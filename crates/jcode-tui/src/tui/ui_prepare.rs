@@ -482,6 +482,7 @@ pub(super) fn prepare_messages(
     }
 
     let key = FullPrepCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         height,
         diff_mode: app.diff_mode(),
@@ -649,7 +650,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
     let stream_prefix_blank = has_streaming
-        && !super::messages::starts_with_reasoning(app.streaming_text())
+        && !(crate::config::config().display.compact_thinking
+            && super::messages::starts_with_reasoning(app.streaming_text()))
         && (!body_prepared.wrapped_lines.is_empty()
             || !batch_progress_prepared.wrapped_lines.is_empty()
             || !reasoning_prepared.wrapped_lines.is_empty());
@@ -966,6 +968,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     super::note_body_request();
 
     let key = BodyCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         diff_mode: app.diff_mode(),
         // Pinning changes which tool messages participate in the transcript.

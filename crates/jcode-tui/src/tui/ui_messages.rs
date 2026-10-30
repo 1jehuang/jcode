@@ -361,11 +361,11 @@ pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
 
 /// Keep the same separator policy in full/incremental layout and overflow estimates.
 pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
-    // Thinking and tool calls form one compact activity stream.
-    !matches!(
-        msg.effective_role(),
-        "tool" | "meta" | "swarm" | "reasoning"
-    ) && !(msg.effective_role() == "assistant" && starts_with_reasoning(&msg.content))
+    let compact_reasoning = crate::config::config().display.compact_thinking
+        && (msg.effective_role() == "reasoning"
+            || (msg.effective_role() == "assistant" && starts_with_reasoning(&msg.content)));
+    !matches!(msg.effective_role(), "tool" | "meta" | "swarm")
+        && !compact_reasoning
         && !is_kv_cache_footer(msg)
 }
 

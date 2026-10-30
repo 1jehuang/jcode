@@ -30,6 +30,9 @@ pub struct DisplayConfig {
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
+    /// Remove blank rows before thinking activity (default: false).
+    /// Applies to retained, embedded assistant, and live-streaming reasoning.
+    pub compact_thinking: bool,
     /// How to display reasoning/thinking content (off/full/current).
     /// When unset, falls back to `show_thinking` (true => full, false => off).
     #[serde(
@@ -139,6 +142,7 @@ impl Default for DisplayConfig {
             emoji: true,
             centered: false,
             show_thinking: true,
+            compact_thinking: false,
             reasoning_display: Some(ReasoningDisplayMode::Full),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
@@ -227,6 +231,18 @@ mod tests {
         let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
         assert!(missing.show_thinking);
         assert_eq!(missing.reasoning_display(), ReasoningDisplayMode::Full);
+    }
+
+    #[test]
+    fn compact_thinking_is_opt_in() {
+        assert!(!DisplayConfig::default().compact_thinking);
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert!(!missing.compact_thinking);
+        let enabled: DisplayConfig = serde_json::from_str(r#"{"compact_thinking":true}"#).unwrap();
+        assert!(enabled.compact_thinking);
+        let roundtrip: DisplayConfig =
+            serde_json::from_str(&serde_json::to_string(&enabled).unwrap()).unwrap();
+        assert!(roundtrip.compact_thinking);
     }
 
     #[test]
