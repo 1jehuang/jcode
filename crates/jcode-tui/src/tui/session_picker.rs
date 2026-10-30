@@ -1232,6 +1232,16 @@ impl SessionPicker {
         Ok(OverlayAction::Continue)
     }
 
+    /// Standalone picker input follows the main TUI's press/repeat policy.
+    /// Release events must not trigger navigation, editing, or selection.
+    fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return Ok(OverlayAction::Continue);
+        }
+        let key = jcode_tui_core::korean_input::normalize_key_event(key);
+        self.handle_overlay_key(key.code, key.modifiers)
+    }
+
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
     /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
@@ -2485,14 +2495,11 @@ impl SessionPicker {
             }
             if event::poll(input_poll_timeout)? {
                 match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        let key = jcode_tui_core::korean_input::normalize_key_event(key);
-                        match self.handle_overlay_key(key.code, key.modifiers)? {
-                            OverlayAction::Continue => {}
-                            OverlayAction::Close => break Ok(None),
-                            OverlayAction::Selected(result) => break Ok(Some(result)),
-                        }
-                    }
+                    Event::Key(key) => match self.handle_key_event(key)? {
+                        OverlayAction::Continue => {}
+                        OverlayAction::Close => break Ok(None),
+                        OverlayAction::Selected(result) => break Ok(Some(result)),
+                    },
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
