@@ -152,7 +152,10 @@ async fn route_selection_wire_marks_only_automatic_failover() {
         provider_label: "OpenAI".into(),
         detail: String::new(),
     };
-    remote.set_route_selection(selection.clone()).await.unwrap();
+    remote
+        .set_route_selection(selection.clone(), false)
+        .await
+        .unwrap();
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
     let manual: serde_json::Value = serde_json::from_str(&line).unwrap();

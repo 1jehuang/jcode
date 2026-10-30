@@ -162,7 +162,18 @@ impl MultiProvider {
             ModelRouteApiMethod::OpenRouter if provider_display != "auto" => {
                 let model_id = crate::provider::openrouter_catalog_model_id(bare_name)
                     .unwrap_or_else(|| bare_name.to_string());
-                format!("{}@{}", model_id, provider_display)
+                // Never re-append the provider pin when the spec already ends
+                // with one: openrouter_catalog_model_id keeps an existing
+                // base@provider pin, and appending the route's display name on
+                // top produced claude-...@Anthropic@Anthropic.
+                if model_id
+                    .rsplit_once('@')
+                    .is_some_and(|(_, pin)| !pin.trim().is_empty())
+                {
+                    model_id
+                } else {
+                    format!("{}@{}", model_id, provider_display)
+                }
             }
             _ => bare_name.to_string(),
         };
@@ -951,6 +962,17 @@ mod tests {
             openrouter_openai.provider_key.as_deref(),
             Some("openrouter")
         );
+
+        // A pinned model spec (base@provider) must not gain a second pin:
+        // OpenRouter routes for Anthropic models are real (fallback routes in
+        // catalog_routes.rs), and openrouter_catalog_model_id passes a
+        // '@'-containing name through unchanged, so the pin would double.
+        let pinned = MultiProvider::default_model_selection_from_route(
+            "claude-sonnet-4-5@Anthropic",
+            "openrouter",
+            "Anthropic",
+        );
+        assert_eq!(pinned.model_spec, "anthropic/claude-sonnet-4-5@Anthropic");
     }
 
     #[test]

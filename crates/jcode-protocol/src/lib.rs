@@ -983,7 +983,14 @@ fn decode_legacy_set_route_model(line: &str) -> Option<Request> {
     }
     let model = obj.get("model")?.as_str()?.to_string();
     let id = obj.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-    Some(Request::SetModel { id, model })
+    // The legacy shape predates persist_default; a desktop client using it
+    // still expects its confirmed switch to become the default, which is the
+    // behavior set_model had before the flag existed.
+    Some(Request::SetModel {
+        id,
+        model,
+        persist_default: true,
+    })
 }
 
 #[cfg(test)]
