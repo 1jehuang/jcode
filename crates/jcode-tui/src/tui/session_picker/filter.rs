@@ -31,6 +31,19 @@ impl SessionPicker {
 
     fn search_matched_session_refs(&mut self, query: &str) -> Vec<SessionRef> {
         let normalized = Self::normalized_search_query(query);
+        let mut transcript_search = std::mem::take(&mut self.transcript_search);
+        transcript_search.reset(
+            &normalized,
+            self.all_sessions
+                .iter()
+                .chain(self.all_orphan_sessions.iter())
+                .chain(
+                    self.all_server_groups
+                        .iter()
+                        .flat_map(|group| group.sessions.iter()),
+                ),
+        );
+        self.transcript_search = transcript_search;
         if normalized.is_empty() {
             self.cached_search_query.clear();
             self.cached_search_refs.clear();
@@ -51,14 +64,33 @@ impl SessionPicker {
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
-                self.session_by_ref(*session_ref)
-                    .is_some_and(|session| Self::session_matches_search(session, &normalized))
+                self.session_by_ref(*session_ref).is_some_and(|session| {
+                    Self::session_matches_search(session, &normalized)
+                        || self.transcript_search.contains(&session.id)
+                })
             })
             .collect::<Vec<_>>();
 
         self.cached_search_query = normalized;
         self.cached_search_refs = matches.clone();
         matches
+    }
+
+    /// Called once per rendered frame, so completed scans update results even
+    /// when the user is not typing. Never wait for the worker on the UI thread.
+    pub(super) fn poll_transcript_search(&mut self) {
+        if self.transcript_search.poll() {
+            let selected = self.selected_session().map(|session| session.id.clone());
+            let preview_scroll = self.scroll_offset;
+            let auto_scroll = self.auto_scroll_preview;
+            self.cached_search_query.clear();
+            self.cached_search_refs.clear();
+            self.rebuild_items();
+            if self.selected_session().map(|session| &session.id) == selected.as_ref() {
+                self.scroll_offset = preview_scroll;
+                self.auto_scroll_preview = auto_scroll;
+            }
+        }
     }
 
     fn filtered_session_refs(

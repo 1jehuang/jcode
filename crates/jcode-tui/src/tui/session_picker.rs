@@ -40,6 +40,7 @@ mod memory;
 mod navigation;
 mod render;
 mod saved_placement;
+mod transcript_search;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
@@ -281,6 +282,8 @@ pub struct SessionPicker {
     cached_search_query: String,
     /// Session refs that matched the cached search query.
     cached_search_refs: Vec<SessionRef>,
+    /// Cancellable full-text scan, separate from the bounded display cache.
+    transcript_search: transcript_search::TranscriptSearch,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
@@ -362,6 +365,7 @@ impl SessionPicker {
             last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
+            transcript_search: Default::default(),
             loading_message: None,
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
@@ -411,6 +415,7 @@ impl SessionPicker {
             last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
+            transcript_search: Default::default(),
             loading_message: Some("Loading sessions…".to_string()),
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
@@ -492,6 +497,7 @@ impl SessionPicker {
             last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
+            transcript_search: Default::default(),
             loading_message: None,
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
@@ -692,6 +698,7 @@ impl SessionPicker {
         self.all_orphan_sessions = all_orphan_sessions;
         self.hidden_test_count = hidden_test_count;
         self.loading_message = None;
+        self.transcript_search = Default::default();
         // Invalidate the cached search pass so the rebuild re-evaluates matches
         // against the new data instead of stale session refs.
         self.cached_search_query.clear();

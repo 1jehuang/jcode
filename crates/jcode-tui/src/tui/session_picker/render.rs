@@ -434,6 +434,7 @@ impl SessionPicker {
     }
 
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        self.poll_transcript_search();
         let server_color: Color = rgb(255, 200, 100);
         let dim: Color = rgb(100, 100, 100);
         let spinner_frame = Self::running_spinner_frame();
@@ -649,6 +650,8 @@ impl SessionPicker {
             " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
         } else if self.loading_message.is_some() {
             " / search · s/S filter · Esc cancel ".to_string()
+        } else if self.transcript_search.pending() {
+            " searching full transcripts… · type to refine · Ctrl+C cancel ".to_string()
         } else if self.search_active {
             " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
         } else {
