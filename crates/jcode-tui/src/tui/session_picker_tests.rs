@@ -2268,8 +2268,13 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // starts just inside the rounded border. Read the first inner content row and
     // confirm it carries the "N›" sticky-header marker.
     let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
+    let header_y = 1 + crate::tui::ui::header::build_preview_header(
+        picker.selected_session().expect("selected session"),
+        w.saturating_sub(preview_inner_x + 1),
+    )
+    .len() as u16;
     let header_row: String = (preview_inner_x..w.saturating_sub(1))
-        .map(|x| buffer[(x, 1)].symbol())
+        .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(
         header_row.contains('›'),
@@ -2370,8 +2375,13 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     assert!(!picker.auto_scroll_preview);
 
     let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
+    let header_y = 1 + crate::tui::ui::header::build_preview_header(
+        picker.selected_session().expect("selected session"),
+        w.saturating_sub(preview_inner_x + 1),
+    )
+    .len() as u16;
     let header_row: String = (preview_inner_x..w.saturating_sub(1))
-        .map(|x| buffer[(x, 1)].symbol())
+        .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(
         header_row.contains('›'),

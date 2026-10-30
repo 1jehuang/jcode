@@ -2535,6 +2535,10 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         })?;
 
     let mut picker = SessionPicker::loading();
+    // Global launchers can request immediate typing without synthesizing keys.
+    if std::env::var("JCODE_RESUME_SEARCH").as_deref() == Ok("1") {
+        picker.activate_search();
+    }
     picker.set_current_dir(
         std::env::current_dir()
             .ok()
