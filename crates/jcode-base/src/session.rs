@@ -135,6 +135,9 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Per-session context ceiling. Missing values follow the global cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_cap: Option<usize>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -234,6 +237,8 @@ struct SessionStartupStub {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
@@ -351,6 +356,7 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
         session.improve_mode = stub.improve_mode;
@@ -390,6 +396,7 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
         session.improve_mode = snapshot.improve_mode;
@@ -531,6 +538,7 @@ impl Session {
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
             improve_mode: self.improve_mode,
@@ -734,6 +742,7 @@ impl Session {
         self.provider_key = meta.provider_key;
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
+        self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
         self.improve_mode = meta.improve_mode;
@@ -777,6 +786,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -835,6 +845,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -1767,6 +1778,8 @@ struct RemoteStartupSessionSnapshot {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]

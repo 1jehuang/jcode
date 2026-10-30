@@ -768,6 +768,69 @@ fn test_save_persists_reasoning_effort() -> Result<()> {
 }
 
 #[test]
+fn context_cap_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let id = "session_context_cap_persist_test";
+    let mut session = Session::create_with_id(id.into(), None, Some("cap test".into()));
+    session.context_cap = Some(40_000);
+    // Large metadata changes use the journal rather than rewriting a snapshot.
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2 * 1024 * 1024),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    let assert_loaders = |cap| -> Result<()> {
+        assert_eq!(Session::load(id)?.context_cap, cap);
+        assert_eq!(Session::load_startup_stub(id)?.context_cap, cap);
+        assert_eq!(Session::load_for_remote_startup(id)?.context_cap, cap);
+        Ok(())
+    };
+    assert_loaders(Some(40_000))?;
+    session.context_cap = Some(80_000);
+    session.save()?;
+    assert!(session_journal_path(id)?.exists());
+    assert_loaders(Some(80_000))?;
+    session.context_cap = None;
+    session.save()?;
+    assert_loaders(None)?;
+    // Force a full snapshot after clearing the override.
+    session.replace_messages(session.messages.clone());
+    session.save()?;
+    assert_loaders(None)?;
+    Ok(())
+}
+
+#[test]
+fn context_cap_missing_is_backward_compatible_for_all_snapshot_types() -> Result<()> {
+    let session = Session::create_with_id("session_context_cap_legacy".into(), None, None);
+    let value = serde_json::to_value(&session)?;
+    assert!(value.get("context_cap").is_none());
+    assert_eq!(
+        serde_json::from_value::<Session>(value.clone())?.context_cap,
+        None
+    );
+    let stub = serde_json::from_value::<SessionStartupStub>(value.clone())?;
+    assert_eq!(Session::session_from_startup_stub(stub).context_cap, None);
+    let snapshot = serde_json::from_value::<RemoteStartupSessionSnapshot>(value)?;
+    assert_eq!(
+        Session::session_from_remote_startup_snapshot(snapshot).context_cap,
+        None
+    );
+    let mut meta = serde_json::to_value(session.journal_meta())?;
+    meta.as_object_mut().unwrap().remove("context_cap");
+    assert_eq!(
+        serde_json::from_value::<SessionJournalMeta>(meta)?.context_cap,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
