@@ -156,6 +156,8 @@ pub(super) async fn cancel_spawned_descendant_turns(
     stopped
 }
 
+#[path = "swarm_agent_defs.rs"]
+pub(super) mod swarm_agent_defs;
 #[cfg(test)]
 #[path = "swarm_cascade_tests.rs"]
 mod swarm_cascade_tests;

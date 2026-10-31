@@ -22,6 +22,20 @@ impl Agent {
         id
     }
 
+    /// Add a hidden persona message (an agent definition body) to the
+    /// transcript of a freshly spawned worker. The system prompt is unchanged.
+    pub(crate) fn add_persona_message(&mut self, text: &str) {
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("agent persona");
+    }
+
     pub(crate) fn add_message_with_display_role(
         &mut self,
         role: Role,

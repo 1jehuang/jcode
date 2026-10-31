@@ -708,6 +708,11 @@ pub enum Request {
         /// otherwise derived from the first line of `initial_message`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// Optional agent definition name (`.jcode/agents/<name>.md`). The
+        /// worker receives its persona as a hidden message at the start of its
+        /// transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
 
     /// List models/routes available for spawning swarm agents

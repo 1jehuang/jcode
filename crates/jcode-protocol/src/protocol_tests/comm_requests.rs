@@ -458,6 +458,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         model: Some("openai-api:gpt-5.5".to_string()),
         effort: Some("low".to_string()),
         label: Some("review auth flow".to_string()),
+        agent: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"comm_spawn\""));

@@ -39,6 +39,44 @@ pub(in crate::server) struct SpawnedWorker<'a> {
     pub working_dir: Option<&'a str>,
 }
 
+impl<'a> SpawnedWorker<'a> {
+    pub(in crate::server) fn new(
+        session_id: &'a str,
+        swarm_id: &'a str,
+        coordinator_session_id: &'a str,
+        label: Option<&'a str>,
+        agent_type: Option<&'a str>,
+        spawn_mode: &'a str,
+        working_dir: Option<&'a str>,
+    ) -> Self {
+        Self {
+            session_id,
+            swarm_id,
+            coordinator_session_id,
+            label,
+            agent_type,
+            spawn_mode,
+            working_dir,
+        }
+    }
+}
+
+/// Launch context for a visible swarm worker window: tags it so spawn hooks and
+/// terminals can identify and reroute it (`JCODE_SPAWN_*`).
+pub(in crate::server) fn spawn_context(
+    swarm_id: &str,
+    coordinator_session_id: &str,
+    label: Option<&str>,
+) -> crate::session_launch::SessionSpawnContext {
+    let context = crate::session_launch::SessionSpawnContext::kind("swarm-agent")
+        .env("JCODE_SPAWN_SWARM_ID", swarm_id)
+        .env("JCODE_SPAWN_COORDINATOR_SESSION_ID", coordinator_session_id);
+    match label {
+        Some(label) => context.env("JCODE_SPAWN_SWARM_LABEL", label),
+        None => context,
+    }
+}
+
 /// Register the worker's identity and fire `swarm_member_start`.
 pub(in crate::server) fn worker_spawned(worker: &SpawnedWorker<'_>) {
     let identity = SwarmIdentity {

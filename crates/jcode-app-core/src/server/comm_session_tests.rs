@@ -894,6 +894,9 @@ async fn global_agent_model_request_updates_server_config_not_session() {
     }
 }
 
+#[path = "comm_session_agent_def_tests.rs"]
+mod agent_def_tests;
+
 #[tokio::test]
 async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let _env = crate::storage::lock_test_env();
@@ -953,6 +956,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
             None,
             None,
             Some("routing test".into()),
+            None,
             &sessions,
             &Arc::new(RwLock::new(String::new())),
             &provider,

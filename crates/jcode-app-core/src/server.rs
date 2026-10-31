@@ -68,6 +68,7 @@ mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
 mod swarm;
+mod swarm_agent_defs;
 mod swarm_channels;
 mod swarm_labels;
 mod swarm_mutation_state;

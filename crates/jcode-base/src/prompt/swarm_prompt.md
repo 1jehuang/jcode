@@ -15,5 +15,7 @@ The named todo lane is the source of truth: its tasks and details
   only to that lane. `prompt` is optional extra context, not a duplicate task list.
   If the lane does not exist, one is created from `prompt` or `label`.
 
+- When the swarm tool lists an `agent` property, pass one of its names on spawn to give the
+  worker that definition's persona. Unknown names are rejected with the valid list.
 - Only the root session may spawn agents. Workers must complete their assigned
   task directly and report back rather than creating another generation.
