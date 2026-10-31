@@ -66,6 +66,7 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // GPT-6.1 Sol (2026-10-16): latest generation and the default.
     DEFAULT_OPENAI_MODEL,
     "gpt-6-astra",
+    "gpt-6.1-terra",
     "gpt-5.6-sol",
     "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
@@ -102,6 +103,13 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
 #[cfg(test)]
 mod gpt_5_6_catalog_tests {
     use super::*;
+
+    // The Terra model should be selectable without changing the default model.
+    #[test]
+    fn openai_catalog_includes_gpt_6_1_terra() {
+        assert!(ALL_OPENAI_MODELS.contains(&"gpt-6.1-terra"));
+        assert_eq!(ALL_OPENAI_MODELS[0], DEFAULT_OPENAI_MODEL);
+    }
 
     #[test]
     fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
