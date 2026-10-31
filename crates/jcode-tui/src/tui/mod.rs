@@ -391,7 +391,9 @@ pub(crate) fn reapply_terminal_modes_to(
     focus_change: bool,
 ) -> std::io::Result<()> {
     use crossterm::QueueableCommand;
-    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
+    use crossterm::event::{
+        DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
+    };
 
     writer.queue(EnableBracketedPaste)?;
     if focus_change {
@@ -403,6 +405,13 @@ pub(crate) fn reapply_terminal_modes_to(
         // hosts such as VS Code also need the VT tracking modes reasserted.
         #[cfg(windows)]
         writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")?;
+    } else {
+        // A terminal can inherit capture from an earlier Jcode invocation (or
+        // from a configuration change while this session is running). Omitting
+        // the enable sequences is not enough to return selection to the host.
+        writer.queue(DisableMouseCapture)?;
+        #[cfg(windows)]
+        writer.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1015l\x1b[?1006l")?;
     }
     if keyboard_enhanced {
         reapply_keyboard_enhancement_to(writer, inside_tmux())?;
@@ -587,7 +596,10 @@ mod terminal_mode_tests {
     fn reapply_omits_keyboard_protocols_when_disabled() {
         let mut output = Vec::new();
         reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
-        assert_eq!(output, b"\x1b[?2004h");
+        assert_eq!(
+            output,
+            b"\x1b[?2004h\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
     }
 
     #[test]
@@ -598,6 +610,11 @@ mod terminal_mode_tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("\x1b[?2004h\x1b[?1004h"));
         assert!(!output.contains("\x1b[?1000h"));
+        assert!(output.contains("\x1b[?1006l"));
+        assert!(output.contains("\x1b[?1015l"));
+        assert!(output.contains("\x1b[?1003l"));
+        assert!(output.contains("\x1b[?1002l"));
+        assert!(output.contains("\x1b[?1000l"));
         assert!(output.contains("\x1b[="));
     }
 
@@ -640,6 +657,7 @@ mod terminal_mode_tests {
                     "must keep focus reporting enabled"
                 );
                 assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
+                assert_eq!(output.contains("\x1b[?1000l"), !mouse_capture);
                 assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
                 assert!(
                     !output.contains("\x1b[>7u"),
