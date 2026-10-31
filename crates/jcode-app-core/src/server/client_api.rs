@@ -173,6 +173,7 @@ impl Client {
         }
     }
 
+    /// Request history and wait for the matching response, skipping unrelated broadcasts.
     pub async fn get_history_event(&mut self) -> Result<ServerEvent> {
         let id = self.next_id;
         self.next_id += 1;
@@ -188,8 +189,13 @@ impl Client {
             }
             let event: ServerEvent = serde_json::from_str(&line)?;
             match event {
-                ServerEvent::Ack { .. } => continue,
-                _ => return Ok(event),
+                ServerEvent::History {
+                    id: response_id, ..
+                }
+                | ServerEvent::Error {
+                    id: response_id, ..
+                } if response_id == id => return Ok(event),
+                _ => continue,
             }
         }
 
@@ -346,5 +352,54 @@ impl Client {
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod history_response_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// A status broadcast can arrive before the requested history response.
+    #[tokio::test]
+    async fn history_request_ignores_interleaved_status() {
+        let (stream, server) = crate::transport::stream_pair().expect("stream pair");
+        let (reader, writer) = stream.into_split();
+        let mut client = Client {
+            reader: BufReader::new(reader),
+            writer,
+            next_id: 1,
+        };
+        let (server_reader, mut server_writer) = server.into_split();
+        let server_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_reader);
+            let mut request = String::new();
+            reader.read_line(&mut request).await.expect("read request");
+            let parsed: Request = serde_json::from_str(&request).expect("parse request");
+            assert!(matches!(parsed, Request::GetHistory { id: 1 }));
+            server_writer.write_all(b"{\"type\":\"swarm_status\",\"members\":[]}\n{\"type\":\"history\",\"id\":99,\"session_id\":\"stale\",\"messages\":[]}\n{\"type\":\"history\",\"id\":1,\"session_id\":\"session\",\"messages\":[]}\n").await.expect("write responses");
+            request.clear();
+            reader
+                .read_line(&mut request)
+                .await
+                .expect("read second request");
+            let parsed: Request = serde_json::from_str(&request).expect("parse second request");
+            assert!(matches!(parsed, Request::GetHistory { id: 2 }));
+            server_writer
+                .write_all(b"{\"type\":\"error\",\"id\":2,\"message\":\"history unavailable\"}\n")
+                .await
+                .expect("write error");
+        });
+        let response = client.get_history_event().await.expect("history response");
+        assert!(
+            matches!(response, ServerEvent::History { id: 1, .. }),
+            "unexpected response: {response:?}"
+        );
+        let error = client.get_history_event().await.expect("error response");
+        assert!(
+            matches!(error, ServerEvent::Error { id: 2, .. }),
+            "unexpected response: {error:?}"
+        );
+        server_task.await.expect("server task");
     }
 }
