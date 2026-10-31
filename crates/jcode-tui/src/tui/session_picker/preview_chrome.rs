@@ -29,6 +29,74 @@ fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoW
     data
 }
 
+/// Draw only the image rows intersecting the scrolling transcript. Raster
+/// images retain their original fit box when partially scrolled off screen.
+pub(super) fn draw_images(
+    frame: &mut Frame,
+    area: Rect,
+    regions: &[jcode_tui_messages::ImageRegion],
+    scroll: usize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let visible_end = scroll.saturating_add(area.height as usize);
+    for region in regions {
+        let start = region.abs_line_idx.max(scroll);
+        let end = region.end_line.min(visible_end);
+        if region.height == 0 || start >= end {
+            continue;
+        }
+        let image_area = Rect {
+            x: area.x,
+            y: area.y + (start - scroll) as u16,
+            width: area.width,
+            height: (end - start).min(u16::MAX as usize) as u16,
+        };
+        let fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+        if fit {
+            let cols = if region.width == 0 {
+                area.width
+            } else {
+                region.width.min(area.width)
+            };
+            if !super::super::ui::inline_image_ui::ensure_drawable(region.hash, cols, region.height)
+            {
+                continue;
+            }
+            if !crate::tui::mermaid::render_image_widget_fit_stable(
+                region.hash,
+                image_area,
+                frame.buffer_mut(),
+                cols,
+                region.height,
+                (start - region.abs_line_idx).min(u16::MAX as usize) as u16,
+                false,
+                true,
+            ) {
+                crate::tui::mermaid::render_image_widget_fit(
+                    region.hash,
+                    image_area,
+                    frame.buffer_mut(),
+                    false,
+                    true,
+                );
+            }
+        } else {
+            let rows = crate::tui::mermaid::render_image_widget(
+                region.hash,
+                image_area,
+                frame.buffer_mut(),
+                false,
+                start > region.abs_line_idx,
+            );
+            if rows == 0 && start == region.abs_line_idx {
+                frame.render_widget(Paragraph::new("↗ mermaid diagram unavailable"), image_area);
+            }
+        }
+    }
+}
+
 /// Reserve stationary chrome around the scrolling transcript, like the live
 /// layout. At tiny heights prefer preserving one transcript row over widgets.
 pub(super) fn draw(
