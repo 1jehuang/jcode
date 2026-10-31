@@ -6,6 +6,26 @@ against the supplied executable, twice with fresh fixture directories. It is a
 regression gate, not evidence that a managed cloud service or live login works.
 A workflow definition or successful build alone is not an acceptance result.
 
+## Coordinated group commands
+
+`/cloud` and `jcode cloud move` include the selected session's associated swarm.
+Use `/cloud --dry-run` to preview, and repeat `--include-session <id>` to opt in
+independent sessions sharing the same checkout. `--session-only` explicitly
+selects the legacy single-session path and conflicts with `--include-session`.
+The coordinator owns environment setup and the temporary local resource bridge;
+members share the resulting repository-keyed environment instead of each
+requesting credentials or repeating setup.
+
+Group migration requires compatible daemons and a safe idle boundary. It must
+fail closed when it cannot reserve that boundary. A failed or interrupted
+activation can leave source sessions fenced deliberately: retry the same move
+to recover, rather than deleting leases or starting both copies. The initial
+group implementation rejects individual member returns, and full group return
+is not implemented. Ungrouped single-session move/return remains available.
+Imported workers stay paused until the coordinator finishes shared setup and
+resumes their existing IDs. Only the initiating terminal attaches automatically;
+other terminals must reconnect to their migrated sessions.
+
 ## What runs
 
 | Layer | Mechanism and assertions |
@@ -13,6 +33,7 @@ A workflow definition or successful build alone is not an acceptance result.
 | `cli` | `scripts/test_cloud_move_e2e.sh`: real cloud move/return commands and daemons, with a local transport script into a **bubblewrap** filesystem sandbox instead of SSH. Exercises dry run, repository/index/untracked state, session and todo transfer, ownership fencing, round-trip merge and conflict handling. |
 | `agent` | `scripts/test_cloud_move_agent_e2e.sh`: real agent turns before move, in the bubblewrap destination and after return. Checks conversation continuity, cloud notice in provider context and refusal to run the away local copy. Transport is local, not SSH. |
 | `credentials` | `tests/test_cloud_credentials.py`: synthetic OpenAI/Claude OAuth and router credentials over local pipes. Checks round trips, all-account transfer, permissions, secret-free archives/diagnostics, stale and expired tokens, dry run, identity/refresh conflicts, ownership rollback, one-way router transfer and failure before transfer with an incompatible remote. No production authentication or refresh endpoint is used. |
+| `group` | `scripts/test_cloud_group_e2e.sh`: real local/cloud daemons with isolated homes and a bubblewrap transport. Checks automatic swarm selection, explicit independent-session inclusion, excluded sessions, one shared repository and environment replay, preserved conversation/todo/swarm state, preview, and safe retry after a lost activation response. No live cloud account or model is used. |
 | `tui` | `scripts/cloud_acceptance_tui.py`: the **actual interactive TUI in tmux**, a real loopback OpenSSH server and client, isolated local/cloud homes, real daemons, and a user/mount namespace providing separate repository contents at the same absolute path. No cloud-transport override is used in this layer. |
 
 The agent and TUI use `scripts/fake_openai_server.py`, a deterministic local
@@ -40,7 +61,7 @@ The TUI scenarios are:
 - `destination_binary_retry`: missing and protocol-incompatible destination
   binaries fail before ownership changes, then a corrected destination works.
 
-With the current seven TUI scenarios, a full `--repeat 2` invocation records 20
+With the current seven TUI scenarios, a full `--repeat 2` invocation records 22
 stage results. Credential test cases are grouped into one stage per repetition.
 The runner continues after a failed stage and returns nonzero if any stage fails.
 Missing tools or failed namespace/bubblewrap probes are **failures, never skips**.
@@ -97,6 +118,8 @@ python3 scripts/test_cloud_acceptance.py --binary /absolute/path/to/jcode \
   --layers tui --scenario transfer_outage_retry --repeat 1
 python3 scripts/test_cloud_acceptance.py --binary /absolute/path/to/jcode \
   --layers credentials --repeat 1
+python3 scripts/test_cloud_acceptance.py --binary /absolute/path/to/jcode \
+  --layers group --repeat 1
 ```
 
 Other `--scenario` values are listed above. `--scenario` filters only TUI scenarios,

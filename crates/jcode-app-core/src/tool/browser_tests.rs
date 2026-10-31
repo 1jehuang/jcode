@@ -2,6 +2,138 @@
 use super::*;
 
 #[test]
+fn open_defaults_to_new_tab_unless_targeted_or_explicitly_reused() {
+    for (tab_id, new_tab, expected) in [
+        (None, None, true),
+        (Some(7), None, false),
+        (None, Some(false), false),
+        (Some(7), Some(true), true),
+    ] {
+        let input = BrowserInput {
+            action: "open".into(),
+            url: Some("https://example.com".into()),
+            tab_id,
+            new_tab,
+            ..Default::default()
+        };
+        let (_, params, _) = bridge_request("open", &input).unwrap();
+        assert_eq!(params["newTab"], expected);
+    }
+}
+
+#[test]
+fn fresh_handoff_replaces_stale_tab_window_and_frame() {
+    let mut input = BrowserInput {
+        tab_id: Some(7),
+        window_id: Some(8),
+        frame_id: Some(9),
+        all_frames: Some(true),
+        new_tab: Some(true),
+        ..Default::default()
+    };
+    bind_created_handoff_tab(&mut input, Some(&json!({"tabId": 42, "windowId": 43}))).unwrap();
+    assert_eq!(input.tab_id, Some(42));
+    assert_eq!(input.window_id, Some(43));
+    assert_eq!(input.frame_id, Some(0));
+    assert_eq!(input.all_frames, Some(false));
+    assert_eq!(input.new_tab, Some(false));
+}
+
+#[test]
+fn fresh_handoff_never_falls_back_to_old_tab_on_invalid_response() {
+    for result in [None, Some(json!({})), Some(json!({"tabId": "42"}))] {
+        let mut input = BrowserInput {
+            tab_id: Some(7),
+            ..Default::default()
+        };
+        assert!(bind_created_handoff_tab(&mut input, result.as_ref()).is_err());
+    }
+}
+
+struct FreshTabProvider;
+
+#[async_trait]
+impl BrowserProvider for FreshTabProvider {
+    fn id(&self) -> &'static str {
+        "test"
+    }
+    fn supported_browsers(&self) -> &'static [&'static str] {
+        &["auto"]
+    }
+    async fn status(&self, _: &ToolContext) -> Result<ToolOutput> {
+        unreachable!()
+    }
+    async fn setup(&self) -> Result<ToolOutput> {
+        unreachable!()
+    }
+    async fn ensure_ready(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn execute(
+        &self,
+        action: &str,
+        input: &BrowserInput,
+        _: &ToolContext,
+    ) -> Result<ToolOutput> {
+        assert_eq!(action, "new_tab");
+        assert_eq!(input.url.as_deref(), Some("https://example.com"));
+        assert_eq!(input.tab_id, None);
+        assert_eq!(input.frame_id, None);
+        Ok(ToolOutput::new("created").with_metadata(json!({"tabId": 42, "windowId": 43})))
+    }
+}
+
+#[tokio::test]
+async fn handoff_creates_and_binds_fresh_tab_in_one_call() {
+    let ctx = ToolContext {
+        session_id: "fresh-tab-test".into(),
+        message_id: "m".into(),
+        tool_call_id: "t".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+    for (tab_id, new_tab, expected) in [
+        (Some(7), Some(true), 42),
+        (None, None, 42),
+        (Some(7), None, 7),
+    ] {
+        let mut input = BrowserInput {
+            action: "handoff".into(),
+            goal: Some("Read the page".into()),
+            url: Some("https://example.com".into()),
+            tab_id,
+            new_tab,
+            frame_id: Some(9),
+            ..Default::default()
+        };
+        prepare_handoff_tab(&FreshTabProvider, &mut input, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(input.tab_id, Some(expected));
+    }
+    let mut invalid = BrowserInput {
+        new_tab: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        prepare_handoff_tab(&FreshTabProvider, &mut invalid, &ctx)
+            .await
+            .is_err()
+    );
+    assert!(
+        recover_slow_navigation(
+            &json!({"newTab": true, "tabId": 7, "url": "https://example.com"}),
+            None,
+            &ctx,
+        )
+        .await
+        .is_none()
+    );
+}
+
+#[test]
 fn best_effort_bridge_diagnostics_never_persist_page_payloads() {
     let secret = "https://private.example/?token=secret-token page text and script contents";
     let bridge = anyhow::anyhow!(secret.to_string()).context("getContent failed");
@@ -344,9 +476,30 @@ fn ordinary_click_preserves_existing_bridge_dispatch() {
     assert!(params.get("dispatchEvents").is_none());
 }
 
+pub(super) struct HandoffEnvGuard(&'static str, Option<std::ffi::OsString>);
+
+impl HandoffEnvGuard {
+    pub(super) fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        jcode_base::env::set_var(key, value);
+        Self(key, previous)
+    }
+}
+
+impl Drop for HandoffEnvGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => jcode_base::env::set_var(self.0, value),
+            None => jcode_base::env::remove_var(self.0),
+        }
+    }
+}
+
 #[test]
 fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
+    let _disabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "0");
     let tool = BrowserTool::new();
     assert!(
         tool.description()
@@ -382,13 +535,21 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
 
     let _guard = jcode_base::storage::lock_test_env();
     let _restore = RestoreEnv(std::env::var_os(KEY));
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
     let tool = BrowserTool::new();
-    for value in [None, Some("0"), Some("1")] {
+    for (enabled, value) in [
+        ("0", None),
+        ("false", Some("0")),
+        ("1", None),
+        ("true", Some("0")),
+        ("1", Some("1")),
+    ] {
+        jcode_base::env::set_var("JCODE_BROWSER_HANDOFF", enabled);
         match value {
             Some(value) => jcode_base::env::set_var(KEY, value),
             None => jcode_base::env::remove_var(KEY),
         }
-        let disabled = value == Some("1");
+        let disabled = value == Some("1") || matches!(enabled, "0" | "false");
         assert_eq!(browser_handoff_disabled(), disabled);
         let schema = tool.parameters_schema();
         let properties = &schema["properties"];

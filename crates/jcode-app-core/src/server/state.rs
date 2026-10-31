@@ -228,7 +228,7 @@ pub struct SwarmMember {
     pub friendly_name: Option<String>,
     /// Session that should receive direct completion report-back for this member, if any.
     pub report_back_to_session_id: Option<String>,
-    /// Latest explicit completion report submitted by this member.
+    /// Latest automatically captured output tail (or a legacy explicit report).
     pub latest_completion_report: Option<String>,
     /// Role: "agent" or "coordinator"
     pub role: String,
@@ -414,6 +414,7 @@ pub(super) async fn fanout_session_event(
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
+    super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {

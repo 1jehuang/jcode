@@ -7,21 +7,182 @@ use crate::tool::bash::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
+type SessionEnvLaunchGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+static SESSION_ENV_LAUNCH_GATES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, SessionEnvLaunchGate>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
+    let gate = SESSION_ENV_LAUNCH_GATES.lock().unwrap().remove(session_id);
+    if let Some((reached, release)) = gate {
+        let _ = reached.send(());
+        let _ = release.await;
+    }
+}
+
+#[tokio::test]
+async fn session_env_foreground_sessions_are_isolated() {
+    use crate::session_env::{remove_session_env, set_session_env};
+    for (sid, value) in [("env-bash-a", "proxy-a"), ("env-bash-b", "proxy-b")] {
+        set_session_env(
+            sid,
+            std::collections::HashMap::from([("HTTPS_PROXY".into(), value.into())]),
+        )
+        .unwrap();
+    }
+    let mut a = make_ctx(None);
+    a.session_id = "env-bash-a".into();
+    let mut b = make_ctx(None);
+    b.session_id = "env-bash-b".into();
+    let tool = BashTool::new();
+    let command = json!({"command": "printf '%s:%s' \"$HTTPS_PROXY\" \"$JCODE_SESSION_ID\""});
+    let (a, b) = tokio::join!(tool.execute(command.clone(), a), tool.execute(command, b));
+    let a = a.unwrap().output;
+    let b = b.unwrap().output;
+    assert!(a.contains("proxy-a:env-bash-a"), "{a}");
+    assert!(!a.contains("proxy-b"));
+    assert!(b.contains("proxy-b:env-bash-b"), "{b}");
+    assert!(!b.contains("proxy-a"));
+    remove_session_env("env-bash-a");
+    remove_session_env("env-bash-b");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_env_reload_persistable_command_receives_overrides() {
+    let mut ctx = make_agent_ctx(jcode_agent_runtime::InterruptSignal::new());
+    ctx.session_id = "env-bash-detached".into();
+    crate::session_env::set_session_env(
+        &ctx.session_id,
+        std::collections::HashMap::from([("HTTPS_PROXY".into(), "proxy-detached".into())]),
+    )
+    .unwrap();
+    let result = BashTool::new()
+        .execute(
+            json!({"command": "printf '%s:%s' \"$HTTPS_PROXY\" \"$JCODE_SESSION_ID\""}),
+            ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.output.contains("proxy-detached:env-bash-detached"),
+        "{}",
+        result.output
+    );
+    crate::session_env::remove_session_env("env-bash-detached");
+}
+
+#[tokio::test]
+async fn session_env_updates_affect_only_new_launches_and_invalid_updates_keep_bash_working() {
+    use crate::session_env::{remove_session_env, set_session_env};
+    let sid = "env-bash-updates";
+    let mut ctx = make_ctx(None);
+    ctx.session_id = sid.into();
+    let tool = BashTool::new();
+    let input = json!({"command": "printf '%s' \"${SESSION_ENV_REGRESSION_PROBE-unset}\""});
+    for value in ["first", "second"] {
+        set_session_env(
+            sid,
+            std::collections::HashMap::from([(
+                "SESSION_ENV_REGRESSION_PROBE".into(),
+                value.into(),
+            )]),
+        )
+        .unwrap();
+        assert!(
+            set_session_env(
+                sid,
+                std::collections::HashMap::from([(
+                    "SESSION_ENV_REGRESSION_PROBE".into(),
+                    "invalid\0value".into()
+                ),])
+            )
+            .is_err()
+        );
+        let result = tool.execute(input.clone(), ctx.clone()).await.unwrap();
+        assert!(result.output.contains(value), "{}", result.output);
+    }
+    set_session_env(sid, std::collections::HashMap::new()).unwrap();
+    let result = tool.execute(input, ctx).await.unwrap();
+    assert!(result.output.contains("unset"), "{}", result.output);
+    remove_session_env(sid);
+}
+
+#[tokio::test]
+async fn session_env_background_snapshots_before_deferred_launch() {
+    use crate::session_env::{remove_session_env, set_session_env};
+    for clear in [false, true] {
+        let sid = format!("env-bash-race-{clear}");
+        let original =
+            std::collections::HashMap::from([("HTTPS_PROXY".into(), "proxy-original".into())]);
+        set_session_env(&sid, original).unwrap();
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        SESSION_ENV_LAUNCH_GATES
+            .lock()
+            .unwrap()
+            .insert(sid.clone(), (reached_tx, release_rx));
+        let mut ctx = make_ctx(None);
+        ctx.session_id = sid.clone();
+        let result = BashTool::new()
+            .execute(
+                json!({
+                    "command": "printf '%s:%s\\n' \"$HTTPS_PROXY\" \"$JCODE_SESSION_ID\"",
+                    "run_in_background": true, "notify": false,
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if clear {
+            set_session_env(&sid, std::collections::HashMap::new()).unwrap();
+        } else {
+            set_session_env(
+                &sid,
+                std::collections::HashMap::from([("HTTPS_PROXY".into(), "proxy-replaced".into())]),
+            )
+            .unwrap();
+        }
+        // Teardown must not erase the snapshot of this already-accepted job.
+        remove_session_env(&sid);
+        release_tx.send(()).unwrap();
+        let metadata = result.metadata.unwrap();
+        let task_id = metadata["task_id"].as_str().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let status = crate::background::global().status(task_id).await.unwrap();
+                if status.status != BackgroundTaskStatus::Running {
+                    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let output = crate::background::global().output(task_id).await.unwrap();
+        assert!(
+            output.contains(&format!("proxy-original:{sid}")),
+            "{output}"
+        );
+        assert!(!output.contains("proxy-replaced"));
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn bash_definition_prefers_repository_search_tools() {
     let definition = BashTool::new().to_definition();
     assert_eq!(definition.name, "bash");
-    assert!(
-        definition
-            .description
-            .contains("prefer agentgrep or rg over grep -r")
-    );
-    assert!(
-        definition
-            .description
-            .contains("hidden and ignored files by default, not all untracked files")
-    );
+    assert!(definition.description.contains("Prefer agentgrep/rg"));
+    assert!(definition.description.contains("hidden/ignored"));
     assert!(definition.description.contains("--hidden --no-ignore"));
 }
 
@@ -97,10 +258,13 @@ async fn bash_executes_with_null_optional_arguments() {
 
 #[test]
 fn repository_commands_export_a_logged_cargo_function() {
-    let repo =
-        crate::build::find_repo_in_ancestors(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
-            .expect("test runs inside the jcode repository");
-    let wrapped = wrap_repo_cargo_commands("cargo test -p demo && echo done", Some(&repo))
+    let fixture = tempfile::tempdir().expect("repo fixture");
+    let repo = fixture.path();
+    std::fs::create_dir(repo.join(".git")).expect("git marker");
+    std::fs::create_dir(repo.join("scripts")).expect("scripts directory");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"jcode\"\n").expect("manifest");
+    std::fs::write(repo.join("scripts/dev_cargo.sh"), "#!/bin/sh\n").expect("wrapper");
+    let wrapped = wrap_repo_cargo_commands("cargo test -p demo && echo done", Some(repo))
         .expect("jcode repository has dev_cargo.sh");
 
     assert!(wrapped.contains("export JCODE_DEV_CARGO_SCRIPT="));
@@ -154,6 +318,80 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }
+}
+
+#[test]
+fn cloud_environment_hydrates_commands_without_transcript_values() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir(repo.join("subdir")).unwrap();
+    let original_home = std::env::var_os("JCODE_HOME");
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(original_home);
+    crate::env::set_var("JCODE_HOME", &state);
+    let name = "CLOUD_TEST_RESOURCE_TOKEN";
+    let secret = "opaque-sentinel-do-not-return";
+    let original_value = std::env::var_os(name);
+    crate::cloud_environment::save_environment(&repo, name, secret).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for persistent in [false, true] {
+            let mut ctx = make_ctx(None);
+            ctx.working_dir = Some(repo.join("subdir"));
+            if persistent {
+                ctx.execution_mode = crate::tool::ToolExecutionMode::AgentTurn;
+                ctx.graceful_shutdown_signal = Some(jcode_agent_runtime::InterruptSignal::new());
+            }
+            let result = BashTool::new().execute(json!({
+                "command": "test \"${CLOUD_TEST_RESOURCE_TOKEN:+present}\" = present && printf resource-ready"
+            }), ctx).await.unwrap();
+            assert_eq!(result.output.lines().next(), Some("resource-ready"));
+            assert!(!result.output.contains(secret));
+        }
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(repo.join("subdir"));
+        let result = BashTool::new().execute(json!({
+            "command": "test \"${CLOUD_TEST_RESOURCE_TOKEN:+present}\" = present && printf resource-ready",
+            "run_in_background": true,
+            "notify": false,
+            "wake": false
+        }), ctx).await.unwrap();
+        let id = result.metadata.as_ref().unwrap()["task_id"].as_str().unwrap();
+        let mut completed = false;
+        for _ in 0..100 {
+            if let Some(status) = crate::background::global().status(id).await
+                && status.status != BackgroundTaskStatus::Running
+            {
+                assert_eq!(status.status, BackgroundTaskStatus::Completed);
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(completed, "background command did not finish");
+        let output = crate::background::global().output(id).await.unwrap();
+        assert!(output.contains("resource-ready"));
+        assert!(!output.contains(secret));
+    });
+    assert_eq!(
+        std::env::var_os(name),
+        original_value,
+        "daemon environment must not change"
+    );
 }
 
 #[tokio::test]
@@ -1018,12 +1256,10 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    // The concrete outside-workspace directory is allowed by policy. Its glob
-    // keeps this test focused on the Confirm path for a statically unknown set
-    // of affected files.
+    // Temp paths are deliberately low risk. Use a shell-expanded target to
+    // exercise Confirm for a target the static assessor cannot resolve.
     let command = format!(
-        "rm -rf {}/* && rmdir {}",
-        target.display(),
+        "fixture_target=\"{}\"; rm -rf \"$fixture_target\"/* && rmdir \"$fixture_target\"",
         target.display()
     );
     let tool = BashTool::new();
@@ -1155,137 +1391,5 @@ fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
     );
 }
 
-/// The bug this guards against: a foreground command promoted to background at
-/// the timeout showed 0% until it completed, because nothing parsed its output
-/// for progress. Both the update emitted *before* promotion and updates
-/// emitted *after* promotion must reach the background task's status.
-#[tokio::test]
-async fn test_timeout_promoted_command_reports_intermediate_progress() {
-    let tool = BashTool::new();
-    // Emits 10% before the 300ms foreground timeout, then 80% about 2s in.
-    let input = json!({
-        "command": "echo 'progress 10% done'; sleep 2; echo 'progress 80% done'; sleep 1",
-        "timeout": 300,
-    });
-    let ctx = make_ctx(None);
-
-    let result = tool
-        .execute(input, ctx)
-        .await
-        .expect("timeout should promote to background");
-    let metadata = result.metadata.expect("expected background metadata");
-    assert_eq!(metadata["timeout_promoted"], true);
-    let task_id = metadata["task_id"]
-        .as_str()
-        .expect("task_id should be present")
-        .to_string();
-
-    // The pre-promotion update (10%) must be attached at promotion time, and
-    // the post-promotion update (80%) must stream in while still running.
-    let mut observed: Vec<f32> = Vec::new();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        let status = crate::background::global()
-            .status(&task_id)
-            .await
-            .expect("status should exist");
-        if let Some(percent) = status.progress.as_ref().and_then(|p| p.percent)
-            && observed.last() != Some(&percent)
-        {
-            observed.push(percent);
-        }
-        if observed.contains(&80.0) {
-            break;
-        }
-        if status.status != BackgroundTaskStatus::Running {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-
-    assert!(
-        observed.contains(&80.0),
-        "promoted task should reach 80% via parsed output, saw {observed:?}"
-    );
-    assert!(
-        observed.contains(&10.0),
-        "the pre-promotion 10% update should be flushed at promotion, saw {observed:?}"
-    );
-
-    let _ = crate::background::global().cancel(&task_id).await;
-}
-
-/// Same guarantee for the reload-persistable (detached) path: the command
-/// writes straight to its output file, so a follower must translate progress
-/// lines into status updates while the task is still running.
-#[tokio::test]
-async fn test_detached_promoted_command_reports_intermediate_progress() {
-    let tool = BashTool::new();
-    let signal = jcode_agent_runtime::InterruptSignal::new();
-    let ctx = make_agent_ctx(signal);
-
-    let result = tool
-        .execute(
-            json!({
-                "command": "sleep 0.5; echo 'done 3/10 steps'; sleep 2; echo 'done 8/10 steps'; sleep 1",
-                "timeout": 200,
-            }),
-            ctx,
-        )
-        .await
-        .expect("timeout should promote the detached command to background");
-    let metadata = result.metadata.expect("expected background metadata");
-    assert_eq!(metadata["timeout_promoted"], true);
-    let task_id = metadata["task_id"]
-        .as_str()
-        .expect("task_id should be present")
-        .to_string();
-
-    let mut observed: Vec<f32> = Vec::new();
-    let mut saw_intermediate_while_running = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        let status = crate::background::global()
-            .status(&task_id)
-            .await
-            .expect("status should exist");
-        if let Some(percent) = status.progress.as_ref().and_then(|p| p.percent) {
-            if observed.last() != Some(&percent) {
-                observed.push(percent);
-            }
-            if status.status == BackgroundTaskStatus::Running && percent < 100.0 {
-                saw_intermediate_while_running = true;
-            }
-        }
-        if observed.contains(&80.0) {
-            break;
-        }
-        if status.status != BackgroundTaskStatus::Running {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    assert!(
-        observed.contains(&30.0) && observed.contains(&80.0),
-        "detached task should report 30% then 80% from parsed output, saw {observed:?}"
-    );
-    assert!(
-        saw_intermediate_while_running,
-        "intermediate progress must be visible while the task is still running"
-    );
-
-    let output_file = std::path::PathBuf::from(
-        metadata["output_file"]
-            .as_str()
-            .expect("output_file should be present"),
-    );
-    let status_file = std::path::PathBuf::from(
-        metadata["status_file"]
-            .as_str()
-            .expect("status_file should be present"),
-    );
-    let _ = crate::background::global().cancel(&task_id).await;
-    let _ = tokio::fs::remove_file(output_file).await;
-    let _ = tokio::fs::remove_file(status_file).await;
-}
+#[path = "bash_promoted_tests.rs"]
+mod promoted;

@@ -123,6 +123,14 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         super::input::run_queued_commands_local(app);
         needs_redraw = true;
     }
+    if !app.is_processing
+        && !app.pending_turn
+        && !app.cloud_handoff_blocks_work()
+        && app.has_pending_cloud_recovery()
+    {
+        app.pending_queued_dispatch = true;
+        needs_redraw = true;
+    }
     let ops = app.stream_buffer.flush();
     if app.apply_stream_ops(ops) {
         needs_redraw = true;
@@ -131,6 +139,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.refresh_todo_card_if_needed();
     needs_redraw |= app.refresh_completed_todo_report(false);
     needs_redraw |= app.refresh_pinned_todos_if_needed();
+    needs_redraw |= app.refresh_justrust_status();
     needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();

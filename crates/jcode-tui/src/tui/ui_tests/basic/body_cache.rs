@@ -6,6 +6,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -72,6 +73,24 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
     assert!(cache.best_incremental_base(&different_latex, 4).is_none());
+
+    let compact_key = BodyCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = BodyCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone(), 3, 0);
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.best_incremental_base(&key_a, 4).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        assert!(cache.best_incremental_base(&compact_key, 4).is_none());
+        assert!(cache.take_best_incremental_base(&compact_key).is_none());
+        assert!(cache.take_best_incremental_base(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -82,6 +101,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         pin_images: true,
         inline_images_visible: true,
@@ -115,6 +135,7 @@ fn test_body_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             pin_images: true,
             inline_images_visible: true,
@@ -157,6 +178,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -187,6 +209,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -218,6 +241,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -256,6 +280,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -393,6 +418,42 @@ fn test_build_body_from_base_keeps_current_mermaid_pending_base() {
 }
 
 #[test]
+fn test_prepare_body_swarm_await_wake_is_not_a_numbered_prompt() {
+    let report = "🐝 **Swarm await finished**\n\nAll members done.\n\nMember statuses:\n  ✓ jaguar (ready)\n\nRecent outputs:\n\n--- jaguar (ready) ---\n[Tool: bash · Inspect graph rules]\nworker transcript";
+    let base_state = TestState {
+        display_messages: vec![DisplayMessage::user("first prompt")],
+        messages_version: 1,
+        ..Default::default()
+    };
+    let state = TestState {
+        display_messages: vec![
+            DisplayMessage::user("first prompt"),
+            DisplayMessage::user(report),
+            DisplayMessage::user("second prompt"),
+        ],
+        messages_version: 2,
+        ..Default::default()
+    };
+    for width in [24, 80, 140] {
+        let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
+        let incremental = super::prepare::prepare_body_incremental(&state, width, base, 1);
+        let full = super::prepare::prepare_body(&state, width, false);
+        for prepared in [&*incremental, &full] {
+            let text = prepared
+                .wrapped_lines
+                .iter()
+                .map(extract_line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("🐝 ✓ 1/1"), "{text}");
+            assert!(!text.contains("worker transcript"), "{text}");
+            assert!(!text.contains("Swarm await finished"), "{text}");
+            assert_eq!(prepared.user_prompt_texts.len(), 2);
+        }
+    }
+}
+
+#[test]
 fn test_prepare_body_incremental_reuses_unique_prepared_arc() {
     let width = 80;
     let base_state = TestState {
@@ -494,6 +555,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -562,6 +624,21 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     assert!(Arc::ptr_eq(&hit_b, &prepared_b));
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
+
+    let compact_key = FullPrepCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = FullPrepCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone());
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        assert!(cache.get_exact(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -573,6 +650,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         is_processing: false,
         streaming_text_len: 0,
@@ -608,6 +686,7 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             is_processing: false,
             streaming_text_len: 0,
@@ -654,6 +733,7 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -687,6 +767,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,
@@ -722,6 +803,7 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,
@@ -806,8 +888,8 @@ fn test_prepare_body_anchors_tool_image_after_tool_message() {
     );
     let region = &prepared.image_regions[0];
     assert_eq!(region.render, jcode_tui_messages::ImageRegionRender::Fit);
-    assert_eq!(region.width, 0);
-    assert_eq!(region.height, 0, "tool images start collapsed");
+    assert!(region.width > 0);
+    assert!(region.height > 0, "tool images are shown by default");
 
     // The region must sit between the tool message and the assistant reply.
     let plain = &prepared.wrapped_plain_lines;
@@ -911,7 +993,10 @@ fn test_prepare_body_collapses_anchored_images_when_inline_images_hidden() {
 
     let prepared = super::prepare::prepare_body(&state, 80, false);
     assert!(
-        prepared.image_regions.iter().all(|region| region.height == 0),
+        prepared
+            .image_regions
+            .iter()
+            .all(|region| region.height == 0),
         "collapsed images must not emit drawable regions"
     );
     let text = prepared.wrapped_plain_lines.join("\n");
@@ -928,299 +1013,6 @@ fn test_prepare_body_collapses_anchored_images_when_inline_images_hidden() {
 /// Assert two prepared bodies are byte-for-byte equivalent across every
 /// observable array. Used to prove prefix-reuse output matches a fresh full
 /// build.
-fn assert_prepared_equivalent(a: &PreparedMessages, b: &PreparedMessages, ctx: &str) {
-    let a_lines: Vec<String> = a.wrapped_lines.iter().map(line_to_plain).collect();
-    let b_lines: Vec<String> = b.wrapped_lines.iter().map(line_to_plain).collect();
-    assert_eq!(a_lines, b_lines, "{ctx}: wrapped_lines text differ");
-    assert_eq!(
-        a.wrapped_plain_lines, b.wrapped_plain_lines,
-        "{ctx}: wrapped_plain_lines differ"
-    );
-    assert_eq!(
-        a.wrapped_copy_offsets, b.wrapped_copy_offsets,
-        "{ctx}: wrapped_copy_offsets differ"
-    );
-    assert_eq!(
-        a.raw_plain_lines, b.raw_plain_lines,
-        "{ctx}: raw_plain_lines differ"
-    );
-    assert_eq!(
-        a.user_prompt_texts, b.user_prompt_texts,
-        "{ctx}: user_prompt_texts differ"
-    );
-    assert_eq!(
-        a.wrapped_user_indices, b.wrapped_user_indices,
-        "{ctx}: wrapped_user_indices differ"
-    );
-    assert_eq!(
-        a.wrapped_user_prompt_starts, b.wrapped_user_prompt_starts,
-        "{ctx}: wrapped_user_prompt_starts differ"
-    );
-    assert_eq!(
-        a.wrapped_user_prompt_ends, b.wrapped_user_prompt_ends,
-        "{ctx}: wrapped_user_prompt_ends differ"
-    );
-    let a_map: Vec<usize> = a.wrapped_line_map.iter().map(|m| m.raw_line).collect();
-    let b_map: Vec<usize> = b.wrapped_line_map.iter().map(|m| m.raw_line).collect();
-    assert_eq!(a_map, b_map, "{ctx}: wrapped_line_map raw_line differ");
-    assert_eq!(
-        a.image_regions.len(),
-        b.image_regions.len(),
-        "{ctx}: image_regions count differ"
-    );
-    for (x, y) in a.image_regions.iter().zip(b.image_regions.iter()) {
-        assert_eq!(
-            x.abs_line_idx, y.abs_line_idx,
-            "{ctx}: image_region abs_line_idx differ"
-        );
-        assert_eq!(
-            x.end_line, y.end_line,
-            "{ctx}: image_region end_line differ"
-        );
-    }
-    assert_eq!(
-        a.edit_tool_ranges.len(),
-        b.edit_tool_ranges.len(),
-        "{ctx}: edit_tool_ranges count differ"
-    );
-    for (x, y) in a.edit_tool_ranges.iter().zip(b.edit_tool_ranges.iter()) {
-        assert_eq!(
-            x.start_line, y.start_line,
-            "{ctx}: edit_tool_range start_line differ"
-        );
-        assert_eq!(
-            x.end_line, y.end_line,
-            "{ctx}: edit_tool_range end_line differ"
-        );
-    }
-    assert_eq!(
-        a.copy_targets.len(),
-        b.copy_targets.len(),
-        "{ctx}: copy_targets count differ"
-    );
-    for (x, y) in a.copy_targets.iter().zip(b.copy_targets.iter()) {
-        assert_eq!(
-            x.start_line, y.start_line,
-            "{ctx}: copy_target start_line differ"
-        );
-        assert_eq!(x.end_line, y.end_line, "{ctx}: copy_target end_line differ");
-    }
-    let a_b: Vec<_> = a
-        .message_boundaries
-        .iter()
-        .map(|b| (b.msg_hash, b.wrapped_len, b.raw_len, b.user_prompt_len))
-        .collect();
-    let b_b: Vec<_> = b
-        .message_boundaries
-        .iter()
-        .map(|b| (b.msg_hash, b.wrapped_len, b.raw_len, b.user_prompt_len))
-        .collect();
-    assert_eq!(a_b, b_b, "{ctx}: message_boundaries differ");
-}
-
-fn line_to_plain(line: &Line) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
-/// Prefix-reuse must produce a body byte-identical to a fresh full build when
-/// the tail message is edited in place (e.g. a streaming tool result is
-/// finalized). This exercises truncate + re-append on the changed tail.
-#[test]
-fn test_prefix_reuse_tail_edit_matches_full_build() {
-    let width = 64;
-    let base_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("first prompt"),
-            DisplayMessage::assistant(
-                "a fairly long answer that wraps across the width boundary here",
-            ),
-            DisplayMessage::user("second prompt"),
-            DisplayMessage::assistant("partial"),
-        ],
-        messages_version: 1,
-        ..Default::default()
-    };
-    // Tail (last assistant) edited in place; prefix of 3 messages unchanged.
-    let edited_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("first prompt"),
-            DisplayMessage::assistant(
-                "a fairly long answer that wraps across the width boundary here",
-            ),
-            DisplayMessage::user("second prompt"),
-            DisplayMessage::assistant(
-                "partial answer is now complete and considerably longer than before",
-            ),
-        ],
-        messages_version: 2,
-        ..Default::default()
-    };
-
-    let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
-    assert_eq!(k, 3, "only the last message changed");
-
-    let mut reuse = base;
-    super::prepare::truncate_prepared_to_boundary(Arc::make_mut(&mut reuse), k);
-    let reuse = super::prepare::prepare_body_incremental(&edited_state, width, reuse, k);
-    let full = super::prepare::prepare_body(&edited_state, width, false);
-    assert_prepared_equivalent(&reuse, &full, "tail_edit");
-}
-
-/// Pure append still matches a full build (k == prev_count path).
-#[test]
-fn test_prefix_reuse_append_matches_full_build() {
-    let width = 50;
-    let base_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("hello there"),
-            DisplayMessage::assistant("hi, how can I help you today with this task"),
-        ],
-        messages_version: 1,
-        ..Default::default()
-    };
-    let grown_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("hello there"),
-            DisplayMessage::assistant("hi, how can I help you today with this task"),
-            DisplayMessage::user("another question that is fairly long and wraps too"),
-            DisplayMessage::assistant("sure, here is the answer to your second question"),
-        ],
-        messages_version: 2,
-        ..Default::default()
-    };
-
-    let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &grown_state.display_messages);
-    assert_eq!(k, 2);
-    let reuse = super::prepare::prepare_body_incremental(&grown_state, width, base, k);
-    let full = super::prepare::prepare_body(&grown_state, width, false);
-    assert_prepared_equivalent(&reuse, &full, "append");
-}
-
-/// Truncation (transcript shrank, e.g. a rewind) reuses the surviving prefix
-/// and matches a full build.
-#[test]
-fn test_prefix_reuse_truncation_matches_full_build() {
-    let width = 48;
-    let long_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("q1 that is reasonably long to force wrapping in body"),
-            DisplayMessage::assistant("answer one spanning multiple wrapped lines for sure"),
-            DisplayMessage::user("q2 also long enough to wrap across the configured width"),
-            DisplayMessage::assistant("answer two also spanning several wrapped output lines"),
-        ],
-        messages_version: 1,
-        ..Default::default()
-    };
-    let short_state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("q1 that is reasonably long to force wrapping in body"),
-            DisplayMessage::assistant("answer one spanning multiple wrapped lines for sure"),
-        ],
-        messages_version: 2,
-        ..Default::default()
-    };
-
-    let base = Arc::new(super::prepare::prepare_body(&long_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &short_state.display_messages);
-    assert_eq!(k, 2);
-    let mut reuse = base;
-    super::prepare::truncate_prepared_to_boundary(Arc::make_mut(&mut reuse), k);
-    // After truncation alone (no new tail to append) it must already match.
-    let full = super::prepare::prepare_body(&short_state, width, false);
-    assert_prepared_equivalent(&reuse, &full, "truncation");
-}
-
-/// Regression for #735 at the TUI layer.
-///
-/// `prepare_body` runs on the draw path, the same thread that services
-/// keystrokes and interrupts. When display math rendered synchronously, a
-/// stalled TeX toolchain (the reporter's `latex` was regenerating its format
-/// files) blocked this call for the per-command timeout on every uncached
-/// formula. The user-visible result was a client that could not act on Esc:
-/// the server cancelled the turn in milliseconds while the TUI sat
-/// unresponsive, so "Interrupting" lingered and then vanished.
-///
-/// Two things must hold: preparing a transcript full of uncached formulas
-/// stays fast even when the toolchain never returns, and the resulting body
-/// carries the pending stamp, without which the placeholder would never be
-/// replaced by the finished image.
-#[cfg(unix)]
-#[test]
-fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
-    // Earlier tests can cache a missing toolchain. Exercise the real probe and
-    // worker in a fresh process, not that process-global cached result.
-    if std::env::var_os("JCODE_STALLED_TEX_TEST_CHILD").is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tui::ui::tests::basic::test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain",
-                "--nocapture",
-            ])
-            .env("JCODE_STALLED_TEX_TEST_CHILD", "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "isolated stalled TeX regression failed");
-        return;
-    }
-    use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let dir = tempfile::tempdir().unwrap();
-    let stub = dir.path().join("hanging-tex");
-    let mut file = std::fs::File::create(&stub).unwrap();
-    file.write_all(b"#!/bin/sh\nsleep 120\nexit 1\n").unwrap();
-    drop(file);
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // SAFETY: read only by the render and worker threads spawned below.
-    unsafe {
-        std::env::set_var("JCODE_LATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_DVIPNG_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFLATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFTOCAIRO_COMMAND", &stub);
-    }
-
-    // Unique formulas so no previously cached artifact short-circuits this.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let math: String = (0..8)
-        .map(|i| format!("$$w_{{{nonce}_{i}}} = \\frac{{{i}}}{{\\sqrt{{2}}}}$$\n\n"))
-        .collect();
-    let state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("derive it"),
-            DisplayMessage::assistant(&math),
-        ],
-        messages_version: 1,
-        ..Default::default()
-    };
-
-    // Image mode only engages when the terminal advertises graphics, as the
-    // reporter's terminal did; a test process otherwise skips the LaTeX path.
-    let started = std::time::Instant::now();
-    let prepared = crate::tui::mermaid::with_image_protocol_override(Some(true), || {
-        super::prepare::prepare_body(&state, 90, false)
-    });
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "prepare_body blocked the draw path for {elapsed:?} with a stalled TeX toolchain; \
-         keystrokes and interrupts cannot be serviced while it does (#735)"
-    );
-    assert!(
-        prepared.mermaid_pending_epoch.is_some(),
-        "deferred formulas must stamp the prepared body, or the completed render \
-         never invalidates the cache and the placeholder stays on screen forever"
-    );
-
-    unsafe {
-        std::env::remove_var("JCODE_LATEX_COMMAND");
-        std::env::remove_var("JCODE_DVIPNG_COMMAND");
-        std::env::remove_var("JCODE_PDFLATEX_COMMAND");
-        std::env::remove_var("JCODE_PDFTOCAIRO_COMMAND");
-    }
-}
+#[path = "cache_equivalence_tests.rs"]
+mod cache_equivalence;
+use cache_equivalence::assert_prepared_equivalent;

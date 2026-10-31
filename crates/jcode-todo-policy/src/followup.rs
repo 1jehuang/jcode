@@ -29,9 +29,9 @@ pub const MAX_GATE_ATTEMPTS: u8 = 5;
 pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
 
 /// Shared retry budget for clients that handle their own turn-end loop.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncompleteTodoBudget {
-    fingerprint: Option<String>,
+    fingerprint: Option<Vec<TodoItem>>,
     attempts: u8,
 }
 
@@ -47,8 +47,8 @@ impl IncompleteTodoBudget {
             *self = Self::default();
             return true;
         }
-        let fingerprint =
-            serde_json::to_string(&incomplete).expect("todo items must serialize to JSON");
+        // Compare the actual policy inputs instead of fallible JSON serialization.
+        let fingerprint: Vec<TodoItem> = incomplete.into_iter().cloned().collect();
         if self.fingerprint.as_ref() != Some(&fingerprint) {
             self.fingerprint = Some(fingerprint);
             self.attempts = 0;
@@ -90,6 +90,30 @@ pub fn todo_waits_on_running_task(
     mut is_running: impl FnMut(&str) -> bool,
 ) -> bool {
     todo.waiting_on.iter().any(|task_id| is_running(task_id))
+}
+
+/// Explicit external waits remain incomplete. Their review time only restores
+/// actionability so the agent can reassess, never marks them done.
+pub fn todo_has_external_blocker_at(todo: &TodoItem, now: chrono::DateTime<chrono::Utc>) -> bool {
+    is_incomplete_todo(todo)
+        && todo
+            .external_blocker
+            .as_ref()
+            .is_some_and(|blocker| !blocker.reason.trim().is_empty() && blocker.review_at > now)
+}
+
+pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
+    todo_has_external_blocker_at(todo, chrono::Utc::now())
+}
+
+/// Only valid, incomplete complete blockers suppress work. Programmatically
+/// constructed snapshots may bypass the persisted type's field validation.
+pub fn todo_completely_blocked(todo: &TodoItem) -> bool {
+    is_incomplete_todo(todo)
+        && todo
+            .completely_blocked
+            .as_ref()
+            .is_some_and(|required| !required.reason.trim().is_empty())
 }
 
 /// Persistent side effects a decision requires. Apply them whether or not a
@@ -158,12 +182,12 @@ impl Decision {
 }
 
 /// Per-session follow-up state. Keep one per session and reuse it across turns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FollowUpPolicy {
     armed: bool,
     default_on: bool,
     final_response_requested: bool,
-    final_response_fingerprint: Option<String>,
+    final_response_fingerprint: Option<(Vec<TodoItem>, TodoPlan, Vec<TodoGoal>)>,
     gate_attempts: u8,
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
@@ -246,7 +270,7 @@ impl FollowUpPolicy {
             return Decision::default();
         }
 
-        let fingerprint = serde_json::to_string(&(todos, &snapshot.plan, goals)).ok();
+        let fingerprint = Some((todos.clone(), snapshot.plan.clone(), goals.clone()));
         if self.final_response_fingerprint.is_some() {
             if self.final_response_fingerprint == fingerprint {
                 // Neither elapsed time nor a stale observation starts a new
@@ -266,12 +290,14 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_waits_on_running_task(todo, |id| {
-                    snapshot
-                        .running_background_tasks
-                        .iter()
-                        .any(|running| running == id)
-                })
+                !todo_completely_blocked(todo)
+                    && !todo_has_external_blocker(todo)
+                    && !todo_waits_on_running_task(todo, |id| {
+                        snapshot
+                            .running_background_tasks
+                            .iter()
+                            .any(|running| running == id)
+                    })
             })
             .collect();
         if !incomplete.is_empty() && actionable.is_empty() {
@@ -314,18 +340,18 @@ impl FollowUpPolicy {
             clear_gate_observations: !snapshot.gate_observations.is_empty(),
             ..TodoEffects::default()
         };
-        if self.gate_digest_enabled && !self.gate_digest_delivered {
-            if let Some(message) =
+        if self.gate_digest_enabled
+            && !self.gate_digest_delivered
+            && let Some(message) =
                 crate::build_gate_digest(&snapshot.gate_observations, &snapshot.plan, goals)
-            {
-                self.gate_digest_delivered = true;
-                return Decision::send(
-                    FollowUpKind::GateDigest,
-                    message,
-                    "🔍 Double-checking this turn's weak points...",
-                )
-                .with_effects(effects);
-            }
+        {
+            self.gate_digest_delivered = true;
+            return Decision::send(
+                FollowUpKind::GateDigest,
+                message,
+                "🔍 Double-checking this turn's weak points...",
+            )
+            .with_effects(effects);
         }
 
         let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);

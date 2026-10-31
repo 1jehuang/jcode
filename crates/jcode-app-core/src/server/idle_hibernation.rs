@@ -230,68 +230,75 @@ mod tests {
         assert!(!state.due(now, threshold, Duration::from_secs(8), None));
     }
 
-    #[tokio::test]
-    async fn idle_hibernation_monitor_skips_busy_and_running_then_releases_once() {
+    #[test]
+    fn idle_hibernation_monitor_skips_busy_and_running_then_releases_once() {
         let _env = crate::storage::lock_test_env();
-        let agent = Arc::new(Mutex::new(Agent::new(
-            Arc::new(IdleProvider),
-            crate::tool::Registry::empty(),
-        )));
-        let id = agent.lock().await.session_id().to_string();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut member = SwarmMember::from_record(
-            jcode_swarm_core::SwarmMemberRecord {
-                session_id: id.clone(),
-                working_dir: None,
-                swarm_id: None,
-                swarm_enabled: false,
-                status: jcode_swarm_core::SwarmLifecycleStatus::from("ready".to_string()),
-                detail: None,
-                task_label: None,
-                friendly_name: None,
-                report_back_to_session_id: None,
-                latest_completion_report: None,
-                role: jcode_swarm_core::SwarmRole::from("agent".to_string()),
-                is_headless: false,
-            },
-            tx,
-        );
-        let old = Instant::now() - Duration::from_secs(60);
-        member.last_status_change = old;
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            id.clone(),
-            Arc::clone(&agent),
-        )])));
-        let members = Arc::new(RwLock::new(HashMap::from([(id.clone(), member)])));
-        let mut idle = HashMap::from([(id.clone(), IdleState::new(old, old))]);
-        let threshold = Duration::from_secs(1);
-        let held = agent.lock().await;
-        assert_eq!(
-            reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
-            0
-        );
-        assert!(idle.is_empty());
-        drop(held);
-        members.write().await.get_mut(&id).unwrap().status = "running".into();
-        assert_eq!(
-            reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
-            0
-        );
-        members.write().await.get_mut(&id).unwrap().status = "ready".into();
-        idle.insert(id.clone(), IdleState::new(old, old));
-        assert_eq!(
-            reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
-            1
-        );
-        assert!(idle[&id].released);
-        assert_eq!(
-            reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
-            0
-        );
-        assert_eq!(
-            reclaim_idle_caches(&sessions, &members, &mut idle, Duration::ZERO).await,
-            0
-        );
-        assert!(idle.is_empty());
+        // Serialize process-wide environment outside the asynchronous runtime.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let agent = Arc::new(Mutex::new(Agent::new(
+                    Arc::new(IdleProvider),
+                    crate::tool::Registry::empty(),
+                )));
+                let id = agent.lock().await.session_id().to_string();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let mut member = SwarmMember::from_record(
+                    jcode_swarm_core::SwarmMemberRecord {
+                        session_id: id.clone(),
+                        working_dir: None,
+                        swarm_id: None,
+                        swarm_enabled: false,
+                        status: jcode_swarm_core::SwarmLifecycleStatus::from("ready".to_string()),
+                        detail: None,
+                        task_label: None,
+                        friendly_name: None,
+                        report_back_to_session_id: None,
+                        latest_completion_report: None,
+                        role: jcode_swarm_core::SwarmRole::from("agent".to_string()),
+                        is_headless: false,
+                    },
+                    tx,
+                );
+                let old = Instant::now() - Duration::from_secs(60);
+                member.last_status_change = old;
+                let sessions = Arc::new(RwLock::new(HashMap::from([(
+                    id.clone(),
+                    Arc::clone(&agent),
+                )])));
+                let members = Arc::new(RwLock::new(HashMap::from([(id.clone(), member)])));
+                let mut idle = HashMap::from([(id.clone(), IdleState::new(old, old))]);
+                let threshold = Duration::from_secs(1);
+                let held = agent.lock().await;
+                assert_eq!(
+                    reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
+                    0
+                );
+                assert!(idle.is_empty());
+                drop(held);
+                members.write().await.get_mut(&id).unwrap().status = "running".into();
+                assert_eq!(
+                    reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
+                    0
+                );
+                members.write().await.get_mut(&id).unwrap().status = "ready".into();
+                idle.insert(id.clone(), IdleState::new(old, old));
+                assert_eq!(
+                    reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
+                    1
+                );
+                assert!(idle[&id].released);
+                assert_eq!(
+                    reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
+                    0
+                );
+                assert_eq!(
+                    reclaim_idle_caches(&sessions, &members, &mut idle, Duration::ZERO).await,
+                    0
+                );
+                assert!(idle.is_empty());
+            });
     }
 }

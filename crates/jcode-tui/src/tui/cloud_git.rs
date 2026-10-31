@@ -332,7 +332,7 @@ mod tests {
     use super::*;
     #[test]
     fn snapshot_handles_rename_newline_and_independent_counts() {
-        let info = parse(b"jcode-git-v1\0/repo\0main\02 3\0R  new name\0old name\0?? a\nb\0 M tracked\0\01\t2\ttracked\n").unwrap();
+        let info = parse(b"jcode-git-v1\0/repo\0main\x002 3\0R  new name\0old name\0?? a\nb\0 M tracked\0\x001\t2\ttracked\n").unwrap();
         assert_eq!(
             (info.staged, info.modified, info.untracked, info.dirty_total),
             (1, 1, 1, 3)
@@ -348,7 +348,7 @@ mod tests {
             (2, 3, 1, 2)
         );
         assert!(parse(b"bad response").is_none());
-        assert!(parse(b"jcode-git-v1\0/repo\0main\00 0\0 M truncated").is_none());
+        assert!(parse(b"jcode-git-v1\0/repo\0main\x000 0\0 M truncated").is_none());
     }
     #[tokio::test]
     async fn live_independent_repositories_and_missing_path() {

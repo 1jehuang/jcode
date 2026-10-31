@@ -13,6 +13,59 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 const TODO_CARD_ROLE: &str = "todos";
 
 impl App {
+    fn current_todo_state(
+        &self,
+    ) -> (
+        Vec<TodoItem>,
+        crate::todo::TodoPlan,
+        Vec<crate::todo::TodoGoal>,
+    ) {
+        let session_id = self.active_client_session_id();
+        if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
+            let payload = self
+                .remote_todos_payload
+                .as_ref()
+                .filter(|(id, _)| Some(id.as_str()) == session_id)
+                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .unwrap_or_default();
+            return (
+                serde_json::from_value(payload["todos"].clone()).unwrap_or_default(),
+                serde_json::from_value(payload["plan"].clone()).unwrap_or_default(),
+                serde_json::from_value(payload["goals"].clone()).unwrap_or_default(),
+            );
+        }
+        (
+            load_current_session_todos(session_id),
+            load_current_session_plan(session_id),
+            load_current_session_goals(session_id),
+        )
+    }
+
+    pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
+        if !crate::tui::is_ssh_remote()
+            || !(self.todos_view_enabled
+                || self.latest_todo_card_index().is_some()
+                || crate::config::config().display.pin_todos)
+            || self
+                .remote_todos_requested_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return false;
+        }
+        self.remote_todos_requested_at = Some(Instant::now());
+        true
+    }
+
+    pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
+        if self.active_client_session_id() != Some(session_id.as_str()) {
+            return;
+        }
+        self.remote_todos_payload = Some((session_id, payload));
+        self.refresh_todo_card_if_needed();
+        self.refresh_todos_view_now();
+        self.refresh_pinned_todos_now();
+    }
+
     pub(super) fn todos_view_enabled(&self) -> bool {
         self.todos_view_enabled
     }
@@ -40,16 +93,8 @@ impl App {
     /// Push (or move to the bottom) the inline todo card with fresh data. The
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
-        if crate::tui::is_ssh_remote() {
-            self.set_status_notice(
-                "Local todo view unavailable for SSH; ask the remote agent for todos",
-            );
-            return;
-        }
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
         self.todo_card_rendered_hash =
@@ -70,16 +115,11 @@ impl App {
     /// Live-refresh the inline todo card when the session todo list changed.
     /// Returns true when the transcript was updated.
     pub(super) fn refresh_todo_card_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let Some(idx) = self.latest_todo_card_index() else {
             return false;
         };
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
             ^ hash_background_tasks(&tasks);
@@ -95,9 +135,6 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -114,7 +151,7 @@ impl App {
         }
         self.pinned_todos_checked_at = Some(Instant::now());
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         if todos.is_empty() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -123,8 +160,6 @@ impl App {
             }
             return false;
         }
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
         let agents = self.todo_card_agents(&todos);
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
@@ -157,6 +192,14 @@ impl App {
                 {
                     continue;
                 }
+                if self.running_todo_await_dependency(id) {
+                    tasks.push(crate::tui::ui::TodoCardBackgroundTask {
+                        task_id: id.clone(),
+                        label: "Swarm await".into(),
+                        percent: None,
+                    });
+                    continue;
+                }
                 let Some(status) = self.running_todo_background_dependency(id) else {
                     continue;
                 };
@@ -187,7 +230,16 @@ impl App {
         }
         self.remote_swarm_members
             .iter()
-            .map(crate::tui::ui::TodoCardAgent::from_member)
+            .map(|member| {
+                let mut agent = crate::tui::ui::TodoCardAgent::from_member(member);
+                agent.shortcut = self.swarm_agent_shortcut_digit(&member.session_id);
+                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    && let Some(received_at) = self.remote_swarm_members_received_at
+                {
+                    advance_todo_agent_elapsed(&mut agent, received_at.elapsed());
+                }
+                agent
+            })
             .filter(|agent| {
                 todos.iter().any(|todo| {
                     todo.assigned_to.as_deref().is_some_and(|assigned| {
@@ -308,13 +360,8 @@ impl App {
     }
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let session_id = self.active_client_session_id();
-        let todos = load_current_session_todos(session_id);
-        let goals = load_current_session_goals(session_id);
-        let plan = load_current_session_plan(session_id);
+        let (todos, plan, goals) = self.current_todo_state();
         let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
@@ -364,7 +411,9 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
 pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
     let arg = if trimmed == "/todo" {
         ""
-    } else if let Some(rest) = trimmed.strip_prefix("/todos") {
+    } else if trimmed == "/todos" {
+        ""
+    } else if let Some(rest) = trimmed.strip_prefix("/todos ") {
         rest.trim()
     } else {
         return false;
@@ -499,7 +548,13 @@ fn with_background_tasks(
     let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&content) else {
         return content;
     };
-    payload["background_tasks"] = serde_json::to_value(tasks).unwrap_or_default();
+    match serde_json::to_value(tasks) {
+        Ok(tasks) => payload["background_tasks"] = tasks,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot encode todo background tasks: {error}"));
+            return content;
+        }
+    }
     payload.to_string()
 }
 
@@ -508,9 +563,16 @@ fn hash_background_tasks(tasks: &[crate::tui::ui::TodoCardBackgroundTask]) -> u6
         return 0;
     }
     let mut hasher = DefaultHasher::new();
-    serde_json::to_string(tasks)
-        .unwrap_or_default()
-        .hash(&mut hasher);
+    match serde_json::to_string(tasks) {
+        Ok(serialized) => serialized.hash(&mut hasher),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot fingerprint todo background tasks: {error}"
+            ));
+            // Avoid mistaking a failed encoding for an empty task list.
+            tasks.len().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -526,24 +588,55 @@ fn todo_card_payload_json_with_agents(
         "goals": goals,
     });
     if !agents.is_empty() {
-        payload["agents"] = serde_json::to_value(agents).unwrap_or_default();
+        match serde_json::to_value(agents) {
+            Ok(agents) => payload["agents"] = agents,
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot encode todo agents: {error}"));
+            }
+        }
     }
     serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
+}
+
+fn advance_todo_agent_elapsed(
+    agent: &mut crate::tui::ui::TodoCardAgent,
+    elapsed: std::time::Duration,
+) {
+    if let Some(live) = &mut agent.live_status {
+        live.elapsed_ms = live
+            .elapsed_ms
+            .saturating_add(elapsed.as_millis().min(u64::MAX as u128) as u64);
+    }
+    for age in [
+        &mut agent.age_secs,
+        &mut agent.activity_age_secs,
+        &mut agent.wait_age_secs,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *age = age.saturating_add(elapsed.as_secs());
+    }
 }
 
 fn hash_todo_card_agents(agents: &[crate::tui::ui::TodoCardAgent]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for agent in agents {
         agent.session_id.hash(&mut hasher);
+        agent.shortcut.hash(&mut hasher);
         agent.status.hash(&mut hasher);
         agent.activity.hash(&mut hasher);
         agent.todo_statuses.hash(&mut hasher);
-        // Minute granularity: the band shows "3m", so finer ages would only
-        // force redraws with no visible change.
-        agent
-            .age_secs
-            .map(|age| if age < 60 { age } else { age / 60 * 60 })
+        agent.wait_reason.hash(&mut hasher);
+        // The wire snapshot is small and includes every visible status field.
+        serde_json::to_string(&agent.live_status)
+            .unwrap_or_default()
             .hash(&mut hasher);
+        // Hash every displayed age, including quiet activity and scoped waits.
+        for age in [agent.age_secs, agent.activity_age_secs, agent.wait_age_secs] {
+            age.map(|age| if age < 60 { age } else { age / 60 * 60 })
+                .hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -635,11 +728,25 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .filter(|group| !group.is_empty())
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
+    let blocker_detail = if crate::todo::todo_completely_blocked(todo) {
+        match todo.completely_blocked.as_ref() {
+            Some(blocker) => format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason),
+            None => {
+                crate::logging::warn("Todo marked completely blocked without blocker details");
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     format!(
-        "- {} {}{}\n",
-        status_badge(&todo.status, !todo.blocked_by.is_empty()),
-        todo.content,
-        group
+        "- {} {}{group}{blocker_detail}\n",
+        if crate::todo::todo_completely_blocked(todo) {
+            "✋"
+        } else {
+            status_badge(&todo.status, !todo.blocked_by.is_empty())
+        },
+        todo.content
     )
 }
 
@@ -655,7 +762,7 @@ fn sorted_todos_for_status<'a>(todos: &'a [TodoItem], status: &str) -> Vec<&'a T
 }
 
 fn status_badge(status: &str, blocked: bool) -> &'static str {
-    if blocked && status != "completed" {
+    if blocked && !matches!(status, "completed" | "cancelled") {
         return "[blocked]";
     }
     match status {
@@ -688,9 +795,13 @@ fn hash_todos_payload(
         todo.status.hash(&mut hasher);
         todo.priority.hash(&mut hasher);
         todo.group.hash(&mut hasher);
+        todo.lane_after.hash(&mut hasher);
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
+        if let Some(blocker) = &todo.completely_blocked {
+            blocker.reason.hash(&mut hasher);
+        }
         todo.assigned_to.hash(&mut hasher);
         todo.stage.hash(&mut hasher);
     }
@@ -726,12 +837,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_status_elapsed_and_tokens_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            live_status: Some(crate::protocol::SwarmLiveStatus {
+                phase: "running_tool".into(),
+                elapsed_ms: 12_000,
+                input_tokens: Some(123),
+                ..Default::default()
+            }),
+            activity_age_secs: Some(1),
+            ..Default::default()
+        };
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        advance_todo_agent_elapsed(&mut agent, std::time::Duration::from_secs(5));
+        assert_eq!(agent.live_status.as_ref().unwrap().elapsed_ms, 17_000);
+        assert_eq!(agent.activity_age_secs, Some(6));
+        let later = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, later);
+        agent.live_status.as_mut().unwrap().output_tokens = Some(456);
+        assert_ne!(later, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
+    fn shortcut_changes_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            shortcut: Some(1),
+            ..Default::default()
+        };
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        agent.shortcut = Some(0);
+        assert_ne!(before, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
     fn worker_item_status_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        agent.todo_statuses = vec!["pending".into(), "in_progress".into()];
+        let mut agent = crate::tui::ui::TodoCardAgent {
+            todo_statuses: vec!["pending".into(), "in_progress".into()],
+            ..Default::default()
+        };
         let before = hash_todo_card_agents(&[agent.clone()]);
         agent.todo_statuses.swap(0, 1);
         assert_ne!(before, hash_todo_card_agents(&[agent]));
+    }
+
+    #[test]
+    fn wait_and_activity_changes_invalidate_pinned_payload() {
+        let mut agent = crate::tui::ui::TodoCardAgent::default();
+        let before = hash_todo_card_agents(&[agent.clone()]);
+        agent.wait_reason = Some("Waiting for build".into());
+        let waiting = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(before, waiting);
+        agent.wait_age_secs = Some(120);
+        let aged = hash_todo_card_agents(&[agent.clone()]);
+        assert_ne!(waiting, aged);
+        agent.wait_age_secs = Some(125);
+        assert_eq!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.activity_age_secs = Some(180);
+        assert_ne!(aged, hash_todo_card_agents(&[agent.clone()]));
+        agent.wait_reason = None;
+        assert_ne!(waiting, hash_todo_card_agents(&[agent]));
     }
 
     /// Plan-level intent used by the view tests.
@@ -757,15 +921,44 @@ mod tests {
             status: status.to_string(),
             priority: priority.to_string(),
             group: None,
+            lane_after: None,
             confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
+            external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,
+        }
+    }
+
+    #[test]
+    fn complete_blocker_panel_preserves_reason_and_invalidates_cache() {
+        let mut item = todo("1", "Connect", "pending", "high", None, None);
+        let before = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only the account owner can grant access.\nKeep this entire explanation."
+                .into(),
+        });
+        let after = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
+        assert_ne!(before, after);
+        let markdown = format_todo_compact_markdown(&item);
+        assert!(markdown.contains("✋"));
+        assert!(markdown.contains("Completely blocked"));
+        assert!(!markdown.contains("Approve access"));
+        assert!(markdown.contains("Keep this entire explanation."));
+        item.completely_blocked.as_mut().unwrap().reason.push('!');
+        assert_ne!(
+            after,
+            hash_todos_payload(None, &[item.clone()], &plan(), &[])
+        );
+        for status in ["completed", "cancelled"] {
+            item.status = status.into();
+            assert!(!format_todo_compact_markdown(&item).contains("✋"));
         }
     }
 

@@ -35,6 +35,22 @@
   test, and integrate that contribution regardless of author status. Do not pull
   in unrelated branches or merge a PR without user authorization.
 
+## Provider model discovery
+
+- Model arrays are offline fallbacks, not release allowlists. Providers with a
+  catalog must discover new model IDs without a Jcode release and expose them
+  through switching lists and structured model routes.
+- Implement both cached prefetch and explicit refresh. Explicit refresh must
+  bypass fresh caches. Preserve the last good catalog on network, authentication,
+  or malformed-response failures, and scope persistent caches to their endpoint.
+- Wire new providers into the shared refresh fanout and model-update publication,
+  including long-lived sessions, not only startup or login.
+- Regression tests must discover an arbitrary future model absent from all
+  fallback arrays, using the provider's actual response schema. Check picker
+  routes, forced refresh with a fresh cache, and last-good behavior on failure.
+- If a backend has no discovery API, document that limitation instead of
+  presenting a hardcoded list or a no-op refresh as live discovery.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.

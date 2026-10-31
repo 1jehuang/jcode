@@ -3,6 +3,192 @@ mod tests {
     use crate::server::debug_jobs::DebugJobStatus;
 
     #[test]
+    fn production_group_transfer_does_not_enable_arbitrary_debug_control() {
+        let bundle = serde_json::json!({
+            "version": 1, "transfer_id": "test-transfer", "destination_host": "cloud",
+            "sessions": [], "swarms": [],
+        });
+        let prepare = serde_json::json!({
+            "session_ids": ["session_one"], "destination_host": "cloud", "expected": bundle,
+        });
+        for command in [
+            "group_transfer:inspect:{\"session_ids\":[\"session_one\"]}".to_string(),
+            " server:group_transfer:inspect:{\"swarm_ids\":[\"swarm_one\"]} ".to_string(),
+            format!("group_transfer:prepare:{prepare}"),
+            format!("group_transfer:reserve:{bundle}"),
+            format!("group_transfer:import:{bundle}"),
+            format!("group_transfer:abort:{bundle}"),
+            format!("group_transfer:check_import:{bundle}"),
+        ] {
+            assert!(debug_command_authorized(&command, false), "{command}");
+        }
+        for command in [
+            "message:run arbitrary code",
+            "server:tool:bash {\"command\":\"true\"}",
+            "create_session",
+            "destroy_session:session_one",
+            "reload",
+            "state",
+            "client:group_transfer:inspect:{}",
+            "tester:group_transfer:inspect:{}",
+            "group_transfer:unknown:{}",
+            "group_transfer:inspect",
+            "group_transfer:inspect:not-json",
+            "group_transfer:inspect:[]",
+            "group_transfer:prepare:{}",
+            "group_transfer:import:{}",
+            "group_transfer:inspect:{}\nmessage:run arbitrary code",
+            "group_transfer:inspect:{};reload",
+            "group_transfer:inspect: {} {}",
+        ] {
+            assert!(!debug_command_authorized(command, false), "{command}");
+        }
+        assert!(debug_command_authorized("message:hello", true));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_group_transfer_scopes_admission_and_keeps_debug_socket_alive() {
+        use super::debug_execution_tests::TestProvider;
+        use crate::server::Server;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // A child test process isolates the global gate from other tests' turns
+        // and keeps all fixture sessions and leases outside user directories.
+        const CHILD: &str = "JCODE_TEST_SCOPED_TRANSFER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "production_group_transfer_scopes_admission_and_keeps_debug_socket_alive",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_RUNTIME_DIR", home.path().join("runtime"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated transport regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        crate::session::Session::create_with_id("selected".into(), None, None)
+            .save_prepared()
+            .unwrap();
+        let server = Server::new_with_name(Arc::new(TestProvider), Some("transfer-test".into()));
+        let (client, stream) = tokio::net::UnixStream::pair().unwrap();
+        let handler = tokio::spawn(super::super::handle_debug_client(
+            stream,
+            server.sessions,
+            server.is_processing,
+            server.session_id,
+            server.provider,
+            server.client_connections,
+            server.swarm_state.members,
+            server.swarm_state.swarms_by_id,
+            server.shared_context,
+            server.swarm_state.plans,
+            server.swarm_state.coordinators,
+            server.file_touch,
+            server.channel_subscriptions,
+            server.channel_subscriptions_by_session,
+            server.client_debug_state,
+            server.client_debug_response_tx,
+            server.debug_jobs,
+            server.event_history,
+            server.event_counter,
+            server.swarm_event_tx,
+            server.identity,
+            Instant::now(),
+            None,
+            None,
+            server.shutdown_signals,
+            server.soft_interrupt_queues,
+        ));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut id = 0;
+        for (owner, expect_success) in [
+            (None, false),
+            (Some("selected"), false),
+            (Some("unrelated"), true),
+        ] {
+            let gate = crate::runtime_activity::global();
+            let _activity = match owner {
+                Some(session) => gate.try_enter_session(session).unwrap(),
+                None => gate.try_enter_global().unwrap(),
+            };
+            for command in [
+                "group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
+                "server:group_transfer:inspect:{\"session_ids\":[\"selected\"]}",
+            ] {
+                id += 1;
+                let request = serde_json::json!({
+                    "type": "debug_command", "id": id, "command": command,
+                });
+                writer
+                    .write_all(format!("{request}\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    reader.read_line(&mut line),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["type"], "debug_response");
+                assert_eq!(response["id"], id);
+                assert_eq!(
+                    response["ok"], expect_success,
+                    "owner={owner:?}: {response}"
+                );
+                let output = response["output"].as_str().unwrap();
+                if expect_success {
+                    let bundle: serde_json::Value = serde_json::from_str(output).unwrap();
+                    assert_eq!(bundle["sessions"][0]["session_id"], "selected");
+                    assert_eq!(bundle["sessions"].as_array().unwrap().len(), 1);
+                } else {
+                    assert!(
+                        output.contains("selected sessions or unscoped background tasks are busy"),
+                        "{output}"
+                    );
+                    assert!(
+                        output.contains("action=inspect phase=idle_admission"),
+                        "{output}"
+                    );
+                }
+            }
+        }
+        writer
+            .write_all(b"{\"type\":\"ping\",\"id\":7}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["type"], "pong");
+        assert_eq!(response["id"], 7);
+        drop(writer);
+        drop(reader);
+        handler.await.unwrap().unwrap();
+    }
+
+    #[test]
     fn client_debug_state_registers_unregisters_and_falls_back() {
         let mut state = ClientDebugState::default();
         let (tx1, _rx1) = mpsc::unbounded_channel();
@@ -472,7 +658,7 @@ mod debug_execution_tests {
         }
     }
 
-    struct TestProvider;
+    pub(super) struct TestProvider;
 
     #[async_trait::async_trait]
     impl provider::Provider for TestProvider {

@@ -70,6 +70,20 @@ pub struct RequestSignature {
 }
 
 impl RequestSignature {
+    /// Positive evidence requires complete per-message fingerprints, not an
+    /// absent signature or an aggregate-hash fallback.
+    pub fn checked_prefix_unchanged(&self, previous: &RequestSignature) -> bool {
+        previous.message_count > 0
+            && previous.system_static_hash != 0
+            && previous.tools_hash != 0
+            && previous.message_hashes.len() == previous.message_count
+            && self.message_hashes.len() == self.message_count
+            && self.system_static_hash == previous.system_static_hash
+            && self.tools_hash == previous.tools_hash
+            && self.tool_count == previous.tool_count
+            && self.extends(previous)
+    }
+
     /// Whether `self` extends `previous` without modifying earlier messages.
     pub fn extends(&self, previous: &RequestSignature) -> bool {
         if previous.message_count > self.message_count {
@@ -169,6 +183,9 @@ impl MissReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvCacheMiss {
     pub reason: MissReason,
+    /// Checked system, tool and prior-message fingerprints are unchanged.
+    /// This is evidence about the prefix, not proof of a provider-side cause.
+    pub prefix_unchanged: bool,
     /// Tokens expected to be served from cache (previous reusable boundary).
     pub expected_tokens: u64,
     /// Tokens the provider reported as read from cache.
@@ -193,6 +210,11 @@ impl KvCacheMiss {
             );
         }
         let tokens = format_token_count(self.missed_tokens);
+        let prefix_tag = if self.prefix_unchanged {
+            " [prefix unchanged]"
+        } else {
+            ""
+        };
         let detail = if self.detail.is_empty() {
             self.reason.detail()
         } else {
@@ -207,7 +229,7 @@ impl KvCacheMiss {
                 self.reason.id()
             ),
             (None, false) => format!(
-                "KV cache miss [{}]: ~{tokens} tokens resent ({detail}).",
+                "KV cache miss [{}]{prefix_tag}: ~{tokens} tokens resent ({detail}).",
                 self.reason.id()
             ),
         }
@@ -366,7 +388,7 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
                 "provider, model"
             };
             format!(
-                "provider read {read} of the {prefix}-token prefix{timing}; same {same}, system prompt, tools and message prefix, so the provider evicted or rerouted the cache"
+                "provider read {read} of the {prefix}-token prefix{timing}; no detected change to {same}, system prompt, tools or message prefix; cause unconfirmed (possible provider routing, eviction or cache-boundary differences)"
             )
         }
     }
@@ -522,6 +544,10 @@ fn classify(
     );
     Some(KvCacheMiss {
         reason,
+        prefix_unchanged: matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
+            && pending
+                .signature
+                .checked_prefix_unchanged(&baseline.signature),
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
@@ -648,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_read_detail_rules_out_harness_and_reports_timing() {
+    fn zero_read_detail_reports_observations_without_claiming_eviction() {
         let mut monitor = KvCacheMonitor::new();
         warm(&mut monitor);
         monitor.begin_request(route(), sig(&[10, 11, 12]));
@@ -660,7 +686,13 @@ mod tests {
             miss.detail
         );
         assert!(miss.detail.contains("TTL 5m"), "{}", miss.detail);
-        assert!(miss.detail.contains("evicted"), "{}", miss.detail);
+        assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
+        assert!(
+            miss.detail.contains("no detected change"),
+            "{}",
+            miss.detail
+        );
+        assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
     }
 
     #[test]
@@ -669,6 +701,61 @@ mod tests {
         warm(&mut monitor);
         monitor.begin_request(route(), sig(&[10, 11, 12]));
         assert_eq!(monitor.finish_request(52_000, Some(49_800)), None);
+    }
+
+    #[test]
+    fn prefix_unchanged_tag_requires_complete_matching_fingerprints() {
+        for change in [
+            "none",
+            "system",
+            "tools",
+            "tool_count",
+            "message",
+            "missing",
+            "partial",
+            "missing_system",
+            "missing_tools",
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            let mut previous = sig(&[10, 11]);
+            let mut current = sig(&[10, 11, 12]);
+            match change {
+                "system" => current.system_static_hash += 1,
+                "tools" => current.tools_hash += 1,
+                "tool_count" => current.tool_count += 1,
+                "message" => current.message_hashes[0] += 1,
+                "missing" => {
+                    previous.message_hashes.clear();
+                    current = previous.clone();
+                }
+                "partial" => {
+                    previous.message_hashes.pop();
+                    current.message_hashes.pop();
+                }
+                "missing_system" => {
+                    previous.system_static_hash = 0;
+                    current.system_static_hash = 0;
+                }
+                "missing_tools" => {
+                    previous.tools_hash = 0;
+                    current.tools_hash = 0;
+                }
+                _ => {}
+            }
+            monitor.begin_request(route(), previous);
+            assert!(monitor.finish_request(50_000, Some(0)).is_none());
+            monitor.begin_request(route(), current);
+            let miss = monitor.finish_request(52_000, Some(0)).expect("miss");
+            assert_eq!(miss.prefix_unchanged, change == "none", "{change}");
+            assert_eq!(
+                miss.message().contains("[prefix unchanged]"),
+                change == "none",
+                "{change}"
+            );
+        }
+        assert!(
+            !RequestSignature::default().checked_prefix_unchanged(&RequestSignature::default())
+        );
     }
 
     #[test]
@@ -692,6 +779,32 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(1800),
             ttl_is_estimate: true,
+        }
+    }
+
+    #[test]
+    fn observed_openai_partial_reads_do_not_prove_eviction_and_recover() {
+        for (baseline, input, read, next_input, next_read) in [
+            (19_970, 20_372, 4_352, 27_278, 20_352),
+            (30_379, 30_743, 20_096, 32_143, 30_336),
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            monitor.begin_request(openai_route(), sig(&[10]));
+            assert!(monitor.finish_request(baseline, Some(0)).is_none());
+            monitor.begin_request(openai_route(), sig(&[10, 11]));
+            let miss = monitor
+                .finish_request(input, Some(read))
+                .expect("partial read");
+            assert_eq!(miss.reason, MissReason::LowRead);
+            assert_eq!(miss.missed_tokens, baseline - read);
+            assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
+            assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
+            monitor.begin_request(openai_route(), sig(&[10, 11, 12]));
+            assert!(
+                monitor
+                    .finish_request(next_input, Some(next_read))
+                    .is_none()
+            );
         }
     }
 

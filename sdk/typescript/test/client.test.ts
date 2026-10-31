@@ -760,3 +760,25 @@ test("run retains an abnormal stop without leaking another session's reason", as
     await server.close();
   }
 });
+test("setContextCap returns effective budget and supports zero/null clearing", async () => {
+  const seen: unknown[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req !== "set_context_cap") return;
+      seen.push(request.max_context_tokens);
+      send({ v: 1, reply_to: request.id, ev: "context_cap_changed", session_id: request.session_id,
+        max_context_tokens: request.max_context_tokens || null, effective_budget: 90_000 });
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    for (const cap of [100_000, 0, null]) assert.equal(await client.setContextCap("s1", cap), 90_000);
+    assert.deepEqual(seen, [100_000, 0, null]);
+    for (const cap of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(() => client.setContextCap("s1", cap), RangeError);
+    }
+  } finally {
+    client.close();
+    await server.close();
+  }
+});

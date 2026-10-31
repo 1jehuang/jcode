@@ -219,6 +219,18 @@ fn auto_poke_feature_defaults_on_and_parses_false() {
 }
 
 #[test]
+fn todo_gate_diagnostics_defaults_off_and_requires_explicit_opt_in() {
+    assert!(!Config::default().features.todo_gate_diagnostics);
+    let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
+    assert!(!omitted.features.todo_gate_diagnostics);
+    for enabled in [true, false] {
+        let cfg: Config =
+            toml::from_str(&format!("[features]\ntodo_gate_diagnostics = {enabled}\n")).unwrap();
+        assert_eq!(cfg.features.todo_gate_diagnostics, enabled);
+    }
+}
+
+#[test]
 fn todo_gate_digest_defaults_off_and_requires_explicit_opt_in() {
     assert!(!Config::default().features.todo_gate_digest);
     let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
@@ -417,6 +429,66 @@ fn test_env_override_swarm_model() {
     assert_eq!(cfg.agents.swarm_model, None);
 
     restore_env_var("JCODE_SWARM_MODEL", prev);
+}
+
+#[test]
+fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
+    let agents = Config::default().agents;
+    assert!(!agents.swarm_model_selection);
+    assert!(agents.swarm_model_allowlist.is_empty());
+    assert!(agents.validate_swarm_model_request(None).is_ok());
+    for model in [
+        "inherit",
+        "coordinator",
+        "",
+        "  ",
+        "claude-api:claude-opus-4-8",
+    ] {
+        assert!(agents.validate_swarm_model_request(Some(model)).is_err());
+    }
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_model_allowlist = [\"claude-api:claude-opus-4-8\"]\n")
+            .unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
+            .is_err()
+    );
+}
+
+#[test]
+fn swarm_model_selection_requires_opt_in_and_exact_route_match() {
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_model_selection = true\nswarm_model_allowlist = [\"claude:claude-opus-4-8\"]\n"
+    ).unwrap();
+    assert!(cfg.agents.validate_swarm_model_request(None).is_ok());
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_ok()
+    );
+    for model in [
+        "claude-api:claude-opus-4-8",
+        "claude-opus-4-8",
+        "Claude:claude-opus-4-8",
+        "claude:claude-opus-4-8 ",
+        "inherit",
+        "",
+        "  ",
+    ] {
+        assert!(
+            cfg.agents
+                .validate_swarm_model_request(Some(model))
+                .is_err(),
+            "{model:?}"
+        );
+    }
+    let cfg: Config = toml::from_str("[agents]\nswarm_model_selection = true\n").unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_err()
+    );
 }
 
 #[test]
@@ -1237,120 +1309,8 @@ fn test_env_override_diff_mode_full_inline() {
     }
 }
 
-#[test]
-fn test_env_override_trusted_external_auth_splits_source_and_path_entries() {
-    let _guard = crate::storage::lock_test_env();
-    let prev = std::env::var_os("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
-    crate::env::set_var(
-        "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
-        "legacy_source,claude_code_credentials|/tmp/auth.json",
-    );
-
-    let mut cfg = Config::default();
-    cfg.apply_env_overrides();
-
-    assert_eq!(cfg.auth.trusted_external_sources, vec!["legacy_source"]);
-    assert_eq!(
-        cfg.auth.trusted_external_source_paths,
-        vec!["claude_code_credentials|/tmp/auth.json"]
-    );
-
-    if let Some(prev) = prev {
-        crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", prev);
-    } else {
-        crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
-    }
-}
-
-#[test]
-fn test_external_auth_source_allowed_for_path_matches_saved_entry() {
-    let _guard = crate::storage::lock_test_env();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("auth.json");
-    std::fs::write(&path, "{}\n").expect("write auth file");
-
-    let canonical = std::fs::canonicalize(&path).expect("canonical path");
-    let mut cfg = Config::default();
-    cfg.auth.trusted_external_source_paths = vec![format!(
-        "test_source|{}",
-        canonical.to_string_lossy().to_ascii_lowercase()
-    )];
-
-    assert!(cfg.external_auth_source_allowed_for_path_config("test_source", &path));
-}
-
-#[test]
-fn test_external_auth_source_allowed_for_path_ignores_broad_legacy_entry() {
-    let _guard = crate::storage::lock_test_env();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("auth.json");
-    std::fs::write(&path, "{}\n").expect("write auth file");
-
-    let mut cfg = Config::default();
-    cfg.auth.trusted_external_sources = vec!["test_source".to_string()];
-
-    assert!(!cfg.external_auth_source_allowed_for_path_config("test_source", &path));
-}
-
-/// Regression test for issue #349: a removed/unknown `update_channel` value
-/// (older configs could contain `"manual"`) must not fail the whole config
-/// parse. A hard parse failure during the reload handoff left the reload
-/// marker stuck in `starting` and clients re-requested the reload forever.
-#[test]
-fn unknown_update_channel_value_falls_back_to_stable_instead_of_failing_parse() {
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"manual\"\n")
-        .expect("unknown update_channel must not fail config parse");
-    assert_eq!(
-        cfg.features.update_channel,
-        super::UpdateChannel::Stable,
-        "unknown channel should fall back to the default"
-    );
-
-    // Other settings in the same config must survive the fallback.
-    let cfg: Config = toml::from_str(
-        "[features]\nupdate_channel = \"manual\"\nmemory = false\n\n[display]\ncentered = true\n",
-    )
-    .expect("config with unknown update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
-    assert!(!cfg.features.memory);
-    assert!(cfg.display.centered);
-}
-
-#[test]
-fn known_update_channel_values_still_parse() {
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"main\"\n")
-        .expect("main update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Main);
-
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"stable\"\n")
-        .expect("stable update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
-}
-
-#[test]
-fn update_channel_parse_accepts_known_aliases_and_rejects_unknown() {
-    use super::UpdateChannel;
-    assert_eq!(UpdateChannel::parse("stable"), Some(UpdateChannel::Stable));
-    assert_eq!(UpdateChannel::parse("release"), Some(UpdateChannel::Stable));
-    assert_eq!(UpdateChannel::parse("main"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("nightly"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("edge"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse(" Main "), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("manual"), None);
-    assert_eq!(UpdateChannel::parse(""), None);
-}
-
-impl Config {
-    fn external_auth_source_allowed_for_path_config(&self, source_id: &str, path: &Path) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-        self.auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-}
+#[path = "config_preference_tests.rs"]
+mod preferences;
 
 #[test]
 fn populate_context_limits_from_config_ref_seeds_global_cache() {
@@ -1804,4 +1764,43 @@ fn removed_overscroll_status_key_still_loads_config() {
     .expect("legacy key must not break config");
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
+}
+#[test]
+fn tool_auto_background_timeout_configuration() {
+    assert_eq!(ToolConfig::default().auto_background_timeout_ms, 3_000);
+    for contents in ["", "[tools]\n"] {
+        let config: Config = toml::from_str(contents).unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
+    }
+    for timeout in [0_u64, 1, 1250, 60_000, u64::MAX / 2] {
+        let config: Config = toml::from_str(&format!(
+            "[tools]\nauto_background_timeout_ms = {timeout}\n"
+        ))
+        .unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, timeout);
+        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.tools.auto_background_timeout_ms, timeout);
+    }
+    for invalid in ["-1", "1.5", "\"3000\"", "true"] {
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "[tools]\nauto_background_timeout_ms = {invalid}\n"
+            ))
+            .is_err()
+        );
+    }
+}
+#[test]
+fn browser_handoff_defaults_off_and_roundtrips() {
+    for contents in ["", "[tools]\n"] {
+        let config: Config = toml::from_str(contents).unwrap();
+        assert!(!config.tools.browser_handoff);
+    }
+    for enabled in [false, true] {
+        let config: Config =
+            toml::from_str(&format!("[tools]\nbrowser_handoff = {enabled}\n")).unwrap();
+        assert_eq!(config.tools.browser_handoff, enabled);
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.tools.browser_handoff, enabled);
+    }
 }

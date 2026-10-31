@@ -1,6 +1,7 @@
 use super::openai_stream_cancellation::while_consumer_open;
 use super::openai_stream_runtime::{
-    stream_response, stream_response_websocket_persistent, try_persistent_ws_continuation,
+    recover_opaque_ws_rejection, stream_response, stream_response_websocket_persistent,
+    try_persistent_ws_continuation,
 };
 use super::*;
 
@@ -122,63 +123,7 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prewarm(&self, tools: &[ToolDefinition], system: &str) {
-        if self.oauth_account_label().is_some_and(|label| {
-            jcode_base::auth::codex::load_credentials_for_account(&label).is_err()
-        }) {
-            return;
-        }
-        if self.is_browser_only()
-            || is_chatgpt_web_model(&self.model())
-            || std::env::var("JCODE_OPENAI_PREWARM").is_ok_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off"
-                )
-            })
-        {
-            return;
-        }
-        let mode = self
-            .transport_mode
-            .try_read()
-            .map(|mode| *mode)
-            .unwrap_or(OpenAITransportMode::HTTPS);
-        if matches!(mode, OpenAITransportMode::HTTPS) {
-            return;
-        }
-        // An existing response chain is more useful than a speculative prefix.
-        // Never contend with active generation or keepalive for its socket.
-        match self.persistent_ws.try_lock() {
-            Ok(guard) if guard.is_none() => {}
-            _ => return,
-        }
-        // Unlike foreground completion, preparation must not wait for model
-        // discovery or OAuth refresh. A changed/fallback model simply makes
-        // this speculative request incompatible at adoption time.
-        let model = self.model();
-        let model = model.strip_suffix("[1m]").unwrap_or(&model);
-        let Ok(credentials) = self.credentials.try_read() else {
-            return;
-        };
-        let request = self.response_request_for_model(
-            model,
-            &[],
-            tools,
-            system,
-            Self::is_chatgpt_mode(&credentials),
-        );
-        drop(credentials);
-        if matches!(mode, OpenAITransportMode::Auto)
-            && websocket_cooldown_remaining(
-                &self.websocket_cooldowns,
-                &openai_request_model(&request),
-            )
-            .await
-            .is_some()
-        {
-            return;
-        }
-        self.prewarm.start(Arc::clone(&self.credentials), &request);
+        self.prewarm_request(tools, system).await;
     }
 
     async fn complete(
@@ -383,6 +328,8 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
+                let mut retry_diagnostics =
+                    super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
                 // Attempt persistent WebSocket continuation first
                 if use_websocket_transport {
                     // Track output: a continuation that streams partial output
@@ -409,6 +356,16 @@ impl Provider for OpenAIProvider {
                     let saw_output = attempt_guard.finish().await;
 
                     match continuation_result {
+                        PersistentWsResult::OpaqueWsRejection => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                request.clone(),
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         PersistentWsResult::TerminalError => return,
                         PersistentWsResult::Success => {
                             log_openai_stream_lifecycle(
@@ -465,6 +422,9 @@ impl Provider for OpenAIProvider {
                                         max: MAX_RETRIES,
                                     }))
                                     .await;
+                            }
+                            if let Some(notice) = retry_diagnostics.record(&err) {
+                                emit_status_detail(&tx, notice).await;
                             }
                         }
                     }
@@ -633,6 +593,16 @@ impl Provider for OpenAIProvider {
                     }
 
                     match result {
+                        Err(OpenAIStreamFailure::OpaqueWsRejection) => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                request.clone(),
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         Ok(()) => {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Info,
@@ -692,6 +662,9 @@ impl Provider for OpenAIProvider {
                                     .await;
                             }
                             force_https_for_request = true;
+                            if let Some(notice) = retry_diagnostics.record(&format!("{error:#}")) {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             skip_backoff_once = true;
                             if matches!(transport_mode, OpenAITransportMode::Auto) {
                                 let (streak, cooldown) = record_websocket_fallback(
@@ -717,6 +690,7 @@ impl Provider for OpenAIProvider {
                             continue;
                         }
                         Err(OpenAIStreamFailure::Other(error)) => {
+                            let overload_notice = retry_diagnostics.record(&format!("{error:#}"));
                             let elapsed_ms = attempt_started.elapsed().as_millis();
                             // Full anyhow chain ({:#}) so a send-level transport
                             // cause wrapped behind `.context("Failed to send
@@ -748,6 +722,11 @@ impl Provider for OpenAIProvider {
                                         ("elapsed_ms", elapsed_ms.to_string()),
                                     ],
                                 );
+                                // A durable UI notice is a transcript fence. It
+                                // must follow rollback of this failed attempt.
+                                if let Some(notice) = overload_notice {
+                                    emit_status_detail(&tx, notice).await;
+                                }
                                 jcode_base::logging::info(&format!(
                                     "Transient error after {}ms, will retry: {}",
                                     elapsed_ms, error
@@ -771,6 +750,9 @@ impl Provider for OpenAIProvider {
                                     ("elapsed_ms", elapsed_ms.to_string()),
                                 ],
                             );
+                            if let Some(notice) = overload_notice {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             // A tool schema OpenAI rejects fails every turn, not
                             // just this one, and one bad construct invalidates
                             // the whole catalog (#446, #543, #687, #711, #713).
@@ -792,7 +774,7 @@ impl Provider for OpenAIProvider {
                                 }
                                 None => error,
                             };
-                            let _ = tx.send(Err(error)).await;
+                            let _ = tx.send(Err(retry_diagnostics.annotate(error))).await;
                             return;
                         }
                     }
@@ -810,11 +792,11 @@ impl Provider for OpenAIProvider {
                         ],
                     );
                     let _ = tx
-                        .send(Err(anyhow::anyhow!(
+                        .send(Err(retry_diagnostics.annotate(anyhow::anyhow!(
                             "Failed after {} retries: {}",
                             MAX_RETRIES,
                             e
-                        )))
+                        ))))
                         .await;
                 }
             };

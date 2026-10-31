@@ -399,6 +399,9 @@ fn dock_is_attention(status: &str) -> bool {
 /// The dock owns lifecycle health and alerts. Task titles and ordinary live
 /// activity belong to the todo lanes, so do not echo them here.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
+    if let Some(note) = super::swarm_gallery::member_wait_note(member) {
+        return note;
+    }
     let detail = member.detail.as_deref().unwrap_or_default().trim();
     let is_message = detail.starts_with("DM from ") || detail.starts_with("Cross-swarm DM from ");
     if !dock_is_attention(&member.status) && !is_message {
@@ -495,8 +498,9 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
 
     let mut lines = Vec::with_capacity(rows);
     for member in shown {
-        let accent = status_accent(&member.status);
-        let glyph = status_glyph(&member.status, info.spinner_frame);
+        let display_status = super::swarm_gallery::member_display_status(member);
+        let accent = status_accent(display_status);
+        let glyph = status_glyph(display_status, info.spinner_frame);
         let finished = dock_is_finished(&member.status);
 
         let right = member
@@ -666,6 +670,31 @@ mod substantive_footer_tests {
         let clipped = render_swarm_widget(&data, Rect::new(0, 0, 40, 1));
         assert_eq!(clipped.lines.len(), 1);
         assert!(clipped.footer.unwrap().to_string().contains("+1 more"));
+    }
+
+    #[test]
+    fn dock_wait_has_clock_and_reason_instead_of_false_quiet_alert() {
+        let mut worker = member("one", "running");
+        worker.runtime.wait_reason = Some("Waiting for build".into());
+        worker.runtime.wait_age_secs = Some(180);
+        worker.runtime.activity_age_secs = Some(300);
+        assert_eq!(dock_activity(&worker), "Waiting for build · 3m");
+        let data = InfoWidgetData {
+            swarm_info: Some(SwarmInfo {
+                managed_members: vec![worker],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_swarm_widget(&data, Rect::new(0, 0, 80, 2));
+        let text = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<String>();
+        assert!(text.contains('◷'), "{text}");
+        assert!(text.contains("Waiting for build"), "{text}");
+        assert!(!text.contains("quiet"), "{text}");
     }
 
     #[test]

@@ -435,6 +435,7 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
     let spawned_session = spawn_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
@@ -464,7 +465,7 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
 }
 
 #[tokio::test]
-async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
+async fn communicate_spawn_with_seeded_lane_and_summary_work_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
@@ -505,8 +506,7 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
         .execute(
             json!({
                 "action": "spawn",
-                "label": "summary worker",
-                "prompt": "Reply with a short acknowledgement."
+                "label": "summary worker"
             }),
             ctx.clone(),
         )
@@ -515,12 +515,27 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
     let spawned_session = spawn_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
     assert!(
         !spawned_session.is_empty(),
         "spawned session id should not be empty"
+    );
+
+    let seeded = crate::todo::load_todos(&spawned_session)
+        .expect("worker todo list must exist when spawn returns");
+    assert!(!seeded.is_empty());
+    assert!(
+        seeded
+            .iter()
+            .all(|todo| todo.group.as_deref() == Some("summary worker"))
+    );
+    assert!(
+        spawn_output
+            .output
+            .contains("prepopulated before startup and synced")
     );
 
     wait_for_member_presence(&mut watcher, &watcher_session, &spawned_session)
@@ -672,7 +687,10 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     // agent here; the sender was elected coordinator on join.
     let peer_ctx = test_ctx(&peer_session, &repo_dir);
     let untargeted = tool
-        .execute(json!({"action": "message", "message": "oops"}), peer_ctx.clone())
+        .execute(
+            json!({"action": "message", "message": "oops"}),
+            peer_ctx.clone(),
+        )
         .await;
     assert!(
         untargeted
@@ -713,10 +731,17 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
 
     // The coordinator may message everyone by omitting the target.
     let to_all = tool
-        .execute(json!({"action": "message", "message": "hello-all"}), ctx.clone())
+        .execute(
+            json!({"action": "message", "message": "hello-all"}),
+            ctx.clone(),
+        )
         .await
         .expect("coordinator message without target should broadcast");
-    assert!(to_all.output.contains("Broadcast sent"), "{}", to_all.output);
+    assert!(
+        to_all.output.contains("Broadcast sent"),
+        "{}",
+        to_all.output
+    );
     assert_eq!(
         peer.next_message_notification(Duration::from_secs(5))
             .await

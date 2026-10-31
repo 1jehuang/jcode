@@ -591,10 +591,44 @@ pub fn on_config_reloaded(listener: fn()) {
         .push(listener);
 }
 
+/// Scoped local resource bridge policy. Zero disables access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudConfig {
+    pub local_access_seconds: u32,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            local_access_seconds: 86_400,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cloud_config_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_access_defaults_and_overrides() {
+        let defaults: Config = toml::from_str("").unwrap();
+        assert_eq!(defaults.cloud.local_access_seconds, 86400);
+        for seconds in [0, 900, 172800] {
+            let config: Config =
+                toml::from_str(&format!("[cloud]\nlocal_access_seconds = {seconds}")).unwrap();
+            assert_eq!(config.cloud.local_access_seconds, seconds);
+        }
+        assert!(toml::from_str::<Config>("[cloud]\nlocal_access_seconds = -1").is_err());
+    }
+}
+
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Local resource access after cloud handoff.
+    pub cloud: CloudConfig,
     /// Idle session memory hibernation policy.
     pub session: SessionConfig,
 
@@ -776,6 +810,10 @@ impl McpToolsMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolConfig {
+    /// Opt into Jev browser handoff. Direct browser actions remain available.
+    pub browser_handoff: bool,
+    /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
+    pub auto_background_timeout_ms: u64,
     /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
     pub profile: String,
     /// Explicit allow-list. When set, only these tools are exposed.
@@ -805,6 +843,8 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            browser_handoff: false,
+            auto_background_timeout_ms: 3_000,
             profile: String::new(),
             enabled: Vec::new(),
             disabled: Vec::new(),

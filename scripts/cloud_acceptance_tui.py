@@ -304,10 +304,10 @@ LogLevel VERBOSE
         assert "local uncommitted edit" in (self.cloud_repo / "file.txt").read_text()
         self.checkpoint("Destination agent continued with transferred workspace")
 
-    def go_cloud(self):
+    def go_cloud(self, *, session_only=False):
         self.wait_idle()
         start = len(self.records())
-        self.send("/cloud")
+        self.send("/cloud --session-only" if session_only else "/cloud")
         self.await_cloud(start)
 
     def go_local(self):
@@ -390,7 +390,10 @@ def idle_round_trip(t):
     t.wait_text("[model] ack")
     t.discover_session()
     for cycle in (1, 2):
-        t.go_cloud()
+        # Coordinated migrations deliberately reject individual member returns.
+        # Exercise the supported ungrouped round trip, including real SSH,
+        # ownership transfer, reattachment and both directions of workspace edits.
+        t.go_cloud(session_only=True)
         (t.cloud_repo / f"cloud-{cycle}.txt").write_text(f"cloud work {cycle}\n")
         (t.repo / f"local-{cycle}.txt").write_text(f"concurrent local work {cycle}\n")
         t.go_local()

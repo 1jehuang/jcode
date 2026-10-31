@@ -6,12 +6,147 @@ fn waiting_dependency_test_app() -> App {
     app
 }
 
+#[test]
+fn complete_blocker_pauses_auto_pokes_until_cleared_but_not_independent_work() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut blocked = dependency_todo("licensed-sdk", "unused");
+        blocked.waiting_on.clear();
+        blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only the user can authorize the license".into(),
+        });
+        crate::todo::save_todos(&app.session.id, &[blocked.clone()]).unwrap();
+        app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        for _ in 0..4 {
+            assert!(!app.schedule_turn_end_followups());
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert!(app.queued_messages.is_empty());
+            assert_eq!(app.auto_poke_attempts, 0);
+        }
+        let mut reloaded = waiting_dependency_test_app();
+        reloaded.session.id = app.session.id.clone();
+        assert!(!reloaded.schedule_turn_end_followups());
+        assert!(!reloaded.schedule_auto_poke_followup_if_needed());
+
+        let mut independent = dependency_todo("independent", "unused");
+        independent.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, &[blocked.clone(), independent]).unwrap();
+        assert!(app.schedule_turn_end_followups());
+        assert!(app.queued_messages[0].contains("- independent:"));
+        assert!(!app.queued_messages[0].contains("- licensed-sdk:"));
+
+        blocked.completely_blocked = None;
+        crate::todo::save_todos(&app.session.id, &[blocked]).unwrap();
+        assert!(reloaded.schedule_turn_end_followups());
+        assert!(reloaded.queued_messages[0].contains("- licensed-sdk:"));
+    });
+}
+
+#[test]
+fn external_blocker_pauses_pokes_survives_reload_and_expires_without_completion() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut todo = dependency_todo("acceptance", "unused");
+        todo.waiting_on.clear();
+        todo.external_blocker = Some(crate::todo::TodoExternalBlocker {
+            reason: "Coordinator acceptance of frozen source".into(),
+            review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        });
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
+        app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        assert!(!app.schedule_turn_end_followups());
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.auto_poke_attempts, 0);
+        assert!(app.queued_messages.is_empty());
+        let mut reloaded = waiting_dependency_test_app();
+        reloaded.remote_session_id = Some(app.session.id.clone());
+        assert!(reloaded.todo_is_paused_for_auto_followup(&todo));
+        let mut independent = dependency_todo("independent", "unused");
+        independent.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, &[todo.clone(), independent]).unwrap();
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages[0].contains("- independent:"));
+        assert!(!app.queued_messages[0].contains("- acceptance:"));
+        todo.external_blocker.as_mut().unwrap().review_at =
+            chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert!(!reloaded.todo_is_paused_for_auto_followup(&todo));
+        assert_eq!(todo.status, "pending");
+        todo.external_blocker = None;
+        assert!(!reloaded.todo_is_paused_for_auto_followup(&todo));
+    });
+}
+
+#[test]
+fn await_dependency_suppresses_pokes_and_survives_reload_until_terminal_or_timeout() {
+    with_temp_jcode_home(|| {
+        for timeout in [false, true] {
+            let mut app = waiting_dependency_test_app();
+            let key = format!("tui-await-{}", app.session.id);
+            let id = crate::todo::await_dependency::dependency_id(&key, 1);
+            let path = crate::storage::runtime_dir()
+                .join(crate::todo::await_dependency::STATE_DIR)
+                .join(format!("{key}.json"));
+            let _fixture = DependencyTaskFixture(path.clone());
+            let mut state = serde_json::json!({
+                "key": key, "session_id": app.session.id, "created_at_unix_ms": 1,
+                "deadline_unix_ms": u64::MAX, "background": true, "final_response": null
+            });
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            let todo = dependency_todo("await-review", &id);
+            crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
+            assert!(
+                app.background_task_rows.is_empty(),
+                "no process row or PID is required"
+            );
+            app.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert!(!app.schedule_turn_end_followups());
+            assert_eq!(app.auto_poke_attempts, 0);
+            assert!(app.queued_messages.is_empty());
+            let snapshot = crate::todo::store::load_snapshot(
+                &crate::storage::jcode_dir().unwrap(),
+                &app.session.id,
+            );
+            assert!(snapshot.running_background_tasks.contains(&id));
+            app.show_todo_card();
+            let payload: serde_json::Value =
+                serde_json::from_str(&app.display_messages.last().unwrap().content).unwrap();
+            assert_eq!(payload["background_tasks"][0]["label"], "Swarm await");
+            assert!(payload["background_tasks"][0]["percent"].is_null());
+            // A new client instance has no cached rows, and must still wait.
+            let mut reloaded = waiting_dependency_test_app();
+            reloaded.remote_session_id = Some(app.session.id.clone());
+            assert!(reloaded.todo_is_paused_for_auto_followup(&todo));
+            state["session_id"] = "foreign-owner".into();
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            assert!(!reloaded.todo_is_paused_for_auto_followup(&todo));
+            state["session_id"] = app.session.id.clone().into();
+            if timeout {
+                state["deadline_unix_ms"] = 0.into();
+            } else {
+                state["final_response"] = serde_json::json!({"completed": true});
+            }
+            crate::storage::write_json_fast(&path, &state).unwrap();
+            assert!(!reloaded.todo_is_paused_for_auto_followup(&todo));
+            assert!(app.refresh_todo_card_if_needed());
+            assert!(app.schedule_auto_poke_followup_if_needed());
+            let snapshot = crate::todo::store::load_snapshot(
+                &crate::storage::jcode_dir().unwrap(),
+                &app.session.id,
+            );
+            assert!(!snapshot.running_background_tasks.contains(&id));
+        }
+    });
+}
+
 fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         id: id.into(),
         content: format!("Finish {id}"),
         status: "pending".into(),
         priority: "high".into(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: vec![task_id.into()],
         ..Default::default()
     }
@@ -180,7 +315,7 @@ fn background_dependency_card_refresh_tracks_only_live_task_progress() {
         let task = format!("tui-card-{}", app.session.id);
         let _fixture = live_dependency_fixture(&app, &task);
         let todo = dependency_todo("waiting", &task);
-        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
         app.upsert_running_background_task(task.clone(), "Build 🦀".into(), Some(25.0));
         app.show_todo_card();
         let payload: serde_json::Value =
@@ -218,7 +353,7 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
         });
         std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();
         let todo = dependency_todo("reload-id", &task);
-        crate::todo::save_todos(&app.session.id, &[todo.clone()]).unwrap();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&todo)).unwrap();
         assert!(app.background_task_rows.is_empty());
         assert!(!app.schedule_auto_poke_followup_if_needed());
         app.finish_background_task(
@@ -226,11 +361,11 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
             "Build".into(),
             crate::tui::BackgroundTaskRowStatus::Completed,
         );
-        assert!(!app.todo_waits_on_background_task(&todo));
+        assert!(!app.todo_is_paused_for_auto_followup(&todo));
         app.upsert_running_background_task(task.clone(), "Build".into(), None);
         status["session_id"] = "other-session".into();
         std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();
-        assert!(!app.todo_waits_on_background_task(&todo));
+        assert!(!app.todo_is_paused_for_auto_followup(&todo));
         status["session_id"] = app.session.id.clone().into();
         status["status"] = "failed".into();
         std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();

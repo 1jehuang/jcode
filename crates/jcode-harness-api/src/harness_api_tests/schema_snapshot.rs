@@ -38,6 +38,7 @@ fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
             output: 5,
             cache_read_input: Some(2),
             cache_creation_input,
+            effective_budget: None,
         });
         let wire = serde_json::to_value(&frame).unwrap();
         assert_eq!(wire["cache_creation_input"], cache_creation_input.unwrap());

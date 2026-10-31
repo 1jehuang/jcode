@@ -11,6 +11,10 @@
 
 use crate::TodoItem;
 
+#[cfg(test)]
+#[path = "lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
 /// One parallel lane inside a stage: indices into the original todo slice,
 /// in list order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,53 @@ pub fn stage_layout(todos: &[&TodoItem]) -> Vec<TodoStage> {
     stages
 }
 
+/// Validate lane-wide prerequisites against phase order of first appearance,
+/// not numeric phase labels. Restricting edges to earlier phases prevents cycles.
+pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
+    let refs: Vec<_> = todos.iter().collect();
+    let stages = stage_layout(&refs);
+    let mut positions = std::collections::HashMap::new();
+    for (phase, stage) in stages.iter().enumerate() {
+        for index in stage.item_indices() {
+            if positions.insert(todos[index].id.as_str(), phase).is_some() {
+                return Err(format!("duplicate todo id {:?}", todos[index].id));
+            }
+        }
+    }
+    for (phase, stage) in stages.iter().enumerate() {
+        for lane in &stage.lanes {
+            let expected = &todos[lane.items[0]].lane_after;
+            if lane.items.iter().any(|&i| &todos[i].lane_after != expected) {
+                return Err("lane_after must be consistent across every lane member".into());
+            }
+            let Some(dependencies) = expected else {
+                continue;
+            };
+            if dependencies.is_empty() {
+                return Err(
+                    "lane_after must be nonempty, or null for the default phase barrier".into(),
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for id in dependencies {
+                if id.trim().is_empty() || !seen.insert(id) {
+                    return Err("lane_after must contain unique nonempty todo IDs".into());
+                }
+                match positions.get(id.as_str()) {
+                    Some(&position) if position < phase => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "lane_after todo {id:?} must be in a strictly earlier phase"
+                        ));
+                    }
+                    None => return Err(format!("unknown lane_after todo {id:?}")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +231,33 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .map(|todo| TodoItem {
             assigned_to: None,
             blocked_by: Vec::new(),
+            external_blocker: None,
             waiting_on: Vec::new(),
+            ..todo.clone()
+        })
+        .collect()
+}
+
+/// Pin worker-authored todos to their assigned coordinator lane before local
+/// persistence. Only lane identity changes: task edits and session-local
+/// bookkeeping stay with the worker. A missing lane leaves the list alone.
+pub fn canonicalize_worker_lane(
+    coordinator_todos: &[TodoItem],
+    link: &LaneLink,
+    worker_todos: &[TodoItem],
+) -> Vec<TodoItem> {
+    let Some(template) = coordinator_todos
+        .iter()
+        .find(|todo| lane_id(todo) == link.lane)
+    else {
+        return worker_todos.to_vec();
+    };
+    worker_todos
+        .iter()
+        .map(|todo| TodoItem {
+            stage: template.stage,
+            group: template.group.clone(),
+            lane_after: template.lane_after.clone(),
             ..todo.clone()
         })
         .collect()
@@ -212,17 +289,21 @@ pub fn merge_worker_lane(
             let mut item = todo.clone();
             item.stage = template.stage;
             item.group = template.group.clone();
+            item.lane_after = template.lane_after.clone();
             item.assigned_to = Some(link.worker.clone());
             if other_ids.contains(item.id.as_str()) {
                 item.id = format!("{}:{}", link.worker, item.id);
             }
             // Background task IDs belong to the destination session, not the
             // worker. New items get no references from the source session.
-            item.waiting_on = coordinator_todos
+            item.waiting_on = match coordinator_todos
                 .iter()
                 .find(|old| lane_id(old) == link.lane && old.id == item.id)
-                .map(|old| old.waiting_on.clone())
-                .unwrap_or_default();
+            {
+                Some(old) => old.waiting_on.clone(),
+                // A newly introduced worker item cannot inherit another session's waits.
+                None => Vec::new(),
+            };
             item
         })
         .collect();
@@ -311,6 +392,23 @@ mod lane_sync_tests {
         let ids: Vec<&str> = seeded.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["p1", "p2"]);
         assert!(seeded.iter().all(|t| t.assigned_to.is_none()));
+    }
+
+    #[test]
+    fn canonical_worker_lane_preserves_unstaged_and_ungrouped_assignments() {
+        for group in [Some("parser"), None] {
+            let boss = vec![item("p1", "pending", None, group)];
+            let link = LaneLink {
+                lane: lane_id(&boss[0]),
+                ..link()
+            };
+            let worker = vec![item("p1", "completed", Some(9), Some("renamed"))];
+            let canonical = canonicalize_worker_lane(&boss, &link, &worker);
+            assert_eq!(canonical[0].stage, None);
+            assert_eq!(canonical[0].group.as_deref(), group);
+            assert_eq!(canonical[0].status, "completed");
+            assert_eq!(canonicalize_worker_lane(&[], &link, &worker), worker);
+        }
     }
 
     #[test]

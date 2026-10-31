@@ -7,6 +7,9 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        if let Ok(value) = std::env::var("JCODE_BROWSER_HANDOFF") {
+            self.tools.browser_handoff = value == "1" || value.eq_ignore_ascii_case("true");
+        }
         // Server/operator behavior
         if let Ok(v) = std::env::var("JCODE_WAKE_MODE")
             && let Some(parsed) = WakeMode::parse(&v)

@@ -14,6 +14,7 @@
 //!   first plan, or more than one status change) show a header plus one line
 //!   per changed item.
 
+use super::messages::todo_complete_blocker_detail;
 use super::*;
 use crate::message::ToolCall;
 use crate::todo::TodoItem;
@@ -25,8 +26,51 @@ use ratatui::text::{Line, Span};
 const MAX_CHANGE_LINES: usize = 6;
 
 /// Parse the todo list a `todo` tool call wrote. Returns `None` for read calls
-/// (no `todos` argument) or when the payload cannot be parsed for display.
+/// (no full-list argument) or when the payload cannot be parsed for display.
 pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
+    if let Some(phases) = tc.input.get("phases").filter(|value| !value.is_null()) {
+        #[derive(serde::Deserialize)]
+        struct Phase {
+            phase: u32,
+            lanes: Vec<Lane>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Lane {
+            lane: String,
+            #[serde(default)]
+            after: Option<Vec<String>>,
+            items: Vec<TodoItem>,
+        }
+
+        let phases = match serde_json::from_value::<Vec<Phase>>(phases.clone()) {
+            Ok(phases) => phases,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot render todo phase changes: {error}"));
+                return None;
+            }
+        };
+        let mut todos = Vec::new();
+        for phase in phases {
+            if phase.phase == 0 || phase.lanes.is_empty() {
+                return None;
+            }
+            for lane in phase.lanes {
+                let name = lane.lane.trim();
+                if name.is_empty() || lane.items.is_empty() {
+                    return None;
+                }
+                for mut item in lane.items {
+                    item.stage = Some(phase.phase);
+                    item.group = Some(name.to_string());
+                    if lane.after.is_some() {
+                        item.lane_after = lane.after.clone();
+                    }
+                    todos.push(item);
+                }
+            }
+        }
+        return Some(todos);
+    }
     let todos = tc.input.get("todos")?;
     if todos.is_null() {
         return None;
@@ -53,6 +97,7 @@ pub(super) fn previous_todos(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TodoChangeKind {
+    CompletelyBlocked,
     Added,
     Removed,
     StatusChanged { to: String, blocked: bool },
@@ -90,7 +135,8 @@ impl TodoDiff {
 }
 
 fn blocked_of(todo: &TodoItem) -> bool {
-    !todo.blocked_by.is_empty()
+    crate::todo::is_incomplete_todo(todo)
+        && (!todo.blocked_by.is_empty() || crate::todo::todo_has_external_blocker(todo))
 }
 
 fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
@@ -105,6 +151,34 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
     let find_prev = |id: &str| prev_items.iter().find(|p| p.id == id);
 
     for item in next {
+        let previous = find_prev(&item.id);
+        let blocker_changed = previous
+            .map(|old| {
+                old.completely_blocked
+                    .as_ref()
+                    .map(|blocker| &blocker.reason)
+                    != item
+                        .completely_blocked
+                        .as_ref()
+                        .map(|blocker| &blocker.reason)
+            })
+            .unwrap_or(true);
+        if crate::todo::todo_completely_blocked(item)
+            && (blocker_changed
+                || previous
+                    .is_some_and(|old| old.status != item.status || old.content != item.content))
+        {
+            if previous.is_none() {
+                diff.added += 1;
+            } else {
+                diff.edited += 1;
+            }
+            diff.changes.push(TodoChange {
+                kind: TodoChangeKind::CompletelyBlocked,
+                content: format!("{} · {}", todo_complete_blocker_detail(item), item.content),
+            });
+            continue;
+        }
         match find_prev(&item.id) {
             None => {
                 diff.added += 1;
@@ -114,7 +188,7 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
                 });
             }
             Some(prev_item) => {
-                if prev_item.status != item.status {
+                if prev_item.status != item.status || blocker_changed {
                     diff.status_changes += 1;
                     match item.status.as_str() {
                         "completed" => diff.to_completed += 1,
@@ -157,8 +231,8 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
 }
 
 fn status_icon(status: &str, blocked: bool) -> (&'static str, Color) {
-    if blocked && status != "completed" {
-        return ("⊳", rgb(180, 140, 100));
+    if blocked && !matches!(status, "completed" | "cancelled") {
+        return ("⊘", rgb(180, 140, 100));
     }
     match status {
         "completed" => ("✓", rgb(100, 180, 100)),
@@ -171,6 +245,7 @@ fn status_icon(status: &str, blocked: bool) -> (&'static str, Color) {
 /// Leading marker (glyph + color) and the text color used for a change line.
 fn change_marker(kind: &TodoChangeKind) -> (&'static str, Color, Color) {
     match kind {
+        TodoChangeKind::CompletelyBlocked => ("✋", rgb(225, 165, 90), rgb(225, 165, 90)),
         TodoChangeKind::Added => ("+", rgb(100, 180, 100), rgb(190, 200, 195)),
         TodoChangeKind::Removed => ("-", rgb(200, 110, 100), rgb(120, 120, 125)),
         TodoChangeKind::StatusChanged { to, blocked } => {
@@ -303,6 +378,125 @@ pub(super) fn render_todo_change_lines(
 mod tests {
     use super::*;
 
+    #[test]
+    fn complete_blocker_changes_are_visible_and_width_safe() {
+        let before = todo("1", "Connect", "pending");
+        let mut after = before.clone();
+        after.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only the owner can approve".into(),
+        });
+        let lines =
+            render_todo_change_lines(Some(std::slice::from_ref(&before)), &[after.clone()], 200);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✋ Completely blocked: Only the owner can approve"));
+        assert!(text.contains("Only the owner can approve"));
+        for width in 0..100 {
+            assert!(
+                render_todo_change_lines(
+                    Some(std::slice::from_ref(&before)),
+                    &[after.clone()],
+                    width
+                )
+                .iter()
+                .all(|line| line.width() <= usize::from(width))
+            );
+        }
+        assert!(render_todo_change_lines(Some(&[after.clone()]), &[after.clone()], 200).is_empty());
+        let cleared = render_todo_change_lines(Some(&[after.clone()]), &[before], 200);
+        assert!(!cleared.is_empty());
+        assert!(!cleared.iter().any(|line| line.to_string().contains('✋')));
+        after.status = "completed".into();
+        assert!(
+            !render_todo_change_lines(None, &[after], 200)
+                .iter()
+                .any(|line| line.to_string().contains('✋'))
+        );
+    }
+
+    fn parse(input: serde_json::Value) -> Option<Vec<TodoItem>> {
+        todos_from_tool_input(&ToolCall {
+            input,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn nested_input_inherits_parents_and_preserves_order() {
+        let item = |id: &str| serde_json::to_value(todo(id, id, "pending")).unwrap();
+        let parsed = parse(serde_json::json!({"phases": [
+            {"phase": 1, "lanes": [
+                {"lane": "  parser  ", "items": [item("a"), item("b")]},
+                {"lane": "tests", "items": [item("c")]}
+            ]},
+            {"phase": 2, "lanes": [{"lane": "ship", "after": ["a"], "items": [item("d")]}]}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            parsed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+        assert_eq!(
+            parsed.iter().map(|t| t.stage).collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(1), Some(2)]
+        );
+        assert_eq!(parsed[3].lane_after, Some(vec!["a".to_string()]));
+        assert!(parsed[..3].iter().all(|todo| todo.lane_after.is_none()));
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|t| t.group.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("parser"), Some("parser"), Some("tests"), Some("ship")]
+        );
+    }
+
+    #[test]
+    fn legacy_input_remains_compatible_with_nested_deltas() {
+        let mut original = todo("a", "Task", "pending");
+        original.stage = Some(1);
+        original.group = Some("work".into());
+        let previous = parse(serde_json::json!({"todos": [original]})).unwrap();
+        let next = parse(serde_json::json!({"phases": [{"phase": 1, "lanes": [
+            {"lane": "work", "items": [todo("a", "Task", "completed")]}
+        ]}]}))
+        .unwrap();
+        assert_eq!(previous[0].stage, next[0].stage);
+        assert_eq!(previous[0].group, next[0].group);
+        let diff = compute_diff(Some(&previous), &next);
+        assert_eq!(diff.to_completed, 1);
+        assert_eq!(diff.added, 0);
+        assert_eq!(diff.removed, 0);
+    }
+
+    #[test]
+    fn malformed_nested_input_is_not_a_write() {
+        for input in [
+            serde_json::json!({"phases": {}}),
+            serde_json::json!({"phases": [null]}),
+            serde_json::json!({"phases": [{"phase": 1}]}),
+            serde_json::json!({"phases": [{"phase": 0, "lanes": []}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": []}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "work", "items": []}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "  ", "items": [todo("a", "Task", "pending")]}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": 5, "items": []}]}]}),
+            serde_json::json!({"phases": [{"phase": 1, "lanes": [{"lane": "work", "items": [null]}]}]}),
+        ] {
+            assert!(parse(input).is_none());
+        }
+    }
+
+    #[test]
+    fn read_calls_and_empty_writes_remain_distinct() {
+        assert!(parse(serde_json::json!({})).is_none());
+        assert!(parse(serde_json::json!({"phases": null, "todos": null})).is_none());
+        assert_eq!(parse(serde_json::json!({"phases": []})), Some(vec![]));
+        assert_eq!(parse(serde_json::json!({"todos": []})), Some(vec![]));
+    }
+
     fn todo(id: &str, content: &str, status: &str) -> TodoItem {
         TodoItem {
             id: id.to_string(),
@@ -310,9 +504,12 @@ mod tests {
             status: status.to_string(),
             priority: "medium".to_string(),
             group: None,
+            lane_after: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,

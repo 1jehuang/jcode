@@ -12,6 +12,7 @@ fn header_invalidation_discards_composed_account_quota_frames() {
         messages_version: 0,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,

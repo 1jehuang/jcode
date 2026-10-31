@@ -200,7 +200,7 @@ mod usage_capture_tests {
     #[test]
     fn error_exit_preserves_cached_only_usage_without_inventing_unreported_tokens() {
         let mut reports = Vec::new();
-        let result: Result<(), ()> = (|| {
+        let result: Result<(), ()> = {
             let mut recorder = StreamUsageRecorder {
                 session_id: "worker-session".to_string(),
                 observed: None,
@@ -208,7 +208,7 @@ mod usage_capture_tests {
             };
             recorder.observe("anthropic", "model", [None, None, None, Some(20)]);
             Err(())
-        })();
+        };
         assert!(result.is_err());
         assert_eq!(reports, vec![[None, None, None, Some(20)]]);
         {

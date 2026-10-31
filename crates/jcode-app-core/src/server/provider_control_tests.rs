@@ -239,6 +239,155 @@ struct AuthChangeMockProvider {
     state: Arc<AuthChangeMockState>,
 }
 
+struct PinnedAccountSwitchProvider {
+    route: StdRwLock<crate::provider::RouteSelection>,
+}
+
+#[async_trait]
+impl Provider for PinnedAccountSwitchProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("account switch must not send a model request")
+    }
+
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    fn model(&self) -> String {
+        self.route.read().unwrap().model.clone()
+    }
+    fn set_route_selection(
+        &self,
+        selection: &crate::provider::RouteSelection,
+    ) -> anyhow::Result<()> {
+        if selection.account_label() == Some("missing") {
+            anyhow::bail!("No saved account named missing");
+        }
+        *self.route.write().unwrap() = selection.clone();
+        Ok(())
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        self.route
+            .read()
+            .unwrap()
+            .account_label()
+            .map(str::to_owned)
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            route: StdRwLock::new(self.route.read().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_identity() {
+    let _guard = EnvGuard::save(&[]);
+    let provider: Arc<dyn Provider> = Arc::new(PinnedAccountSwitchProvider {
+        route: StdRwLock::new(crate::provider::RouteSelection {
+            model: "arbitrary-future-model".into(),
+            runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+            api_method: "openai-oauth@first".into(),
+            provider_label: "OpenAI".into(),
+            detail: String::new(),
+        }),
+    });
+    let mut session_agent = Agent::new(provider, Registry::empty());
+    session_agent.persist_session_now().unwrap();
+    let agent = Arc::new(Mutex::new(session_agent));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for label in ["second", "third", "first"] {
+        spawn_account_switch_refresh(81, "openai", label.into(), Arc::clone(&agent), tx.clone());
+        let mut acknowledged = false;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ServerEvent::ModelChanged {
+                        id: 81,
+                        model,
+                        provider_oauth_account_label,
+                        error,
+                        ..
+                    } => {
+                        assert_eq!(model, "arbitrary-future-model");
+                        assert_eq!(provider_oauth_account_label.as_deref(), Some(label));
+                        assert!(error.is_none());
+                        acknowledged = true;
+                    }
+                    ServerEvent::Done { id: 81 } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            acknowledged,
+            "a same-model account switch needs an identity acknowledgement"
+        );
+        let agent = agent.lock().await;
+        assert_eq!(
+            agent.provider_handle().oauth_account_label().as_deref(),
+            Some(label)
+        );
+        assert_eq!(
+            agent.session_route_api_method().as_deref(),
+            Some(format!("openai-oauth@{label}").as_str())
+        );
+        let saved = crate::session::Session::load(agent.session_id()).unwrap();
+        assert_eq!(saved.route_api_method, agent.session_route_api_method());
+    }
+    let mut agent = agent.lock().await;
+    apply_account_switch(82, "openai", "missing", &mut agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChanged {
+            id: 82,
+            error: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        agent.provider_handle().oauth_account_label().as_deref(),
+        Some("first")
+    );
+    assert_eq!(
+        agent.session_route_api_method().as_deref(),
+        Some("openai-oauth@first")
+    );
+}
+
+#[tokio::test]
+async fn account_switch_cross_provider_uses_target_oauth_catalog() {
+    let _guard = EnvGuard::save(&[]);
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    *provider.state.routes_override.write().unwrap() = Some(vec![ModelRoute {
+        model: "future-target-model".into(),
+        provider: "Claude".into(),
+        api_method: "claude-oauth@work".into(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    }]);
+    let agent = Agent::new(provider, Registry::empty());
+    let selection = account_switch_selection(&agent, "anthropic", "personal").unwrap();
+    assert_eq!(selection.model, "future-target-model");
+    assert_eq!(selection.api_method, "claude-oauth@personal");
+    assert_eq!(
+        selection.runtime_key,
+        jcode_provider_core::RuntimeKey::ClaudeOAuth
+    );
+}
+
 impl AuthChangeMockProvider {
     fn new() -> Self {
         let state = AuthChangeMockState {
@@ -1297,56 +1446,5 @@ async fn notify_auth_changed_switches_only_current_session_model() {
     );
 }
 
-#[tokio::test]
-async fn refresh_models_emits_available_models_updated_after_prefetch() {
-    crate::bus::reset_models_updated_publish_state_for_tests();
-    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
-    let registry = Registry::empty();
-    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    handle_refresh_models(7, &provider, &agent, &client_event_tx).await;
-
-    let mut saw_done = false;
-    let mut saw_models = None;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let event = tokio::time::timeout(remaining, client_event_rx.recv())
-            .await
-            .expect("receive server event before timeout");
-        match event.expect("channel open") {
-            ServerEvent::Done { id } => {
-                assert_eq!(id, 7);
-                saw_done = true;
-            }
-            ServerEvent::AvailableModelsUpdated {
-                provider_name,
-                provider_model,
-                available_models,
-                available_model_routes,
-            } => {
-                saw_models = Some((
-                    provider_name,
-                    provider_model,
-                    available_models,
-                    available_model_routes,
-                ));
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(saw_done, "expected immediate Done ack");
-    let (provider_name, provider_model, available_models, available_model_routes) =
-        saw_models.expect("expected AvailableModelsUpdated event");
-    assert_eq!(provider_name.as_deref(), Some("mock-auth"));
-    assert_eq!(provider_model.as_deref(), Some("logged-out-model"));
-    assert_eq!(available_models, vec!["logged-out-model".to_string()]);
-    assert!(available_model_routes.iter().any(|route| {
-        route.model == "logged-out-model"
-            && route.provider == "MockAuth"
-            && route.api_method == "mock-auth"
-    }));
-}
+#[path = "provider_control_tests/model_catalog.rs"]
+mod model_catalog;

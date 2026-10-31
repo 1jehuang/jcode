@@ -10,6 +10,95 @@
 
 use super::App;
 
+/// These commands belong to the terminal displaying the remote session. Saved
+/// display preferences intentionally stay on the client, never on the VM.
+pub(super) fn ssh_presentation_command(input: &str) -> bool {
+    matches!(
+        input.split_whitespace().next().unwrap_or_default(),
+        "/cancel"
+            | "/stop"
+            | "/help"
+            | "/?"
+            | "/commands"
+            | "/todos"
+            | "/todo"
+            | "/diff"
+            | "/keys"
+            | "/keybindings"
+            | "/alignment"
+            | "/latex"
+            | "/reasoning"
+            | "/thinking"
+            | "/thinking-display"
+            | "/compact-notifications"
+            | "/show-agentgrep-output"
+            | "/tool-call-details"
+            | "/colors"
+            | "/color"
+            | "/cls"
+            | "/clear-view"
+            | "/version"
+            | "/changelog"
+            | "/hotkeys"
+            | "/subscribe"
+            | "/hosted"
+            | "/update-sim"
+            | "/onboarding-preview"
+            | "/observe"
+            | "/splitview"
+            | "/split-view"
+            | "/voice"
+            | "/dictate"
+            | "/dictation"
+            | "/terminal-setup"
+            | "/debug-visual"
+            | "/screenshot-mode"
+            | "/screenshot"
+            | "/record"
+            | "/feedback"
+            | "/support"
+    )
+}
+
+pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> bool {
+    if !crate::tui::is_ssh_remote() || !ssh_presentation_command(input) {
+        return false;
+    }
+    if matches!(input, "/subscribe" | "/hosted") {
+        app.show_subscribe_pitch();
+        return true;
+    }
+    if matches!(input, "/cls" | "/clear-view") {
+        app.clear_view_keep_context();
+        return true;
+    }
+    if matches!(input, "/version" | "/changelog") {
+        return super::state_ui::handle_info_command(app, input);
+    }
+    if matches!(
+        input.split_whitespace().next(),
+        Some("/update-sim" | "/onboarding-preview")
+    ) {
+        return super::tui_lifecycle_runtime::handle_dev_command(app, input);
+    }
+    super::commands::handle_observe_command(app, input)
+        || super::split_view::handle_split_view_command(app, input)
+        || super::commands::handle_dictation_command(app, input)
+        || app.handle_terminal_setup_command(input)
+        || super::debug::handle_debug_command(app, input)
+        || super::commands::handle_feedback_command(app, input)
+        || super::support::handle_support_command(app, input)
+        || super::commands::handle_cancel_command(app, input)
+        || app.handle_hotkeys_command(input)
+        || super::todos_view::handle_todos_view_command(app, input)
+        || super::commands::handle_help_command(app, input)
+        || super::commands::handle_diff_command(app, input)
+        || super::commands::handle_keys_command(app, input)
+        || super::commands::handle_display_settings_command(app, input)
+        || super::commands::handle_latex_command(app, input)
+        || super::commands_colors::handle_colors_command(app, input)
+}
+
 /// Local-only operations must not interpret the remote session's paths or IDs
 /// against the laptop. Wire-backed commands are handled before local dispatch.
 pub(super) fn ssh_unsupported_command(input: &str) -> bool {
@@ -25,24 +114,11 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
         command,
         "/logout"
             | "/auth"
-            | "/account"
-            | "/accounts"
             | "/config"
             | "/permissions"
             | "/permission"
             | "/agents"
             | "/swarm-prompt"
-            | "/keys"
-            | "/keybindings"
-            | "/alignment"
-            | "/latex"
-            | "/reasoning"
-            | "/thinking"
-            | "/thinking-display"
-            | "/compact-notifications"
-            | "/show-agentgrep-output"
-            | "/tool-call-details"
-            | "/colors"
             | "/theme"
             | "/telemetry"
             | "/ssh"
@@ -56,7 +132,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/save"
             | "/unsave"
             | "/transcript"
-            | "/git"
             | "/open"
             | "/file"
             | "/selfdev"
@@ -66,16 +141,15 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/restart"
             | "/rebuild"
             | "/update"
-            | "/update-sim"
             | "/update-rehearsal"
             | "/onboarding-sim"
-            | "/onboarding-preview"
             | "/usage"
             | "/reset"
             | "/subscription"
             | "/fix"
-            | "/support"
-            | "/feedback"
+            | "/poke"
+            | "/improve"
+            | "/refactor"
             | "/productivity"
             | "/wrapped"
             | "/stats"
@@ -83,28 +157,14 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/cache"
             | "/initiatives"
             | "/goals"
-            | "/dictate"
-            | "/dictation"
-            | "/voice"
             | "/debug-fixture"
-            | "/debug-visual"
-            | "/screenshot"
-            | "/record"
             | "/subagent-model"
-            | "/continue"
-            | "/resumeall"
-            | "/resume-all"
             | "/z"
             | "/zz"
             | "/zzz"
             | "/zstatus"
             | "/autoreview"
             | "/autojudge"
-            | "/todo"
-            | "/todos"
-            | "/observe"
-            | "/splitview"
-            | "/split-view"
             | "/review"
             | "/judge"
             | "/subagent"
@@ -210,10 +270,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
     // remote dispatcher. In particular, a disconnected client must not fall
     // back to local session/model/storage handlers for a remote command.
     if crate::tui::is_ssh_remote() {
-        if super::commands::handle_cancel_command(app, trimmed)
-            || super::commands::handle_help_command(app, trimmed)
-            || super::commands::handle_diff_command(app, trimmed)
-        {
+        if handle_ssh_presentation_command(app, trimmed) {
             return true;
         }
         if trimmed.starts_with('/') {
@@ -288,14 +345,7 @@ mod tests {
         use crate::tui::app::{input, tests::create_test_app};
         let mut app = create_test_app();
         app.is_remote = true;
-        for command in [
-            "/config init",
-            "/logout",
-            "/save test",
-            "/reload",
-            "/git",
-            "/latex unicode",
-        ] {
+        for command in ["/config init", "/logout", "/save test", "/reload"] {
             assert!(super::dispatch_local_command(&mut app, command));
             assert!(
                 app.display_messages
@@ -348,11 +398,9 @@ mod tests {
     fn ssh_blocks_local_side_effects_but_preserves_wire_commands() {
         for command in [
             "/logout all",
-            "/account add",
             "/config edit",
             "/permissions",
             "/open /etc/passwd",
-            "/git",
             "/save name",
             "/resume",
             "/selfdev status",
@@ -361,7 +409,6 @@ mod tests {
             "/rebuild",
             "/fast default on",
             "/agents",
-            "/latex unicode",
             "/subagent-model",
             "/transcript path",
             "!cat ~/.ssh/config",
@@ -373,13 +420,23 @@ mod tests {
             "/desktop",
             "/workspace",
             "/workspace split",
-            "/todos",
+            "/poke",
+            "/improve plan remote changes",
+            "/refactor resume",
             "/review",
             "/subagent investigate",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
         for command in [
+            "/account",
+            "/accounts openai",
+            "/git",
+            "/continue",
+            "/resumeall",
+            "/resume-all",
+            "/todos",
+            "/todo",
             "/login",
             "hello",
             "explain !commands",
@@ -427,5 +484,116 @@ mod tests {
                  dispatch_local_command instead"
             );
         }
+    }
+
+    #[test]
+    fn ssh_presentation_commands_are_not_blocked_or_prefix_matched() {
+        for command in [
+            "/keys",
+            "/keybindings",
+            "/alignment left",
+            "/latex unicode",
+            "/reasoning off",
+            "/thinking full",
+            "/thinking-display current",
+            "/compact-notifications off",
+            "/show-agentgrep-output on",
+            "/tool-call-details on",
+            "/colors",
+            "/color harmony",
+            "/todos",
+            "/diff inline",
+            "/help account",
+            "/cls",
+            "/clear-view",
+            "/version",
+            "/changelog",
+            "/hotkeys",
+            "/subscribe",
+            "/hosted",
+            "/update-sim reset",
+            "/onboarding-preview status",
+            "/observe status",
+            "/splitview status",
+            "/split-view status",
+            "/voice",
+            "/dictate",
+            "/dictation",
+            "/terminal-setup",
+            "/debug-visual off",
+            "/screenshot-mode off",
+            "/screenshot info",
+            "/record cancel",
+            "/feedback test",
+            "/support",
+        ] {
+            assert!(super::ssh_presentation_command(command), "{command}");
+            assert!(!super::ssh_unsupported_command(command), "{command}");
+            assert!(!super::ssh_presentation_command(&format!(
+                "{}-custom",
+                command.split_whitespace().next().unwrap()
+            )));
+        }
+        for command in ["/config edit", "/account", "/model", "/compact", "/git"] {
+            assert!(!super::ssh_presentation_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ssh_display_preferences_work_without_remote_or_local_session_operations() {
+        if super::ssh_test_runs_in_child(
+            "ssh_display_preferences_work_without_remote_or_local_session_operations",
+        ) {
+            return;
+        }
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        for command in [
+            "/latex status",
+            "/alignment",
+            "/thinking-display",
+            "/compact-notifications",
+            "/show-agentgrep-output",
+            "/tool-call-details",
+            "/colors export",
+            "/diff inline",
+            "/update-sim reset",
+            "/onboarding-preview off",
+            "/observe off",
+            "/splitview off",
+            "/split-view status",
+            "/debug-visual off",
+            "/screenshot-mode off",
+            "/record cancel",
+        ] {
+            assert!(
+                super::dispatch_local_command(&mut app, command),
+                "{command}"
+            );
+            assert!(
+                !app.display_messages
+                    .last()
+                    .is_some_and(|message| message.content.contains("unavailable in SSH mode")),
+                "{command}"
+            );
+        }
+        assert!(!app.pending_turn);
+        assert!(app.session_picker_overlay.is_none());
+    }
+
+    #[test]
+    fn ssh_clear_view_preserves_session_context() {
+        if super::ssh_test_runs_in_child("ssh_clear_view_preserves_session_context") {
+            return;
+        }
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.push_display_message(super::super::DisplayMessage::user("visible remote message"));
+        let session_id = app.session.id.clone();
+        assert!(super::dispatch_local_command(&mut app, "/cls"));
+        assert!(app.display_messages.is_empty());
+        assert_eq!(app.session.id, session_id);
+        assert!(!app.pending_turn);
+        assert!(app.queued_messages.is_empty());
     }
 }

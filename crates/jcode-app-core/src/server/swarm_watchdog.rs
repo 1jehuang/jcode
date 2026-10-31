@@ -122,7 +122,8 @@ pub(super) fn update_stalls(
             role: &member.role,
             activity_age_secs: activity_age(&member.session_id),
             status_age_secs: member.last_status_change.elapsed().as_secs(),
-            tool_running: tool_running(&member.session_id),
+            tool_running: tool_running(&member.session_id)
+                || crate::wait_registry::current(&member.session_id).is_some(),
         };
         if let Some(silent) = evaluate_stall(inputs, stall_after) {
             now_stalled.insert(member.session_id.clone(), silent);
@@ -194,7 +195,7 @@ pub(super) fn coordinator_message(stall: &NewStall) -> String {
 
 pub(super) fn nudge_message(silent_secs: u64) -> String {
     format!(
-        "[swarm watchdog] No progress from this session for {}. If you are blocked, report it with `swarm report` (status blocked). Otherwise continue your assigned task.",
+        "[swarm watchdog] No progress from this session for {}. If you are blocked, explain the blocker in your response. Otherwise continue your assigned task. Recent output is forwarded automatically when you stop.",
         format_duration(silent_secs)
     )
 }

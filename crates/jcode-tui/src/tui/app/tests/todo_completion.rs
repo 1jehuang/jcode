@@ -20,7 +20,7 @@ fn completion_report_todos(status: &str) -> Vec<crate::todo::TodoItem> {
 }
 
 #[test]
-fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
+fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = false;
@@ -91,7 +91,8 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
 
         // Descriptive assessments alone never fabricate gate findings.
         assert_eq!(snapshot["observations"], serde_json::json!([]));
-        // The actual renderer retains the full pinned card at narrow widths.
+        // The snapshot retains all evidence, but the chat view only shows a
+        // completion title with inline finished task dots at every width.
         for width in [20, 40, 80] {
             let lines = crate::tui::ui::render_system_message(
                 &report,
@@ -103,14 +104,21 @@ fn todo_completion_report_is_full_nonblocking_and_independent_of_poke() {
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(lines.len(), 1, "{plain}");
             if width == 80 {
-                assert!(normalized.contains("Report task 11"), "{plain}");
+                assert_eq!(
+                    lines[0].to_string(),
+                    format!("✓ Todo completion  {}", "●".repeat(12))
+                );
             }
             // Removing wrap whitespace lets us assert every detail even when
             // an individual word has to be split at a narrow terminal width.
             let unwrapped: String = plain.chars().filter(|ch| !ch.is_whitespace()).collect();
             for unexpected in [
+                "Report task",
+                "Evidence for task",
+                "Intent clear",
+                "Show all evidence without another agent turn",
                 "FINAL_EVIDENCE_MARKER",
                 "Earlier weak states",
                 "feedback_loop_relevance was indirect",
@@ -190,8 +198,8 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
             .collect::<Vec<_>>()
             .join(" ");
         let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains("Disabled gates that would have fired"));
-        assert!(normalized.contains("• Intent understanding"));
+        assert!(!normalized.contains("Disabled gates that would have fired"));
+        assert!(!normalized.contains("• Intent understanding"));
         assert!(!normalized.contains("started this work without understanding"));
         assert!(!normalized.contains("flagged 2 times this turn"));
         assert!(!plain.contains("[auto]"));
@@ -224,7 +232,7 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         .collect::<Vec<_>>()
         .join(" ");
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(text.contains("• Intent understanding"));
+        assert!(!text.contains("• Intent understanding"));
         assert!(!text.contains("never became solid"));
         assert!(!text.contains("flagged 2 times this turn"));
         // This updated snapshot is the immutable record for the earlier cycle.

@@ -1037,8 +1037,10 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 app.remote_resume_activity = None;
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                // Reload recovery continues the same visible turn. Only the
+                // request-level processing state is stale, not its elapsed time.
+                app.visible_turn_started = app.visible_turn_started.or(app.processing_started);
                 app.processing_started = None;
-                app.clear_visible_turn_started();
                 app.last_stream_activity = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;

@@ -51,9 +51,11 @@ const REQUIRES_ATTACH: &[&str] = &[
     "get_history",
     "list_models",
     "set_model",
+    "set_context_cap",
     "set_reasoning_effort",
     "compact",
     "rename_session",
+    "set_session_env",
     "set_session_saved",
     "get_runtime_info",
     "fork_session",
@@ -312,6 +314,7 @@ enum SimpleKind {
     Ok,
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
+    ContextCap,
     /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
     /// Awaiting `compacted_history`.
@@ -1162,6 +1165,24 @@ impl BridgeState {
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }
+            "set_context_cap" => {
+                let cap = &request["max_context_tokens"];
+                if !cap.is_null() && cap.as_u64().and_then(|n| usize::try_from(n).ok()).is_none() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "max_context_tokens must be a non-negative integer or null",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ContextCap));
+                vec![Outbound::Legacy(json!({
+                    "type": "set_context_cap", "id": id,
+                    "session_id": request["session_id"],
+                    "max_context_tokens": cap,
+                }))]
+            }
             "set_model" => {
                 let model = request["model"].as_str().unwrap_or("");
                 if model.is_empty() {
@@ -1255,6 +1276,24 @@ impl BridgeState {
                     }
                 }
                 vec![Outbound::Legacy(out)]
+            }
+            "set_session_env" => {
+                let valid = request
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .is_some_and(|env| env.values().all(Value::is_string));
+                if !valid {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "set_session_env requires an env object containing string values",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({
+                    "type": "set_session_env", "id": id, "env": request["env"].clone()
+                }))]
             }
             "set_session_saved" => {
                 let id = self.legacy_id();
@@ -1905,6 +1944,9 @@ impl BridgeState {
                 output: event["output"].as_u64().unwrap_or(0),
                 cache_read_input: event["cache_read_input"].as_u64(),
                 cache_creation_input: event["cache_creation_input"].as_u64(),
+                effective_budget: event["effective_budget"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok()),
             })],
             "kv_cache_miss" => vec![ServerFrame::event(ApiEvent::KvCacheMiss {
                 session_id: session(self),
@@ -2198,6 +2240,29 @@ impl BridgeState {
             }
             // The model can change mid-session (`/model`, a cycle, or an auth
             // change re-resolving the route), so both pushes are forwarded.
+            "context_cap_changed" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let reply_to = self.take_simple(id, SimpleKind::ContextCap);
+                let changed = ApiEvent::ContextCapChanged {
+                    session_id: event["session_id"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| session(self)),
+                    max_context_tokens: event["max_context_tokens"]
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .filter(|n| *n != 0),
+                    effective_budget: event["effective_budget"]
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .unwrap_or(0),
+                };
+                let mut frames = vec![ServerFrame::event(changed.clone())];
+                if let Some(api_id) = reply_to {
+                    frames.push(ServerFrame::reply(api_id, changed));
+                }
+                frames
+            }
             "model_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let reply_to = self.take_simple(id, SimpleKind::Model);

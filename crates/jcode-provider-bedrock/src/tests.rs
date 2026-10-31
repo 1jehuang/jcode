@@ -1,5 +1,95 @@
 use super::*;
 
+#[cfg(feature = "aws-sdk")]
+#[test]
+fn inference_profile_discovery_reads_all_sdk_pages() {
+    use std::io::{BufRead, Write};
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().to_str().unwrap());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for index in 0..6 {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "SDK catalog request timed out"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("accept: {err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            if index == 5 {
+                let body = r#"{"message":"access denied"}"#;
+                write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                continue;
+            }
+            let page = index % 3;
+            let body = if page == 0 {
+                assert!(request.contains("/foundation-models"));
+                json!({"modelSummaries": []})
+            } else {
+                assert!(request.contains("/inference-profiles"));
+                if page == 2 { assert!(request.contains("nextToken=second-page")); }
+                let mut body = json!({"inferenceProfileSummaries": [{
+                    "inferenceProfileName": format!("profile-{index}"),
+                    "inferenceProfileId": format!("profile-{index}"),
+                    "inferenceProfileArn": format!("arn:aws:bedrock:us-east-1:123456789012:inference-profile/profile-{index}"),
+                    "type": "SYSTEM_DEFINED", "status": "ACTIVE", "models": []
+                }]});
+                if page == 1 { body["nextToken"] = json!("second-page"); }
+                body
+            }.to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let config = aws_sdk_bedrock::config::Builder::new()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_types::region::Region::new("us-east-1"))
+            .credentials_provider(aws_credential_types::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .build();
+        let client = BedrockControlClient::from_conf(config);
+        let provider = BedrockProvider::new();
+        let (_, profiles) = provider.refresh_catalog_with_client(&client).await.unwrap();
+        assert!(profiles.contains(&"profile-1".into()));
+        assert!(profiles.contains(&"profile-2".into()));
+        assert!(provider.refresh_catalog_with_client(&client).await.is_err());
+        assert_eq!(
+            *provider.fetched_inference_profiles.read().unwrap(),
+            profiles
+        );
+    });
+    server.join().unwrap();
+}
+
 #[test]
 fn opus_low_effort_default_and_explicit_overrides() {
     let _guard = lock_test_env();

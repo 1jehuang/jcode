@@ -156,71 +156,12 @@ pub(super) use batch::parse_batch_sub_outputs;
 pub(crate) use batch::{batch_subcall_intent, batch_subcall_params};
 pub(super) use batch::{parse_batch_completion_counts, parse_batch_sub_outputs_by_index};
 
-pub(super) fn summarize_unified_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("--- ")
-            .or_else(|| line.strip_prefix("+++ "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if path.is_empty() || path == "/dev/null" {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
-
-pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if path.is_empty() {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
+#[path = "ui_tools/patch_summary.rs"]
+mod patch_summary;
+pub(crate) use patch_summary::{
+    extract_apply_patch_primary_file, extract_unified_patch_primary_file,
+};
+pub(super) use patch_summary::{summarize_apply_patch_input, summarize_unified_patch_input};
 
 fn parse_agentgrep_smart_subject_relation(
     input: &serde_json::Value,
@@ -257,48 +198,6 @@ fn parse_agentgrep_smart_subject_relation(
     }
 
     (subject, relation)
-}
-
-pub(crate) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if !path.is_empty() {
-            return Some(path.to_string());
-        }
-    }
-
-    None
-}
-
-pub(crate) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("+++ ")
-            .or_else(|| line.strip_prefix("--- "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if !path.is_empty() && path != "/dev/null" {
-            return Some(path.to_string());
-        }
-    }
-
-    None
 }
 
 fn display_prefix_by_width(s: &str, max_width: usize) -> &str {
@@ -860,11 +759,14 @@ fn truncate_identifier_display(value: &str, max_width: usize) -> String {
 }
 
 pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
-    id.strip_prefix("batch-")?
-        .split('-')
-        .next()?
-        .parse::<usize>()
-        .ok()
+    let index = id.strip_prefix("batch-")?.split('-').next()?;
+    match index.parse::<usize>() {
+        Ok(index) => Some(index),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid batch subcall index: {error}"));
+            None
+        }
+    }
 }
 
 pub(super) fn is_memory_store_tool(tc: &ToolCall) -> bool {

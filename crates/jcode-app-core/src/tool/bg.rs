@@ -407,6 +407,7 @@ async fn resolve_task_ids(
 
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
+    session_id: &str,
     task_ids: &[String],
     max_wait: Duration,
     return_on_progress: bool,
@@ -414,6 +415,7 @@ async fn wait_many_polling(
 ) -> Result<(String, Vec<background::TaskStatusFile>)> {
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
+    let mut wait_guard = None;
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
             last_progress.insert(task_id.clone(), task.progress.clone());
@@ -456,6 +458,9 @@ async fn wait_many_polling(
         for task in &tasks {
             last_progress.insert(task.task_id.clone(), task.progress.clone());
         }
+        wait_guard.get_or_insert_with(|| {
+            crate::wait_registry::register(session_id, "Waiting for background tasks")
+        });
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -709,6 +714,12 @@ impl Tool for BgTool {
                 let requested_wait = params.max_wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
                 let capped_wait = requested_wait.min(MAX_WAIT_SECONDS);
                 let wait_duration = Duration::from_secs(capped_wait);
+                // watch/delivery only updates notification settings and does not
+                // block. Only the actual wait action owns foreground metadata.
+                let wait_reason = format!(
+                    "Waiting for background task{}",
+                    if task_ids.len() > 1 { "s" } else { "" }
+                );
 
                 if task_ids.len() > 1 {
                     let mode = params.wait_mode.as_deref().unwrap_or("any");
@@ -719,6 +730,7 @@ impl Tool for BgTool {
                     };
                     let (reason, tasks) = wait_many_polling(
                         manager,
+                        &ctx.session_id,
                         &task_ids,
                         wait_duration,
                         params
@@ -754,7 +766,17 @@ impl Tool for BgTool {
                         "Missing task_id; provide a task_id or use latest=true"
                     ));
                 };
-                match manager
+                let blocking = if capped_wait > 0 {
+                    manager
+                        .status(&task_id)
+                        .await
+                        .is_some_and(|task| !is_terminal(&task.status))
+                } else {
+                    false
+                };
+                let wait_guard =
+                    blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
+                let wait_result = manager
                     .wait(
                         &task_id,
                         wait_duration,
@@ -762,8 +784,9 @@ impl Tool for BgTool {
                             .return_on_progress
                             .unwrap_or_else(default_wait_return_on_progress),
                     )
-                    .await
-                {
+                    .await;
+                drop(wait_guard);
+                match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
                         let reason = wait_result.reason;
@@ -861,6 +884,52 @@ impl Tool for BgTool {
 mod tests {
     use super::*;
     use anyhow::{Result, anyhow};
+
+    #[tokio::test]
+    async fn multi_wait_metadata_tracks_only_blocking_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_multi_wait_metadata";
+        let task = manager
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let ids = vec![task.task_id.clone()];
+        let result = wait_many_polling(&manager, sid, &ids, Duration::ZERO, false, "all")
+            .await
+            .unwrap();
+        assert_eq!(result.0, "timeout");
+        assert_eq!(crate::wait_registry::current(sid), None);
+
+        let mut future = Box::pin(wait_many_polling(
+            &manager,
+            sid,
+            &ids,
+            Duration::from_secs(30),
+            false,
+            "all",
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut future => panic!("unexpected completion: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                        if crate::wait_registry::current(sid).is_some() { break; }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::wait_registry::current(sid).map(|(reason, _)| reason),
+            Some("Waiting for background tasks".into())
+        );
+        drop(future);
+        assert_eq!(crate::wait_registry::current(sid), None);
+        manager.cancel(&task.task_id).await.unwrap();
+    }
 
     #[test]
     fn status_filter_schema_any_of_branches_have_types() -> Result<()> {

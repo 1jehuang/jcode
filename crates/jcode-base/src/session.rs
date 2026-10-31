@@ -7,32 +7,14 @@ pub use crate::storage::{
 };
 use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
 
-/// RAII guard that marks a session as actively streaming for its lifetime.
-///
-/// Wraps the on-disk streaming marker from `jcode-storage` (cleared on every
-/// exit path so presence UIs never show a phantom streaming session) and
-/// additionally holds a macOS power assertion so the system does not
-/// idle-sleep in the middle of a streaming model response.
-pub struct StreamingGuard {
-    _marker: crate::storage::StreamingGuard,
-    #[allow(dead_code)]
-    sleep_assertion: crate::platform::PowerAssertion,
-}
-
-impl StreamingGuard {
-    pub fn new(session_id: impl Into<String>) -> Self {
-        Self {
-            _marker: crate::storage::StreamingGuard::new(session_id),
-            sleep_assertion: crate::platform::PowerAssertion::prevent_user_idle_system_sleep(
-                "Jcode streaming model response",
-            ),
-        }
-    }
-}
+mod streaming;
+mod window_closures;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+pub use streaming::StreamingGuard;
+pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
 mod agent_models;
 mod crash;
@@ -70,6 +52,7 @@ pub use render::{
     summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
+pub(crate) mod resume_cache;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
@@ -154,6 +137,9 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Per-session context ceiling. Missing values follow the global cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_cap: Option<usize>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -178,6 +164,9 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// First session directory, retained when the session moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_working_dir: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -254,6 +243,8 @@ struct SessionStartupStub {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
+    context_cap: Option<usize>,
+    #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
@@ -269,6 +260,8 @@ struct SessionStartupStub {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -370,6 +363,7 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
         session.improve_mode = stub.improve_mode;
@@ -378,6 +372,7 @@ impl Session {
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
+        session.original_working_dir = stub.original_working_dir;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -409,6 +404,7 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
         session.improve_mode = snapshot.improve_mode;
@@ -417,6 +413,7 @@ impl Session {
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
+        session.original_working_dir = snapshot.original_working_dir;
         session.short_name = snapshot.short_name;
         session.status = snapshot.status;
         session.last_pid = snapshot.last_pid;
@@ -548,8 +545,11 @@ impl Session {
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
+            route_api_method: self.route_api_method.clone(),
+            route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
             improve_mode: self.improve_mode,
@@ -558,6 +558,7 @@ impl Session {
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
+            original_working_dir: self.original_working_dir.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -751,8 +752,12 @@ impl Session {
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
+        if meta.route_api_method_present {
+            self.route_api_method = meta.route_api_method;
+        }
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
+        self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
         self.improve_mode = meta.improve_mode;
@@ -761,6 +766,7 @@ impl Session {
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
+        self.original_working_dir = meta.original_working_dir;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -796,6 +802,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -804,6 +811,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -854,6 +862,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -862,6 +871,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1787,6 +1797,8 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
+    context_cap: Option<usize>,
+    #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
@@ -1802,6 +1814,8 @@ struct RemoteStartupSessionSnapshot {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]

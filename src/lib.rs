@@ -28,6 +28,25 @@ pub mod cli;
 
 use anyhow::Result;
 
+fn register_bundled_docs() {
+    tool::register_bundled_docs(jcode_docs_data::documents());
+}
+
 pub async fn run() -> Result<()> {
     cli::startup::run().await
+}
+
+#[cfg(test)]
+mod bundled_docs_tests {
+    #[test]
+    fn executable_registers_its_version_matched_corpus() {
+        // app-core is a normal dependency here, so this checks the production
+        // lookup path, not app-core's cfg(test) corpus provider.
+        super::register_bundled_docs();
+        let actual = super::tool::bundled_docs().unwrap();
+        assert_eq!(actual, jcode_docs_data::documents());
+        assert!(actual.iter().any(|(path, _)| *path == "README.md"));
+        super::register_bundled_docs();
+        assert_eq!(super::tool::bundled_docs().unwrap(), actual);
+    }
 }

@@ -2,11 +2,12 @@
 //! synthetic continuation messages (auto-poke, gate digest, ownership,
 //! completion confidence, final response), and their transcript classifiers.
 //!
-//! No storage or runtime dependencies, so the SDK and any embedding client can
-//! use the exact same policy as the TUI.
+//! Policy is independent of the agent runtime. Shared disk readers let the SDK
+//! and embedding clients use the same dependency state as the TUI.
 
 use serde::{Deserialize, Serialize};
 
+pub mod await_dependency;
 pub mod completion_report;
 pub mod followup;
 pub mod store;
@@ -14,7 +15,8 @@ pub mod store;
 pub use followup::{
     ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
     INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
-    TodoSnapshot, is_incomplete_todo, todo_waits_on_running_task,
+    TodoSnapshot, is_incomplete_todo, todo_completely_blocked, todo_has_external_blocker,
+    todo_has_external_blocker_at, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -32,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
-    TodoPlanField,
+    IterationMaturity, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal, TodoGoalChange,
+    TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -671,13 +673,8 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
             actionable.len() - GATE_NAMED_TODO_LIMIT
         ));
     }
-    message.push('\n');
-    message.push_str(ACTIONABLE_POKE_WAIT_GUIDANCE);
     message
 }
-
-const ACTIONABLE_POKE_WAIT_GUIDANCE: &str =
-    "Leave todos waiting on still-running background tasks alone until their dependencies finish.";
 
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.
@@ -768,13 +765,14 @@ pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> S
 /// reload/resume/remote attach.
 pub fn is_auto_poke_message(message: &str) -> bool {
     let trimmed = message.trim();
-    let first_line = trimmed.lines().next().unwrap_or_default();
+    let Some(first_line) = trimmed.lines().next() else {
+        return false;
+    };
     (trimmed.starts_with("You have ")
         && first_line.contains(" incomplete todo")
         && first_line.ends_with("update the todo tool.")
         && (trimmed == first_line
-            || (trimmed[first_line.len()..].starts_with("\nActionable todos:")
-                && trimmed.ends_with(ACTIONABLE_POKE_WAIT_GUIDANCE))))
+            || trimmed[first_line.len()..].starts_with("\nActionable todos:")))
         || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_TODO_REMINDER_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
@@ -818,6 +816,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     let trimmed = message.trim();
     if !is_auto_poke_message(trimmed) {
         return None;
+    }
+    if trimmed.starts_with("You have ") && trimmed.contains("\nActionable todos:") {
+        return Some("Auto-poking: incomplete todos...");
     }
     if trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -918,6 +919,9 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
 
     non_empty(plan.user_intention.as_deref())
 }
+
+#[cfg(test)]
+mod reminder_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

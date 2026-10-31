@@ -335,11 +335,19 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         false,
         Some("Do the thing."),
-        |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
+        |session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
+            crate::session_env::set_session_env(
+                session_id,
+                HashMap::from([("SPAWN_SECRET".into(), "test-only".into())]),
+            )
+            .unwrap();
+            Ok(false)
+        },
     )
     .expect("visible spawn preparation should succeed even when launch is skipped");
 
     assert!(!launched);
+    assert!(crate::session_env::session_env(&session_id).is_empty());
     let path = crate::storage::jcode_dir()
         .expect("jcode dir")
         .join(format!("client-input-{}", session_id));
@@ -938,6 +946,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         super::spawn_swarm_agent(
             "routing_busy",
             "routing-swarm",
+            None,
             Some(temp.path().to_string_lossy().into_owned()),
             None,
             Some(crate::config::SwarmSpawnMode::Headless),
@@ -1283,50 +1292,5 @@ async fn spawn_admission_lock_serializes_per_swarm_only() {
     );
 }
 
-#[test]
-fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
-    use super::resolve_swarm_spawn_effort;
-
-    // Explicit spawn argument wins over the config pin (#1165).
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("low"), Some("medium")),
-        Some("low".to_string())
-    );
-    // A missing or blank spawn argument falls back to `agents.swarm_effort`.
-    assert_eq!(
-        resolve_swarm_spawn_effort(None, Some("medium")),
-        Some("medium".to_string())
-    );
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("  "), Some(" medium ")),
-        Some("medium".to_string())
-    );
-    // With neither, workers default to low effort.
-    assert_eq!(
-        resolve_swarm_spawn_effort(None, None),
-        Some("low".to_string())
-    );
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some(""), Some("")),
-        Some("low".to_string())
-    );
-}
-
-#[test]
-fn per_call_auto_spawn_mode_defers_to_configured_mode() {
-    use super::resolve_swarm_spawn_mode;
-    use crate::config::SwarmSpawnMode::{Auto, Headless, Inline, Visible};
-
-    // A model passing `auto` must not override an inline config with a
-    // visible-terminal attempt (workers opened outside VS Code).
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Inline), Inline);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Headless), Headless);
-    assert_eq!(resolve_swarm_spawn_mode(None, Inline), Inline);
-    // A configured `auto` keeps its visible-then-headless behavior.
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Auto), Auto);
-    assert_eq!(resolve_swarm_spawn_mode(None, Auto), Auto);
-    // Explicit concrete modes still win over config.
-    assert_eq!(resolve_swarm_spawn_mode(Some(Visible), Inline), Visible);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
-}
+#[path = "comm_session_effort_tests.rs"]
+mod effort;

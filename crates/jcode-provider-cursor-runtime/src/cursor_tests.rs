@@ -2,6 +2,38 @@ use super::*;
 use std::io::Read;
 
 #[test]
+fn failed_catalog_refresh_returns_error_and_preserves_models() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let previous = std::env::var_os("CURSOR_API_KEY");
+    jcode_base::env::set_var("CURSOR_API_KEY", "synthetic-test-key");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let mut provider = CursorCliProvider::new();
+        provider.client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        *provider.fetched_models.write().unwrap() = vec!["cached-cursor-model".into()];
+        let result = provider.refresh_model_catalog().await;
+        assert!(
+            provider
+                .available_models_display()
+                .contains(&"cached-cursor-model".into())
+        );
+        result
+    });
+    match previous {
+        Some(value) => jcode_base::env::set_var("CURSOR_API_KEY", value),
+        None => jcode_base::env::remove_var("CURSOR_API_KEY"),
+    }
+    assert!(result.is_err());
+}
+
+#[test]
 fn routed_prompt_includes_system_and_namespaced_tool_directive() {
     let tools = vec![ToolDefinition {
         name: "read".to_string(),

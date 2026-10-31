@@ -21,6 +21,15 @@ import fake_openai_server as provider
 
 
 class Reports(unittest.TestCase):
+    def test_workflow_installs_nondefault_acceptance_prerequisites(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cloud-acceptance.yml").read_text()
+        install_lines = [line for line in workflow.splitlines()
+                         if "apt-get install" in line]
+        packages = set(" ".join(install_lines).split())
+        for package in ("ripgrep", "tmux", "openssh-server", "bubblewrap",
+                        "util-linux", "python3"):
+            self.assertIn(package, packages, f"runner must install {package}")
+
     def test_failure_is_present_in_json_and_junit(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -120,6 +129,19 @@ class Provider(unittest.TestCase):
 
 
 class Isolation(unittest.TestCase):
+    def test_cloud_selection_preserves_group_default_and_explicit_round_trip(self):
+        from unittest.mock import Mock
+
+        fixture = Mock()
+        fixture.records.return_value = ["existing request"]
+        acceptance.CloudTUI.go_cloud(fixture)
+        fixture.send.assert_called_once_with("/cloud")
+        fixture.await_cloud.assert_called_once_with(1)
+        fixture.reset_mock()
+        acceptance.CloudTUI.go_cloud(fixture, session_only=True)
+        fixture.send.assert_called_once_with("/cloud --session-only")
+        fixture.await_cloud.assert_called_once_with(1)
+
     def test_long_artifact_paths_do_not_lengthen_runtime_sockets(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = acceptance.CloudTUI("/bin/true", Path(temp) / ("long-artifacts-" * 12))

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "repository": "1jehuang/jcode",
+  "run_id": "40628778548",
+  "run_attempt": 1,
+  "source_revision": "a143bccbc9c28d7ce6abbbd47a715dba3a9bff96",
+  "target": "aarch64-apple-darwin",
+  "producer": "native-macos-arm64",
+  "justrust_revision": "a7e7d02cbd50358d1aea056d3c17e5496586d62a",
+  "toolchain": "nightly-2026-10-08",
+  "completed_at": "2026-10-28T04:15:58Z",
+  "unsigned_artifact": {
+    "id": 12791990457,
+    "name": "native-handoff-macos-arm64-1",
+    "archive_sha256": "7779c845c8e7c722840df6a2f6810a4355904deacd84ded37276b65cddd363db",
+    "binary_sha256": "e7d0acd40c9751bd2fa2fcd7285b853a639a48453f5b149fec2bfc33e64c5bac"
+  },
+  "signed_artifact": {
+    "id": 12791493145,
+    "name": "signed-native-handoff-macos-arm64-1",
+    "archive_sha256": "b3d50cf05a3803105adef076d540b3b5e10dbf0de5dcbaeea811981969564eab",
+    "binary_sha256": "2a60e86c2d2a75888bcc40e3c9ede3663817778afab53dbbad2bc9338068e127",
+    "notarized_zip_sha256": "c44d9e5ad88bf759239a917738d056492418aee7ac95db4d3b211e538828df1a"
+  },
+  "notarization": {
+    "status": "Accepted",
+    "id": "049344cd-ace4-4dbc-bf2e-0c45890c5ed4",
+    "message": "Processing complete"
+  },
+  "checks": {
+    "same_run_source_and_attempt_provenance": "passed",
+    "unsigned_native_smoke": "passed",
+    "developer_id_signature": "passed",
+    "explicit_apple_chain_identifier_and_team_requirement": "passed",
+    "signed_native_smoke": "passed",
+    "downloaded_signed_binary_matches_signing_provenance": "passed"
+  },
+  "published_release": false,
+  "limitations": [
+    "Native GitHub macOS ARM64 build through justrust --local, not hosted Linux cross-compilation",
+    "Launch/help smoke checks, not full integration tests",
+    "No Intel macOS acceptance or Windows signing acceptance",
+    "No offline Gatekeeper or stapled raw CLI ticket claim"
+  ]
+}
