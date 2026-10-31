@@ -17,7 +17,7 @@ pub(super) fn panel_area(area: Rect, header_rows: u16) -> Rect {
         .min(available);
     Rect::new(
         area.right()
-            .saturating_sub(width + u16::from(area.width > width)),
+            .saturating_sub(width + area.width.saturating_sub(width).min(2)),
         area.y + top,
         width,
         height,
@@ -28,6 +28,9 @@ impl SessionPicker {
     pub(super) fn render_resume_canvas(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
+        // Measure after polling so a completed load moves the card this frame.
+        let _ = self.poll_preview_load();
+        self.ensure_selected_preview_loading();
         let header_rows = self.selected_session().map_or(3, |session| {
             super::super::ui::header::build_preview_header(session, area.width).len() as u16
         });
@@ -35,9 +38,10 @@ impl SessionPicker {
         self.reserved_panel_area = Some(panel);
         self.last_preview_area = Some(area);
         self.render_preview(frame, area);
+        let panel = self.reserved_panel_area.unwrap_or(panel);
 
-        // Search and session selection share one bounded card, never a full-height
-        // split pane. The preview reserves these cells before it is painted.
+        // Search and session selection share one bounded overlay card. Painting
+        // it last leaves the underlying session's wrapping and scroll unchanged.
         frame.render_widget(Clear, panel);
         let banner_rows = u16::from(self.crashed_sessions.is_some() && panel.height > 5);
         if banner_rows > 0 {

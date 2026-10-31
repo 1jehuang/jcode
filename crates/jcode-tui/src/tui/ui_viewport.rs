@@ -1287,58 +1287,17 @@ pub(super) fn draw_messages(
             if !prompt_text.is_empty() {
                 let prompt_num =
                     preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
-                let num_str = format!("{}", prompt_num);
-                let prefix_len = num_str.len() + 2;
-                let content_width =
-                    render_area.width.saturating_sub(prefix_len as u16 + 2) as usize;
-                let dim_style = Style::default().dim();
                 let align = if app.centered_mode() {
                     ratatui::layout::Alignment::Center
                 } else {
                     ratatui::layout::Alignment::Left
                 };
-
-                let text_flat = prompt_text.replace('\n', " ");
-                let text_chars: Vec<char> = text_flat.chars().collect();
-                let is_long = text_chars.len() > content_width;
-
-                let preview_lines: Vec<Line<'static>> = if !is_long {
-                    vec![
-                        Line::from(vec![
-                            Span::styled(num_str.clone(), dim_style.fg(dim_color()).bg(user_bg())),
-                            Span::styled("› ", dim_style.fg(user_color()).bg(user_bg())),
-                            Span::styled(text_flat, dim_style.fg(user_text()).bg(user_bg())),
-                        ])
-                        .alignment(align),
-                    ]
-                } else {
-                    let half = content_width.max(4);
-                    let head: String = text_chars[..half.min(text_chars.len())].iter().collect();
-                    let tail_start = text_chars.len().saturating_sub(half);
-                    let tail: String = text_chars[tail_start..].iter().collect();
-
-                    let first = Line::from(vec![
-                        Span::styled(num_str.clone(), dim_style.fg(dim_color()).bg(user_bg())),
-                        Span::styled("› ", dim_style.fg(user_color()).bg(user_bg())),
-                        Span::styled(
-                            format!("{} ...", head.trim_end()),
-                            dim_style.fg(user_text()).bg(user_bg()),
-                        ),
-                    ])
-                    .alignment(align);
-
-                    let padding: String = " ".repeat(prefix_len);
-                    let second = Line::from(vec![
-                        Span::styled(padding, dim_style.bg(user_bg())),
-                        Span::styled(
-                            format!("... {}", tail.trim_start()),
-                            dim_style.fg(user_text()).bg(user_bg()),
-                        ),
-                    ])
-                    .alignment(align);
-
-                    vec![first, second]
-                };
+                let preview_lines = self::prompt_preview_lines(
+                    prompt_num,
+                    prompt_text,
+                    text_render_area.width,
+                    align,
+                );
 
                 let line_count = preview_lines.len() as u16;
                 let preview_area = Rect {
@@ -1538,6 +1497,84 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
     PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
+}
+
+/// The same previous-prompt band for live sessions and resume previews. Work on
+/// bounded head/tail graphemes instead of allocating every character in a prompt.
+pub(crate) fn prompt_preview_lines(
+    number: usize,
+    text: &str,
+    width: u16,
+    align: ratatui::layout::Alignment,
+) -> Vec<Line<'static>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = text.trim().replace('\n', " ");
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let number = number.to_string();
+    let prefix = number.len() + 2;
+    let content_width = usize::from(width).saturating_sub(prefix + 2);
+    let style = Style::default().dim().bg(user_bg());
+    let mut lines = Vec::with_capacity(2);
+    let long = UnicodeWidthStr::width(text.as_str()) > content_width;
+    let (head, tail) = if long {
+        let budget = usize::from(width.saturating_sub(1)).saturating_sub(prefix + 4);
+        let mut used = 0;
+        let head: String = text
+            .graphemes(true)
+            .take_while(|g| {
+                used += UnicodeWidthStr::width(*g);
+                used <= budget
+            })
+            .collect();
+        used = 0;
+        let tail: Vec<_> = text
+            .graphemes(true)
+            .rev()
+            .take_while(|g| {
+                used += UnicodeWidthStr::width(*g);
+                used <= budget
+            })
+            .collect();
+        (
+            format!("{} ...", head.trim_end()),
+            Some(format!(
+                "... {}",
+                tail.into_iter().rev().collect::<String>().trim_start()
+            )),
+        )
+    } else {
+        (text, None)
+    };
+    lines.push(
+        Line::from(vec![
+            Span::styled(number, style.fg(dim_color())),
+            Span::styled("› ", style.fg(user_color())),
+            Span::styled(head, style.fg(user_text())),
+        ])
+        .alignment(align),
+    );
+    if let Some(tail) = tail {
+        lines.push(
+            Line::from(vec![
+                Span::styled(" ".repeat(prefix), style),
+                Span::styled(tail, style.fg(user_text())),
+            ])
+            .alignment(align),
+        );
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut clipped = super::truncate_line_with_ellipsis_to_width(
+                &line,
+                usize::from(width.saturating_sub(1)),
+            );
+            clipped.alignment = Some(align);
+            clipped
+        })
+        .collect()
 }
 
 fn compute_prompt_preview_line_count(

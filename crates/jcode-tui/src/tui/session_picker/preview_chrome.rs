@@ -139,19 +139,6 @@ pub(super) fn draw(
 ) -> Rect {
     let data = selected_info(session, extras);
     let mut transcript = area;
-    if transcript.height > 2 {
-        let lines = super::super::ui::header::build_preview_header(session, area.width);
-        let height = (lines.len() as u16).min(transcript.height.saturating_sub(2));
-        frame.render_widget(
-            Paragraph::new(lines),
-            Rect {
-                height,
-                ..transcript
-            },
-        );
-        transcript.y += height;
-        transcript.height -= height;
-    }
     if transcript.height > 1 {
         let status_area = Rect {
             y: transcript.y + transcript.height - 1,

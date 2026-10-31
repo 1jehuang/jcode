@@ -88,7 +88,7 @@ fn preview_composer_matches_live_wrapper_styles_and_narrow_width_behavior() {
                         width as usize - 3,
                         "9",
                         "> ",
-                        crate::tui::ui::user_color(),
+                        jcode_tui_style::theme::user_color(),
                         3,
                     );
                     frame.render_widget(Paragraph::new(lines), area);

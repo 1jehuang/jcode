@@ -2061,8 +2061,16 @@ pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usi
     if area.height == 0 || line_width == 0 {
         return;
     }
-    let (lines, _, _) =
-        wrap_input_text("", 0, line_width, &number, prompt, user_color(), prompt_len);
+    let (lines, _, _) = wrap_input_text_with_images(
+        "",
+        0,
+        line_width,
+        &number,
+        prompt,
+        user_color(),
+        prompt_len,
+        &|_| false,
+    );
     frame.render_widget(Paragraph::new(lines), area);
 }
 

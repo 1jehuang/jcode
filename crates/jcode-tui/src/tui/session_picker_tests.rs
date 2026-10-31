@@ -1,5 +1,6 @@
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
+use ratatui::layout::Position;
 use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
@@ -16,6 +17,11 @@ fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_region
         assert_eq!(preview, Rect::new(0, 0, width, 30));
         assert!(sidebar.x > preview.x);
         assert!(sidebar.right() < preview.right());
+        assert_eq!(
+            sidebar.right(),
+            preview.right() - 2,
+            "one blank column must separate the card and native scrollbar"
+        );
         assert!(sidebar.height < preview.height);
         assert!(sidebar.bottom() < preview.bottom());
         assert!(picker.mouse_over_preview(sidebar.x + 1, sidebar.bottom() + 1));
@@ -30,6 +36,95 @@ fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_region
             assert_eq!(picker.focus, PaneFocus::Sessions);
         }
     }
+}
+
+#[test]
+fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    for width in [40, 80, 120] {
+        let mut session = make_session("overlay-parity", "fox", false, SessionStatus::Closed);
+        session.messages_preview.push(PreviewMessage {
+            role: "assistant".into(),
+            content: (0..70)
+                .map(|n| format!("row {n}: {}", "Unicode 界 text ".repeat(12)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+            timestamp: None,
+        });
+        let mut actual = SessionPicker::new(vec![session.clone()]);
+        let mut baseline = SessionPicker::new(vec![session]);
+        let area = Rect::new(0, 0, width, 45);
+        // Unbordered conversation canvas, without painting the control card.
+        baseline.reserved_panel_area = Some(Rect::default());
+        let mut expected =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
+        let mut rendered =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
+        expected
+            .draw(|frame| baseline.render_preview(frame, area))
+            .unwrap();
+        rendered.draw(|frame| actual.render(frame)).unwrap();
+        let card = actual.reserved_panel_area.unwrap();
+        assert_eq!(actual.scroll_offset, baseline.scroll_offset);
+        assert_eq!(
+            actual.preview_cache.as_ref().unwrap().wrapped_lines,
+            baseline.preview_cache.as_ref().unwrap().wrapped_lines
+        );
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if !card.contains(Position::new(x, y)) {
+                    assert_eq!(
+                        rendered.backend().buffer()[(x, y)],
+                        expected.backend().buffer()[(x, y)],
+                        "session pixel outside overlay changed at ({x},{y}), width={width}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resume_card_starts_below_full_width_pinned_todos() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let session = make_session("pinned-placement", "fox", false, SessionStatus::Closed);
+    let id = session.id.clone();
+    let mut picker = SessionPicker::new(vec![session]);
+    let payload = serde_json::json!({"todos": (0..20).map(|n| serde_json::json!({
+        "id": format!("item-{n}"), "content": format!("Pinned work item {n}"),
+        "status": "pending", "priority": "high", "phase": 1, "lane": format!("lane-{n}")
+    })).collect::<Vec<_>>()})
+    .to_string();
+    picker.preview_extras.insert(
+        id,
+        PreviewExtras {
+            todos_payload: Some(payload.clone()),
+            ..Default::default()
+        },
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let (lines, _) = super::super::ui::viewport::pinned_todo_band_lines_for_payload(
+        Some(&payload),
+        false,
+        crate::config::config().display.diff_mode,
+        119,
+        47,
+    );
+    assert!(
+        !lines.is_empty(),
+        "fixture must exercise the pinned todo band"
+    );
+    let card = picker.reserved_panel_area.unwrap();
+    assert!(
+        card.y >= lines.len() as u16,
+        "resume card must not cover pinned todos: {card:?}"
+    );
+    assert_eq!(card.right(), 118);
 }
 
 #[test]
@@ -111,8 +206,20 @@ fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
                 tool_data: msg.tool_data.clone(),
             })
             .collect();
-        let live = super::super::ui::prepare::prepare_history_preview(&messages, 0, width, mode);
-        assert_eq!(cache.wrapped_lines, live.wrapped_lines, "width={width}");
+        let text_width = width - u16::from(cache.show_scrollbar);
+        let text_width = text_width.saturating_sub(super::super::ui::left_aligned_content_inset(
+            text_width, false,
+        ));
+        let live =
+            super::super::ui::prepare::prepare_history_preview(&messages, 0, text_width, mode);
+        let header = super::super::ui::header::build_preview_header(&session, text_width);
+        let offset = header.len()
+            + super::super::ui::prepare::initial_header_pad_top(inner.height, header.len());
+        assert_eq!(
+            cache.wrapped_lines[offset..],
+            live.wrapped_lines,
+            "width={width}"
+        );
     }
     session.messages_preview.last_mut().unwrap().duration_secs = Some(4.5);
     let changed_timing = picker.preview_content_hash(&session, mode);
@@ -391,7 +498,7 @@ fn cloud_session_picker_renders_host_and_preserves_resume_target() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("cloud: dev-cloud"));
+    assert!(text.to_lowercase().contains("cloud: dev-cloud"));
     assert_eq!(picker.selection_or_current_targets(), vec![target]);
 }
 
@@ -2260,9 +2367,12 @@ fn test_preview_transcript_omits_picker_metadata() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.starts_with("1› hello"), "{text}");
+    assert!(text.contains("1› hello"), "{text}");
+    assert!(
+        text.contains("client: Metadata-monkey"),
+        "the real startup header belongs to the scrolling transcript"
+    );
     for metadata in [
-        "metadata-monkey",
         "metadata-video-title",
         "/metadata-only-directory",
         "▶ Active",
@@ -2318,7 +2428,10 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                         .collect();
                     for text in ["1› hello", "world"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
-                        assert!(row.starts_with(text), "preview must be flush left: {row:?}");
+                        assert!(
+                            row.starts_with(&format!(" {text}")),
+                            "preview must use the live one-cell gutter: {row:?}"
+                        );
                     }
                     assert!(
                         rows.iter().all(|row| !row.contains("tool:")),
@@ -2484,17 +2597,10 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
         .expect("render picker");
     let buffer = terminal.backend().buffer().clone();
 
-    // The preview occupies the full canvas; its header precedes the transcript.
-    // Read the first transcript content row and
-    // confirm it carries the "N›" sticky-header marker.
+    // Startup chrome scrolls away. The sticky previous prompt is the first row.
     let preview = picker.last_preview_area.expect("preview pane");
     let preview_inner_x = preview.x;
-    let header_y = preview.y
-        + crate::tui::ui::header::build_preview_header(
-            picker.selected_session().expect("selected session"),
-            preview.width,
-        )
-        .len() as u16;
+    let header_y = preview.y;
     let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
@@ -2506,6 +2612,7 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // The header marker is a prompt number followed by the chevron.
     assert!(
         header_row
+            .trim_start()
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_digit()),
@@ -2598,12 +2705,7 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
 
     let preview = picker.last_preview_area.expect("preview pane");
     let preview_inner_x = preview.x;
-    let header_y = preview.y
-        + crate::tui::ui::header::build_preview_header(
-            picker.selected_session().expect("selected session"),
-            preview.width,
-        )
-        .len() as u16;
+    let header_y = preview.y;
     let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
