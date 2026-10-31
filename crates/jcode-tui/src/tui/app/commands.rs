@@ -3602,6 +3602,11 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/config" {
+        app.open_config_wizard();
+        return true;
+    }
+
+    if trimmed == "/config show" || trimmed == "/config status" {
         use crate::config::config;
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),

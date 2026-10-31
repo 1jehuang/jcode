@@ -203,6 +203,9 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
     if picker.kind == crate::tui::PickerKind::Account {
         return Some(" [ higher priority · ] lower priority · Ctrl+R automatic · Enter select");
     }
+    if picker.kind == crate::tui::PickerKind::Config {
+        return Some(" Enter toggle · type to filter · Esc done · /config edit opens the raw file");
+    }
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
         && picker.entries.iter().any(|entry| {
             matches!(

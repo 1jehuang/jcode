@@ -15,6 +15,9 @@ pub(super) enum InlinePickerPreviewRequest {
         provider_filter: Option<String>,
         filter: String,
     },
+    Config {
+        filter: String,
+    },
 }
 
 impl InlinePickerPreviewRequest {
@@ -23,6 +26,7 @@ impl InlinePickerPreviewRequest {
             Self::Model { .. } | Self::SubagentModel { .. } => PickerKind::Model,
             Self::Login { .. } => PickerKind::Login,
             Self::Account { .. } => PickerKind::Account,
+            Self::Config { .. } => PickerKind::Config,
         }
     }
 
@@ -31,7 +35,8 @@ impl InlinePickerPreviewRequest {
             Self::Model { filter }
             | Self::SubagentModel { filter }
             | Self::Login { filter }
-            | Self::Account { filter, .. } => filter,
+            | Self::Account { filter, .. }
+            | Self::Config { filter } => filter,
         }
     }
 
@@ -52,6 +57,7 @@ impl InlinePickerPreviewRequest {
             Self::Account {
                 provider_filter, ..
             } => app.open_account_picker(provider_filter.as_deref()),
+            Self::Config { .. } => app.open_config_wizard(),
         }
     }
 
@@ -96,6 +102,7 @@ pub(super) fn picker_account_provider_scope(picker: &InlineInteractiveState) -> 
         | PickerAction::Usage { .. }
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
-        | PickerAction::SubagentModelChoice { .. } => None,
+        | PickerAction::SubagentModelChoice { .. }
+        | PickerAction::ConfigToggle { .. } => None,
     })
 }

@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "inline_interactive/helpers.rs"]
 mod helpers;
+#[path = "inline_interactive/config_wizard.rs"]
+mod config_wizard;
 #[path = "inline_interactive/openers.rs"]
 mod openers;
 #[path = "inline_interactive/preview.rs"]
@@ -3791,6 +3793,22 @@ impl App {
                 }
 
                 match entry.action {
+                    PickerAction::ConfigToggle { key } => {
+                        // Config rows keep the wizard open so several
+                        // settings can be changed in one pass. `picker`
+                        // already borrows the picker field, so persist the
+                        // toggle through that borrow (associated fn, no
+                        // `&mut self`) and only then report through `self`.
+                        let result =
+                            crate::config::Config::toggle_config_wizard_setting(key);
+                        Self::record_config_toggle_result(picker, idx, &result);
+                        // Release the field borrow before reporting through
+                        // `self`; NLL ends the borrow here, the lint prefers
+                        // the explicit `let _` form over `drop`.
+                        #[expect(unused_variables, reason = "borrow-scope release")]
+                        let picker = picker;
+                        Self::report_config_toggle_result(self, key, &result);
+                    }
                     PickerAction::Account(selection) => {
                         self.inline_interactive_state = None;
                         self.handle_account_picker_selection(selection);

@@ -1392,6 +1392,7 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+    Config,
 }
 
 /// Render snapshot of the Ctrl+R reverse prompt-history search overlay.
@@ -1604,6 +1605,17 @@ impl PickerKind {
                 shows_default_shortcut_hint: false,
                 preview_activation_column: 2,
             },
+            Self::Config => InlineInteractiveSchema {
+                layout: InlineInteractiveLayout::ThreeColumn,
+                primary_label: "SETTING",
+                secondary_label: "VALUE",
+                secondary_preview_label: "SETTING",
+                tertiary_label: "CONFIG PATH",
+                preview_submit_hint: "  ↵ toggle",
+                active_submit_hint: "  ↑↓ ↵ toggle · Esc done",
+                shows_default_shortcut_hint: false,
+                preview_activation_column: 0,
+            },
         }
     }
 
@@ -1666,6 +1678,17 @@ impl PickerKind {
                     entry.name, pretty, provider, method, detail
                 )
             }
+            Self::Config => {
+                let value = entry
+                    .active_option()
+                    .map(|option| option.provider.as_str())
+                    .unwrap_or("");
+                let path = entry
+                    .active_option()
+                    .map(|option| option.api_method.as_str())
+                    .unwrap_or("");
+                format!("{} {} {} {}", entry.name, value, path, entry.name)
+            }
         }
     }
 }
@@ -1718,6 +1741,12 @@ pub enum PickerAction {
     SubagentModelChoice {
         inherit: bool,
     },
+    /// Interactive `/config` wizard row. `key` identifies the setting (e.g.
+    /// `display.centered`); the handler persists the toggle and refreshes the
+    /// picker in place so several settings can be changed in one pass.
+    ConfigToggle {
+        key: &'static str,
+    },
 }
 
 /// Unified inline picker with three columns.
@@ -1763,6 +1792,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
+        | PickerAction::ConfigToggle { .. }
         | PickerAction::LogoutAll => 0,
         PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
             provider_id.capacity() + label.capacity()

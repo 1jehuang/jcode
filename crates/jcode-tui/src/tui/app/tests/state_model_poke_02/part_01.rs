@@ -1454,6 +1454,26 @@ fn test_login_picker_preview_filter_parsing() {
 }
 
 #[test]
+fn test_config_wizard_preview_filter_parsing() {
+    assert_eq!(
+        App::config_wizard_preview_filter("/config"),
+        Some(String::new())
+    );
+    assert_eq!(
+        App::config_wizard_preview_filter("/config   emoji"),
+        Some("emoji".to_string())
+    );
+    assert_eq!(App::config_wizard_preview_filter("/configx"), None);
+    // Text subcommands keep their legacy behavior, no preview.
+    assert_eq!(App::config_wizard_preview_filter("/config edit"), None);
+    assert_eq!(App::config_wizard_preview_filter("/config init"), None);
+    assert_eq!(App::config_wizard_preview_filter("/config create"), None);
+    assert_eq!(App::config_wizard_preview_filter("/config show"), None);
+    assert_eq!(App::config_wizard_preview_filter("/config status"), None);
+    assert_eq!(App::config_wizard_preview_filter("hello /config"), None);
+}
+
+#[test]
 fn test_agents_command_opens_agent_picker() {
     let mut app = create_test_app();
     app.input = "/agents".to_string();

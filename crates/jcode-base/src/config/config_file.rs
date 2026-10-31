@@ -328,6 +328,109 @@ impl Config {
         Ok(())
     }
 
+    /// Toggle (or cycle) one `/config` wizard setting and persist it.
+    ///
+    /// Returns the new value's display label so the picker can update its row
+    /// without a full reload. Bool settings flip; the update channel cycles
+    /// stable → preview → main → stable. Uses [`Self::load_for_update`] so an
+    /// environment override is never baked into the file by a toggle.
+    pub fn toggle_config_wizard_setting(key: &str) -> anyhow::Result<String> {
+        let mut cfg = Self::load_for_update()?;
+        let new_value = match key {
+            "display.centered" => {
+                cfg.display.centered = !cfg.display.centered;
+                cfg.display.centered
+            }
+            "display.mouse_capture" => {
+                cfg.display.mouse_capture = !cfg.display.mouse_capture;
+                cfg.display.mouse_capture
+            }
+            "display.emoji" => {
+                cfg.display.emoji = !cfg.display.emoji;
+                cfg.display.emoji
+            }
+            "display.compact_notifications" => {
+                cfg.display.compact_notifications = !cfg.display.compact_notifications;
+                cfg.display.compact_notifications
+            }
+            "display.show_agentgrep_output" => {
+                cfg.display.show_agentgrep_output = !cfg.display.show_agentgrep_output;
+                cfg.display.show_agentgrep_output
+            }
+            "display.tool_call_details" => {
+                cfg.display.tool_call_details = !cfg.display.tool_call_details;
+                cfg.display.tool_call_details
+            }
+            "display.pin_todos" => {
+                cfg.display.pin_todos = !cfg.display.pin_todos;
+                cfg.display.pin_todos
+            }
+            "display.queue_mode" => {
+                cfg.display.queue_mode = !cfg.display.queue_mode;
+                cfg.display.queue_mode
+            }
+            "display.debug_socket" => {
+                cfg.display.debug_socket = !cfg.display.debug_socket;
+                cfg.display.debug_socket
+            }
+            "features.check_updates" => {
+                cfg.features.check_updates = !cfg.features.check_updates;
+                cfg.features.check_updates
+            }
+            "features.memory" => {
+                cfg.features.memory = !cfg.features.memory;
+                cfg.features.memory
+            }
+            "features.swarm" => {
+                cfg.features.swarm = !cfg.features.swarm;
+                cfg.features.swarm
+            }
+            "features.mermaid" => {
+                cfg.features.mermaid = !cfg.features.mermaid;
+                cfg.features.mermaid
+            }
+            "features.auto_poke" => {
+                cfg.features.auto_poke = !cfg.features.auto_poke;
+                cfg.features.auto_poke
+            }
+            "features.message_timestamps" => {
+                cfg.features.message_timestamps = !cfg.features.message_timestamps;
+                cfg.features.message_timestamps
+            }
+            "features.kv_cache_miss_notices" => {
+                cfg.features.kv_cache_miss_notices = !cfg.features.kv_cache_miss_notices;
+                cfg.features.kv_cache_miss_notices
+            }
+            "features.update_channel" => {
+                let next = cfg.features.update_channel;
+                let cycled = match next {
+                    jcode_config_types::UpdateChannel::Stable => {
+                        jcode_config_types::UpdateChannel::Preview
+                    }
+                    jcode_config_types::UpdateChannel::Preview => {
+                        jcode_config_types::UpdateChannel::Main
+                    }
+                    jcode_config_types::UpdateChannel::Main => {
+                        jcode_config_types::UpdateChannel::Stable
+                    }
+                };
+                cfg.features.update_channel = cycled;
+                cfg.save()?;
+                crate::logging::info(&format!(
+                    "Saved features.update_channel to config: {cycled}"
+                ));
+                return Ok(cycled.to_string());
+            }
+            other => anyhow::bail!("Unknown config wizard setting: {other}"),
+        };
+        cfg.save()?;
+        let label = if new_value { "on" } else { "off" };
+        crate::logging::info(&format!(
+            "Saved {key} to config via /config wizard: {label}"
+        ));
+        Ok(label.to_string())
+    }
+
     /// One-time bake of per-repo launch hotkeys from session history.
     ///
     /// Scans `~/.jcode/sessions` for the directories the user works in most,

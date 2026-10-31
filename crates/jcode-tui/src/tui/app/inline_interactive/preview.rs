@@ -17,6 +17,26 @@ impl App {
         slash_command_preview_filter(input, &["/login"])
     }
 
+    pub(crate) fn config_wizard_preview_filter(input: &str) -> Option<String> {
+        // `/config edit` and `/config init` keep their text behaviors, so only
+        // the bare command or a filter argument opens the wizard preview.
+        let trimmed = input.trim_start();
+        if trimmed == "/config" {
+            return Some(String::new());
+        }
+        let Some(rest) = trimmed.strip_prefix("/config ") else {
+            return None;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Some(String::new());
+        }
+        if matches!(rest, "init" | "create" | "edit" | "show" | "status") {
+            return None;
+        }
+        Some(rest.to_string())
+    }
+
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
         if crate::tui::is_ssh_remote()
             && !crate::usage::remote_account_list()
@@ -127,6 +147,10 @@ impl App {
             .or_else(|| {
                 Self::login_picker_preview_filter(input)
                     .map(|filter| InlinePickerPreviewRequest::Login { filter })
+            })
+            .or_else(|| {
+                Self::config_wizard_preview_filter(input)
+                    .map(|filter| InlinePickerPreviewRequest::Config { filter })
             })
             .or_else(|| self.account_picker_preview_request(input))
     }
