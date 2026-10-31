@@ -68,6 +68,19 @@ fn hanging_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
         end += "│ ".len();
     }
     let rest = &text[end..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if rest[digits..].starts_with("› ") {
+        let marker_end = end + digits + "› ".len();
+        let mut prefix = split_bytes(line, end).0.spans;
+        let marker = split_bytes(&split_bytes(line, marker_end).0, end).1;
+        prefix.extend(
+            marker
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(" ".repeat(span.width()), span.style)),
+        );
+        return prefix;
+    }
     let marker = if rest.starts_with("• ") {
         Some("• ".len())
     } else {
@@ -187,6 +200,49 @@ pub(super) fn tail_start(lines: &[Line<'static>], area: Rect, reserved: Option<R
 mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier, Style};
+
+    #[test]
+    fn numbered_chevron_continuation_keeps_prompt_styles() {
+        let number = Style::default().fg(Color::Gray).bg(Color::Blue);
+        let prompt = Style::default().fg(Color::Cyan).bg(Color::Blue);
+        let source = Line::from(vec![
+            Span::styled("12", number),
+            Span::styled("› ", prompt),
+            Span::styled("abcdefghijklmnopqrstuvwxyz", prompt),
+        ])
+        .style(Style::default().bg(Color::Blue));
+        let prefix = hanging_prefix(&source);
+        assert_eq!(
+            prefix,
+            vec![Span::styled("  ", number), Span::styled("  ", prompt)]
+        );
+        let flow = layout(&[source.clone()], 0, Rect::new(0, 0, 10, 10), None);
+        assert_eq!(flow.consumed, 1);
+        for line in &flow.lines[1..] {
+            assert!(plain(line).starts_with("    "));
+            assert_eq!(&line.spans[..2], prefix.as_slice());
+            assert_eq!(line.style.bg, Some(Color::Blue));
+        }
+        let narrow = layout(&[source.clone()], 0, Rect::new(0, 0, 1, 50), None);
+        assert_eq!(narrow.consumed, 1);
+        assert_eq!(
+            narrow.lines.iter().map(plain).collect::<String>(),
+            plain(&source)
+        );
+        assert!(
+            layout(&[source.clone()], 0, Rect::new(0, 0, 0, 3), None)
+                .lines
+                .is_empty()
+        );
+        let occluded = layout(
+            &[source],
+            0,
+            Rect::new(0, 0, 10, 2),
+            Some(Rect::new(0, 0, 10, 2)),
+        );
+        assert_eq!(occluded.consumed, 0);
+        assert_eq!(occluded.lines.len(), 2);
+    }
 
     #[test]
     fn preserves_whitespace_and_span_boundaries() {
