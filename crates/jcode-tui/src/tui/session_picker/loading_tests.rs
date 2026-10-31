@@ -1,4 +1,31 @@
 use super::*;
+
+#[test]
+fn preview_loading_preserves_live_tool_duration_metadata() {
+    let mut session = Session::create_with_id("preview_metadata".into(), None, None);
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "tool-result".into(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool-call".into(),
+            content: "completed".into(),
+            is_error: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: Some(1250),
+        token_usage: None,
+    });
+    let live = crate::tui::display_messages_from_session(&session);
+    let preview = build_messages_preview(&session);
+    assert_eq!(preview.len(), live.len());
+    let tool = preview.iter().find(|msg| msg.role == "tool").unwrap();
+    assert_eq!(tool.duration_secs, Some(1.25));
+    for (preview, live) in preview.iter().zip(live) {
+        assert_eq!(preview.duration_secs, live.duration_secs);
+        assert_eq!(preview.title, live.title);
+    }
+}
 use std::path::Path;
 use std::sync::{
     Arc, OnceLock,

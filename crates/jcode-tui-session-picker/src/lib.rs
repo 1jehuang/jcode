@@ -174,6 +174,10 @@ pub struct PreviewMessage {
     pub content: String,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub duration_secs: Option<f32>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub title: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
 }
 
