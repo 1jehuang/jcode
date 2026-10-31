@@ -1,10 +1,28 @@
 # Dependency Security Triage
 
 Last reviewed: 2026-11-03
-Prior review: 2026-10-14 04:00Z (P30 master remediation complete), 2026-10-13 (P30 audit refresh), 2026-05-14
+Prior review: 2026-10-30 (CI security-preflight remediation), 2026-10-14 04:00Z (P30 master remediation complete), 2026-10-13 (P30 audit refresh), 2026-05-14
 
 This file tracks the current `cargo audit` findings for jcode and the intended remediation path.
 It is not an allowlist. It is a triage record so advisories are visible and actionable.
+
+## 2026-10-30 remediation
+
+`Security preflight (Linux)` began failing on `cargo audit` exit 1 after five new RUSTSEC
+advisories were published (2026-10-20 to 2026-10-23). Four were cleared by lockfile-only
+bumps; one is pinned by an `aws-sdk` release and is now a documented suppression.
+
+| Advisory | Crate | Before | After | Outcome |
+|---|---|---|---|---|
+| `RUSTSEC-2026-0382` | `rustls-webpki` | 0.103.15 | 0.103.16 | **CLEARED** (`cargo update`) |
+| `RUSTSEC-2026-0381` | `webpki-roots` | 1.0.6 | 1.0.11 | **CLEARED** (`cargo update`) |
+| `RUSTSEC-2026-0383` | `webpki-root-certs` | 1.0.7 | 1.0.11 | **CLEARED** (`cargo update`) |
+| `RUSTSEC-2026-0385` | `ctutils` | 0.4.2 | 0.4.7 | **CLEARED** (`cargo update`, via `digest 0.11.3`) |
+| `RUSTSEC-2026-0387` | `crypto-bigint` | 0.5.5 | 0.5.5 | **SUPPRESSED** (see row below) |
+
+| Advisory | Crate | Dependency path | Affected area in jcode | Triage | Planned action |
+|---|---|---|---|---|---|
+| `RUSTSEC-2026-0387` | `crypto-bigint` 0.5.5 | `aws-sdk-bedrockruntime 1.136.0 -> aws-sigv4 -> p256 0.13 -> elliptic-curve 0.13 -> crypto-bigint 0.5.5` | Bedrock provider only, which is an **optional** cargo feature | Timing-variability in operations intended to be constant-time. Not reached in our ECDSA verification path; the Bedrock feature is off by default. `aws-sigv4 1.6.4` exists and wants `p256 ^0.14`, but `aws-sdk-bedrockruntime 1.136.0` pins the `p256 0.13` line, so bumping `aws-sigv4` alone does **not** clear the advisory and was deliberately not done (it would duplicate the whole crypto stack for no security gain). | Bump `aws-sdk-bedrockruntime` to `>=1.152.0` (verified published) once it is compatible with the workspace's `aws-smithy-runtime-api` version. Then remove the `--ignore RUSTSEC-2026-0387` line from `scripts/security_preflight.sh`. |
 
 ## Current advisories
 
