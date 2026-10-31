@@ -778,6 +778,13 @@ swarm_stall_after_secs = 600
 # post_tool_feedback = "~/bin/jcode-vale"
 # post_tool_feedback_timeout_ms = 10000
 #
+# Blocking hook when a turn would end with no tool calls. {"decision":"block",
+# "reason":"..."} (or exit 2) continues the same turn with the reason as a
+# hidden reminder, up to stop_max_continuations in a row.
+# stop = "~/bin/stop-hook"
+# stop_timeout_ms = 10000
+# stop_max_continuations = 8
+#
 # Synchronous hook for every new user message. The prompt arrives as JSON on
 # stdin (never in env) with its origin (person or host-generated). Plain stdout
 # or additionalContext is added as a hidden reminder; exit 2 or
