@@ -406,7 +406,7 @@ impl OpenRouterTransportState {
 }
 
 /// Models the Grok CLI chat proxy serves to Grok Build subscribers.
-pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
+pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.7", "grok-4.6", "grok-4.5", "grok-code-fast-1"];
 const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
 
 /// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
