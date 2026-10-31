@@ -17,7 +17,7 @@ pub(in crate::tui::app) async fn send_interleave_now(
     images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
-    if content.trim().is_empty() {
+    if content.trim().is_empty() && images.is_empty() {
         return;
     }
     let msg_clone = content.clone();

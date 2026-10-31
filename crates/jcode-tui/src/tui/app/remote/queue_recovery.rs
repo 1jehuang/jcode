@@ -175,7 +175,7 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
     let Some(interleave) = app.interleave_message.take() else {
         return false;
     };
-    if interleave.trim().is_empty() {
+    if interleave.trim().is_empty() && app.interleave_images.is_empty() {
         app.interleave_images.clear();
         return false;
     }
