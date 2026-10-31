@@ -335,11 +335,19 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         false,
         Some("Do the thing."),
-        |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
+        |session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
+            crate::session_env::set_session_env(
+                session_id,
+                HashMap::from([("SPAWN_SECRET".into(), "test-only".into())]),
+            )
+            .unwrap();
+            Ok(false)
+        },
     )
     .expect("visible spawn preparation should succeed even when launch is skipped");
 
     assert!(!launched);
+    assert!(crate::session_env::session_env(&session_id).is_empty());
     let path = crate::storage::jcode_dir()
         .expect("jcode dir")
         .join(format!("client-input-{}", session_id));

@@ -29,7 +29,7 @@ pub const MAX_GATE_ATTEMPTS: u8 = 5;
 pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
 
 /// Shared retry budget for clients that handle their own turn-end loop.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncompleteTodoBudget {
     fingerprint: Option<Vec<TodoItem>>,
     attempts: u8,
@@ -182,7 +182,7 @@ impl Decision {
 }
 
 /// Per-session follow-up state. Keep one per session and reuse it across turns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FollowUpPolicy {
     armed: bool,
     default_on: bool,

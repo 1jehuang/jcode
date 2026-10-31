@@ -1550,6 +1550,7 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
     // One completed call with split-accounting cache telemetry.
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 1_000,
             output: 2_000,
             cache_read_input: Some(40_000),
@@ -1578,6 +1579,7 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
     oauth_app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     oauth_app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 1_000,
             output: 2_000,
             cache_read_input: Some(40_000),
@@ -1672,6 +1674,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     reset_call_state(&mut app);
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 1_000,
             output: 1_000,
             cache_read_input: None,
@@ -1690,6 +1693,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     reset_call_state(&mut app);
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 1_000,
             output: 1_000,
             cache_read_input: None,
@@ -1709,6 +1713,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     let before = app.cost.total_cost;
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 1_000,
             output: 1_000,
             cache_read_input: None,

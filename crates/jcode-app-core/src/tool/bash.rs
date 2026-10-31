@@ -949,6 +949,7 @@ impl BashTool {
 
         let mut command = build_shell_command(&params.command);
         command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
+        command.envs(crate::session_env::session_env(&ctx.session_id));
         command
             .env("JCODE_SESSION_ID", &ctx.session_id)
             .kill_on_drop(true)
@@ -1180,6 +1181,7 @@ impl BashTool {
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
         cmd.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
+        cmd.envs(crate::session_env::session_env(&ctx.session_id));
         cmd.env("JCODE_SESSION_ID", &ctx.session_id);
         let stdout = OpenOptions::new()
             .create(true)
@@ -1320,6 +1322,9 @@ impl BashTool {
         let working_dir = ctx.working_dir.clone();
         let cloud_environment = cloud_command_environment(working_dir.as_deref())?;
         let session_id_env = ctx.session_id.clone();
+        // Capture before handing work to the manager. Its closure can start
+        // after a caller has already replaced or cleared these overrides.
+        let session_environment = crate::session_env::session_env(&ctx.session_id);
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1336,8 +1341,11 @@ impl BashTool {
                 wake,
                 cancellation,
 				move |output_path| async move {
+                    #[cfg(all(test, not(windows)))]
+                    tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
 					cmd.envs(cloud_environment);
+					cmd.envs(session_environment);
 					cmd.env("JCODE_SESSION_ID", &session_id_env);
 					#[cfg(unix)]
 					unsafe {

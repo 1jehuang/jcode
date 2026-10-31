@@ -1188,6 +1188,7 @@ fn test_context_command_reports_session_context_snapshot() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,

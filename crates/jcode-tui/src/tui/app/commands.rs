@@ -1371,7 +1371,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.
     let images = if prompt.is_some() {
-        std::mem::take(&mut app.pending_images)
+        app.take_pending_image_payloads()
     } else {
         Vec::new()
     };
@@ -2089,7 +2089,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         }
         history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
 
-        app.push_display_message(DisplayMessage::system(history));
+        app.push_display_message(DisplayMessage::system(history).with_title("Rewind"));
         return true;
     }
 
@@ -3442,24 +3442,16 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> bool {
+    handle_alignment_command(app, trimmed)
+        || handle_reasoning_display_command(app, trimmed)
+        || handle_compact_notifications_command(app, trimmed)
+        || handle_show_agentgrep_output_command(app, trimmed)
+        || handle_tool_call_details_command(app, trimmed)
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_alignment_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_reasoning_display_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_compact_notifications_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_show_agentgrep_output_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_tool_call_details_command(app, trimmed) {
+    if handle_display_settings_command(app, trimmed) {
         return true;
     }
 

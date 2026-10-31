@@ -143,6 +143,7 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
                 })
                 .to_string(),
             ),
+            ..Default::default()
         },
     );
 
@@ -165,8 +166,13 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
         .iter()
         .position(|row| row.contains("PINNED_PREVIEW_TASK"))
         .expect("todo row");
+    let header_height = crate::tui::ui::header::build_preview_header(
+        picker.selected_session().expect("selected session"),
+        70,
+    )
+    .len();
     assert!(
-        todo_row <= 4,
+        todo_row <= header_height + 4,
         "todo band should be pinned at top, row {todo_row}:\n{text}"
     );
 }

@@ -27,7 +27,7 @@ pub struct ToolConfiguration {
 }
 
 /// Curated request surface. Internally-tagged on `"req"`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
     /// Version negotiation. Must be the first frame on a connection.
@@ -261,6 +261,12 @@ pub enum ApiRequest {
     /// suffix like `claude-opus-4-6[1m]` selects a specific context variant.
     SetModel { session_id: String, model: String },
 
+    /// Override the session context budget. Null or zero restores the default.
+    SetContextCap {
+        session_id: String,
+        max_context_tokens: Option<usize>,
+    },
+
     /// Set how much the model deliberates before answering.
     ///
     /// The cost/quality dial: `minimal`, `low`, `medium`, `high`, `xhigh`, or
@@ -279,6 +285,12 @@ pub enum ApiRequest {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+
+    /// Replace the session's process-local environment overlay. Empty clears it.
+    SetSessionEnv {
+        session_id: String,
+        env: std::collections::HashMap<String, String>,
     },
 
     /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
@@ -348,4 +360,38 @@ pub enum PermissionDecision {
     Allow,
     AllowAlways,
     Deny,
+}
+
+impl std::fmt::Debug for ApiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::SetSessionEnv { session_id, .. } = self {
+            return f
+                .debug_struct("SetSessionEnv")
+                .field("session_id", session_id)
+                .field("env", &"[REDACTED]")
+                .finish();
+        }
+        match serde_json::to_value(self) {
+            Ok(value) => std::fmt::Debug::fmt(&value, f),
+            Err(_) => f.write_str("ApiRequest([unavailable])"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_env_tests {
+    use super::*;
+
+    #[test]
+    fn session_environment_roundtrips_without_debug_secrets() {
+        let request = ApiRequest::SetSessionEnv {
+            session_id: "session-1".into(),
+            env: [("TOKEN".into(), "private-secret".into())].into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["req"], "set_session_env");
+        assert_eq!(serde_json::from_value::<ApiRequest>(json).unwrap(), request);
+        assert!(!format!("{request:?}").contains("private-secret"));
+        assert!(!format!("{request:?}").contains("TOKEN"));
+    }
 }

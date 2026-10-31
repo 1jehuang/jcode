@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn test_account_hotkeys_preserve_draft_before_control_editing() {
+    let mut app = create_test_app();
+    // Missing remote inventory makes this deterministic without reading or
+    // switching real credentials from the test machine.
+    app.is_remote = true;
+    for key in ['j', 'k'] {
+        app.input = "keep this draft".into();
+        app.cursor_pos = 4;
+        assert!(input::handle_pre_control_shortcuts(
+            &mut app,
+            KeyCode::Char(key),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert_eq!(app.input, "keep this draft");
+        assert_eq!(app.cursor_pos, 4);
+    }
+}
+
+#[test]
 fn test_disconnected_key_handler_allows_typing_and_queueing() {
     let mut app = create_test_app();
 

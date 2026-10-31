@@ -1013,6 +1013,8 @@ fn handle_openai_image_generation_item(
 }
 
 pub struct OpenAIResponsesStream {
+    last_transport_activity: std::time::Instant,
+    transport_bytes: u64,
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
     /// Carries incomplete multi-byte UTF-8 sequences across chunk boundaries
@@ -1028,6 +1030,8 @@ pub struct OpenAIResponsesStream {
 impl OpenAIResponsesStream {
     pub fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
         Self {
+            last_transport_activity: std::time::Instant::now(),
+            transport_bytes: 0,
             inner: Box::pin(stream),
             buffer: String::new(),
             utf8: jcode_core::util::Utf8StreamDecoder::new(),
@@ -1037,6 +1041,15 @@ impl OpenAIResponsesStream {
             streaming_tool_calls: HashMap::new(),
             completed_tool_items: HashSet::new(),
         }
+    }
+
+    /// Includes SSE comments and status events that do not produce agent events.
+    pub fn transport_idle_for(&self) -> std::time::Duration {
+        self.last_transport_activity.elapsed()
+    }
+
+    pub fn transport_bytes(&self) -> u64 {
+        self.transport_bytes
     }
 
     fn parse_next_event(&mut self) -> Option<StreamEvent> {
@@ -1121,6 +1134,10 @@ impl Stream for OpenAIResponsesStream {
 
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
+                    if !bytes.is_empty() {
+                        self.last_transport_activity = std::time::Instant::now();
+                        self.transport_bytes += bytes.len() as u64;
+                    }
                     let text = self.utf8.decode(&bytes);
                     self.buffer.push_str(&text);
                 }

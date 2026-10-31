@@ -34,6 +34,62 @@ fn fit_header_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>>
         })
         .collect()
 }
+
+fn product_header_line(is_canary: bool, status_items: &[&str]) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "jcode",
+        Style::default().fg(header_name_color()).bold(),
+    )];
+    if is_canary {
+        spans.push(Span::styled(" self-dev", Style::default().fg(dim_color())));
+    }
+    if !status_items.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {}", status_items.join(" · ")),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    Line::from(spans).alignment(Alignment::Left)
+}
+
+fn client_header_text(name: &str, icon: &str, connection: Option<&str>) -> String {
+    match connection {
+        Some(conn) => format!("client: {} {} {}", capitalize(name), icon, conn),
+        None => format!("client: {} {}", capitalize(name), icon),
+    }
+}
+
+fn model_header_span(model: String) -> Span<'static> {
+    Span::styled(model, Style::default().fg(rgb(255, 150, 200)).bold())
+}
+
+/// The persisted subset of the real header. Credentials, transport and binary
+/// versions are deliberately omitted when the selected session does not own them.
+pub(crate) fn build_preview_header(
+    session: &crate::tui::session_picker::SessionInfo,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![product_header_line(session.is_canary, &[])];
+    if let Some(server) = session.server_name.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("server: {server}"),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    if !session.short_name.is_empty() {
+        let icon = crate::id::session_icon(&session.short_name);
+        lines.push(Line::from(Span::styled(
+            client_header_text(&session.short_name, &icon, None),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    if let Some(model) = session.model.as_deref().filter(|model| !model.is_empty()) {
+        let nice_model =
+            header_model_display_name(model, session.provider_key.as_deref().unwrap_or_default());
+        lines.push(Line::from(model_header_span(nice_model)));
+    }
+    fit_header_lines(lines, width)
+}
 #[cfg(test)]
 use std::sync::OnceLock;
 
@@ -633,23 +689,7 @@ fn build_persistent_header_with_auth(
     // First line: `jcode` (+ `self-dev` when running a dev/canary build),
     // followed by any remaining status badges rendered dimly.
     {
-        let mut spans = vec![Span::styled(
-            "jcode".to_string(),
-            Style::default().fg(header_name_color()).bold(),
-        )];
-        if is_canary {
-            spans.push(Span::styled(
-                " self-dev".to_string(),
-                Style::default().fg(dim_color()),
-            ));
-        }
-        if !status_items.is_empty() {
-            spans.push(Span::styled(
-                format!(" · {}", status_items.join(" · ")),
-                Style::default().fg(dim_color()),
-            ));
-        }
-        lines.push(Line::from(spans).alignment(align));
+        lines.push(product_header_line(is_canary, &status_items));
     }
 
     if let Some(server_name) = server_name.as_deref() {
@@ -673,10 +713,7 @@ fn build_persistent_header_with_auth(
     }
 
     if !session_name.is_empty() {
-        let client_text = match connection_icon {
-            Some(conn) => format!("client: {} {} {}", capitalize(&session_name), icon, conn),
-            None => format!("client: {} {}", capitalize(&session_name), icon),
-        };
+        let client_text = client_header_text(&session_name, &icon, connection_icon);
         let mut spans = vec![Span::styled(
             client_text.clone(),
             Style::default().fg(dim_color()),
@@ -751,12 +788,7 @@ fn build_persistent_header_with_auth(
             model_spans.push(Span::styled(prefix, Style::default().fg(dim_color())));
         }
     }
-    model_spans.push(Span::styled(
-        nice_model.clone(),
-        // Match the info widget's model accent (pink, bold) instead of plain
-        // white so the model reads as a distinct, styled element.
-        Style::default().fg(rgb(255, 150, 200)).bold(),
-    ));
+    model_spans.push(model_header_span(nice_model.clone()));
     if let Some(upstream) = upstream.as_deref() {
         let suffix = format!(" via {}", upstream);
         if model_line_len + suffix.chars().count() <= fit_width {

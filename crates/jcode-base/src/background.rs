@@ -477,7 +477,9 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
-        let runtime_activity = crate::runtime_activity::global().enter().await;
+        let runtime_activity = crate::runtime_activity::global()
+            .enter_session(session_id)
+            .await;
         let (notify, wake) = normalize_delivery(notify, wake);
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));
@@ -531,8 +533,7 @@ impl BackgroundTaskManager {
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Spawn the background task
-        let handle = tokio::spawn(async move {
-            let _runtime_activity = runtime_activity;
+        let handle = tokio::spawn(runtime_activity.scope(async move {
             let result = execute_fn(output_path_clone.clone()).await;
 
             // The cancelling caller owns status publication, as with aborted tasks.
@@ -638,7 +639,7 @@ impl BackgroundTaskManager {
             }));
 
             result
-        });
+        }));
 
         // Track the running task
         let running_task = RunningTask {
@@ -696,7 +697,9 @@ impl BackgroundTaskManager {
     ) -> BackgroundTaskInfo {
         let mut handle = model::AbortAdoptedTask(handle);
         // Reserve before the foreground caller can release its turn/tool guard.
-        let runtime_activity = crate::runtime_activity::global().enter().await;
+        let runtime_activity = crate::runtime_activity::global()
+            .enter_session(session_id)
+            .await;
         let (notify, wake) = normalize_delivery(notify, wake);
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));
@@ -752,8 +755,7 @@ impl BackgroundTaskManager {
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
-        let wrapper_handle = tokio::spawn(async move {
-            let _runtime_activity = runtime_activity;
+        let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
@@ -857,7 +859,7 @@ impl BackgroundTaskManager {
                 status: Some(status),
                 cancelled: false,
             })
-        });
+        }));
 
         let running_task = RunningTask {
             task_id: task_id.clone(),

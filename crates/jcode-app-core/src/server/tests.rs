@@ -78,12 +78,42 @@ fn file_activity_scope_label_classifies_overlap() {
 }
 
 #[tokio::test]
+async fn session_env_live_updates_cannot_recreate_destroyed_sessions() {
+    let _guard = crate::storage::lock_test_env();
+    let sid = "session-env-live-update-cleanup";
+    let sessions = Arc::new(RwLock::new(HashMap::from([(sid.to_owned(), ())])));
+    let env = HashMap::from([("SESSION_SECRET".into(), "original".into())]);
+    super::set_live_session_env(&sessions, sid, env.clone())
+        .await
+        .unwrap();
+    assert_eq!(crate::session_env::session_env(sid), env);
+    let (update, removed) = tokio::join!(
+        super::set_live_session_env(&sessions, sid, env.clone()),
+        remove_session_entry(&sessions, sid),
+    );
+    let _ = update;
+    assert_eq!(removed, Some(()));
+    assert!(crate::session_env::session_env(sid).is_empty());
+    assert!(
+        super::set_live_session_env(&sessions, sid, env)
+            .await
+            .is_err()
+    );
+    assert!(crate::session_env::session_env(sid).is_empty());
+}
+
+#[tokio::test]
 async fn removing_server_session_clears_active_pid_marker() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
     let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
     let session_id = "session_marker_cleanup_test";
     crate::storage::register_active_pid(session_id, std::process::id());
+    crate::session_env::set_session_env(
+        session_id,
+        HashMap::from([("LIFECYCLE_SECRET".into(), "cleanup-value".into())]),
+    )
+    .unwrap();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         session_id.to_string(),
@@ -92,6 +122,7 @@ async fn removing_server_session_clears_active_pid_marker() {
     let removed = remove_session_entry(&sessions, session_id).await;
 
     assert_eq!(removed, Some("agent"));
+    assert!(crate::session_env::session_env(session_id).is_empty());
     assert!(!sessions.read().await.contains_key(session_id));
     assert!(
         !crate::storage::active_session_ids()

@@ -2,6 +2,128 @@ use super::*;
 use ratatui::style::Modifier;
 
 #[test]
+fn overscroll_directory_transition_only_shows_real_moves() {
+    assert_eq!(
+        overscroll_directory_transition(None, Some("/a/start")),
+        Some("/a/start".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start/"), Some("/a/start")),
+        Some("/a/start".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start"), Some("/b/current")),
+        Some("/a/start → /b/current".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start"), None),
+        None
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/"), Some("/b")),
+        Some("/ → /b".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/one/a/b"), Some("/two/a/b")),
+        Some("/one/a/b → /two/a/b".into())
+    );
+}
+
+#[test]
+fn overscroll_directory_transition_fits_unicode_terminal_widths() {
+    let data = crate::tui::info_widget::InfoWidgetData {
+        original_working_dir: Some("/projects/起点".into()),
+        working_dir: Some("/projects/現在".into()),
+        ..Default::default()
+    };
+    let wide = preview_overscroll_line(&data, 100);
+    let text = wide
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("/projects/起点 → /projects/現在"), "{text}");
+    for width in 0..80 {
+        assert!(preview_overscroll_line(&data, width).width() <= width as usize);
+    }
+}
+
+#[test]
+fn image_tags_are_colored_without_changing_input_geometry() {
+    for width in [3, 8, 80] {
+        let input = "界 [image 1] hi [image 22]";
+        let (lines, cursor_line, cursor_col) = wrap_input_text_with_images(
+            input,
+            input.len(),
+            width,
+            "1",
+            "> ",
+            Color::White,
+            3,
+            &|_| true,
+        );
+        let segments = wrap_input_segments(input, width);
+        let mut highlighted = String::new();
+        for (index, line) in lines.iter().enumerate() {
+            let prefix = if index == 0 { 2 } else { 1 };
+            let spans = &line.spans[prefix..];
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+                segments[index].text
+            );
+            for span in spans {
+                if span.style.fg == Some(rgb(102, 204, 221)) {
+                    assert!(span.style.add_modifier.contains(Modifier::BOLD));
+                    highlighted.push_str(&span.content);
+                }
+            }
+        }
+        assert_eq!(highlighted, "[image 1][image 22]");
+        assert_eq!(cursor_line, segments.len() - 1);
+        assert_eq!(cursor_col, segments.last().unwrap().display_width);
+    }
+}
+
+#[test]
+fn malformed_image_tags_remain_plain_text() {
+    let input = "[image ] [image x] [image 1 [image ２]";
+    let (lines, _, _) = wrap_input_text(input, 0, 80, "1", "> ", Color::White, 3);
+    assert!(
+        lines[0].spans[2..]
+            .iter()
+            .all(|span| span.style == Style::default())
+    );
+}
+
+#[test]
+fn image_tags_warn_when_payload_is_missing() {
+    let input = "[image 1] [image 2] [image 0] [image 999999999999999999999999999999]";
+    let (lines, _, _) =
+        wrap_input_text_with_images(input, 0, 100, "1", "> ", Color::White, 3, &|number| {
+            number == 2
+        });
+    let tags: Vec<_> = lines[0]
+        .spans
+        .iter()
+        .filter(|span| span.content.starts_with("[image"))
+        .collect();
+    assert_eq!(tags.len(), 4);
+    for (index, tag) in tags.iter().enumerate() {
+        assert_eq!(
+            tag.style.fg,
+            Some(if index == 1 {
+                rgb(102, 204, 221)
+            } else {
+                rgb(255, 193, 7)
+            })
+        );
+    }
+}
+
+#[test]
 fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     let mut status = crate::protocol::SwarmLiveStatus {
         phase: "running_tool".into(),
@@ -50,6 +172,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
         branch: None,
         git: None,
         context: None,
+        account_remaining: None,
         auth: None,
         provider: None,
         model: Some("Opus".into()),
@@ -69,6 +192,92 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
     let (spans, _) = overscroll_fit_facts(&local, 80);
     assert!(!text(&spans).contains('☁'));
 }
+#[test]
+fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
+    let facts = OverscrollFacts {
+        machine: None,
+        dir: Some("~/jcode".into()),
+        branch: None,
+        git: None,
+        context: Some((74_000, 256_000)),
+        account_remaining: None,
+        auth: None,
+        provider: None,
+        model: Some("Opus".into()),
+        effort: None,
+    };
+    for width in [16, 40, 200] {
+        let (spans, fits) = overscroll_fit_facts(&facts, width);
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(fits, "{width}: {text}");
+        assert!(text.contains("29%"), "{width}: {text}");
+        if width >= 40 {
+            assert!(text.contains("74k/256k ▰▱▱▱ 29% used"), "{width}: {text}");
+        } else {
+            assert!(!text.contains("74k"), "{width}: {text}");
+            assert!(!text.contains('▰') && !text.contains('▱'));
+        }
+    }
+    for (used, limit, expected, color) in [
+        (0, 0, "0%", rgb(100, 200, 100)),
+        (50, 100, "50%", rgb(255, 200, 100)),
+        (80, 100, "80%", rgb(255, 100, 100)),
+        (200, 100, "100%", rgb(255, 100, 100)),
+    ] {
+        let span = overscroll_context_percentage(used, limit);
+        assert_eq!(span.content, expected);
+        assert_eq!(span.style.fg, Some(color));
+    }
+}
+
+#[test]
+fn overscroll_account_remaining_uses_available_matching_subscription_limits() {
+    use crate::tui::info_widget::{AuthMethod, InfoWidgetData, UsageInfo, UsageProvider};
+    let mut data = InfoWidgetData::default();
+    assert_eq!(overscroll_account_remaining(&data), None);
+    data.auth_method = AuthMethod::OpenAIOAuth;
+    data.usage_info = Some(UsageInfo {
+        provider: UsageProvider::OpenAI,
+        available: true,
+        five_hour: 0.25,
+        seven_day: 0.60,
+        ..Default::default()
+    });
+    assert_eq!(overscroll_account_remaining(&data), Some(40));
+    data.usage_info.as_mut().unwrap().spark = Some(0.8);
+    assert_eq!(overscroll_account_remaining(&data), Some(20));
+    data.usage_info.as_mut().unwrap().available = false;
+    assert_eq!(overscroll_account_remaining(&data), None);
+    data.usage_info.as_mut().unwrap().limit_reached = true;
+    assert_eq!(overscroll_account_remaining(&data), Some(0));
+    data.auth_method = AuthMethod::OpenAIApiKey;
+    assert_eq!(overscroll_account_remaining(&data), None);
+    data.auth_method = AuthMethod::AnthropicOAuth;
+    assert_eq!(overscroll_account_remaining(&data), None);
+    let info = data.usage_info.as_mut().unwrap();
+    info.provider = UsageProvider::Anthropic;
+    info.available = true;
+    info.limit_reached = false;
+    info.spark = None;
+    assert_eq!(overscroll_account_remaining(&data), Some(40));
+    data.usage_info.as_mut().unwrap().five_hour = f32::NAN;
+    assert_eq!(overscroll_account_remaining(&data), None);
+}
+
+#[test]
+fn overscroll_context_formats_small_and_large_token_counts() {
+    for (tokens, expected) in [
+        (0, "0"),
+        (999, "999"),
+        (1_234, "1.2k"),
+        (74_000, "74k"),
+        (256_000, "256k"),
+        (1_000_000, "1.0M"),
+    ] {
+        assert_eq!(overscroll_format_tokens(tokens), expected);
+    }
+}
+
 #[test]
 fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
     use crate::tui::info_widget::AuthMethod;

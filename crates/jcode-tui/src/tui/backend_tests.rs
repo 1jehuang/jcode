@@ -2,6 +2,37 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
+async fn runtime_command_writes_control_request_without_prompt() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let args = vec!["set".to_string(), "model with spaces".to_string()];
+    let id = remote
+        .runtime_command("subagent_model", args.clone())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let request: Request = serde_json::from_str(&line).unwrap();
+    assert!(
+        matches!(request, Request::RuntimeCommand { id: wire_id, command, args: wire_args }
+        if wire_id == id && command == "subagent_model" && wire_args == args)
+    );
+    assert_eq!(remote.next_request_id_for_test(), id + 1);
+    assert!(remote.control_done_ids.lock().unwrap().is_empty());
+    line.clear();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn cloud_session_switch_revokes_and_aborts_before_request() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();

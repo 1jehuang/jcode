@@ -1,6 +1,26 @@
 use super::*;
 use std::ffi::OsString;
 
+#[test]
+fn subscription_type_comes_from_account_scoped_jwt_claims() {
+    for plan in ["pro", "promax", "team", "future-plan"] {
+        let payload =
+            serde_json::json!({"https://api.openai.com/auth": {"chatgpt_plan_type": plan}});
+        let token = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        assert_eq!(extract_subscription_type(&token).as_deref(), Some(plan));
+    }
+    for token in [
+        "opaque-token",
+        "header.e30.signature",
+        "header.invalid.signature",
+    ] {
+        assert_eq!(extract_subscription_type(token), None);
+    }
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,

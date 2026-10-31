@@ -409,6 +409,29 @@ fn split_corrupt_persisted_parent_is_not_hidden_by_live_fallback() {
     assert_eq!(std::fs::read(&path).unwrap(), b"invalid session JSON");
 }
 
+#[test]
+fn split_and_transfer_inherit_independent_ephemeral_environment() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = SplitTestHome::new();
+    let mut parent = crate::session::Session::create(None, None);
+    parent.save().unwrap();
+    let original = HashMap::from([("LIFECYCLE_SECRET".into(), "private-test-value".into())]);
+    crate::session_env::set_session_env(&parent.id, original.clone()).unwrap();
+    let (split_id, _) = clone_split_session(&parent.id, Some(&parent)).unwrap();
+    let (transfer_id, _) = create_transfer_child_session(&parent.id, &parent, None).unwrap();
+    crate::session_env::set_session_env(&parent.id, HashMap::new()).unwrap();
+    for child_id in [&split_id, &transfer_id] {
+        assert_eq!(crate::session_env::session_env(child_id), original);
+        let persisted =
+            std::fs::read_to_string(crate::session::session_path(child_id).unwrap()).unwrap();
+        assert!(!persisted.contains("LIFECYCLE_SECRET"));
+        assert!(!persisted.contains("private-test-value"));
+        crate::session_env::remove_session_env(child_id);
+        let _loaded = crate::session::Session::load(child_id).unwrap();
+        assert!(crate::session_env::session_env(child_id).is_empty());
+    }
+}
+
 #[tokio::test]
 async fn enabling_swarm_does_not_auto_elect_coordinator() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

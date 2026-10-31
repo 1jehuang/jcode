@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-pub const LOCAL_ACCESS_SECONDS: i64 = 900;
+pub fn local_access_seconds() -> i64 {
+    i64::from(crate::config::config().cloud.local_access_seconds)
+}
 pub const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_REQUEST_BYTES: usize = 8192;
 const MAX_REQUIREMENTS: usize = 128;
@@ -565,6 +567,16 @@ pub fn validate_lease(
     host: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<PathBuf> {
+    validate_lease_with_timeout(lease, session, host, now, local_access_seconds())
+}
+
+fn validate_lease_with_timeout(
+    lease: &crate::storage::SessionLease,
+    session: &str,
+    host: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    timeout: i64,
+) -> Result<PathBuf> {
     ensure!(
         lease.session_id == session
             && lease.epoch > 0
@@ -575,7 +587,7 @@ pub fn validate_lease(
     let updated = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)?;
     let age = now.signed_duration_since(updated);
     ensure!(
-        age >= chrono::Duration::zero() && age < chrono::Duration::seconds(LOCAL_ACCESS_SECONDS),
+        age >= chrono::Duration::zero() && age < chrono::Duration::seconds(timeout),
         "expired lease"
     );
     let root = PathBuf::from(lease.repo_root.as_ref().context("missing root")?);
@@ -592,7 +604,7 @@ fn parity_guidance() -> &'static str {
 
 pub fn migration_guidance(session_id: &str) -> String {
     format!(
-        "You are continuing session {session_id} after a machine handoff. {} Local callback access expires 15 minutes after handoff and may already be unavailable.",
+        "You are continuing session {session_id} after a machine handoff. {} Local callback access expires after the configured cloud.local_access_seconds timeout (24 hours by default) and may already be unavailable.",
         parity_guidance()
     )
 }
@@ -603,7 +615,7 @@ pub fn migration_guidance(session_id: &str) -> String {
 pub fn group_migration_guidance(session_id: &str, coordinator_session_id: &str) -> String {
     if session_id == coordinator_session_id {
         format!(
-            "You are coordinator {session_id} continuing after a group machine handoff. Root and members share one repository and its hydrated environment. Coordinate runtime/package setup once for the workspace, checking actual state first; do not claim setup succeeded until verified. Only you own the temporary local bridge, if granted. Check callback status and sync saved requirements once for the group when needed, not once per member. Deduplicate members' metadata-only missing-resource requests and fetch only resources still missing. Relay nonsecret completion or failure to members. Callback access remains scoped to your session, destination, epoch and 15-minute lease; group membership grants no additional authorization. If unavailable, arrange an explicit local push, never delegate unrestricted callback access to members. Never print or relay secret values. Record runtime/package dependencies in setup documentation and only typed resource identifiers in .jcode/cloud-environment.json. Allowed resources are explicit relative project files, named environment variables and fixed github/aws/npm credentials, never SSH private keys, keychains or arbitrary home paths."
+            "You are coordinator {session_id} continuing after a group machine handoff. Root and members share one repository and its hydrated environment. Coordinate runtime/package setup once for the workspace, checking actual state first; do not claim setup succeeded until verified. Only you own the temporary local bridge, if granted. Check callback status and sync saved requirements once for the group when needed, not once per member. Deduplicate members' metadata-only missing-resource requests and fetch only resources still missing. Relay nonsecret completion or failure to members. Callback access remains scoped to your session, destination, epoch and configured local-access timeout; group membership grants no additional authorization. If unavailable, arrange an explicit local push, never delegate unrestricted callback access to members. Never print or relay secret values. Record runtime/package dependencies in setup documentation and only typed resource identifiers in .jcode/cloud-environment.json. Allowed resources are explicit relative project files, named environment variables and fixed github/aws/npm credentials, never SSH private keys, keychains or arbitrary home paths."
         )
     } else {
         format!(
@@ -859,6 +871,11 @@ mod tests {
             updated_at: now.to_rfc3339(),
         };
         assert!(validate_lease(&lease, "id", "remote", now).is_ok());
+        assert!(validate_lease_with_timeout(&lease, "id", "remote", now, 0).is_err());
+        let later = now + chrono::Duration::hours(2);
+        assert!(validate_lease_with_timeout(&lease, "id", "remote", later, 900).is_err());
+        assert!(validate_lease_with_timeout(&lease, "id", "remote", later, 86400).is_ok());
+        assert!(validate_lease_with_timeout(&lease, "id", "remote", later, 7200).is_err());
         assert!(validate_lease(&lease, "id", "wrong", now).is_err());
         assert!(
             validate_lease(
@@ -874,7 +891,13 @@ mod tests {
         assert!(validate_lease(&lease, "id", "remote", now).is_err());
         lease.epoch = epoch;
         assert!(
-            validate_lease(&lease, "id", "remote", now + chrono::Duration::seconds(900)).is_err()
+            validate_lease(
+                &lease,
+                "id",
+                "remote",
+                now + chrono::Duration::seconds(local_access_seconds())
+            )
+            .is_err()
         );
         lease.away_host = None;
         assert!(validate_lease(&lease, "id", "remote", now).is_err());

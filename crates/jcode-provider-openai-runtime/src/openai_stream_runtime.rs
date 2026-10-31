@@ -27,14 +27,19 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
     let Some(error) = value.get("error").and_then(Value::as_object) else {
         return false;
     };
-    !*response_started
+    let recoverable = !*response_started
         && value["type"] == "error"
         && value.get("response").is_none_or(Value::is_null)
-        && envelope.keys().all(|key| {
-            matches!(
-                key.as_str(),
-                "type" | "error" | "response" | "sequence_number" | "event_id" | "request_id"
-            )
+        && envelope.iter().all(|(key, value)| {
+            match key.as_str() {
+                "type" | "error" | "response" | "sequence_number" | "event_id" | "request_id" => {
+                    true
+                }
+                // WebSocket gateways can include the HTTP-equivalent status.
+                // It is transport metadata, not a validation explanation.
+                "status" => value.is_null() || value.as_u64() == Some(400),
+                _ => false,
+            }
         })
         && error.get("type").and_then(Value::as_str) == Some("invalid_request_error")
         && error.get("message").and_then(Value::as_str) == Some("Invalid request")
@@ -44,7 +49,22 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
                 value.is_null() || value.as_str() == Some("")
             }
             _ => false,
-        })
+        });
+    if !recoverable
+        && error.get("type").and_then(Value::as_str) == Some("invalid_request_error")
+        && error.get("message").and_then(Value::as_str) == Some("Invalid request")
+    {
+        // Log shape only. Error envelopes may contain user content or headers.
+        jcode_base::logging::warn(&format!(
+            "OpenAI opaque websocket rejection not recovered: response_started={} response_present={} envelope_keys={:?} error_keys={:?} status={:?}",
+            *response_started,
+            value.get("response").is_some_and(|value| !value.is_null()),
+            envelope.keys().collect::<Vec<_>>(),
+            error.keys().collect::<Vec<_>>(),
+            value.get("status").and_then(Value::as_u64),
+        ));
+    }
+    recoverable
 }
 
 #[test]
@@ -63,6 +83,11 @@ fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
     metadata["response"] = Value::Null;
     metadata["error"]["code"] = Value::Null;
     assert!(opaque_ws_rejection(&metadata.to_string(), &mut false));
+    metadata["status"] = serde_json::json!(400);
+    assert!(opaque_ws_rejection(&metadata.to_string(), &mut false));
+    metadata["status"] = serde_json::json!(429);
+    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
+    metadata["status"] = serde_json::json!(400);
     metadata["response"] = serde_json::json!({"id":"resp_started"});
     assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
     metadata["response"] = Value::Null;

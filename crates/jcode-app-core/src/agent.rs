@@ -14,6 +14,7 @@ mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod runtime_recovery;
 mod status;
 mod streaming;
 #[cfg(test)]
@@ -742,6 +743,7 @@ impl Agent {
             }
         };
         manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
@@ -1225,6 +1227,16 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
+            if self.session.original_working_dir.is_none()
+                && self.session.working_dir != working_dir
+                && self
+                    .session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User)
+            {
+                self.session.original_working_dir = self.session.working_dir.clone();
+            }
             self.session.working_dir = working_dir;
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();

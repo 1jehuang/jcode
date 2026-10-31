@@ -809,6 +809,7 @@ fn clone_split_session(
     child.append_fork_notice(parent_session_id, parent.display_name());
     child.save()?;
 
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     let name = child.display_name().to_string();
     Ok((child.id.clone(), name))
 }
@@ -854,6 +855,7 @@ fn create_transfer_child_session(
     child.status = crate::session::SessionStatus::Closed;
     child.save()?;
     crate::todo::save_todos(&child.id, &todos)?;
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 

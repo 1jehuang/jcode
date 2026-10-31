@@ -73,7 +73,7 @@ fn lease_remaining(
             return None;
         }
     };
-    Duration::from_secs(crate::cloud_environment::LOCAL_ACCESS_SECONDS as u64)
+    Duration::from_secs(crate::cloud_environment::local_access_seconds() as u64)
         .checked_sub(age)
         .filter(|left| !left.is_zero())
 }
@@ -106,7 +106,7 @@ fn configuration() -> SessionToolConfig {
     SessionToolConfig {
         custom: vec![SessionToolDefinition {
             name: "cloud_environment".into(),
-            description: "Temporary scoped local resource bridge. Before continuing a migrated task, call status then sync to restore the saved resource manifest. Fetch required resources opaquely into cloud files. Returns status only, never secret values or file content. Records a metadata manifest. No arbitrary shell commands. Access expires after 15 minutes without renewal.".into(),
+            description: "Temporary scoped local resource bridge. Before continuing a migrated task, call status then sync to restore the saved resource manifest. Fetch required resources opaquely into cloud files. Returns status only, never secret values or file content. Records a metadata manifest. No arbitrary shell commands. Access expires after the configured cloud.local_access_seconds timeout (24 hours by default), without renewal.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
                 "action":{"type":"string","enum":["status","sync","fetch"]},
                 "reason":{"type":"string","maxLength":1024},
@@ -536,7 +536,9 @@ mod tests {
         assert!(lease_remaining(&lease, "session", "session", "host", now).is_some());
         assert!(lease_remaining(&lease, "other", "session", "host", now).is_none());
         assert!(lease_remaining(&lease, "session", "session", "other", now).is_none());
-        lease.updated_at = (now - chrono::Duration::seconds(900)).to_rfc3339();
+        lease.updated_at = (now
+            - chrono::Duration::seconds(crate::cloud_environment::local_access_seconds()))
+        .to_rfc3339();
         assert!(lease_remaining(&lease, "session", "session", "host", now).is_none());
         lease.updated_at = (now + chrono::Duration::seconds(1)).to_rfc3339();
         assert!(lease_remaining(&lease, "session", "session", "host", now).is_none());

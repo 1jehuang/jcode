@@ -37,6 +37,8 @@ pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
         #[derive(serde::Deserialize)]
         struct Lane {
             lane: String,
+            #[serde(default)]
+            after: Option<Vec<String>>,
             items: Vec<TodoItem>,
         }
 
@@ -60,6 +62,9 @@ pub(super) fn todos_from_tool_input(tc: &ToolCall) -> Option<Vec<TodoItem>> {
                 for mut item in lane.items {
                     item.stage = Some(phase.phase);
                     item.group = Some(name.to_string());
+                    if lane.after.is_some() {
+                        item.lane_after = lane.after.clone();
+                    }
                     todos.push(item);
                 }
             }
@@ -427,7 +432,7 @@ mod tests {
                 {"lane": "  parser  ", "items": [item("a"), item("b")]},
                 {"lane": "tests", "items": [item("c")]}
             ]},
-            {"phase": 2, "lanes": [{"lane": "ship", "items": [item("d")]}]}
+            {"phase": 2, "lanes": [{"lane": "ship", "after": ["a"], "items": [item("d")]}]}
         ]}))
         .unwrap();
         assert_eq!(
@@ -438,6 +443,8 @@ mod tests {
             parsed.iter().map(|t| t.stage).collect::<Vec<_>>(),
             [Some(1), Some(1), Some(1), Some(2)]
         );
+        assert_eq!(parsed[3].lane_after, Some(vec!["a".to_string()]));
+        assert!(parsed[..3].iter().all(|todo| todo.lane_after.is_none()));
         assert_eq!(
             parsed
                 .iter()
@@ -497,6 +504,7 @@ mod tests {
             status: status.to_string(),
             priority: "medium".to_string(),
             group: None,
+            lane_after: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),

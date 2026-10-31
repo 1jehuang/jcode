@@ -234,6 +234,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         let mut pool = crate::auth::account_pool::AccountPool {
             members: vec!["anthropic-api".into(), "openai:openai-fox".into()],
             excluded: vec!["claude:claude-otter".into()],
+            ..Default::default()
         };
         pool.save().unwrap();
         assert!(
@@ -283,6 +284,7 @@ fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
         crate::auth::account_pool::AccountPool {
             members: vec!["openai:openai-fox".into(), "openai:openai-otter".into()],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();
@@ -317,6 +319,7 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
         crate::auth::account_pool::AccountPool {
             members: vec!["openai:openai-otter".into(), "openai:openai-fox".into()],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();

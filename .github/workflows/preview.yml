@@ -60,9 +60,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
             compat: true
-          - os: ubuntu-24.04-arm
+            hosted: true
+          # Match the x86 tenant host for the source-pinned justrust bootstrap.
+          # ARM execution separately consumes this job's uploaded archive.
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             artifact: jcode-linux-aarch64
+            hosted: true
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
@@ -90,49 +94,52 @@ jobs:
         with:
           arch: ${{ matrix.msvc }}
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted != true
         with:
           targets: ${{ matrix.target }}
-      - uses: dtolnay/rust-toolchain@nightly
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        with:
-          targets: aarch64-unknown-linux-gnu
-          components: rust-src
       - uses: Swatinem/rust-cache@v2
+        if: matrix.hosted != true
         with:
           key: preview-${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted == true
+        with:
+          toolchain: 1.99.0
       - name: Install pinned justrust
-        if: matrix.compat != true
+        if: matrix.hosted != true
         shell: bash
         run: bash scripts/install_justrust_ci.sh
-      - name: Build portable Linux x86_64 using stable packaging
+      - name: Install source-pinned hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        run: bash scripts/install_justrust_hosted_ci.sh
+      - name: Build Linux preview on hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/build_preview_linux_hosted.sh "${{ matrix.target }}"
+      - name: Verify and package portable hosted Linux preview
         if: matrix.compat == true
         shell: bash
-        run: bash scripts/build_linux_compat.sh dist
-        env:
-          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+        run: bash scripts/package_preview_linux_hosted.sh
       - name: Build native preview
-        if: matrix.compat != true && runner.os != 'Windows'
+        if: matrix.hosted != true && runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           EXTRA_ARGS: ${{ matrix.cargo_args }}
-          # Native macOS/Windows and ARM emulated TLS require local builds.
+          # SDK-backed hosted macOS/MSVC builds still need provisioning.
           JUSTRUST_DISABLE: "1"
         run: |
           set -euo pipefail
-          if [ "$TARGET" = aarch64-unknown-linux-gnu ]; then
-            # Preserve stable release's Termux-compatible emulated TLS contract.
-            export RUSTFLAGS='-Z tls-model=emulated'
-            RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target "$TARGET" -p jcode --bin jcode
-          else
-            # Positional parameters also expand safely when empty on macOS Bash 3.2.
-            set --
-            if [ -n "$EXTRA_ARGS" ]; then
-              read -r -a extra_args <<< "$EXTRA_ARGS"
-              set -- "${extra_args[@]}"
-            fi
-            justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
+          # Positional parameters also expand safely when empty on macOS Bash 3.2.
+          set --
+          if [ -n "$EXTRA_ARGS" ]; then
+            read -r -a extra_args <<< "$EXTRA_ARGS"
+            set -- "${extra_args[@]}"
           fi
+          justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
       - name: Build Windows preview with MSVC environment
         if: runner.os == 'Windows'
         shell: pwsh
@@ -166,8 +173,11 @@ jobs:
             codesign --force --sign - --identifier com.jcode.cli "dist/$ARTIFACT"
             codesign -dv "dist/$ARTIFACT" 2>&1 | grep -qx 'Identifier=com.jcode.cli'
           fi
-          "dist/$ARTIFACT$extension" --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
-          grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+          # Never execute cross-built ARM on the x86 packaging caller.
+          if [ "$TARGET" != aarch64-unknown-linux-gnu ]; then
+            "dist/$ARTIFACT$extension" --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
+            grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+          fi
           tar czf "dist/$ARTIFACT.tar.gz" -C dist "$ARTIFACT$extension"
       - name: Verify portable preview version
         if: matrix.compat == true
@@ -184,8 +194,27 @@ jobs:
           path: dist/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
 
+  native-arm-runtime:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Consume the same immutable upload as publish, never rebuild or repackage.
+      # No hosted credentials enter this job.
+      - uses: actions/download-artifact@v4
+        with:
+          name: preview-jcode-linux-aarch64
+          path: dist
+      - name: Verify uploaded ARM archive on native Ubuntu 24.04
+        shell: bash
+        run: python3 scripts/verify_preview_arm_runtime.py dist/jcode-linux-aarch64.tar.gz
+
   publish:
-    needs: [quiet-and-ci, build]
+    needs: [quiet-and-ci, build, native-arm-runtime]
     if: github.repository == '1jehuang/jcode' && vars.JCODE_V1_PREVIEW_ENABLED != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15

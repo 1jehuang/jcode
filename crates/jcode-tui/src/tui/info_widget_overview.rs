@@ -149,10 +149,6 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
         + u16::from(info.spark.is_some())
 }
 
-fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
-    if data.cache_hit_info.is_some() { 1 } else { 0 }
-}
-
 /// Overview height. Status-line facts (model identity, context %, branch and
 /// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
@@ -160,7 +156,6 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
-        + compact_kv_cache_height(data)
         + changes_section_height(data)
         + u16::from(data.cloud_info.is_some())
 }

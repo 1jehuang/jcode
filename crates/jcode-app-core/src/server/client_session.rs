@@ -185,6 +185,7 @@ pub(super) async fn handle_clear_session(
         working_dir.as_deref(),
     );
     let new_id = new_agent.session_id().to_string();
+    crate::session_env::inherit_session_env(client_session_id, &new_id);
 
     if client_selfdev {
         new_agent.set_canary("self-dev");
@@ -200,6 +201,7 @@ pub(super) async fn handle_clear_session(
     {
         let mut sessions_guard = sessions.write().await;
         sessions_guard.remove(client_session_id);
+        crate::session_env::remove_session_env(client_session_id);
         sessions_guard.insert(new_id.clone(), Arc::clone(agent));
     }
     crate::runtime_memory_log::emit_event(
@@ -290,6 +292,7 @@ pub(super) async fn handle_clear_session(
     {
         let mut connections = client_connections.write().await;
         if let Some(info) = connections.get_mut(client_connection_id) {
+            crate::session::clear_window_closed(&new_id);
             info.session_id = new_id.clone();
             info.last_seen = Instant::now();
         }
@@ -1347,6 +1350,7 @@ async fn remove_detached_source_if_unclaimed(
         .unwrap_or(false);
     if owns_source {
         sessions_guard.remove(old_session_id);
+        crate::session_env::remove_session_env(old_session_id);
     }
     owns_source
 }
@@ -1384,6 +1388,7 @@ async fn claim_live_target_agent(
     }
 
     let info = connections.get_mut(client_connection_id)?;
+    crate::session::clear_window_closed(session_id);
     info.session_id = session_id.to_string();
     info.client_instance_id = client_instance_id.map(str::to_string);
     info.last_seen = Instant::now();
@@ -1857,6 +1862,11 @@ pub(super) async fn handle_resume_session(
             {
                 let mut sessions_guard = sessions.write().await;
                 sessions_guard.remove(&old_session_id);
+                if old_session_id != session_id {
+                    // Attaching existing history must not copy credentials from
+                    // the temporary source into the target session.
+                    crate::session_env::remove_session_env(&old_session_id);
+                }
                 sessions_guard.insert(session_id.clone(), Arc::clone(agent));
             }
             lap("sessions");
@@ -1875,6 +1885,7 @@ pub(super) async fn handle_resume_session(
             {
                 let mut connections = client_connections.write().await;
                 if let Some(info) = connections.get_mut(client_connection_id) {
+                    crate::session::clear_window_closed(&session_id);
                     info.session_id = session_id.clone();
                     info.client_instance_id = incoming_client_instance_id.clone();
                     info.last_seen = Instant::now();

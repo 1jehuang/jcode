@@ -18,6 +18,87 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 struct MockProvider(Option<&'static str>);
 
 #[derive(Clone)]
+struct StaticDiscoveryProvider(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl Provider for StaticDiscoveryProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+    fn name(&self) -> &str {
+        "static-discovery-regression"
+    }
+    fn model(&self) -> String {
+        "static-fallback".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+    fn available_models_display(&self) -> Vec<String> {
+        let mut models = vec![self.model()];
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            models.push("newly-published-model".into());
+        }
+        models
+    }
+    async fn prefetch_models(&self) -> Result<()> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn model_prefetch_discovers_new_models_despite_static_fallback_names() {
+    let _guard = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let provider: Arc<dyn Provider> = Arc::new(StaticDiscoveryProvider(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )));
+            let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+            assert!(!provider.model_capabilities_need_refresh());
+            assert_eq!(provider.available_models_display(), vec!["static-fallback"]);
+            let mut events = crate::bus::Bus::global().subscribe();
+            super::spawn_model_prefetch_update(provider.clone(), agent.clone());
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        crate::bus::BusEvent::ModelsUpdated
+                    ) && provider.available_models_display().len() == 2
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("static fallback names must not suppress discovery or publication");
+            let event =
+                crate::server::provider_control::available_models_updated_event(&agent).await;
+            let crate::protocol::ServerEvent::AvailableModelsUpdated {
+                available_models, ..
+            } = event
+            else {
+                panic!("expected picker catalog update")
+            };
+            assert!(
+                available_models
+                    .iter()
+                    .any(|model| model == "newly-published-model")
+            );
+        });
+}
+
+#[derive(Clone)]
 struct CapabilityRefreshProvider {
     refreshed: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -747,121 +828,8 @@ async fn assert_history_service_tier_and_pdf_capability(
     }
 }
 
-#[tokio::test]
-async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
-    for tier in [Some("priority"), Some("flex"), None] {
-        assert_model_catalog_service_tier(tier, true).await;
-    }
-}
-
-#[tokio::test]
-async fn handle_get_model_catalog_preserves_live_service_tier() {
-    for tier in [Some("priority"), Some("flex"), None] {
-        assert_model_catalog_service_tier(tier, false).await;
-    }
-}
-
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
-)]
-async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: bool) {
-    let _guard = crate::storage::lock_test_env();
-    let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
-
-    let session_id = "session_busy_model_catalog_fallback";
-    let mut session = crate::session::Session::create_with_id(
-        session_id.to_string(),
-        None,
-        Some("busy model catalog".to_string()),
-    );
-    session.model = Some("persisted-model".to_string());
-    session.save().expect("save session");
-
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider.clone(),
-        Registry::empty(),
-        session.clone(),
-        None,
-    )));
-    let busy_guard = if busy { Some(agent.lock().await) } else { None };
-
-    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
-    let (_reader_a, writer_a) = stream_a.into_split();
-    let writer = Arc::new(Mutex::new(writer_a));
-
-    tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        handle_get_model_catalog(43, session_id, &agent, &provider, &writer),
-    )
-    .await
-    .expect("model catalog must not wait for busy agent mutex")
-    .expect("model catalog fallback should write history event");
-
-    drop(busy_guard);
-    drop(writer);
-
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read model catalog event bytes");
-    let mut cursor = std::io::Cursor::new(bytes);
-    let mut line = String::new();
-    cursor.read_line(&mut line).expect("read first line");
-    let event: crate::protocol::ServerEvent =
-        serde_json::from_str(line.trim()).expect("decode model catalog event");
-
-    match event {
-        crate::protocol::ServerEvent::History {
-            id,
-            session_id: returned_session_id,
-            provider_name,
-            provider_model,
-            service_tier,
-            available_service_tiers,
-            reasoning_effort,
-            provider_oauth_account_label,
-            ..
-        } => {
-            assert_eq!(id, 43);
-            assert_eq!(
-                provider_oauth_account_label.as_deref(),
-                tier.map(|_| "daemon-work")
-            );
-            assert_eq!(returned_session_id, session_id);
-            assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
-            assert_eq!(
-                provider_model.as_deref(),
-                Some(if busy {
-                    "persisted-model"
-                } else {
-                    "mock-model"
-                })
-            );
-            assert_eq!(service_tier.as_deref(), tier);
-            assert_eq!(
-                available_service_tiers,
-                Some(if tier.is_some() {
-                    vec!["priority".to_string(), "flex".to_string()]
-                } else {
-                    Vec::new()
-                })
-            );
-            assert_eq!(reasoning_effort.as_deref(), Some("high"));
-        }
-        other => panic!("expected history event, got {:?}", other),
-    }
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-}
+#[path = "client_state_tests/model_catalog.rs"]
+mod model_catalog;
 
 struct ReloadHistoryEnvGuard {
     prev_home: Option<std::ffi::OsString>,

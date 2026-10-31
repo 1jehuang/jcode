@@ -15,6 +15,18 @@ pub(super) fn render(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Option<Vec<Line<'static>>> {
+    render_with_gate_diagnostics(
+        msg,
+        width,
+        crate::config::config().features.todo_gate_diagnostics,
+    )
+}
+
+fn render_with_gate_diagnostics(
+    msg: &DisplayMessage,
+    width: u16,
+    show_gate_diagnostics: bool,
+) -> Option<Vec<Line<'static>>> {
     if msg.title.as_deref() != Some("Todo completion") {
         return None;
     }
@@ -35,7 +47,9 @@ pub(super) fn render(
     let width = width.max(1) as usize;
     let mut lines =
         render_finished_todo_summary(&snapshot.todos, "", width, Some("Todo completion"));
-    lines.extend(render_gate_categories(&snapshot.observations, width));
+    if show_gate_diagnostics {
+        lines.extend(render_gate_categories(&snapshot.observations, width));
+    }
     Some(lines)
 }
 
@@ -114,7 +128,10 @@ mod tests {
             "plan": {}, "goals": []
         }).to_string());
         msg.title = Some("Todo completion".into());
-        let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+        let hidden = render_with_gate_diagnostics(&msg, 80, false).unwrap();
+        assert_eq!(hidden.len(), 1);
+        assert!(!hidden[0].to_string().contains("gates"));
+        let lines = render_with_gate_diagnostics(&msg, 80, true).unwrap();
         let categories = render_gate_categories(&observations, 80);
         assert_eq!(&lines[1..7], categories.as_slice());
         assert_eq!(lines.len(), 7);

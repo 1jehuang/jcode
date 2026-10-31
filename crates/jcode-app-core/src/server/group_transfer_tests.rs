@@ -497,3 +497,261 @@ async fn live_agents_are_reserved_together_then_only_selected_agents_evicted() {
     assert!(two.lock().await.ensure_session_lease().is_err());
     assert!(unrelated.lock().await.ensure_session_lease().is_ok());
 }
+
+#[tokio::test]
+async fn scoped_admission_allows_unrelated_turn_but_rejects_any_selected_swarm_callback() {
+    let _home = TestHome::new();
+    let sessions = agents();
+    let state = state();
+    let gate = Arc::new(crate::runtime_activity::ActivityGate::default());
+    let selected = bundle(
+        vec![swarm("selected", &["leader", "worker"])],
+        &["leader", "worker"],
+    );
+    for id in ["leader", "worker"] {
+        save_session(id, 1);
+        inbound_lease(id, 1);
+    }
+    import_bundle(&selected, &sessions, &state).await.unwrap();
+    for id in ["leader", "worker"] {
+        storage::remove_session_lease(id);
+    }
+    let unrelated = gate.try_enter_session("unrelated").unwrap();
+    let inspect = "group_transfer:inspect:{\"session_ids\":[\"worker\"]}";
+    let raw = handle_with_gate(inspect, &sessions, &state, &gate)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut expected: GroupTransferBundle = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        expected.sessions.len(),
+        2,
+        "selecting a worker includes its coordinator"
+    );
+    expected.destination_host = "cloud".into();
+    let prepare = format!(
+        "group_transfer:prepare:{}",
+        serde_json::json!({
+            "session_ids": ["worker"], "destination_host": "cloud", "expected": expected,
+        })
+    );
+    // The originating turn has finished. Its detached callback alone must
+    // exclude both inspection and prepare of the entire selected swarm.
+    let callback_gate = gate.clone();
+    let callback = gate
+        .spawn_session("leader", async move {
+            callback_gate.spawn(std::future::pending::<()>()).unwrap()
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    for command in [inspect, prepare.as_str()] {
+        let error = handle_with_gate(command, &sessions, &state, &gate)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("idle_admission"), "{error:#}");
+        assert!(storage::read_session_lease("leader").is_none());
+        assert!(storage::read_session_lease("worker").is_none());
+    }
+    callback.abort();
+    let _ = callback.await;
+    handle_with_gate(&prepare, &sessions, &state, &gate)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage::read_session_lease("leader")
+            .unwrap()
+            .away_host
+            .as_deref(),
+        Some("cloud")
+    );
+    assert_eq!(
+        storage::read_session_lease("worker")
+            .unwrap()
+            .away_host
+            .as_deref(),
+        Some("cloud")
+    );
+    assert!(gate.try_idle().is_none(), "unrelated turn remains running");
+    drop(unrelated);
+}
+
+#[tokio::test]
+async fn scoped_bus_callback_reserves_until_dispatch_and_rechecks_ownership_after_fence() {
+    let _home = TestHome::new();
+    save_session("selected", 0);
+    let bus = crate::bus::Bus::new_isolated_for_tests();
+    let mut receiver = bus.subscribe_runtime();
+    let event = crate::bus::BusEvent::SwarmAwaitCompleted(crate::bus::SwarmAwaitCompleted {
+        session_id: "selected".into(),
+        completed: true,
+        summary: "done".into(),
+        notification: "continue".into(),
+        notify: true,
+        wake: true,
+    });
+    let gate = crate::runtime_activity::global();
+    let selected = BTreeSet::from(["selected".to_string()]);
+    bus.publish(event.clone());
+    assert!(
+        gate.try_idle_sessions(&selected).is_none(),
+        "publication reserves before receipt"
+    );
+    let delivery = receiver.recv().await.unwrap();
+    assert!(
+        gate.try_idle_sessions(&selected).is_none(),
+        "receipt is not dispatch completion"
+    );
+    let unrelated = gate
+        .try_idle_sessions(&BTreeSet::from(["unrelated".into()]))
+        .unwrap();
+    drop(unrelated);
+    drop(delivery);
+    let fence = gate.try_idle_sessions(&selected).unwrap();
+    // A late publisher is queued, never blocks the synchronous producer, and
+    // cannot dispatch while the selected session's transfer fence is held.
+    bus.publish(event);
+    let delivery = receiver.recv().await.unwrap();
+    let mut admission = Box::pin(super::super::background_tasks::admit_runtime_delivery(
+        &delivery.event,
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut admission)
+            .await
+            .is_err()
+    );
+    inbound_lease("selected", 1);
+    drop(fence);
+    assert!(
+        admission.await.is_none(),
+        "inbound/away ownership denies stale source callbacks"
+    );
+    drop(delivery);
+    storage::remove_session_lease("selected");
+    assert!(
+        super::super::background_tasks::admit_runtime_delivery(
+            &crate::bus::BusEvent::SwarmAwaitCompleted(crate::bus::SwarmAwaitCompleted {
+                session_id: "selected".into(),
+                completed: true,
+                summary: "done".into(),
+                notification: "continue".into(),
+                notify: true,
+                wake: true,
+            })
+        )
+        .await
+        .is_some()
+    );
+    let path = storage::session_leases_dir().unwrap().join("selected.json");
+    std::fs::write(path, "not-json").unwrap();
+    assert!(
+        super::super::background_tasks::admit_runtime_delivery(&crate::bus::BusEvent::TodoUpdated(
+            crate::bus::TodoEvent {
+                session_id: "selected".into(),
+                todos: vec![],
+            }
+        ))
+        .await
+        .is_none(),
+        "malformed ownership must fail closed"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn production_transport_inspect_prepare_abort_with_unrelated_active_session() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let _home = TestHome::new();
+    save_session("selected", 0);
+    let server = super::super::Server::new_with_name(
+        Arc::new(IdleProvider),
+        Some("scoped-transfer-test".into()),
+    );
+    let (client, stream) = tokio::net::UnixStream::pair().unwrap();
+    let unrelated = crate::runtime_activity::global()
+        .try_enter_session("unrelated")
+        .unwrap();
+    let handler = tokio::spawn(super::super::debug::handle_debug_client(
+        stream,
+        server.sessions,
+        server.is_processing,
+        server.session_id,
+        server.provider,
+        server.client_connections,
+        server.swarm_state.members,
+        server.swarm_state.swarms_by_id,
+        server.shared_context,
+        server.swarm_state.plans,
+        server.swarm_state.coordinators,
+        server.file_touch,
+        server.channel_subscriptions,
+        server.channel_subscriptions_by_session,
+        server.client_debug_state,
+        server.client_debug_response_tx,
+        server.debug_jobs,
+        server.event_history,
+        server.event_counter,
+        server.swarm_event_tx,
+        server.identity,
+        std::time::Instant::now(),
+        None,
+        None,
+        server.shutdown_signals,
+        server.soft_interrupt_queues,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut expected = None;
+    for id in 1..=3 {
+        let command = match id {
+            1 => "group_transfer:inspect:{\"session_ids\":[\"selected\"]}".to_string(),
+            2 => format!(
+                "server:group_transfer:prepare:{}",
+                serde_json::json!({
+                    "session_ids": ["selected"], "destination_host": "cloud", "expected": expected,
+                })
+            ),
+            _ => format!(
+                "group_transfer:abort:{}",
+                serde_json::to_string(&expected).unwrap()
+            ),
+        };
+        let request = serde_json::json!({"type":"debug_command", "id":id, "command":command});
+        writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["type"], "debug_response", "{response}");
+        assert_eq!(response["id"], id);
+        assert_eq!(response["ok"], true, "{response}");
+        if id == 1 {
+            let mut bundle: GroupTransferBundle =
+                serde_json::from_str(response["output"].as_str().unwrap()).unwrap();
+            bundle.destination_host = "cloud".into();
+            expected = Some(bundle);
+        } else if id == 2 {
+            assert_eq!(
+                storage::read_session_lease("selected")
+                    .unwrap()
+                    .away_host
+                    .as_deref(),
+                Some("cloud")
+            );
+        } else {
+            assert!(storage::read_session_lease("selected").is_none());
+        }
+    }
+    drop(unrelated);
+    drop(writer);
+    drop(reader);
+    handler.await.unwrap().unwrap();
+}

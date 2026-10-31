@@ -1,5 +1,80 @@
 # Harness details
 
+## Session subprocess environment
+
+Clients can replace the current session's subprocess environment overrides using
+`SetSessionEnv` (or the SDK's `setSessionEnv` / `set_session_env` helper). The map
+replaces, rather than merges with, previous overrides. An empty map clears it.
+Keys must be nonempty and contain neither `=` nor NUL, values cannot contain NUL,
+and `JCODE_*` keys are reserved (case-insensitively).
+
+These overrides apply to session-owned Bash subprocess launches, including queued
+background launches. Each accepted job keeps its own snapshot. Updating or
+clearing a session's map does not alter already accepted jobs or running
+processes. Overrides do not mutate the daemon's process environment. They are
+not a general override of provider authentication/configuration, shared MCP
+servers, or unrelated daemon services.
+
+Forks, transfers, and swarm children receive independent copies of their parent's
+current overrides. Subsequent parent updates do not update existing children.
+Clearing conversation history carries overrides to the replacement session ID.
+Attaching an existing session uses that target's overrides, never the temporary
+connecting session's map.
+Session teardown removes the live registry entry, not environment copies already
+held by running jobs. Independent sessions do not receive another session's map.
+
+**Overrides are ephemeral and are explicitly lost on daemon restart or reload.**
+They are not saved in session JSON, journals, reload recovery, or conversation
+history. Loading a saved session does not restore them. Clients must reapply
+overrides before submitting resumed work, including after reconnecting to a
+restarted daemon. Automatic recovery may run without them: this feature adds no
+fail-closed recovery barrier and must not be treated as one.
+
+This is environment isolation, not a security sandbox or secret-redaction system.
+The registry does not intentionally log or persist values, but a command can print
+its environment into tool output, write it to disk, or transmit it elsewhere.
+Subprocesses inherit ordinary daemon environment variables unless overridden,
+and OS process inspection or another program running as the same user may expose
+secrets. Only supply credentials to trusted commands and trusted child agents.
+
+## Session context ceilings
+
+The harness API supports a persistent compaction ceiling for each session:
+
+```json
+{"v":1,"id":42,"req":"set_context_cap","session_id":"session-id","max_context_tokens":600000}
+```
+
+The reply reports both the normalized override and the effective budget:
+
+```json
+{"v":1,"reply_to":42,"ev":"context_cap_changed","session_id":"session-id","max_context_tokens":600000,"effective_budget":600000}
+```
+
+The effective budget is the smaller of the model's context window and the session
+ceiling. If no session ceiling is set, `[compaction] max_context_tokens` supplies
+the ceiling instead. A global value of `0` means the model window is uncapped.
+A session override replaces the global ceiling, so it can raise or lower it, but
+can never exceed the model window.
+
+Pass `0` or `null` to clear an override and return to the current global default.
+Overrides are isolated between sessions, saved with the session, and restored on
+resume after a daemon restart. Older sessions without this field inherit the
+global default. Model changes recalculate the budget without discarding the
+override.
+
+Changes requested during a running turn wait for the session lock without blocking
+the connection's request reader. Lowering the ceiling does not interrupt the
+active request or immediately rewrite the transcript. Existing compaction
+thresholds apply to subsequent requests. Use `compact` to request compaction
+explicitly. The ceiling is a compaction budget, not an exact outbound token limit.
+
+Rust SDK: `client.set_context_cap(session_id, Some(600_000))`.
+TypeScript SDK: `await client.setContextCap(sessionId, 600_000)`.
+Both return the effective budget. Live `token_usage` events also carry an optional
+`effective_budget` from the daemon, allowing clients to render a context meter
+without treating the model's full window as the active compaction budget.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.
@@ -43,6 +118,26 @@ Define plans as **phases → lanes → items**, including plans with only one ph
 ```
 
 Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `id` rather than resending the hierarchy. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
+
+A lane can optionally replace the default whole-prior-phase barrier with specific
+prerequisite todo IDs from strictly earlier phases. For example, add this phase
+after the phase above:
+
+```json
+{"phase": 2, "lanes": [{"lane": "tests", "after": ["implement"], "items": [
+  {"id": "test", "content": "Test the change", "status": "pending", "priority": "high"}
+]}]}
+```
+
+The tests lane can start as soon as `implement` is successfully completed, even
+if an unrelated lane in phase 1 is still running. Omit `after` to retain the
+phase barrier. When present, `after` must contain unique, existing todo IDs and
+must not be empty. Saved items
+carry this setting as `lane_after`. Cancelled or deleted prerequisites do not
+satisfy the dependency. The TUI shows concise `tests: after 1/1 · met`
+progress and does not dim a prerequisite-ready lane merely because its phase is
+later. This note describes the prerequisite gate, not the lane's lifecycle or
+other blockers.
 
 ## Completely blocked
 

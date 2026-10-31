@@ -894,6 +894,7 @@ impl Provider for AntigravityProvider {
                     "Antigravity model catalog refresh failed; keeping fallback list: {}",
                     err
                 ));
+                return Err(err);
             }
         }
 

@@ -102,10 +102,36 @@ pub(crate) async fn handle_account_command_remote(
     trimmed: &str,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<bool> {
+    if crate::tui::is_ssh_remote() {
+        let words: Vec<_> = trimmed.split_whitespace().collect();
+        if words.get(0..2) == Some(&["/auth", "doctor"][..]) {
+            let args = std::iter::once("doctor".to_string())
+                .chain(words[2..].iter().map(|word| word.to_string()))
+                .collect();
+            remote.runtime_command("ssh_account", args).await?;
+            return Ok(true);
+        }
+    }
     let Some(parsed) = parse_account_command(trimmed) else {
         return Ok(false);
     };
     match parsed {
+        Ok(AccountCommand::Remove { provider_id, label })
+            if crate::tui::is_ssh_remote() && label.ends_with(" confirm") =>
+        {
+            let target = label.strip_suffix(" confirm").unwrap();
+            remote
+                .runtime_command(
+                    "ssh_account",
+                    vec![
+                        "remove".into(),
+                        provider_id,
+                        target.to_string(),
+                        "confirm".into(),
+                    ],
+                )
+                .await?;
+        }
         Ok(command) => execute_account_command_remote(app, command, remote).await?,
         Err(message) => app.push_display_message(DisplayMessage::error(message)),
     }
@@ -209,6 +235,10 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             },
             "settings" => AccountCommand::ShowSettings {
                 provider_id: provider.id.to_string(),
+            },
+            "login" if !value.is_empty() => AccountCommand::Add {
+                provider_id: provider.id.to_string(),
+                label: Some(value.to_string()),
             },
             "login" => AccountCommand::Login {
                 provider_id: provider.id.to_string(),
@@ -372,6 +402,15 @@ pub(crate) fn account_command_from_picker(
 }
 
 pub(crate) fn execute_account_command_local(app: &mut App, command: AccountCommand) {
+    if crate::tui::is_ssh_remote() {
+        match command {
+            AccountCommand::OpenOverlay { provider_filter } => {
+                app.open_remote_account_picker(provider_filter.as_deref())
+            }
+            _ => app.remote_account_management_notice(),
+        }
+        return;
+    }
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
             if app.should_open_inline_account_picker(provider_filter.as_deref()) {
@@ -447,123 +486,218 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
     }
 }
 
+/// SSH account commands execute on the runtime host without reading laptop
+/// auth/config. Normal local shared-daemon clients keep their local behavior.
 pub(crate) async fn execute_account_command_remote(
     app: &mut App,
     command: AccountCommand,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<()> {
+    // Ordinary shared-daemon clients run on the same host as their auth/config.
+    // is_remote means wire-connected, not SSH. Only SSH/cloud must isolate the
+    // laptop stores. Named switches remain daemon-only for every wire client.
+    if !crate::tui::is_ssh_remote()
+        && !matches!(
+            &command,
+            AccountCommand::Switch { .. } | AccountCommand::SwitchShorthand { .. }
+        )
+    {
+        match command {
+            AccountCommand::SetOpenAiTransport(value) => {
+                save_openai_transport_setting_local(app, value.as_deref());
+                remote
+                    .set_transport(value.as_deref().unwrap_or("auto"))
+                    .await?;
+            }
+            AccountCommand::SetOpenAiEffort(value) => {
+                save_openai_effort_setting_local(app, value.as_deref());
+                if let Some(value) = value.as_deref() {
+                    remote.set_reasoning_effort(value).await?;
+                }
+            }
+            AccountCommand::SetOpenAiFast(enabled) => {
+                save_openai_fast_setting_local(app, enabled);
+                remote
+                    .set_service_tier(if enabled { "priority" } else { "off" })
+                    .await?;
+            }
+            other => execute_account_command_local(app, other),
+        }
+        return Ok(());
+    }
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
-            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
-                app.open_account_picker(provider_filter.as_deref());
-            } else {
-                app.open_account_center(provider_filter.as_deref());
-            }
+            app.open_remote_account_picker(provider_filter.as_deref());
+            remote.poll_account_usage().await?;
         }
-        AccountCommand::Doctor { provider_id } => {
-            execute_account_command_local(app, AccountCommand::Doctor { provider_id })
-        }
-        AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => {
-                if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch account: {}",
-                        e
-                    )));
+        AccountCommand::Switch { provider_id, label } => {
+            match provider_id.as_str() {
+                "claude" => remote.switch_anthropic_account(&label).await?,
+                "openai" => remote.switch_openai_account(&label).await?,
+                _ => {
+                    app.remote_account_management_notice();
                     return Ok(());
                 }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.set_context_limit_and_sync_budget(app.provider.context_window());
-                remote.switch_anthropic_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(
-                    crate::tui::app::helpers::account_switch_notice("Anthropic", &label),
-                ));
-                app.set_status_notice(format!("Account: switched to {}", label));
             }
-            "openai" => {
-                if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch OpenAI account: {}",
-                        e
-                    )));
-                    return Ok(());
-                }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.set_context_limit_and_sync_budget(app.provider.context_window());
-                remote.switch_openai_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(
-                    crate::tui::app::helpers::account_switch_notice("OpenAI", &label),
-                ));
-                app.set_status_notice(format!("OpenAI account: switched to {}", label));
-            }
-            _ => execute_account_command_local(app, AccountCommand::Switch { provider_id, label }),
-        },
+            // Sending is not acknowledgement. The daemon publishes the actual
+            // account/provider state or an error asynchronously.
+            app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
+                provider_id,
+                label: label.clone(),
+            });
+            app.set_status_notice(format!("Account switch requested: {label}"));
+        }
         AccountCommand::SwitchShorthand { label } => {
-            let has_anthropic = crate::auth::claude::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            let has_openai = crate::auth::codex::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            match (has_anthropic, has_openai) {
-                (true, false) => {
-                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.set_context_limit_and_sync_budget(app.provider.context_window());
-                    remote.switch_anthropic_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(
-                        crate::tui::app::helpers::account_switch_notice("Anthropic", &label),
+            let inventory = if crate::tui::is_ssh_remote() {
+                crate::usage::remote_account_list().map(|(claude, openai)| {
+                    (
+                        claude.iter().any(|account| account.label == label),
+                        openai.iter().any(|account| account.label == label),
+                    )
+                })
+            } else {
+                Some((
+                    crate::auth::claude::list_accounts()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|account| account.label == label),
+                    crate::auth::codex::list_accounts()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|account| account.label == label),
+                ))
+            };
+            let Some((has_claude, has_openai)) = inventory else {
+                app.push_display_message(DisplayMessage::system(
+                    "Remote account inventory is not available yet. Retry /accounts, or use /account claude switch <label> or /account openai switch <label>.",
+                ));
+                remote.poll_account_usage().await?;
+                return Ok(());
+            };
+            match (has_claude, has_openai) {
+                (true, false) => remote.switch_anthropic_account(&label).await?,
+                (false, true) => remote.switch_openai_account(&label).await?,
+                _ => {
+                    app.push_display_message(DisplayMessage::error(
+                        "Remote account label is missing or ambiguous. Use /account claude switch <label> or /account openai switch <label>.",
                     ));
-                    app.set_status_notice(format!("Account: switched to {}", label));
+                    return Ok(());
                 }
-                (false, true) => {
-                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch OpenAI account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.set_context_limit_and_sync_budget(app.provider.context_window());
-                    remote.switch_openai_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(
-                        crate::tui::app::helpers::account_switch_notice("OpenAI", &label),
-                    ));
-                    app.set_status_notice(format!("OpenAI account: switched to {}", label));
-                }
-                _ => execute_account_command_local(app, AccountCommand::SwitchShorthand { label }),
+            }
+            app.set_status_notice(format!("Account switch requested: {label}"));
+        }
+        AccountCommand::Login { provider_id }
+        | AccountCommand::Add {
+            provider_id,
+            label: None,
+        } if crate::tui::is_ssh_remote() => {
+            app.handle_ssh_login_command(&format!("/login {provider_id}"));
+        }
+        AccountCommand::Add {
+            provider_id,
+            label: Some(label),
+        } if crate::tui::is_ssh_remote() => {
+            app.start_ssh_account_login(&provider_id, &label);
+        }
+        other if crate::tui::is_ssh_remote() => {
+            if let Some(args) = ssh_account_runtime_args(&other) {
+                remote.runtime_command("ssh_account", args).await?;
+            } else {
+                app.remote_account_management_notice();
             }
         }
-        AccountCommand::SetOpenAiTransport(value) => {
-            save_openai_transport_setting_local(app, value.as_deref());
-            remote
-                .set_transport(value.as_deref().unwrap_or("auto"))
-                .await?;
-        }
-        AccountCommand::SetOpenAiEffort(value) => {
-            save_openai_effort_setting_local(app, value.as_deref());
-            if let Some(value) = value.as_deref() {
-                remote.set_reasoning_effort(value).await?;
-            }
-        }
-        AccountCommand::SetOpenAiFast(enabled) => {
-            save_openai_fast_setting_local(app, enabled);
-            remote
-                .set_service_tier(if enabled { "priority" } else { "off" })
-                .await?;
-        }
-        other => execute_account_command_local(app, other),
+        _ => app.remote_account_management_notice(),
     }
     Ok(())
+}
+
+fn ssh_account_runtime_args(command: &AccountCommand) -> Option<Vec<String>> {
+    let args = match command {
+        AccountCommand::Doctor { provider_id } => std::iter::once("doctor".to_string())
+            .chain(provider_id.clone())
+            .collect(),
+        AccountCommand::ShowSettings { provider_id } => {
+            vec!["settings".into(), provider_id.clone()]
+        }
+        AccountCommand::Remove { provider_id, label } => {
+            vec!["remove".into(), provider_id.clone(), label.clone()]
+        }
+        AccountCommand::SetDefaultProvider(v) => vec![
+            "default-provider".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetDefaultModel(v) => vec![
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiTransport(v) => vec![
+            "openai".into(),
+            "transport".into(),
+            v.clone().unwrap_or_else(|| "auto".into()),
+        ],
+        AccountCommand::SetOpenAiEffort(v) => vec![
+            "openai".into(),
+            "effort".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiFast(v) => vec![
+            "openai".into(),
+            "fast".into(),
+            if *v { "on" } else { "off" }.into(),
+        ],
+        AccountCommand::SetCopilotPremium(v) => vec![
+            "copilot".into(),
+            "premium".into(),
+            v.clone().unwrap_or_else(|| "normal".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiBase(v) => vec![
+            "compat".into(),
+            "api-base".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiKeyName(v) => vec![
+            "compat".into(),
+            "api-key-name".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatEnvFile(v) => vec![
+            "compat".into(),
+            "env-file".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatDefaultModel(v) => vec![
+            "compat".into(),
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        _ => return None,
+    };
+    Some(args)
+}
+
+pub(crate) async fn handle_ssh_usage_command_remote(
+    _app: &mut App,
+    input: &str,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) -> anyhow::Result<bool> {
+    if !crate::tui::is_ssh_remote() {
+        return Ok(false);
+    }
+    let mut words = input.split_whitespace();
+    let operation = match words.next() {
+        Some("/usage") => "usage",
+        Some("/reset") => "reset",
+        _ => return Ok(false),
+    };
+    remote
+        .runtime_command(
+            "ssh_account",
+            std::iter::once(operation.to_string())
+                .chain(words.map(str::to_string))
+                .collect(),
+        )
+        .await?;
+    Ok(true)
 }
 
 fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&str>) {
@@ -1199,6 +1333,44 @@ mod tests {
                 provider_filter: None
             }))
         ));
+    }
+
+    #[test]
+    fn named_provider_login_does_not_discard_label() {
+        assert!(
+            matches!(parse_account_command("/account openai login work team"), Some(Ok(AccountCommand::Add { provider_id, label: Some(label) })) if provider_id == "openai" && label == "work team")
+        );
+    }
+
+    #[test]
+    fn ssh_account_runtime_arguments_preserve_labels_and_clear_values() {
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Remove {
+                provider_id: "openai".into(),
+                label: "work confirm".into()
+            })
+            .unwrap(),
+            vec!["remove", "openai", "work confirm"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetDefaultModel(None)).unwrap(),
+            vec!["default-model", "clear"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetOpenAiFast(true)).unwrap(),
+            vec!["openai", "fast", "on"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Doctor { provider_id: None }).unwrap(),
+            vec!["doctor"]
+        );
+        assert!(
+            ssh_account_runtime_args(&AccountCommand::Add {
+                provider_id: "openai".into(),
+                label: Some("work".into())
+            })
+            .is_none()
+        );
     }
 
     #[test]

@@ -1370,6 +1370,27 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Override the context budget. None or zero clears it. Returns the
+    /// authoritative effective budget after applying the override.
+    pub fn set_context_cap(
+        &self,
+        session_id: &str,
+        max_context_tokens: Option<usize>,
+    ) -> Result<usize> {
+        match self
+            .request_ok(ApiRequest::SetContextCap {
+                session_id: session_id.to_string(),
+                max_context_tokens,
+            })?
+            .event
+        {
+            ApiEvent::ContextCapChanged {
+                effective_budget, ..
+            } => Ok(effective_budget),
+            other => Err(unexpected("context_cap_changed", &other)),
+        }
+    }
+
     /// Set how much the model deliberates before answering. The accepted set
     /// is per-provider, so this takes a string rather than a union that would
     /// go stale.
@@ -1400,6 +1421,19 @@ impl JcodeClient {
         self.request_ok(ApiRequest::RenameSession {
             session_id: session_id.to_string(),
             title,
+        })
+        .map(drop)
+    }
+
+    /// Replace the session's process-local environment overlay. Empty clears it.
+    pub fn set_session_env(
+        &self,
+        session_id: &str,
+        env: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionEnv {
+            session_id: session_id.to_string(),
+            env,
         })
         .map(drop)
     }
@@ -1576,6 +1610,7 @@ impl JcodeClient {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    effective_budget,
                     ..
                 } => {
                     result.usage = Some(Usage {
@@ -1583,6 +1618,7 @@ impl JcodeClient {
                         output,
                         cache_read_input,
                         cache_creation_input,
+                        effective_budget,
                     })
                 }
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
@@ -1889,6 +1925,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | ContextCapChanged { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
         | SoftInterruptInjected { session_id, .. }

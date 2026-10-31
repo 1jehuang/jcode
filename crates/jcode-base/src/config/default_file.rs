@@ -25,6 +25,11 @@ impl Config {
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
 
+[cloud]
+# Scoped local resource access after handoff, in seconds (default: 24 hours).
+# Set to 0 to disable. Disconnecting or switching sessions still revokes access.
+local_access_seconds = 86400
+
 [keybindings]
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key
@@ -250,6 +255,13 @@ prompt_entry_animation = true
 # (default: false). Resume is global by default. Press `s` to cycle filters.
 # resume_project_scope = false
 
+# Highlight just-closed sessions and put them first in Resume for this many
+# seconds (default: 30). Set 0 to disable. Uses the final client socket closing,
+# not the last message time. Reattaching clears it. Explicit detach/switch and
+# server reload are excluded. Applies to local native sessions, including a
+# disconnected SDK client, since the server cannot observe OS windows directly.
+# resume_recent_close_seconds = 30
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -329,6 +341,9 @@ auto_poke = true
 # Optional aggregate weak-point follow-up, once per completed todo cycle.
 # Requires auto-poke. Does not control the display-only completion report.
 todo_gate_digest = false
+# Show which disabled end-of-turn gates would have fired in completion reports.
+# Display only. Does not enable gates or follow-up turns.
+todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
@@ -400,6 +415,14 @@ bing_market = "en-US"
 # snippet_pointer = "/snippet"
 
 [tools]
+# Opt into Jev browser handoff. Default off, direct browser actions still work.
+# Env override: JCODE_BROWSER_HANDOFF=1 to enable.
+browser_handoff = false
+# Automatically hand long-running tool calls to the background after this many
+# milliseconds. Default: 3000 (3 seconds). Set 0 to disable automatic handoff.
+# Applies to streaming, nonstreaming, and SDK calls. bg wait stays foreground.
+# This does not kill tools or change their own execution timeouts.
+auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
 # Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
 # acp keeps core coding tools plus batch for generic ACP clients.
@@ -914,6 +937,7 @@ mod tests {
         );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,

@@ -71,6 +71,26 @@ fn disconnected_while_processing(
         .unwrap_or(client_is_processing)
 }
 
+/// Capture EOF before agent cleanup, including turns retained after disconnect.
+/// Explicit protocol Detach does not call this. Serializes with resume claims,
+/// and removing the connection makes repeated cleanup idempotent.
+pub(super) async fn record_transport_closed(
+    session_id: &str,
+    connection_id: &str,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+) {
+    let mut connections = client_connections.write().await;
+    let removed = connections.remove(connection_id);
+    if removed.is_some_and(|info| info.session_id == session_id)
+        && !connections
+            .values()
+            .any(|info| info.session_id == session_id)
+        && !crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE)
+    {
+        crate::session::record_window_closed(session_id);
+    }
+}
+
 /// Release transport-owned state without changing the live session or turn.
 pub(super) async fn detach_client_attachment(
     session_id: &str,
@@ -132,6 +152,8 @@ pub(super) async fn cleanup_client_connection(
         false
     };
     let originally_registered = swarm_members.read().await.contains_key(client_session_id);
+
+    record_transport_closed(client_session_id, client_connection_id, client_connections).await;
 
     detach_client_attachment(
         client_session_id,
@@ -384,6 +406,10 @@ pub(super) async fn cleanup_client_connection(
     event_handle.abort();
     Ok(None)
 }
+
+#[cfg(test)]
+#[path = "window_closure_tests.rs"]
+mod window_closure_tests;
 
 #[cfg(test)]
 #[path = "client_disconnect_grace_tests.rs"]

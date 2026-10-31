@@ -435,15 +435,17 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let dir = row.find("~/jcode").expect("dir shown");
     let branch = row.find(" main").expect("branch shown");
     let git = row.find("~3 ?2 ↑1").expect("git status shown");
-    let context = row.find("74k/256k").expect("token counts shown when roomy");
+    let context = row
+        .find("29%")
+        .expect("context percentage shown when roomy");
     let model = row.find("GPT-5.6 Sol high").expect("model shown");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
     assert!(
-        row.contains("▰▰▰▱▱▱▱▱▱▱ 29%"),
-        "full 10-cell bar when roomy: {row}"
+        row.contains("74k/256k ▰▱▱▱ 29% used"),
+        "token counts and small context bar: {row}"
     );
     assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
     assert!(
@@ -482,11 +484,37 @@ fn overscroll_line_compact_steps_at_medium_width() {
     let row = overscroll_line_row(&overscroll_line_state(), 63);
     assert!(row.contains("~/jcode"), "{row}");
     assert!(row.contains("GPT-5.6 Sol"), "{row}");
-    assert!(
-        !row.contains("74k/256k"),
-        "token counts dropped first: {row}"
-    );
-    assert!(!row.contains("OAuth"), "auth dropped early: {row}");
+    assert!(row.contains("29%"), "{row}");
+    assert!(!row.contains('▰') && !row.contains('▱'), "{row}");
+}
+
+#[test]
+fn overscroll_line_shows_remaining_account_allowance_after_provider() {
+    let mut state = overscroll_line_state();
+    state.info_widget_data.auth_method = info_widget::AuthMethod::OpenAIOAuth;
+    state.info_widget_data.usage_info = Some(info_widget::UsageInfo {
+        provider: info_widget::UsageProvider::OpenAI,
+        available: true,
+        five_hour: 0.25,
+        seven_day: 0.60,
+        ..Default::default()
+    });
+    let row = overscroll_line_row(&state, 200);
+    assert!(row.contains("OpenAI ▰▰▱▱ 40% left"), "{row}");
+    assert!(row.contains("74k/256k ▰▱▱▱ 29% used"), "{row}");
+    state
+        .info_widget_data
+        .usage_info
+        .as_mut()
+        .unwrap()
+        .available = false;
+    let row = overscroll_line_row(&state, 200);
+    assert!(row.contains("OpenAI"), "{row}");
+    assert!(!row.contains("% left"), "{row}");
+    for width in [20, 40, 63, 80] {
+        let row = overscroll_line_row(&state, width);
+        assert!(unicode_width::UnicodeWidthStr::width(row.as_str()) <= width as usize);
+    }
 }
 
 #[test]

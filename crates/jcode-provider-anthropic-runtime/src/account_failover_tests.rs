@@ -193,6 +193,7 @@ fn http_retry_decision(
                 .chain(std::iter::once("openai-api".into()))
                 .collect(),
             excluded: Vec::new(),
+            ..Default::default()
         }
         .save()
         .unwrap();

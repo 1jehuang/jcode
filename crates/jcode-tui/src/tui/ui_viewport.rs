@@ -217,7 +217,7 @@ pub(crate) fn copy_badge_reserved_width(
     reserved
 }
 
-pub(super) fn compute_visible_margins(
+pub(crate) fn compute_visible_margins(
     lines: &[Line],
     visible_user_indices: &[usize],
     area: Rect,

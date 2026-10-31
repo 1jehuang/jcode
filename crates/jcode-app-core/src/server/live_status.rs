@@ -314,6 +314,7 @@ mod tests {
             output,
             cache_read_input: None,
             cache_creation_input: None,
+            effective_budget: None,
         };
         p.observe(&request(), now);
         p.observe(&usage(20), now);
@@ -365,6 +366,7 @@ mod tests {
                 output: 20,
                 cache_read_input: Some(900),
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -376,6 +378,7 @@ mod tests {
                 output: 20,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -392,6 +395,7 @@ mod tests {
                 output: 20,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -440,6 +444,7 @@ mod tests {
                 output: 10,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(103),
         );

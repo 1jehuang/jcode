@@ -9,6 +9,7 @@ fn uncapped_and_preserves_every_todo_field() {
             status: "completed".into(),
             priority: "high".into(),
             group: Some("lane".into()),
+            lane_after: None,
             details: Some(format!("Full details {i}")),
             confidence: Some(ConfidenceState::Verified),
             completion_confidence: Some(ConfidenceState::Validated),

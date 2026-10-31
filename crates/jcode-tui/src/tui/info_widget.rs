@@ -67,6 +67,7 @@ use swarm_background::{render_background_compact, render_background_widget, rend
 use text::{truncate_smart, truncate_with_ellipsis};
 pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
+pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 use usage_render::{render_usage_compact, render_usage_widget};
 
@@ -190,7 +191,6 @@ impl WidgetKind {
             WidgetKind::WorkspaceMap,
             WidgetKind::Overview,
             WidgetKind::UsageLimits,
-            WidgetKind::KvCache,
             WidgetKind::MemoryActivity,
             WidgetKind::ModelInfo,
             WidgetKind::Compaction,
@@ -686,6 +686,8 @@ pub struct InfoWidgetData {
     pub session_name: Option<String>,
     /// Current working directory for this session.
     pub working_dir: Option<String>,
+    /// Session origin, if its working directory has changed.
+    pub original_working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
@@ -1816,7 +1818,9 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
-use cache_render::{render_kv_cache_summary_line, render_kv_cache_widget};
+#[cfg(test)]
+use cache_render::render_kv_cache_summary_line;
+use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget
 fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
@@ -2061,10 +2065,6 @@ fn render_sections(
         data,
         inner.width,
     ));
-
-    if let Some(cache) = data.cache_hit_info.as_ref() {
-        lines.push(render_kv_cache_summary_line(cache));
-    }
 
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {

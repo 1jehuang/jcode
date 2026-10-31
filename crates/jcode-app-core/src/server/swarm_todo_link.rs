@@ -5,7 +5,8 @@
 //!
 //! * Todos -> plan: [`plan_items_from_todos`] turns each lane of open todos
 //!   into one plan item (`lane:<stage>:<group>`), so one agent owns a lane.
-//!   Stages become dependencies, so the model never writes `blocked_by` ids.
+//!   Stages become default dependencies. Optional lane prerequisites name
+//!   individual todo IDs, without requiring model-written plan `blocked_by` ids.
 //! * Assignment: [`link_assignment`] tags the lane's todos with the worker and
 //!   seeds the worker's own todo list with the lane. From then on every save
 //!   on either side mirrors into the other (see `todo::link_worker_lane`).
@@ -34,7 +35,9 @@ fn is_lane_task(task_id: &str) -> bool {
 /// order, and inside a stage each group is a lane. A whole lane is one plan
 /// item, so one agent owns it end to end and keeps its context; that agent's
 /// own todo list is the lane. Every lane waits for every lane of the previous
-/// stage. The model never writes ids (no cycles, no dangling references).
+/// stage unless it declares `lane_after` item prerequisites. Explicit
+/// prerequisites replace the phase barrier, and their lane edges disappear
+/// as soon as the specific items complete, not when their whole lanes finish.
 /// Completed and cancelled todos are skipped; a lane with nothing open is
 /// skipped and never blocks.
 pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
@@ -47,6 +50,34 @@ pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
             let lane_todos: Vec<&TodoItem> = lane.items.iter().map(|&i| open[i]).collect();
             let first = lane_todos[0];
             let id = lane_id(first);
+            // Use all members, including completed ones: completing the first
+            // item must not lose the lane's prerequisite configuration.
+            let prerequisites = todos
+                .iter()
+                .find(|todo| lane_id(todo) == id)
+                .and_then(|todo| todo.lane_after.as_ref());
+            let blocked_by = match prerequisites {
+                None => previous_stage.clone(),
+                Some(dependencies) => {
+                    let mut blockers = Vec::new();
+                    for dependency in dependencies {
+                        let source = todos.iter().find(|todo| &todo.id == dependency);
+                        if source.is_some_and(|todo| todo.status == "completed") {
+                            continue;
+                        }
+                        // Missing/deleted prerequisites fail closed. A cancelled
+                        // prerequisite is not successful completion either.
+                        let blocker = source
+                            .filter(|todo| is_open(todo))
+                            .map(lane_id)
+                            .unwrap_or_else(|| format!("todo:{dependency}"));
+                        if !blockers.contains(&blocker) {
+                            blockers.push(blocker);
+                        }
+                    }
+                    blockers
+                }
+            };
             let content = match &lane.group {
                 Some(group) => format!(
                     "{group}: {}",
@@ -65,7 +96,7 @@ pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
                 id: id.clone(),
                 subsystem: lane.group.clone(),
                 file_scope: Vec::new(),
-                blocked_by: previous_stage.clone(),
+                blocked_by,
                 assigned_to: None,
             });
             this_stage.push(id);
@@ -305,7 +336,7 @@ pub(crate) fn apply_plan(todos: &mut [TodoItem], items: &[PlanItem]) -> bool {
                     .all(|todo| todo.assigned_to.as_deref() == Some(worker))
             } else {
                 find_todo(todos, &item.id, &item.content)
-                    .is_some_and(|todo| todo.assigned_to.is_some())
+                    .is_some_and(|todo| todo.assigned_to.as_deref() == Some(worker))
             };
             if !already {
                 changed |= apply_assignment(todos, &item.id, &item.content, worker);
@@ -416,6 +447,107 @@ mod tests {
             .iter()
             .map(|item| (item.id.clone(), item.blocked_by.clone()))
             .collect()
+    }
+
+    #[test]
+    fn explicit_item_completion_releases_lane_before_source_lane_or_phase() {
+        let mut early = laned("consumer", 2, "consumer");
+        early.lane_after = Some(vec!["contract".into()]);
+        let mut todos = vec![
+            laned("contract", 1, "api"),
+            laned("implementation", 1, "api"),
+            laned("unrelated", 1, "docs"),
+            early,
+            laned("default", 2, "default"),
+        ];
+        let before = plan_items_from_todos(&todos);
+        let consumer = before
+            .iter()
+            .find(|item| item.id == "lane:2:consumer")
+            .unwrap();
+        assert_eq!(consumer.blocked_by, vec!["lane:1:api"]);
+        assert!(
+            !crate::plan::summarize_plan_graph(&before)
+                .ready_ids
+                .contains(&consumer.id)
+        );
+        todos[0].status = "completed".into();
+        let after = resync_lane_plan(&todos, &before).unwrap();
+        assert_eq!(
+            crate::plan::newly_ready_item_ids(&before, &after),
+            vec!["lane:2:consumer"]
+        );
+        let default = after
+            .iter()
+            .find(|item| item.id == "lane:2:default")
+            .unwrap();
+        assert_eq!(default.blocked_by, vec!["lane:1:api", "lane:1:docs"]);
+        assert_eq!(todos[1].status, "pending");
+    }
+
+    #[test]
+    fn explicit_dependencies_require_all_items_and_fail_closed_on_removal_or_cancel() {
+        let mut consumer = laned("consumer", 3, "consumer");
+        consumer.lane_after = Some(vec!["a".into(), "b".into()]);
+        let mut todos = vec![laned("a", 1, "source"), laned("b", 1, "source"), consumer];
+        assert_eq!(
+            plan_items_from_todos(&todos)[1].blocked_by,
+            vec!["lane:1:source"]
+        );
+        todos[0].status = "completed".into();
+        assert_eq!(
+            plan_items_from_todos(&todos)[1].blocked_by,
+            vec!["lane:1:source"]
+        );
+        todos[1].status = "cancelled".into();
+        let cancelled = plan_items_from_todos(&todos);
+        assert!(
+            crate::plan::summarize_plan_graph(&cancelled)
+                .ready_ids
+                .is_empty()
+        );
+        todos.remove(1);
+        assert!(
+            crate::plan::summarize_plan_graph(&plan_items_from_todos(&todos))
+                .ready_ids
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn worker_item_save_unblocks_consumer_while_worker_lane_is_unfinished() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let mut consumer = laned("consumer", 2, "consumer");
+        consumer.lane_after = Some(vec!["contract".into()]);
+        let todos = vec![
+            laned("contract", 1, "api"),
+            laned("implementation", 1, "api"),
+            laned("unrelated", 1, "docs"),
+            consumer,
+        ];
+        crate::todo::save_todos("early-coordinator", &todos).unwrap();
+        let before = plan_items_from_todos(&todos);
+        seed_spawn_lane("early-coordinator", "early-worker", "lane:1:api").unwrap();
+        let mut worker = crate::todo::load_todos("early-worker").unwrap();
+        worker[0].status = "completed".into();
+        crate::todo::save_todos("early-worker", &worker).unwrap();
+        let updated = crate::todo::load_todos("early-coordinator").unwrap();
+        let after = resync_lane_plan(&updated, &before).unwrap();
+        assert!(
+            crate::plan::summarize_plan_graph(&after)
+                .ready_ids
+                .contains(&"lane:2:consumer".into())
+        );
+        assert_eq!(updated[1].status, "pending");
+        assert_eq!(updated[2].status, "pending");
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[test]
@@ -557,6 +689,56 @@ mod tests {
         assert_eq!(todos[2].status, "pending");
         assert_eq!(todos[2].assigned_to.as_deref(), Some("session_ox_2"));
         assert!(!apply_plan(&mut todos, &items), "second pass is a no-op");
+    }
+
+    #[test]
+    fn flat_plan_hands_self_or_previous_worker_assignment_to_exact_worker() {
+        for owner in ["@self", "session_previous_worker"] {
+            let mut todos = vec![todo("a", "in_progress", None)];
+            todos[0].assigned_to = Some(owner.into());
+            let item = PlanItem {
+                id: "a".into(),
+                content: "task a".into(),
+                status: "running".into(),
+                priority: "high".into(),
+                subsystem: None,
+                file_scope: vec![],
+                blocked_by: vec![],
+                assigned_to: Some("session_next_worker".into()),
+            };
+
+            assert!(
+                apply_plan(&mut todos, std::slice::from_ref(&item)),
+                "{owner}"
+            );
+            assert_eq!(todos[0].assigned_to.as_deref(), Some("session_next_worker"));
+            assert_eq!(todos[0].status, "in_progress");
+            assert!(
+                !apply_plan(&mut todos, &[item]),
+                "an exact worker match must be a no-op"
+            );
+        }
+    }
+
+    #[test]
+    fn lane_plan_hands_self_assignment_to_worker_without_changing_statuses() {
+        let mut todos = vec![laned("p1", 1, "parser"), laned("p2", 1, "parser")];
+        todos[0].status = "in_progress".into();
+        todos[0].assigned_to = Some("@self".into());
+        todos[1].assigned_to = Some("session_worker".into());
+        let mut items = plan_items_from_todos(&todos);
+        items[0].assigned_to = Some("session_worker".into());
+        items[0].status = "running".into();
+
+        assert!(apply_plan(&mut todos, &items));
+        assert!(
+            todos
+                .iter()
+                .all(|todo| todo.assigned_to.as_deref() == Some("session_worker"))
+        );
+        assert_eq!(todos[0].status, "in_progress");
+        assert_eq!(todos[1].status, "pending");
+        assert!(!apply_plan(&mut todos, &items));
     }
 
     #[test]

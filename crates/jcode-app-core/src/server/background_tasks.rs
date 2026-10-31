@@ -14,6 +14,36 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{RwLock, broadcast};
 
+/// Publication before a transfer already owns a reservation in the bus
+/// envelope. Publication during its fence is queued without one, so dispatch
+/// waits and then checks durable ownership before touching runtime state.
+pub(super) async fn admit_runtime_delivery(
+    event: &crate::bus::BusEvent,
+) -> Option<crate::runtime_activity::ActivityReservation> {
+    let activity = match event.runtime_session_id() {
+        Some(session) => {
+            crate::runtime_activity::global()
+                .enter_session(session)
+                .await
+        }
+        None => crate::runtime_activity::global().enter_global().await,
+    };
+    if let Some(session) = event.runtime_session_id() {
+        match super::group_transfer::read_transfer_lease(session) {
+            Ok(None) => {}
+            Ok(Some(lease)) if lease.is_here() => {}
+            Ok(Some(_)) => return None,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot admit runtime callback for {session}: {error}"
+                ));
+                return None;
+            }
+        }
+    }
+    Some(activity)
+}
+
 async fn emit_external_wake(
     session_id: &str,
     reason: &str,

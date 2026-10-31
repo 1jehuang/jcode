@@ -163,6 +163,9 @@ pub(crate) fn agent_roster_spans(
         let Some(assigned) = todo.assigned_to.as_deref() else {
             continue;
         };
+        if assigned == "@self" {
+            continue;
+        }
         // Lane headings carry ownership. Plain lists retain only owners not
         // already represented by an active task row.
         if todos.iter().any(|item| item.stage.is_some())
@@ -298,6 +301,8 @@ fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
         && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
     {
         "blocked"
+    } else if todo.status == "in_progress" && todo.assigned_to.as_deref() == Some("@self") {
+        "self_in_progress"
     } else {
         &todo.status
     }
@@ -313,6 +318,7 @@ fn status_pip_span(status: &str) -> Span<'static> {
         "blocked" => ("⊘", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
+        "self_in_progress" => ("●", rgb(255, 200, 100)),
         _ => ("○", rgb(90, 90, 105)),
     };
     Span::styled(glyph, Style::default().fg(color))
@@ -438,6 +444,14 @@ fn lane_agent_chip(
         else {
             continue;
         };
+        if assigned == "@self" {
+            if todo_pip_status(todo) == "self_in_progress" && !seen.iter().any(|key| key == "@self")
+            {
+                seen.push("@self".to_string());
+                spans.push(Span::styled("you", Style::default().fg(rgb(255, 200, 100))));
+            }
+            continue;
+        }
         let agent = agents.iter().find(|agent| agent.matches(assigned));
         let key = agent
             .map(|agent| agent.session_id.clone())
@@ -563,7 +577,7 @@ fn lane_item_statuses<'a>(
             }
         } else {
             statuses.push((
-                todo.status.as_str(),
+                todo_pip_status(todo),
                 lane_live_agent(&[todo], agents).is_some(),
             ));
         }
@@ -821,12 +835,35 @@ fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec
     super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width).spans
 }
 
-/// Render todos that declare stages, one row per lane:
-/// `●●○  parser 🦊  Extract lexer, Update callers, Add tests`.
-/// The status strip leads, so the left edge reads as a block of progress;
-/// then the group name; then the titles. Phases are labelled on the header
-/// row, so the body has no heading rows. Every phase is listed: finished and
-/// active phases in their phase colour, phases not yet started dimmed.
+/// Count satisfied explicit lane prerequisites. Missing IDs remain unsatisfied.
+fn lane_prerequisite_progress(
+    items: &[&crate::todo::TodoItem],
+    todos: &[&crate::todo::TodoItem],
+) -> Option<(usize, usize)> {
+    let mut ids = std::collections::HashSet::new();
+    let mut explicit = false;
+    for item in items {
+        if let Some(after) = &item.lane_after {
+            explicit = true;
+            ids.extend(after.iter().map(String::as_str));
+        }
+    }
+    explicit.then(|| {
+        let complete = ids
+            .iter()
+            .filter(|id| {
+                todos
+                    .iter()
+                    .any(|todo| todo.id == **id && todo.status == "completed")
+            })
+            .count();
+        (complete, ids.len())
+    })
+}
+
+/// Render staged todos with a bounded row per lane and optional prerequisite
+/// progress. Later lanes retain phase dimming unless explicit prerequisites
+/// replace that barrier and have been satisfied.
 pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -873,8 +910,33 @@ pub(crate) fn push_stage_lines(
     for (phase, lane) in lanes {
         // A lane wears its phase's colour: bold while its phase is active,
         // dimmed (with its titles and dots) while the phase has not started.
-        let later = current.is_some_and(|current| phase > current);
         let items = items_of(lane);
+        let prerequisites = lane_prerequisite_progress(&items, todos);
+        let later = prerequisites.map_or_else(
+            || current.is_some_and(|current| phase > current),
+            |(complete, total)| complete < total,
+        );
+        // Explicit prerequisites replace the phase barrier. Keep a ready
+        // later-phase lane bright even while unrelated earlier work runs.
+        let lane_style = if prerequisites.is_some() && !later && items.iter().any(|t| !is_done(t)) {
+            Style::default()
+                .fg(asap_color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            phase_style(phase, current)
+        };
+        if let Some((complete, total)) = prerequisites {
+            let state = if complete == total { "met" } else { "waiting" };
+            let name = lane
+                .group
+                .as_deref()
+                .unwrap_or_else(|| items[0].id.as_str());
+            let note = Span::styled(
+                format!("  {name}: after {complete}/{total} · {state}"),
+                Style::default().fg(todo_meta_color()),
+            );
+            lines.push(todo_card_line(vec![note], base_indent, inner_width));
+        }
         // Expand a waiting lane so its dependency progress belongs to the
         // corresponding todo rather than an ambiguous lane-wide status dot.
         if items.iter().any(|todo| {
@@ -921,12 +983,7 @@ pub(crate) fn push_stage_lines(
                 let pad = padding.content.width().saturating_sub(1);
                 padding.content = " ".repeat(pad).into();
             }
-            let name = lane_name_spans(
-                lane.group.as_deref(),
-                phase_style(phase, current),
-                &items,
-                agents,
-            );
+            let name = lane_name_spans(lane.group.as_deref(), lane_style, &items, agents);
             let name = super::truncate_line_with_ellipsis_to_width(&Line::from(name), worker_width);
             let name_padding = worker_width.saturating_sub(name.width());
             row.extend(name.spans);
@@ -962,12 +1019,7 @@ pub(crate) fn push_stage_lines(
         }
         let mut row = lane_strip_spans(&statuses, strip_width);
         if name_width > 0 {
-            let name = lane_name_spans(
-                lane.group.as_deref(),
-                phase_style(phase, current),
-                &items,
-                agents,
-            );
+            let name = lane_name_spans(lane.group.as_deref(), lane_style, &items, agents);
             let name =
                 super::truncate_line_with_ellipsis_to_width(&Line::from(name), name_width).spans;
             let pad = name_width.saturating_sub(width_of(&name)) + 2;
@@ -1127,10 +1179,16 @@ pub(crate) fn render_todo_item_line(
     // useful signal in a width-constrained row.
     let mut spans = todo_card_item_spans(todo, false);
     let agent = agents.iter().find(|agent| agent.matches(assigned));
-    let icon = agent
-        .map(TodoCardAgent::icon)
-        .unwrap_or_else(|| fallback_icon(assigned));
-    let mut chip = vec![Span::raw("  "), Span::raw(icon)];
+    let owner = if assigned == "@self" {
+        Span::styled("you", Style::default().fg(rgb(255, 200, 100)))
+    } else {
+        Span::raw(
+            agent
+                .map(TodoCardAgent::icon)
+                .unwrap_or_else(|| fallback_icon(assigned)),
+        )
+    };
+    let mut chip = vec![Span::raw("  "), owner];
     let mut note = String::new();
     if let Some(agent) = agent {
         if let Some((mark, color)) = agent_state_mark(&agent.status) {

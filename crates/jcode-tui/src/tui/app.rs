@@ -317,12 +317,7 @@ struct KvCacheMissSample {
 }
 
 struct PendingSessionPickerLoad {
-    receiver: mpsc::Receiver<
-        anyhow::Result<(
-            Vec<super::session_picker::ServerGroup>,
-            Vec<super::session_picker::SessionInfo>,
-        )>,
-    >,
+    receiver: mpsc::Receiver<super::session_picker::SessionListUpdate>,
 }
 
 /// Session id, display messages, and rendered images from the fast-start thread.
@@ -1230,6 +1225,10 @@ pub struct App {
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
     cloud_recovery_context: Option<(String, String)>,
+    cloud_recovery_auto_pending: bool,
+    // One autonomous diagnosis per command/session per client lifetime. A
+    // diagnosis must never become an endless failed-handoff/recovery loop.
+    cloud_recovery_auto_attempted: std::collections::HashSet<(String, String)>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
@@ -1411,6 +1410,8 @@ pub struct App {
     runtime_mode: AppRuntimeMode,
     // Remote rewind/undo request waiting for the server's replacement History payload.
     pending_remote_rewind_notice: Option<PendingRemoteRewindNotice>,
+    // Opaque server-owned SSH session navigation and child-creation state.
+    ssh_sessions: remote::ssh_sessions::State,
     // History-recovery watchdog for the "stuck on loading session…" bug. When a
     // remote (re)connect never receives the bootstrap `History` event, every
     // prompt path is gated behind `has_loaded_history()` and the session is
@@ -1542,6 +1543,10 @@ pub struct App {
     todos_view_markdown: String,
     todos_view_updated_at_ms: u64,
     todos_view_rendered_hash: u64,
+    /// Remote todo snapshot paired with its owning session. Never read SSH
+    /// session IDs from laptop-local todo storage.
+    remote_todos_payload: Option<(String, String)>,
+    remote_todos_requested_at: Option<Instant>,
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
@@ -1646,6 +1651,8 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Last sent account switch, used only as the cycle cursor until acknowledged.
+    pending_account_switch_target: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching

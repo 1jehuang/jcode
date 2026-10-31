@@ -6,6 +6,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -72,6 +73,24 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
     assert!(cache.best_incremental_base(&different_latex, 4).is_none());
+
+    let compact_key = BodyCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = BodyCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone(), 3, 0);
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.best_incremental_base(&key_a, 4).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        assert!(cache.best_incremental_base(&compact_key, 4).is_none());
+        assert!(cache.take_best_incremental_base(&compact_key).is_none());
+        assert!(cache.take_best_incremental_base(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -82,6 +101,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         pin_images: true,
         inline_images_visible: true,
@@ -115,6 +135,7 @@ fn test_body_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             pin_images: true,
             inline_images_visible: true,
@@ -157,6 +178,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -187,6 +209,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -218,6 +241,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -256,6 +280,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -530,6 +555,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -598,6 +624,21 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     assert!(Arc::ptr_eq(&hit_b, &prepared_b));
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
+
+    let compact_key = FullPrepCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = FullPrepCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone());
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        assert!(cache.get_exact(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -609,6 +650,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         is_processing: false,
         streaming_text_len: 0,
@@ -644,6 +686,7 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             is_processing: false,
             streaming_text_len: 0,
@@ -690,6 +733,7 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -723,6 +767,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,
@@ -758,6 +803,7 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,

@@ -1182,6 +1182,156 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
 }
 
 #[test]
+fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
+    for compact in [false, true] {
+        with_compact_thinking_config(compact, || {
+            assert_thinking_tool_adjacency(false, compact);
+            assert_thinking_tool_adjacency(true, compact);
+        });
+    }
+}
+
+fn with_compact_thinking_config(compact: bool, f: impl FnOnce()) {
+    let _guard = crate::storage::lock_test_env();
+    let _render_guard = viewport_snapshot_test_lock();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    // Omit the setting in the default case to verify existing configurations.
+    std::fs::write(
+        home.path().join("config.toml"),
+        if compact {
+            "[display]\ncompact_thinking = true\n"
+        } else {
+            "[display]\n"
+        },
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+    assert_eq!(crate::config::config().display.compact_thinking, compact);
+    f();
+}
+
+fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
+    clear_test_render_state_for_tests();
+    let tool = |id: &str, title: &str| DisplayMessage {
+        role: "tool".into(),
+        content: "ok".into(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: Some(title.into()),
+        tool_data: Some(ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "true"}),
+            intent: Some(title.into()),
+            thought_signature: None,
+        }),
+    };
+    let state = TestState {
+        display_messages: vec![
+            tool("before", "Before thinking"),
+            if embedded_assistant {
+                DisplayMessage::assistant(format!(
+                    "{}\n",
+                    jcode_tui_markdown::reasoning_line_markup("**Thinking compactly**",)
+                ))
+            } else {
+                DisplayMessage::reasoning(jcode_tui_markdown::reasoning_line_markup(
+                    "Thinking compactly",
+                ))
+            },
+            tool("after", "After thinking"),
+            DisplayMessage::assistant("Final answer"),
+        ],
+        ..Default::default()
+    };
+    let prepared = prepare::prepare_messages(&state, 100, 30);
+    let rows: Vec<String> = prepared
+        .materialize_all_lines()
+        .iter()
+        .map(extract_line_text)
+        .collect();
+    let thinking = rows
+        .iter()
+        .position(|row| row.contains("Thinking compactly"))
+        .unwrap();
+    let before = rows
+        .iter()
+        .position(|row| row.contains("Before thinking"))
+        .unwrap();
+    assert_eq!(thinking - before, if compact { 1 } else { 2 }, "{rows:?}");
+    assert!(rows[thinking + 1].contains("After thinking"), "{rows:?}");
+    let answer = rows
+        .iter()
+        .position(|row| row.contains("Final answer"))
+        .unwrap();
+    assert!(
+        rows[answer - 1].trim().is_empty(),
+        "prose keeps its separator: {rows:?}"
+    );
+}
+
+#[test]
+fn test_prepare_messages_streaming_thinking_has_no_blank_prefix() {
+    for compact in [false, true] {
+        with_compact_thinking_config(compact, || assert_streaming_thinking_spacing(compact));
+    }
+}
+
+fn assert_streaming_thinking_spacing(compact: bool) {
+    for thinking in [true, false] {
+        clear_test_render_state_for_tests();
+        let state = TestState {
+            display_messages: vec![DisplayMessage::system("Previous activity")],
+            status: ProcessingStatus::Streaming,
+            streaming_text: if thinking {
+                jcode_tui_markdown::reasoning_partial_markup("**Live thinking**")
+            } else {
+                "Ordinary answer".into()
+            },
+            ..Default::default()
+        };
+        let prepared = prepare::prepare_messages(&state, 100, 30);
+        let rows: Vec<String> = prepared
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect();
+        let previous = rows
+            .iter()
+            .position(|row| row.contains("Previous activity"))
+            .unwrap();
+        let next = rows
+            .iter()
+            .position(|row| {
+                row.contains(if thinking {
+                    "Live thinking"
+                } else {
+                    "Ordinary answer"
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            next - previous,
+            if thinking && compact { 1 } else { 2 },
+            "{rows:?}"
+        );
+    }
+}
+
+#[test]
 fn test_prepare_messages_renders_reasoning_role_dim_italic_without_sentinel() {
     let _guard = crate::storage::lock_test_env();
     clear_test_render_state_for_tests();

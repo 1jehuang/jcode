@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn pinned_dependency_label_uses_available_width_and_palette() {
+    let task = TodoCardBackgroundTask {
+        task_id: "resume".into(),
+        label: "Resume lint validation".into(),
+        percent: Some(38.0),
+    };
+    let line = todo_dependency_progress(&[&task], 60);
+    assert!(line.to_string().contains(&task.label));
+    assert_eq!(line.spans[0].style.fg, Some(todo_meta_color()));
+    for width in 0..100 {
+        assert!(todo_dependency_progress(&[&task], width).width() <= width);
+    }
+}
+
+#[test]
 fn expanded_diff_rows_preserve_source_and_align_continuations() {
     let source = "    let result = compute(\"界界 e\u{301}\", argument);";
     let parsed = ParsedDiffLine {
@@ -1441,6 +1456,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
 fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
+            lane_after: None,
             id: id.to_string(),
             content: content.to_string(),
             status: status.to_string(),
@@ -1524,6 +1540,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
 #[test]
 fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         stage: None,
         details: None,
         id: "1".to_string(),
@@ -1587,6 +1604,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
 fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Keep the task visible".to_string(),
         status: "in_progress".to_string(),
@@ -1673,6 +1691,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
 #[test]
 fn render_todos_message_uses_readable_semantic_colors() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Tune the palette".to_string(),
         status: "in_progress".to_string(),
@@ -1862,6 +1881,7 @@ fn render_todos_message_color_codes_every_intent_state() {
 #[test]
 fn render_todos_message_collapses_passing_quality_gates() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Verify the result".to_string(),
         status: "completed".to_string(),
@@ -1917,6 +1937,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
 #[test]
 fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Render the card".to_string(),
         status: "in_progress".to_string(),
@@ -1961,6 +1982,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 #[test]
 fn render_todos_message_packs_multiple_goal_gates_per_row() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Render the card".to_string(),
         status: "in_progress".to_string(),
@@ -2031,6 +2053,7 @@ fn render_todos_message_bad_payload_falls_back_to_system() {
 #[test]
 fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         stage: None,
         details: None,
         id: "render".to_string(),

@@ -768,6 +768,103 @@ fn test_save_persists_reasoning_effort() -> Result<()> {
 }
 
 #[test]
+fn context_cap_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let id = "session_context_cap_persist_test";
+    let mut session = Session::create_with_id(id.into(), None, Some("cap test".into()));
+    session.context_cap = Some(40_000);
+    // Large metadata changes use the journal rather than rewriting a snapshot.
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2 * 1024 * 1024),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    let assert_loaders = |cap| -> Result<()> {
+        assert_eq!(Session::load(id)?.context_cap, cap);
+        assert_eq!(Session::load_startup_stub(id)?.context_cap, cap);
+        assert_eq!(Session::load_for_remote_startup(id)?.context_cap, cap);
+        Ok(())
+    };
+    assert_loaders(Some(40_000))?;
+    session.context_cap = Some(80_000);
+    session.save()?;
+    assert!(session_journal_path(id)?.exists());
+    assert_loaders(Some(80_000))?;
+    session.context_cap = None;
+    session.save()?;
+    assert_loaders(None)?;
+    // Force a full snapshot after clearing the override.
+    session.replace_messages(session.messages.clone());
+    session.save()?;
+    assert_loaders(None)?;
+    Ok(())
+}
+
+#[test]
+fn original_working_dir_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let id = "session_original_working_dir_test";
+    let mut session = Session::create_with_id(id.into(), None, None);
+    session.working_dir = Some("/projects/start".into());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2 * 1024 * 1024),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    session.original_working_dir = session.working_dir.clone();
+    session.working_dir = Some("/projects/current".into());
+    session.save()?;
+    assert!(session_journal_path(id)?.exists());
+    for loaded in [
+        Session::load(id)?,
+        Session::load_startup_stub(id)?,
+        Session::load_for_remote_startup(id)?,
+    ] {
+        assert_eq!(
+            loaded.original_working_dir.as_deref(),
+            Some("/projects/start")
+        );
+        assert_eq!(loaded.working_dir.as_deref(), Some("/projects/current"));
+    }
+    Ok(())
+}
+
+#[test]
+fn context_cap_missing_is_backward_compatible_for_all_snapshot_types() -> Result<()> {
+    let session = Session::create_with_id("session_context_cap_legacy".into(), None, None);
+    let value = serde_json::to_value(&session)?;
+    assert!(value.get("context_cap").is_none());
+    assert_eq!(
+        serde_json::from_value::<Session>(value.clone())?.context_cap,
+        None
+    );
+    let stub = serde_json::from_value::<SessionStartupStub>(value.clone())?;
+    assert_eq!(Session::session_from_startup_stub(stub).context_cap, None);
+    let snapshot = serde_json::from_value::<RemoteStartupSessionSnapshot>(value)?;
+    assert_eq!(
+        Session::session_from_remote_startup_snapshot(snapshot).context_cap,
+        None
+    );
+    let mut meta = serde_json::to_value(session.journal_meta())?;
+    meta.as_object_mut().unwrap().remove("context_cap");
+    assert_eq!(
+        serde_json::from_value::<SessionJournalMeta>(meta)?.context_cap,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
@@ -3043,6 +3140,115 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     let stub = Session::load_startup_stub(session_id)?;
     assert_eq!(stub.custom_title.as_deref(), Some("renamed"));
     assert!(matches!(stub.status, SessionStatus::Closed));
+    Ok(())
+}
+
+fn assert_persisted_route(session_id: &str, expected: Option<&str>) -> Result<()> {
+    assert_eq!(
+        Session::load(session_id)?.route_api_method.as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_startup_stub(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_for_remote_startup(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    Ok(())
+}
+
+fn route_journal_roundtrip(large: bool) -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.provider_key = Some("openai".into());
+    session.model = Some("same-model".into());
+    session.route_api_method = Some("account:first".into());
+    session.append_stored_message(StoredMessage {
+        id: "message".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+    let path = storage_paths::session_path(session_id)?;
+    let before = std::fs::read(&path)?;
+    for route in [Some("account:second"), Some("account:third"), None] {
+        session.route_api_method = route.map(str::to_string);
+        session.save()?;
+        assert_persisted_route(session_id, route)?;
+        if large {
+            assert_eq!(std::fs::read(&path)?, before);
+            assert!(session_journal_path(session_id)?.exists());
+        } else {
+            // Small metadata updates keep the snapshot self-contained.
+            let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            assert_eq!(snapshot["route_api_method"].as_str(), route);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn route_journal_small_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(false)
+}
+
+#[test]
+fn route_journal_large_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(true)
+}
+
+#[test]
+fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_legacy_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.route_api_method = Some("account:snapshot".into());
+    session.title = Some("legacy route test".into());
+    session.save()?;
+    // Metadata-only entries at or before the checkpoint timestamp are stale.
+    session.updated_at += chrono::Duration::seconds(1);
+    let mut legacy = serde_json::to_value(session.journal_meta())?;
+    legacy.as_object_mut().unwrap().remove("route_api_method");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("route_api_method_present");
+    let legacy_line = serde_json::json!({"meta": legacy}).to_string();
+    let path = session_journal_path(session_id)?;
+    std::fs::write(&path, format!("{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:snapshot"))?;
+
+    session.route_api_method = Some("account:journal".into());
+    let current_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    // A downgraded writer can append legacy metadata after new metadata.
+    std::fs::write(&path, format!("{current_line}\n{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:journal"))?;
+
+    session.route_api_method = None;
+    let cleared_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    std::fs::write(
+        &path,
+        format!("{current_line}\n{cleared_line}\n{legacy_line}\n"),
+    )?;
+    assert_persisted_route(session_id, None)?;
     Ok(())
 }
 

@@ -430,6 +430,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::Ack { .. }
             | ServerEvent::SwarmStatus { .. }
             | ServerEvent::SidePanelState { .. }
+            | ServerEvent::Todos { .. }
             | ServerEvent::AccountUsage { .. }
             | ServerEvent::ModelUsageUpdated { .. }
             | ServerEvent::AvailableModelsUpdated { .. }
@@ -460,6 +461,22 @@ pub(in crate::tui::app) fn handle_server_event(
         app.push_display_message(DisplayMessage::error(format!(
             "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
         )));
+        return true;
+    }
+
+    // Control failures use the shared Error wire shape, but must not end an
+    // unrelated active turn, trigger rate-limit retry, or discard draft input.
+    if let ServerEvent::Error { id, message, .. } = &event
+        && remote.finish_runtime_command(*id)
+    {
+        app.push_display_message(DisplayMessage::error(message.clone()));
+        return true;
+    }
+
+    // Control responses are transcript notices, never conversation-turn activity.
+    if let ServerEvent::RuntimeCommandResult { id, message, .. } = event {
+        remote.finish_runtime_command(id);
+        app.push_display_message(DisplayMessage::system(message));
         return true;
     }
 
@@ -731,6 +748,7 @@ pub(in crate::tui::app) fn handle_server_event(
             output,
             cache_read_input,
             cache_creation_input,
+            ..
         } => {
             let previous_input = app.streaming.streaming_input_tokens;
             let previous_output = app.streaming.streaming_output_tokens;
@@ -956,7 +974,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::StatusDetail { detail } => {
-            app.status_detail = Some(detail);
+            app.apply_status_detail(detail);
             eager_stream_redraw
         }
         ServerEvent::ServiceTierReported { requested, tier } => {
@@ -2460,6 +2478,13 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_side_panel_snapshot(snapshot);
             false
         }
+        ServerEvent::Todos {
+            session_id,
+            payload,
+        } => {
+            app.receive_remote_todos(session_id, payload);
+            true
+        }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 // Surface member lifecycle transitions (done/failed/blocked/
@@ -2595,6 +2620,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_model_switch_in_flight = false;
             let automatic_route = app.pending_automatic_failover_route.take();
             if let Some(err) = error {
+                let account_switch_failed = app.pending_account_switch_target.take().is_some();
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
                     super::input_dispatch::restore_prepared_remote_input(app, prepared);
                 }
@@ -2606,12 +2632,22 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.push_display_message(DisplayMessage::error(
                     crate::tui::app::model_context::model_switch_failure_message(&err, true),
                 ));
-                app.set_status_notice("Model switch failed");
+                app.set_status_notice(if account_switch_failed {
+                    "Account switch failed"
+                } else {
+                    "Model switch failed"
+                });
             } else {
                 // ModelChanged predates capability metadata. Fetch the typed
                 // History catalog after a successful model/account switch.
                 app.model_catalog_after_history = true;
+                let account_actually_changed = !app.remote_session_facts_provisional
+                    && app.remote_provider_model.is_some()
+                    && (app.remote_provider_oauth_account_label != provider_oauth_account_label
+                        || app.remote_provider_oauth_email != provider_oauth_email
+                        || app.remote_resolved_credential != resolved_credential);
                 if app.remote_provider_model.as_deref() != Some(model.as_str())
+                    || app.remote_provider_oauth_account_label != provider_oauth_account_label
                     || app.remote_provider_oauth_email != provider_oauth_email
                     || app.remote_resolved_credential != resolved_credential
                     || provider_name
@@ -2640,6 +2676,43 @@ pub(in crate::tui::app) fn handle_server_event(
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
+                let acknowledged_provider = app
+                    .remote_provider_name
+                    .as_deref()
+                    .and_then(jcode_provider_core::parse_provider_hint);
+                let account_switch_acknowledged = matches!(
+                    app.pending_account_switch_target.as_ref(),
+                    Some(crate::tui::AccountPickerAction::Switch { provider_id, label })
+                        if app.remote_provider_oauth_account_label.as_ref() == Some(label)
+                            && acknowledged_provider.is_some()
+                            && jcode_provider_core::parse_provider_hint(provider_id)
+                                == acknowledged_provider
+                );
+                if account_switch_acknowledged {
+                    app.pending_account_switch_target = None;
+                }
+                // Several cycles may be queued while the daemon is busy. An
+                // earlier acknowledgement updates confirmed state, but must
+                // not discard the newer target used to anchor the next cycle.
+                // Persist the daemon's label, never the optimistic target.
+                if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth) {
+                    let method = match acknowledged_provider {
+                        Some(jcode_provider_core::ActiveProvider::Claude) => Some("claude-oauth"),
+                        Some(jcode_provider_core::ActiveProvider::OpenAI) => Some("openai-oauth"),
+                        _ => None,
+                    };
+                    if let Some(method) = method {
+                        let route = app
+                            .remote_provider_oauth_account_label
+                            .as_deref()
+                            .map(|label| format!("{method}@{label}"))
+                            .filter(|route| {
+                                jcode_provider_core::oauth_account_label(route).is_some()
+                            })
+                            .unwrap_or_else(|| method.to_string());
+                        app.session.route_api_method = Some(route);
+                    }
+                }
                 // Always replace: a switch to a provider with no OAuth/API
                 // distinction must clear the previous route's credential too.
                 app.remote_resolved_credential = resolved_credential;
@@ -2667,9 +2740,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));
+                } else if account_actually_changed || account_switch_acknowledged {
+                    let label = crate::tui::TuiState::startup_oauth_account_label(app);
+                    app.set_status_notice(match label {
+                        Some(label) => format!("Account → {}", label),
+                        None => "Account updated".to_string(),
+                    });
                 }
             }
-            false
+            // Same-model account acknowledgements change header identity too.
+            // Clear cached header preparation and request a frame even when no
+            // transcript announcement was added (including switch failures).
+            crate::tui::ui::prepare::invalidate_header_prep_cache();
+            true
         }
         ServerEvent::AccountUsage {
             anthropic, openai, ..
@@ -3337,4 +3420,104 @@ fn runtime_activity_status_notice(message: &str) -> String {
         .trim()
         .trim_end_matches('.')
         .to_string()
+}
+
+#[cfg(test)]
+mod runtime_command_tests {
+    use super::*;
+    use crate::tui::app::tests::create_test_app;
+    use crate::tui::backend::RemoteConnection;
+
+    #[test]
+    fn runtime_command_error_preserves_active_turn_and_clears_request_ownership() {
+        let mut app = create_test_app();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            let id = remote
+                .runtime_command("config", vec!["invalid".into()])
+                .await
+                .unwrap();
+            app.is_processing = true;
+            app.pending_turn = true;
+            app.current_message_id = Some(99);
+            app.status = ProcessingStatus::Sending;
+            app.input = "unsent draft".into();
+            app.replace_streaming_text("partial response".into());
+            let activity = app.last_stream_activity;
+            assert!(handle_server_event(
+                &mut app,
+                ServerEvent::Error {
+                    id,
+                    message: "Session is busy. Retry this command after the current turn.".into(),
+                    retry_after_secs: None,
+                },
+                &mut remote
+            ));
+            assert!(app.is_processing);
+            assert!(app.pending_turn);
+            assert_eq!(app.current_message_id, Some(99));
+            assert!(matches!(app.status, ProcessingStatus::Sending));
+            assert_eq!(app.input, "unsent draft");
+            assert_eq!(app.streaming_text(), "partial response");
+            assert_eq!(app.last_stream_activity, activity);
+            assert_eq!(app.display_messages.last().unwrap().role, "error");
+            assert!(!remote.finish_runtime_command(id));
+
+            let id = remote
+                .runtime_command("poke", vec!["status".into()])
+                .await
+                .unwrap();
+            assert!(handle_server_event(
+                &mut app,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "poke".into(),
+                    data: serde_json::json!({}),
+                    message: "Stopped".into(),
+                },
+                &mut remote
+            ));
+            assert!(!remote.finish_runtime_command(id));
+            assert!(app.is_processing);
+        });
+    }
+
+    #[test]
+    fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for active in [false, true] {
+            let mut app = create_test_app();
+            let _runtime_guard = runtime.enter();
+            let mut remote = RemoteConnection::dummy();
+            app.input = "draft prompt".into();
+            app.is_processing = active;
+            app.status = if active {
+                ProcessingStatus::Sending
+            } else {
+                ProcessingStatus::Idle
+            };
+            app.current_message_id = active.then_some(99);
+            let activity = app.last_stream_activity;
+            let count = app.display_messages.len();
+            let event: ServerEvent = serde_json::from_value(serde_json::json!({
+                "type": "runtime_command_result", "id": 42, "command": "agents",
+                "data": {"enabled": true}, "message": "Agents enabled\nDaemon configuration updated."
+            })).unwrap();
+
+            assert!(handle_server_event(&mut app, event, &mut remote));
+            assert_eq!(app.display_messages.len(), count + 1);
+            let notice = app.display_messages.last().unwrap();
+            assert_eq!(notice.role, "system");
+            assert_eq!(
+                notice.content,
+                "Agents enabled\nDaemon configuration updated."
+            );
+            assert_eq!(app.is_processing, active);
+            assert_eq!(matches!(app.status, ProcessingStatus::Sending), active);
+            assert_eq!(app.current_message_id, active.then_some(99));
+            assert_eq!(app.last_stream_activity, activity);
+            assert_eq!(app.input, "draft prompt");
+        }
+    }
 }

@@ -195,9 +195,14 @@ impl SessionPicker {
         let same_dir_clr: Color = rgb(120, 200, 140);
         let highlight_tokens = self.active_highlight_tokens();
 
+        let recently_closed = self.session_recently_closed(session);
         let name_style = if is_selected {
             Style::default()
                 .fg(rgb(140, 220, 160))
+                .add_modifier(Modifier::BOLD)
+        } else if recently_closed {
+            Style::default()
+                .fg(rgb(255, 193, 7))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
@@ -221,7 +226,11 @@ impl SessionPicker {
         // working on a response from ones ready for input, which the stored
         // `SessionStatus::Active` alone cannot.
         let is_current = self.session_is_current(session);
-        let live_badge = if self.session_is_live(session) {
+        let live_badge = if recently_closed {
+            // A detached agent can still have a PID/streaming marker. The
+            // actual last-client EOF is more useful for recovering its window.
+            Some(("↩", rgb(255, 193, 7), "just closed".to_string()))
+        } else if self.session_is_live(session) {
             if session.source == SessionSource::ClaudeCode {
                 Some(("●", rgb(120, 210, 255), "live Claude".to_string()))
             } else if self.session_is_streaming(session) {
@@ -434,6 +443,7 @@ impl SessionPicker {
     }
 
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        self.poll_transcript_search();
         let server_color: Color = rgb(255, 200, 100);
         let dim: Color = rgb(100, 100, 100);
         let spinner_frame = Self::running_spinner_frame();
@@ -558,7 +568,11 @@ impl SessionPicker {
         let mut title_parts: Vec<Span> = Vec::new();
         if self.loading_message.is_some() {
             title_parts.push(Span::styled(
-                " loading sessions ",
+                if self.search_active {
+                    " loading "
+                } else {
+                    " loading sessions "
+                },
                 Style::default()
                     .fg(rgb(255, 200, 100))
                     .add_modifier(Modifier::BOLD),
@@ -609,12 +623,16 @@ impl SessionPicker {
             format!("  {}", filter_label),
             Style::default().fg(rgb(255, 180, 100)),
         ));
-        title_parts.push(Span::styled(
-            " (s/S filter)",
-            Style::default().fg(rgb(80, 80, 80)),
-        ));
+        // These shortcuts insert search text while editing, so do not advertise
+        // them there or let their hint push the query out of a narrow header.
+        if !self.search_active {
+            title_parts.push(Span::styled(
+                " (s/S filter)",
+                Style::default().fg(rgb(80, 80, 80)),
+            ));
+        }
 
-        if self.hidden_test_count > 0 {
+        if self.hidden_test_count > 0 && !self.search_active {
             title_parts.push(Span::styled(
                 format!(" (+{} hidden)", self.hidden_test_count),
                 Style::default().fg(rgb(80, 80, 80)),
@@ -637,8 +655,12 @@ impl SessionPicker {
 
         title_parts.push(Span::styled(" ", Style::default()));
 
-        let mut help = if self.loading_message.is_some() {
-            " Esc cancel ".to_string()
+        let mut help = if self.search_active && self.loading_message.is_some() {
+            " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
+        } else if self.loading_message.is_some() {
+            " / search · s/S filter · Esc cancel ".to_string()
+        } else if self.transcript_search.pending() {
+            " searching full transcripts… · type to refine · Ctrl+C cancel ".to_string()
         } else if self.search_active {
             " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
         } else {

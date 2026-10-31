@@ -123,6 +123,14 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         super::input::run_queued_commands_local(app);
         needs_redraw = true;
     }
+    if !app.is_processing
+        && !app.pending_turn
+        && !app.cloud_handoff_blocks_work()
+        && app.has_pending_cloud_recovery()
+    {
+        app.pending_queued_dispatch = true;
+        needs_redraw = true;
+    }
     let ops = app.stream_buffer.flush();
     if app.apply_stream_ops(ops) {
         needs_redraw = true;

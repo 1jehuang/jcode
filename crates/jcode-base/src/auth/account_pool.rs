@@ -11,18 +11,73 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const FILE_NAME: &str = "account-pool.json";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountPool {
-    /// Auto-switch members in rotation order.
+    /// Auto-switch members in rotation order within each priority tier.
     #[serde(default)]
     pub members: Vec<String>,
     /// Accounts the user explicitly kept out of rotation.
     #[serde(default)]
     pub excluded: Vec<String>,
+    /// Explicit priority overrides. Lower numbers are preferred. Missing keys
+    /// derive their priority from locally known subscription metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub priorities: BTreeMap<String, u32>,
+}
+
+/// Locally known plan only. Never probes the network or exposes token material.
+pub fn subscription_label(key: &str) -> Option<String> {
+    let (provider, label) = key.split_once(':')?;
+    match provider {
+        "claude" => {
+            crate::auth::claude::list_accounts()
+                .ok()?
+                .into_iter()
+                .find(|account| account.label == label)?
+                .subscription_type
+        }
+        "openai" => {
+            let account = crate::auth::codex::list_accounts()
+                .ok()?
+                .into_iter()
+                .find(|account| account.label == label)?;
+            account
+                .id_token
+                .as_deref()
+                .and_then(crate::auth::codex::extract_subscription_type)
+                .or_else(|| crate::auth::codex::extract_subscription_type(&account.access_token))
+        }
+        _ => None,
+    }
+}
+
+/// A conservative routing preference, not a statement about plan prices or
+/// credit balances. Explicit overrides always win over these defaults.
+fn subscription_priority(key: &str, plan: Option<&str>) -> u32 {
+    if key.ends_with("-api")
+        || (!key.contains(':')
+            && key != JCODE_SUBSCRIPTION_KEY
+            && crate::provider_catalog::login_providers()
+                .iter()
+                .any(|login| {
+                    login.id == key
+                        && login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
+                }))
+    {
+        return 2;
+    }
+    let plan = plan.unwrap_or_default().trim().to_ascii_lowercase();
+    match (key.split(':').next().unwrap_or(key), plan.as_str()) {
+        ("claude", "max" | "max_5x" | "max_20x")
+        | ("openai", "pro" | "promax" | "enterprise" | "edu") => 0,
+        (_, "free") => 2,
+        _ => 1,
+    }
 }
 
 /// Stable pool key for an account.
@@ -257,7 +312,7 @@ pub const JCODE_SUBSCRIPTION_KEY: &str = "jcode";
 /// subscription logins (OAuth, device sign-in, the Jcode subscription) join,
 /// metered API keys stay manual so nobody is silently billed per token.
 pub fn default_member(key: &str, api_key: bool) -> bool {
-    key == JCODE_SUBSCRIPTION_KEY || !api_key
+    key != "antigravity" && (key == JCODE_SUBSCRIPTION_KEY || !api_key)
 }
 
 fn path() -> Result<PathBuf> {
@@ -265,6 +320,21 @@ fn path() -> Result<PathBuf> {
 }
 
 impl AccountPool {
+    pub fn priority(&self, key: &str) -> u32 {
+        self.priorities
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| subscription_priority(key, subscription_label(key).as_deref()))
+    }
+
+    pub fn set_priority(&mut self, key: &str, priority: u32) {
+        self.priorities.insert(key.to_owned(), priority);
+    }
+
+    pub fn clear_priority(&mut self, key: &str) {
+        self.priorities.remove(key);
+    }
+
     /// Missing or unreadable files mean "use defaults", never an error.
     pub fn load() -> Self {
         path()
@@ -282,7 +352,7 @@ impl AccountPool {
     /// user has not placed yet.
     pub fn is_member(&self, key: &str, default: bool) -> bool {
         if self.members.iter().any(|member| member == key) {
-            return true;
+            return !self.excluded.iter().any(|excluded| excluded == key);
         }
         if self.excluded.iter().any(|excluded| excluded == key) {
             return false;
@@ -301,7 +371,7 @@ impl AccountPool {
             .filter_map(|member| {
                 accounts
                     .iter()
-                    .find(|(key, _)| key == member)
+                    .find(|(key, _)| key == member && !self.excluded.contains(key))
                     .map(|(key, _)| key.as_str())
             })
             .collect();
@@ -322,6 +392,7 @@ impl AccountPool {
             }
         }
         members.extend(last);
+        members.sort_by_cached_key(|key| self.priority(key));
         (members, others)
     }
 
@@ -376,6 +447,9 @@ impl AccountPool {
         {
             members.rotate_left(position + 1);
         }
+        // Cycle only within a tier. A lower-priority metered account must not
+        // jump ahead of a ready subscription merely because it follows current.
+        members.sort_by_cached_key(|key| self.priority(key));
         let prefix = format!("{provider}:");
         members
             .into_iter()
@@ -388,6 +462,85 @@ impl AccountPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_tiers_are_conservative_and_overridable() {
+        for plan in ["pro", "promax", " Pro "] {
+            assert_eq!(subscription_priority("openai:a", Some(plan)), 0);
+        }
+        assert_eq!(subscription_priority("claude:a", Some("max")), 0);
+        for plan in [None, Some("plus"), Some("team"), Some("future-plan")] {
+            assert_eq!(subscription_priority("openai:a", plan), 1);
+        }
+        assert_eq!(subscription_priority("openai:a", Some("free")), 2);
+        assert_eq!(subscription_priority("openai-api", Some("pro")), 2);
+        let mut pool = AccountPool::default();
+        pool.set_priority("openai-api", 0);
+        assert_eq!(pool.priority("openai-api"), 0);
+        pool.clear_priority("openai-api");
+        assert_eq!(pool.priority("openai-api"), 2);
+        assert!(!default_member("antigravity", false));
+    }
+
+    #[test]
+    fn legacy_pool_loads_without_priorities_and_overrides_roundtrip() {
+        let mut pool: AccountPool =
+            serde_json::from_str(r#"{"members":["openai-api"],"excluded":["antigravity"]}"#)
+                .unwrap();
+        assert!(pool.priorities.is_empty());
+        pool.set_priority("openai-api", 7);
+        let saved = serde_json::to_string(&pool).unwrap();
+        assert_eq!(serde_json::from_str::<AccountPool>(&saved).unwrap(), pool);
+    }
+
+    #[test]
+    fn priority_tiers_precede_order_and_never_enroll_manual_accounts() {
+        let mut pool = AccountPool::default();
+        pool.members = vec![
+            "openai-api".into(),
+            "work".into(),
+            "personal".into(),
+            "claude".into(),
+        ];
+        for (key, priority) in [
+            ("openai-api", 2),
+            ("work", 1),
+            ("personal", 0),
+            ("claude", 0),
+            ("manual", 0),
+        ] {
+            pool.set_priority(key, priority);
+        }
+        let list = accounts(&[
+            ("openai-api", false),
+            ("work", true),
+            ("personal", true),
+            ("claude", true),
+            ("manual", false),
+        ]);
+        assert_eq!(
+            pool.partition(&list),
+            (
+                vec!["personal", "claude", "work", "openai-api"],
+                vec!["manual"]
+            )
+        );
+        pool.excluded.push("personal".into());
+        assert!(!pool.is_member("personal", true));
+        assert_eq!(pool.partition(&list).0, ["claude", "work", "openai-api"]);
+    }
+
+    #[test]
+    fn rotation_stays_with_highest_available_tier_before_lower_tiers() {
+        let mut pool = AccountPool::default();
+        pool.members = vec!["openai:a".into(), "openai:work".into(), "openai:b".into()];
+        pool.set_priority("openai:a", 0);
+        pool.set_priority("openai:b", 0);
+        pool.set_priority("openai:work", 1);
+        let labels = ["a", "work", "b"].map(str::to_owned);
+        assert_eq!(pool.rotation("openai", Some("a"), &labels), ["b", "work"]);
+        assert_eq!(pool.rotation("openai", Some("work"), &labels), ["a", "b"]);
+    }
 
     fn accounts(entries: &[(&str, bool)]) -> Vec<(String, bool)> {
         entries
@@ -455,6 +608,7 @@ mod tests {
         let pool = AccountPool {
             members: vec!["jcode".into(), "claude:claude-otter".into()],
             excluded: vec![],
+            ..Default::default()
         };
         assert_eq!(pool.partition(&list).0[0], "jcode");
     }
@@ -474,6 +628,7 @@ mod tests {
                 "anthropic-api".into(),
             ],
             excluded: vec!["openai-api".into()],
+            ..Default::default()
         };
         // The model picker's `anthropic-api` route moves the API key to #1.
         assert!(pool.promote_route("anthropic-api", active));
@@ -533,6 +688,7 @@ mod tests {
         let mut pool = AccountPool {
             members: vec!["gone".into(), "a".into()],
             excluded: vec![],
+            ..Default::default()
         };
         let list = accounts(&[("a", true), ("b", true)]);
         pool.place("b", true, 0, &["a"]);
@@ -545,6 +701,7 @@ mod tests {
         let pool = AccountPool {
             members: vec![],
             excluded: vec!["openai:openai-fox".into()],
+            ..Default::default()
         };
         let labels: Vec<String> = ["openai-otter", "openai-fox", "openai-panda", "openai-wolf"]
             .into_iter()

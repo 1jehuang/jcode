@@ -849,6 +849,13 @@ impl crate::tui::TuiState for App {
         &self.input
     }
 
+    fn input_image_attached(&self, number: usize) -> bool {
+        number
+            .checked_sub(1)
+            .and_then(|index| self.pending_images.get(index))
+            .is_some_and(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
+    }
+
     fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }
@@ -1884,6 +1891,7 @@ impl crate::tui::TuiState for App {
             session_count,
             session_name,
             working_dir: self.session.working_dir.clone(),
+            original_working_dir: self.session.original_working_dir.clone(),
             client_count,
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
@@ -1982,12 +1990,13 @@ impl crate::tui::TuiState for App {
     }
 
     fn startup_oauth_account_label(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return None;
-        }
         if !self.is_remote {
+            if crate::tui::is_ssh_remote() {
+                return None;
+            }
             return self.provider.oauth_account_label();
         }
+        // SSH must avoid host-local credentials, not daemon-reported identity.
         remote_oauth_account_label(
             self.remote_provider_oauth_account_label.as_deref(),
             self.session.route_api_method.as_deref(),

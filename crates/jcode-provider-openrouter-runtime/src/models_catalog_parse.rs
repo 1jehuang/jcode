@@ -9,6 +9,16 @@ use jcode_provider_openrouter::{ModelInfo, ModelPricing};
 use serde_json::Value;
 
 pub(crate) fn parse_openai_compatible_models_response(raw_body: &str) -> Result<Vec<ModelInfo>> {
+    parse_models_response(raw_body, false)
+}
+
+/// Grok CLI entries may have a menu `id` distinct from the request `model`.
+/// Match the official CLI's model/modelId/id precedence only on this route.
+pub(crate) fn parse_grok_models_response(raw_body: &str) -> Result<Vec<ModelInfo>> {
+    parse_models_response(raw_body, true)
+}
+
+fn parse_models_response(raw_body: &str, grok: bool) -> Result<Vec<ModelInfo>> {
     let value: Value = serde_json::from_str(raw_body)?;
     let items = match &value {
         Value::Array(items) => items,
@@ -22,7 +32,12 @@ pub(crate) fn parse_openai_compatible_models_response(raw_body: &str) -> Result<
 
     let mut models = Vec::new();
     for item in items {
-        if let Some(model) = parse_model_info_value(item) {
+        let model = if grok {
+            parse_grok_model_info_value(item)
+        } else {
+            parse_model_info_value(item)
+        };
+        if let Some(model) = model {
             models.push(model);
         }
     }
@@ -32,6 +47,73 @@ pub(crate) fn parse_openai_compatible_models_response(raw_body: &str) -> Result<
     }
 
     Ok(models)
+}
+
+fn parse_grok_model_info_value(value: &Value) -> Option<ModelInfo> {
+    let object = value.as_object()?;
+    let meta = object.get("_meta").and_then(Value::as_object);
+    if object
+        .get("hidden")
+        .or_else(|| meta.and_then(|m| m.get("hidden")))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
+    let id = [
+        object.get("model"),
+        object.get("modelId"),
+        object.get("id"),
+        meta.and_then(|m| m.get("model")),
+        meta.and_then(|m| m.get("modelId")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)?;
+    let mut normalized = object.clone();
+    normalized.insert("id".into(), Value::String(id.to_string()));
+    if let Some(context) = object
+        .get("contextWindow")
+        .or_else(|| object.get("context_window"))
+        .or_else(|| {
+            meta.and_then(|m| {
+                m.get("contextWindow")
+                    .or_else(|| m.get("totalContextTokens"))
+            })
+        })
+    {
+        normalized.insert("context_length".into(), context.clone());
+    }
+    parse_model_info_value(&Value::Object(normalized))
+}
+
+#[cfg(test)]
+mod grok_tests {
+    use super::*;
+
+    #[test]
+    fn native_grok_catalog_preserves_request_model_and_live_context() {
+        let models = parse_grok_models_response(r#"{"data":[
+            {"id":"menu-entry","model":"grok-future-release","name":"Future Grok","contextWindow":900000},
+            {"modelId":"grok-next-code","context_window":700000},
+            {"_meta":{"model":"grok-meta","totalContextTokens":600000}},
+            {"model":"grok-hidden","hidden":true}
+        ]}"#).unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "grok-future-release");
+        assert_eq!(models[0].name, "Future Grok");
+        assert_eq!(models[0].context_length, Some(900_000));
+        assert_eq!(models[1].id, "grok-next-code");
+        assert_eq!(models[1].context_length, Some(700_000));
+        assert_eq!(models[2].id, "grok-meta");
+        assert_eq!(models[2].context_length, Some(600_000));
+        // Standard APIs must continue treating id as the request identifier.
+        let standard = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"api-id","model":"metadata-model"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(standard[0].id, "api-id");
+    }
 }
 
 pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
@@ -53,6 +135,8 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
     let id = object
         .get("id")
         .and_then(Value::as_str)
+        .or_else(|| object.get("model").and_then(Value::as_str))
+        .or_else(|| object.get("modelId").and_then(Value::as_str))
         .or_else(|| object.get("name").and_then(Value::as_str))?
         .to_string();
     // The native shape puts the display label in `metadata["muse-code"].name`
@@ -83,6 +167,7 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
             &[
                 "context_length",
                 "context_window",
+                "contextWindow",
                 "context_size",
                 "contextLength",
                 "max_context_length",

@@ -198,8 +198,8 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
             .collect::<Vec<_>>()
             .join(" ");
         let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains("Disabled gates that would have fired"));
-        assert!(normalized.contains("• Intent understanding"));
+        assert!(!normalized.contains("Disabled gates that would have fired"));
+        assert!(!normalized.contains("• Intent understanding"));
         assert!(!normalized.contains("started this work without understanding"));
         assert!(!normalized.contains("flagged 2 times this turn"));
         assert!(!plain.contains("[auto]"));
@@ -232,7 +232,7 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         .collect::<Vec<_>>()
         .join(" ");
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(text.contains("• Intent understanding"));
+        assert!(!text.contains("• Intent understanding"));
         assert!(!text.contains("never became solid"));
         assert!(!text.contains("flagged 2 times this turn"));
         // This updated snapshot is the immutable record for the earlier cycle.

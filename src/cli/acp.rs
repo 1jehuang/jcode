@@ -823,6 +823,15 @@ impl AcpRuntime {
 
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
+        self.create_new_session_connected(cwd, reader, writer).await
+    }
+
+    async fn create_new_session_connected(
+        &self,
+        cwd: PathBuf,
+        reader: ReadHalf,
+        writer: WriteHalf,
+    ) -> Result<DaemonSession> {
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let subscribe_id = 1;
         session
@@ -830,7 +839,7 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_server_failover: false,
+                supports_server_failover: true,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -882,6 +891,24 @@ impl AcpRuntime {
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
+        self.attach_existing_session_connected(
+            target_session_id,
+            cwd,
+            replay_history,
+            reader,
+            writer,
+        )
+        .await
+    }
+
+    async fn attach_existing_session_connected(
+        &self,
+        target_session_id: String,
+        cwd: PathBuf,
+        replay_history: bool,
+        reader: ReadHalf,
+        writer: WriteHalf,
+    ) -> Result<DaemonSession> {
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let resume_id = 1;
         session
@@ -889,7 +916,7 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_server_failover: false,
+                supports_server_failover: true,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -1113,6 +1140,7 @@ impl AcpRuntime {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    ..
                 } => {
                     turn_usage.observe_snapshot(
                         input,

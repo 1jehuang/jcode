@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod ssh_sessions;
+
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
@@ -241,6 +243,7 @@ pub struct RemoteConnection {
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
+    pending_runtime_commands: std::collections::HashSet<u64>,
     // Bootstrap Done acknowledgments are not completions of a detached turn.
     // Retain recent ids because target Subscribe can acknowledge twice.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
@@ -291,6 +294,11 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    /// Replay has no outstanding control requests. Live connections track IDs.
+    fn finish_runtime_command(&mut self, _id: u64) -> bool {
+        false
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str);
     fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
@@ -361,6 +369,7 @@ impl RemoteConnection {
             // local sockets as well as SSH. Keep its Done distinct from this
             // connection's Subscribe/GetHistory acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
+            pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -594,6 +603,26 @@ impl RemoteConnection {
             .await
     }
 
+    /// Execute a daemon-owned command without submitting a conversation turn.
+    pub async fn runtime_command(&mut self, command: &str, args: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RuntimeCommand {
+            id,
+            command: command.to_string(),
+            args,
+        })
+        .await?;
+        self.pending_runtime_commands.insert(id);
+        Ok(id)
+    }
+
+    /// Runtime failures share the Error wire variant with chat failures. Keep
+    /// request ownership so the client can render them without ending a turn.
+    pub fn finish_runtime_command(&mut self, id: u64) -> bool {
+        self.pending_runtime_commands.remove(&id)
+    }
+
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
         let had_cloud_authority = self.cloud_authority.is_some();
@@ -705,6 +734,14 @@ impl RemoteConnection {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::GetHistory { id }).await?;
+        Ok(id)
+    }
+
+    /// Fetch the attached session's current todo card from the daemon.
+    pub async fn request_todos(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetTodos { id }).await?;
         Ok(id)
     }
 
@@ -1383,6 +1420,7 @@ impl RemoteConnection {
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
+            pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -1470,6 +1508,10 @@ impl RemoteConnection {
 }
 
 impl RemoteEventState for RemoteConnection {
+    fn finish_runtime_command(&mut self, id: u64) -> bool {
+        Self::finish_runtime_command(self, id)
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str) {
         Self::handle_tool_start(self, id, name);
     }

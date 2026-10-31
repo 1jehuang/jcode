@@ -758,6 +758,11 @@ pub trait TuiState {
         None
     }
     fn input(&self) -> &str;
+    /// Whether the one-based composer image tag has a pending payload.
+    /// This does not acknowledge delivery to a provider.
+    fn input_image_attached(&self, _number: usize) -> bool {
+        false
+    }
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;
     fn queued_messages(&self) -> &[String];
@@ -1969,6 +1974,8 @@ pub struct PickerEntry {
     pub is_default: bool,
     pub is_favorite: bool,
     pub recommended: bool,
+    /// Model recommendation rank, or effective account priority in /account.
+    /// usize::MAX means no ranked account metadata (e.g. management actions).
     pub recommendation_rank: usize,
     pub usage_score: u32,
     pub old: bool,
@@ -1978,6 +1985,28 @@ pub struct PickerEntry {
 }
 
 impl PickerEntry {
+    pub fn account_pool_key(&self) -> Option<String> {
+        match &self.action {
+            PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => Some(
+                crate::auth::account_pool::account_key(provider_id, Some(label)),
+            ),
+            PickerAction::Login(provider)
+                if !matches!(
+                    provider.target,
+                    crate::provider_catalog::LoginProviderTarget::AutoImport
+                ) =>
+            {
+                Some(provider.id.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn account_priority(&self) -> Option<u32> {
+        self.account_pool_key()?;
+        u32::try_from(self.recommendation_rank).ok()
+    }
+
     pub fn active_option(&self) -> Option<&PickerOption> {
         self.options.get(self.selected_option)
     }

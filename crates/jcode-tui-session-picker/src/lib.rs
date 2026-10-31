@@ -41,6 +41,8 @@ pub enum SessionFilterMode {
     CurrentDir,
     CatchUp,
     Saved,
+    /// Sessions owned by a remote cloud host.
+    Cloud,
     /// Sessions with a live process right now (from the active-pid registry),
     /// annotated with whether each is still streaming a response or is ready
     /// for input. Backs the opt-in "active sessions manager" view.
@@ -62,7 +64,8 @@ impl SessionFilterMode {
             Self::All => Self::CurrentDir,
             Self::CurrentDir => Self::CatchUp,
             Self::CatchUp => Self::Saved,
-            Self::Saved => Self::Active,
+            Self::Saved => Self::Cloud,
+            Self::Cloud => Self::Active,
             Self::Active => Self::ClaudeCode,
             Self::ClaudeCode => Self::Codex,
             Self::Codex => Self::Pi,
@@ -81,7 +84,8 @@ impl SessionFilterMode {
             Self::CurrentDir => Self::All,
             Self::CatchUp => Self::CurrentDir,
             Self::Saved => Self::CatchUp,
-            Self::Active => Self::Saved,
+            Self::Cloud => Self::Saved,
+            Self::Active => Self::Cloud,
             Self::ClaudeCode => Self::Active,
             Self::Codex => Self::ClaudeCode,
             Self::Pi => Self::Codex,
@@ -97,6 +101,7 @@ impl SessionFilterMode {
             Self::CurrentDir => Some("📁 current dir"),
             Self::CatchUp => Some("⏭ catch up"),
             Self::Saved => Some("📌 saved"),
+            Self::Cloud => Some("☁ cloud"),
             Self::Active => Some("⚡ active"),
             Self::ClaudeCode => Some("🧵 Claude Code"),
             Self::Codex => Some("🧠 Codex"),
@@ -256,6 +261,29 @@ pub fn session_is_cursor(source: SessionSource, provider_key: Option<&str>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_cycle_includes_cloud_immediately_after_saved() {
+        let cycle = [
+            SessionFilterMode::All,
+            SessionFilterMode::CurrentDir,
+            SessionFilterMode::CatchUp,
+            SessionFilterMode::Saved,
+            SessionFilterMode::Cloud,
+            SessionFilterMode::Active,
+            SessionFilterMode::ClaudeCode,
+            SessionFilterMode::Codex,
+            SessionFilterMode::Pi,
+            SessionFilterMode::OpenCode,
+            SessionFilterMode::Cursor,
+        ];
+        for (index, mode) in cycle.iter().copied().enumerate() {
+            let next = cycle[(index + 1) % cycle.len()];
+            assert_eq!(mode.next(), next);
+            assert_eq!(next.previous(), mode);
+        }
+        assert_eq!(SessionFilterMode::Cloud.label(), Some("☁ cloud"));
+    }
 
     #[test]
     fn resume_target_stable_id_uses_durable_identifier() {
