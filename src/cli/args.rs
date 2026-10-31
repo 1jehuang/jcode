@@ -7,10 +7,12 @@ pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
 mod google;
 mod mcp;
+mod trust;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
+pub(crate) use trust::{TrustCommand, TrustScopeArg};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -309,10 +311,10 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
 
-    /// Review trust for project-local MCP servers that can run commands
-    Mcp {
+    /// Review and approve what a project wants to run (hooks, MCP servers, agent policy)
+    Trust {
         #[command(subcommand)]
-        action: McpCommand,
+        action: TrustCommand,
     },
 
     /// Self-development mode: run as a canary session on the shared server
@@ -644,25 +646,6 @@ pub(crate) enum TelemetryCommand {
     Enable,
     /// Disable all telemetry persistently
     Disable,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum McpCommand {
-    /// Trust the exact current executable project MCP configuration
-    Trust {
-        /// Project directory to review (defaults to the current directory)
-        path: Option<std::path::PathBuf>,
-
-        /// Approve non-interactively after reviewing the project MCP files
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
-
-    /// Revoke saved MCP trust for a project
-    Revoke {
-        /// Project directory to revoke (defaults to the current directory)
-        path: Option<std::path::PathBuf>,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1207,3 +1190,5 @@ pub(crate) enum MemoryCommand {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trust_tests;
