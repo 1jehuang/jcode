@@ -114,6 +114,14 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Whether `[hooks]` in a trusted project `.jcode/config.toml` is honoured
+    /// (default true). Set false in the global config, or set
+    /// JCODE_PROJECT_HOOKS=0, to disable every project hook.
+    pub project_hooks: bool,
+    /// Upper bound, in milliseconds, for any timeout a project hook runs with
+    /// (default 120000). A project may set its own `<event>_timeout_ms`, but
+    /// the value is clamped to this cap. Only the global config sets it.
+    pub project_timeout_cap_ms: u64,
 }
 
 impl Default for HooksConfig {
@@ -130,6 +138,8 @@ impl Default for HooksConfig {
             post_tool_feedback: None,
             post_tool_feedback_timeout_ms: 10_000,
             pre_tool_timeout_ms: 5000,
+            project_hooks: true,
+            project_timeout_cap_ms: 120_000,
         }
     }
 }

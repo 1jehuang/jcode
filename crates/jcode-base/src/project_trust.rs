@@ -185,25 +185,31 @@ fn save(store: &Store) -> Result<()> {
     crate::storage::write_json(&store_path(), store)
 }
 
-/// The directory that identifies the project containing `path`: the git top
-/// level, resolved to the main checkout for a linked worktree, else `path`
-/// itself. Always canonical.
-pub fn project_root(path: &Path) -> Result<PathBuf> {
+/// Where a project's own configuration lives: the git top level containing
+/// `path` (a linked worktree's own top level, not the main checkout), else
+/// `path` itself. Always canonical.
+pub fn config_dir(path: &Path) -> Result<PathBuf> {
     let start = std::fs::canonicalize(path)
         .with_context(|| format!("failed to resolve project directory {}", path.display()))?;
     if !start.is_dir() {
         bail!("project path is not a directory: {}", start.display());
     }
-    for dir in start.ancestors() {
-        let dot_git = dir.join(".git");
-        if dot_git.is_dir() {
-            return Ok(dir.to_path_buf());
-        }
-        if dot_git.is_file() {
-            return Ok(main_checkout_of(dir, &dot_git).unwrap_or_else(|| dir.to_path_buf()));
-        }
+    Ok(start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map_or_else(|| start.clone(), Path::to_path_buf))
+}
+
+/// The directory that identifies the project containing `path`: the git top
+/// level, resolved to the main checkout for a linked worktree, else `path`
+/// itself. Always canonical.
+pub fn project_root(path: &Path) -> Result<PathBuf> {
+    let top = config_dir(path)?;
+    let dot_git = top.join(".git");
+    if dot_git.is_file() {
+        return Ok(main_checkout_of(&top, &dot_git).unwrap_or(top));
     }
-    Ok(start)
+    Ok(top)
 }
 
 /// For a linked worktree whose `.git` file points at

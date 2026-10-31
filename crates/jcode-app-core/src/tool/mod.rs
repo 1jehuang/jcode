@@ -877,7 +877,7 @@ impl Registry {
         result: &Result<ToolOutput>,
         latency_ms: u64,
     ) {
-        if !crate::hooks::hook_configured("post_tool") {
+        if !crate::hooks::hook_configured_at("post_tool", ctx.working_dir.as_deref()) {
             return;
         }
         crate::hooks::dispatch_observer(Self::post_tool_event(
@@ -900,7 +900,7 @@ impl Registry {
         latency_ms: u64,
         output: &mut ToolOutput,
     ) {
-        if !crate::hooks::hook_configured("post_tool_feedback") {
+        if !crate::hooks::hook_configured_at("post_tool_feedback", ctx.working_dir.as_deref()) {
             return;
         }
         let event = Self::post_tool_event(
@@ -1083,7 +1083,7 @@ impl Registry {
         // context for the model. Skipped entirely when not configured.
         let mut input = input;
         let mut gate_context: Vec<String> = Vec::new();
-        if crate::hooks::hook_configured("pre_tool") {
+        if crate::hooks::hook_configured_for("pre_tool", working_dir.as_deref()) {
             let input_json = input.to_string();
             let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,

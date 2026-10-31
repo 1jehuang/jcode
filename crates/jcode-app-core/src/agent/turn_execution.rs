@@ -286,7 +286,7 @@ impl Agent {
     /// submission and the first tool call. No-op (without building the payload)
     /// when the hook is not configured.
     fn fire_turn_start_hook(&self, source: &str) {
-        if !crate::hooks::hook_configured("turn_start") {
+        if !crate::hooks::hook_configured_for("turn_start", self.working_dir()) {
             return;
         }
         let mut event = crate::hooks::HookEvent::new("turn_start")
@@ -307,7 +307,7 @@ impl Agent {
         started_at: Instant,
         start_message_index: usize,
     ) {
-        if !crate::hooks::hook_configured("turn_end") {
+        if !crate::hooks::hook_configured_for("turn_end", self.working_dir()) {
             return;
         }
         let status = if result.is_ok() { "ok" } else { "error" };

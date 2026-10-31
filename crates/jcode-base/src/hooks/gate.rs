@@ -143,35 +143,30 @@ pub async fn transform_tool_input(
     if hooks_suppressed() {
         return input;
     }
-    let commands: Vec<String> = crate::config::config()
-        .hooks
-        .pre_tool_transform
-        .as_ref()
-        .into_iter()
-        .flat_map(|commands| commands.iter())
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let commands = hook_commands_for("pre_tool_transform", working_dir);
     if commands.is_empty() {
         return input;
     }
 
-    let mut event = HookEvent::new("pre_tool_transform")
-        .session_id(session_id)
-        .field("TOOL_NAME", tool_name);
-    if let Some(cwd) = working_dir {
-        event = event.cwd(cwd);
-    }
+    let base_event = {
+        let mut event = HookEvent::new("pre_tool_transform")
+            .session_id(session_id)
+            .field("TOOL_NAME", tool_name);
+        if let Some(cwd) = working_dir {
+            event = event.cwd(cwd);
+        }
+        event
+    };
 
-    let timeout = std::time::Duration::from_millis(
-        crate::config::config()
-            .hooks
-            .pre_tool_transform_timeout_ms
-            .max(1),
-    );
     let mut current = input;
-    for command_line in commands {
+    for scoped in commands {
+        let command_line = scoped.command.clone();
+        let event = base_event.clone().with_scope(&scoped.scope);
+        let timeout = std::time::Duration::from_millis(
+            scoped
+                .effective_timeout_ms(crate::config::config().hooks.pre_tool_transform_timeout_ms)
+                .max(1),
+        );
         let serialized = current.to_string();
         let std_cmd = match build_hook_process(&command_line, &event) {
             Ok(cmd) => cmd,
@@ -223,15 +218,19 @@ pub async fn run_pre_tool_gate(
     tool_name: &str,
     tool_input_json: &str,
 ) -> GateOutcome {
-    let command_lines = hook_commands("pre_tool");
+    let commands = hook_commands_for("pre_tool", working_dir);
     let mut outcome = GateOutcome::allow();
-    if command_lines.is_empty() {
+    if commands.is_empty() {
         return outcome;
     }
 
     let mut current_input = tool_input_json.to_string();
-    for command_line in command_lines {
+    for scoped in commands {
+        let command_line = scoped.command.clone();
+        let timeout =
+            scoped.effective_timeout_ms(crate::config::config().hooks.pre_tool_timeout_ms);
         let mut event = HookEvent::new("pre_tool")
+            .with_scope(&scoped.scope)
             .session_id(session_id)
             .field("TOOL_NAME", tool_name)
             .field(
@@ -241,7 +240,8 @@ pub async fn run_pre_tool_gate(
         if let Some(cwd) = working_dir {
             event = event.cwd(cwd);
         }
-        let verdict = run_pre_tool_command(&command_line, &event, tool_name, &current_input).await;
+        let verdict =
+            run_pre_tool_command(&command_line, &event, tool_name, &current_input, timeout).await;
         if let Some(reason) = verdict.block {
             if outcome.decision == GateDecision::Allow {
                 outcome.decision = GateDecision::Block { reason };
@@ -267,6 +267,7 @@ async fn run_pre_tool_command(
     event: &HookEvent,
     tool_name: &str,
     tool_input_json: &str,
+    timeout_ms: u64,
 ) -> CommandVerdict {
     let session_id = event.session_id.as_deref().unwrap_or("unknown");
     let std_cmd = match build_hook_process(command_line, event) {
@@ -279,8 +280,7 @@ async fn run_pre_tool_command(
         }
     };
 
-    let timeout =
-        std::time::Duration::from_millis(crate::config::config().hooks.pre_tool_timeout_ms.max(1));
+    let timeout = std::time::Duration::from_millis(timeout_ms.max(1));
     let output = match sync_runner::run_command(
         std_cmd,
         tool_input_json.as_bytes(),

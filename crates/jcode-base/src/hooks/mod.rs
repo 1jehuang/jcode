@@ -52,6 +52,9 @@ pub struct HookEvent {
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
     /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
+    /// Provenance of the command being run. Project commands also get
+    /// `JCODE_PROJECT_DIR` pointing at their own project.
+    pub command_scope: Option<CommandScope>,
 }
 
 impl HookEvent {
@@ -61,7 +64,14 @@ impl HookEvent {
             session_id: None,
             cwd: None,
             fields: Vec::new(),
+            command_scope: None,
         }
+    }
+
+    /// Mark the event as running for a command of the given provenance.
+    pub fn with_scope(mut self, scope: &CommandScope) -> Self {
+        self.command_scope = Some(scope.clone());
+        self
     }
 
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -91,12 +101,8 @@ where
     CLIENT_TERMINAL_ENV.scope(env, future).await
 }
 
-/// The configured commands for `event`, in declaration order.
-pub fn hook_commands(event: &str) -> Vec<String> {
-    if hooks_suppressed() {
-        return Vec::new();
-    }
-    let hooks = &crate::config::config().hooks;
+/// The commands `hooks` configures for `event`, in declaration order.
+pub(crate) fn config_commands(hooks: &jcode_config_types::HooksConfig, event: &str) -> Vec<String> {
     let raw = match event {
         "turn_start" => hooks.turn_start.as_ref(),
         "turn_end" => hooks.turn_end.as_ref(),
@@ -105,6 +111,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
         "post_tool_feedback" => hooks.post_tool_feedback.as_ref(),
+        "pre_tool_transform" => hooks.pre_tool_transform.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -113,6 +120,46 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         .filter(|command| !command.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// The global commands for `event`, in declaration order. Project hooks are
+/// not included; see [`hook_commands_for`].
+pub fn hook_commands(event: &str) -> Vec<String> {
+    if hooks_suppressed() {
+        return Vec::new();
+    }
+    config_commands(&crate::config::config().hooks, event)
+}
+
+/// Global commands for `event` followed by the trusted project's commands for
+/// sessions running in `cwd`. A project can only add commands.
+pub fn hook_commands_for(event: &str, cwd: Option<&str>) -> Vec<ScopedCommand> {
+    let mut commands: Vec<ScopedCommand> = hook_commands(event)
+        .into_iter()
+        .map(|command| ScopedCommand {
+            command,
+            scope: CommandScope::global(),
+            timeout_ms: None,
+        })
+        .collect();
+    if hooks_suppressed() {
+        return commands;
+    }
+    if let Some(project) = project::active_project(cwd) {
+        commands.extend(project.commands(event));
+    }
+    commands
+}
+
+/// Whether any hook (global or trusted project) is configured for `event` in
+/// sessions running in `cwd`.
+pub fn hook_configured_for(event: &str, cwd: Option<&str>) -> bool {
+    !hook_commands_for(event, cwd).is_empty()
+}
+
+/// [`hook_configured_for`] for a session working directory held as a path.
+pub fn hook_configured_at(event: &str, dir: Option<&std::path::Path>) -> bool {
+    hook_configured_for(event, dir.and_then(std::path::Path::to_str))
 }
 
 /// The first configured command for `event`, retained for scalar callers.
@@ -129,6 +176,22 @@ pub fn hook_configured(event: &str) -> bool {
 /// True when running inside a hook process (recursion guard).
 fn hooks_suppressed() -> bool {
     std::env::var_os("JCODE_HOOKS_DISABLED").is_some()
+}
+
+/// A relative program path in a project command is resolved against the
+/// project root, so `.jcode/hooks/check.sh` works from any cwd.
+fn resolve_program(program: &str, event: &HookEvent) -> PathBuf {
+    let path = expand_home(program);
+    if let Some(dir) = event
+        .command_scope
+        .as_ref()
+        .and_then(|scope| scope.project_dir.as_ref())
+        && path.is_relative()
+        && path.components().count() > 1
+    {
+        return dir.join(path);
+    }
+    path
 }
 
 fn expand_home(program: &str) -> PathBuf {
@@ -195,6 +258,26 @@ fn apply_event_env(cmd: &mut std::process::Command, event: &HookEvent) {
         cmd.env(format!("JCODE_HOOK_{key}"), value);
     }
     cmd.env("JCODE_HOOK_PAYLOAD", payload_json(event));
+    let is_project = event
+        .command_scope
+        .as_ref()
+        .is_some_and(CommandScope::is_project);
+    cmd.env(
+        "JCODE_HOOK_SCOPE",
+        if is_project { "project" } else { "global" },
+    );
+    // The project the session works in, for every hook (global ones too), so a
+    // script can find its project without parsing the cwd. A project's own
+    // commands get their own project directory.
+    let project_dir = event
+        .command_scope
+        .as_ref()
+        .and_then(|scope| scope.project_dir.clone())
+        .or_else(|| project::project_dir_for(event.cwd.as_deref()));
+    if let Some(dir) = project_dir {
+        cmd.env("JCODE_PROJECT_DIR", &dir);
+        cmd.env("CLAUDE_PROJECT_DIR", &dir);
+    }
 }
 
 fn build_hook_process(
@@ -205,7 +288,7 @@ fn build_hook_process(
     let (program, args) = parts
         .split_first()
         .expect("parse_hook_command guarantees at least one part");
-    let mut cmd = std::process::Command::new(expand_home(program));
+    let mut cmd = std::process::Command::new(resolve_program(program, event));
     cmd.args(args);
     if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty())
         && std::path::Path::new(cwd).is_dir()
@@ -237,12 +320,14 @@ fn build_hook_process(
 /// Detached and fire-and-forget: failures are logged, never propagated, and
 /// the hook process cannot block the agent.
 pub fn dispatch_observer(event: HookEvent) {
-    let command_lines = hook_commands(event.event);
-    if command_lines.is_empty() {
+    let commands = hook_commands_for(event.event, event.cwd.as_deref());
+    if commands.is_empty() {
         return;
     }
     let event_name = event.event;
-    for command_line in command_lines {
+    for scoped in commands {
+        let command_line = scoped.command;
+        let event = event.clone().with_scope(&scoped.scope);
         match build_hook_process(&command_line, &event) {
             Ok(mut cmd) => {
                 cmd.stdin(std::process::Stdio::null())
@@ -274,6 +359,7 @@ mod gate;
 mod json_output;
 mod json_runner;
 mod payload;
+mod project;
 mod sync_runner;
 
 pub use capabilities::hook_capabilities;
@@ -284,6 +370,7 @@ pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_inpu
 pub use json_output::{CommandResult, Verdict, interpret};
 pub use json_runner::run_json_commands;
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
+pub use project::{CommandScope, ScopedCommand, hooks_scope_review, project_hooks_digest};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

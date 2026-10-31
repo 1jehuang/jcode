@@ -25,6 +25,9 @@ fn scopes_for(arg: TrustScopeArg) -> Vec<Scope> {
 /// approve are omitted. Each feature that adds a scope adds its review here.
 fn scope_reviews(path: &Path) -> Result<Vec<ScopeReview>> {
     let mut reviews = Vec::new();
+    if let Some(review) = crate::hooks::hooks_scope_review(path)? {
+        reviews.push(review);
+    }
     if let Some(review) = crate::mcp::mcp_scope_review(path)? {
         reviews.push(review);
     }

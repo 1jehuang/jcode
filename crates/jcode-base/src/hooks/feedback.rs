@@ -15,20 +15,20 @@ const FEEDBACK_LIMIT: usize = 8 * 1024;
 /// exit code, because linters conventionally exit non-zero when they report
 /// findings. Timeouts, spawn failures, and empty stdout contribute nothing.
 pub async fn run_post_tool_feedback(event: &HookEvent, tool_input_json: &str) -> Option<String> {
-    let command_lines = hook_commands("post_tool_feedback");
-    if command_lines.is_empty() {
+    let commands = hook_commands_for("post_tool_feedback", event.cwd.as_deref());
+    if commands.is_empty() {
         return None;
     }
-    let timeout = std::time::Duration::from_millis(
-        crate::config::config()
-            .hooks
-            .post_tool_feedback_timeout_ms
-            .max(1),
-    );
     let mut sections = Vec::new();
-    for command_line in command_lines {
+    for scoped in commands {
+        let timeout = std::time::Duration::from_millis(
+            scoped
+                .effective_timeout_ms(crate::config::config().hooks.post_tool_feedback_timeout_ms)
+                .max(1),
+        );
+        let event = event.clone().with_scope(&scoped.scope);
         if let Some(text) =
-            run_post_tool_feedback_command(&command_line, event, tool_input_json, timeout).await
+            run_post_tool_feedback_command(&scoped.command, &event, tool_input_json, timeout).await
         {
             sections.push(text);
         }
