@@ -27,6 +27,7 @@ fn shell_mode_color() -> Color {
 enum ComposerMode {
     Chat,
     SlashCommand,
+    FileMention,
     ShellLocal,
     ShellRemote,
 }
@@ -37,6 +38,13 @@ impl ComposerMode {
     }
 }
 
+fn file_chip_style() -> Style {
+    Style::default()
+        .fg(rgb(20, 60, 80))
+        .bg(rgb(90, 210, 210))
+        .add_modifier(Modifier::BOLD)
+}
+
 fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
     if app::extract_input_shell_command(input).is_some() {
         if is_remote_mode {
@@ -44,11 +52,101 @@ fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
         } else {
             ComposerMode::ShellLocal
         }
-    } else if app::has_safe_slash_command_token(input) {
+    } else if app::has_safe_slash_command_token(input) || input.trim_start().starts_with('/') {
         ComposerMode::SlashCommand
+    } else if has_active_at_mention(input) {
+        ComposerMode::FileMention
     } else {
         ComposerMode::Chat
     }
+}
+
+/// Convenience predicate for callers that only need to branch on FileMention.
+pub(crate) fn is_at_file_mode(input: &str, is_remote_mode: bool) -> bool {
+    matches!(
+        composer_mode(input, is_remote_mode),
+        ComposerMode::FileMention
+    )
+}
+
+/// Check whether the input contains an active @ mention.
+///
+/// @file mention parsing rules:
+///   1. Find `@` from right to left
+///   2. Left of `@` must be: SOL, whitespace, or `(` `[` `{`
+///   3. No whitespace immediately after `@`
+pub(crate) fn has_active_at_mention(input: &str) -> bool {
+    extract_at_query(input).is_some()
+}
+
+/// Extract @ query content. Returns `(at_sign_byte_offset, query_string)`.
+///
+/// Examples:
+///   "help me look at @main.rs"     → Some((12, "main.rs"))
+///   "help me look at @"           → Some((12, ""))
+///   "help me look at @ main.rs"   → None  (whitespace after @)
+///   "test@main.rs"                → None  (@ not at boundary)
+///
+/// The mention is only *active* while the query token runs to the end of the
+/// input: once the user types a space (e.g. "@main then continue"), the old
+/// mention must no longer drive suggestions or intercept Enter, otherwise
+/// accepting a suggestion would rewrite text the user already moved past.
+pub(crate) fn extract_at_query(input: &str) -> Option<(usize, String)> {
+    let last_at = input.rmatch_indices('@').find(|(idx, _)| {
+        // No whitespace immediately after @.
+        // Note: idx+1 may equal input.len() — the slice is empty and
+        // starts_with() returns false, which is correct.
+        if input[*idx + 1..].starts_with(|c: char| c.is_whitespace()) {
+            return false;
+        }
+        // Left of @ must be SOL, whitespace, or opening bracket
+        if *idx > 0 {
+            let prev = input[..*idx].chars().last().unwrap();
+            prev.is_whitespace() || matches!(prev, '(' | '[' | '{')
+        } else {
+            true
+        }
+    })?;
+    let (pos, _) = last_at;
+
+    let after_at = &input[pos + 1..];
+    if after_at.is_empty() {
+        return Some((pos, String::new()));
+    }
+
+    // The token must extend to the end of the input: any whitespace after the
+    // @ (not just inside the collected query) means the user has finished the
+    // mention and moved on.
+    if after_at.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+
+    Some((pos, after_at.to_string()))
+}
+
+/// Accept a completion: replace the `@query` with the selected path and drop
+/// the `@` sign. Used when the user accepts a file-mention suggestion.
+pub(crate) fn accept_completion(input: &str, new_path: &str) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query(input)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}{}{}", before, new_path, rest);
+    Some((new_input, before.len() + new_path.len()))
+}
+
+/// Tab-complete the `@query` with the selected path while keeping the `@` sign,
+/// so the user can keep cycling suggestions. Used while the mention popover is
+/// still open.
+pub(crate) fn tab_complete(input: &str, new_path: &str) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query(input)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}@{}{}", before, new_path, rest);
+    Some((new_input, before.len() + 1 + new_path.len()))
 }
 
 fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
@@ -61,6 +159,35 @@ fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
 
 fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
+}
+
+/// Resolve the row Enter would actually accept, for highlight purposes.
+///
+/// In file-mention mode the selection may rest on a section-header sentinel
+/// (empty cmd), e.g. right after the popover opens. The accept path skips
+/// headers downward, so the renderer must highlight the row it accepts;
+/// otherwise nothing is highlighted while Enter silently accepts a file.
+fn effective_selected_row(
+    selected: usize,
+    suggestions: &[(String, &'static str)],
+    is_file_mention: bool,
+) -> usize {
+    let len = suggestions.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut idx = selected.min(len - 1);
+    if !is_file_mention {
+        return idx;
+    }
+    let initial = idx;
+    while suggestions[idx].0.is_empty() {
+        idx = (idx + 1) % len;
+        if idx == initial {
+            break; // all-header list: nothing to highlight differently
+        }
+    }
+    idx
 }
 
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
@@ -125,7 +252,10 @@ fn command_suggestions_overlay_rect(
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
-        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
+        && matches!(
+            mode,
+            ComposerMode::SlashCommand | ComposerMode::Chat | ComposerMode::FileMention
+        )
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
 
@@ -291,7 +421,7 @@ pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
     if app.login_input_hint().is_some() {
         return 1;
     }
-    // Command suggestions render as an overlay (see
+    // Command suggestions and file mentions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
     if command_suggestions_active(app, &app.command_suggestions()) {
@@ -1176,6 +1306,10 @@ fn streaming_status_spans(
 #[cfg(test)]
 #[path = "ui_input/status_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ui_input/mention_tests.rs"]
+mod mention_tests;
 
 pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -2086,6 +2220,81 @@ pub(super) fn draw_input(
         prompt_len,
         &|number| app.input_image_attached(number),
     );
+
+    // Highlight confirmed @file paths with a distinct chip style
+    // (background color + bold) to visually separate them from plain text.
+    // Matching is path-boundary aware, the same rule chip deletion and
+    // pruning use (`app::input::file_chip_matches_input`): a chip only
+    // highlights as a complete path token, so `bag` never highlights inside
+    // `char_bag.rs` mid-token. Line start/end count as boundaries, so a chip
+    // still highlights when wrapping puts it at the edge of a wrapped line.
+    let all_lines: Vec<Line> = {
+        let chips = app.file_chips();
+        if chips.is_empty() {
+            all_lines
+        } else {
+            let chip_style = file_chip_style();
+            let is_boundary = |ch: Option<char>| match ch {
+                // Opening brackets are a left boundary: accept_completion can
+                // leave a chip directly after one ("(@main" → "(main.rs").
+                // Closing brackets stay out so prose like "(see main.rs)"
+                // never highlights (greptile A10).
+                Some(c) => {
+                    c == '/' || c == '\\' || c.is_whitespace() || matches!(c, '(' | '[' | '{')
+                }
+                None => true,
+            };
+            all_lines
+                .into_iter()
+                .map(|line| {
+                    let mut new_spans = Vec::new();
+                    for span in line.spans {
+                        let text = span.content.to_string();
+                        let mut start = 0usize;
+                        while start < text.len() {
+                            let mut earliest: Option<(usize, usize)> = None;
+                            for chip in chips {
+                                let cs = chip.to_string_lossy();
+                                if let Some(pos) = text[start..].find(cs.as_ref()) {
+                                    let abs = start + pos;
+                                    let end = abs + cs.len();
+                                    // `text[..abs]` is safe for any abs in
+                                    // 0..=len, and `chars().next_back()` on an
+                                    // empty slice is None, so no unwrap needed.
+                                    let left_ok = is_boundary(text[..abs].chars().next_back());
+                                    let right_ok = is_boundary(text[end..].chars().next());
+                                    if left_ok && right_ok {
+                                        match earliest {
+                                            Some((e, _)) if abs < e => earliest = Some((abs, end)),
+                                            None => earliest = Some((abs, end)),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((e_start, e_end)) = earliest {
+                                if e_start > start {
+                                    new_spans.push(Span::styled(
+                                        text[start..e_start].to_string(),
+                                        span.style,
+                                    ));
+                                }
+                                new_spans.push(Span::styled(
+                                    text[e_start..e_end].to_string(),
+                                    chip_style,
+                                ));
+                                start = e_end;
+                            } else {
+                                new_spans.push(Span::styled(text[start..].to_string(), span.style));
+                                break;
+                            }
+                        }
+                    }
+                    Line::from(new_spans)
+                })
+                .collect()
+        }
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;

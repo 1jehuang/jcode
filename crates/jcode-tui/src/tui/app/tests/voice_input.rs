@@ -53,6 +53,36 @@ fn voice_transcript_remote_send_wraps_tags_and_keeps_typed_draft() {
 }
 
 #[test]
+fn voice_transcript_local_send_keeps_file_chips_attached_to_draft() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.set_input_for_test("review @src/main.rs soon");
+    app.cursor_pos = app.input.len();
+    app.file_chips
+        .push(std::path::PathBuf::from("src/main.rs"));
+
+    super::remote::submit_voice_transcript(&mut app, "look at the diff");
+
+    assert!(
+        app.display_messages()
+            .last()
+            .map(|m| m.role == "user")
+            .unwrap_or(false),
+        "user message displayed"
+    );
+    assert_eq!(app.input(), "review @src/main.rs soon", "draft is kept");
+    // The draft's chip survives for its own send-time expansion: the voice
+    // turn was composed from the transcript, not the draft's attachments.
+    assert!(
+        app.file_chips
+            .iter()
+            .any(|c| c.to_string_lossy() == "src/main.rs"),
+        "voice send must not eat the draft's file chips"
+    );
+}
+
+#[test]
 fn voice_transcript_while_busy_steers_instead_of_waiting() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
