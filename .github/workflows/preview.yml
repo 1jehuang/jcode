@@ -43,10 +43,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER"
-      - name: Require successful exact-commit source CI
+      - name: Require exact-commit source CI under preview policy
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800 --preview
 
   build:
     needs: quiet-and-ci
