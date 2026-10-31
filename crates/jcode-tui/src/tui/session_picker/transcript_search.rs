@@ -3,7 +3,7 @@
 use super::loading::search_query_tokens;
 use super::{ResumeTarget, SessionInfo};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -16,11 +16,89 @@ use std::time::{Duration, Instant};
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
+/// Literal evidence always outranks typo-only evidence. Within that tier,
+/// reward metadata hits and whole words instead of unrelated session recency.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct SearchRank {
+    literal: bool,
+    intent_terms: usize,
+    exact_field: bool,
+    metadata_terms: usize,
+    whole_terms: usize,
+    score: i64,
+}
+
+pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRank {
+    let metadata_terms = tokens
+        .iter()
+        .filter(|token| index.contains(token.as_str()))
+        .count();
+    let whole_terms = tokens
+        .iter()
+        .filter(|token| {
+            index
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word == token.as_str())
+        })
+        .count();
+    SearchRank {
+        literal: metadata_terms == tokens.len(),
+        intent_terms: 0,
+        exact_field: false,
+        metadata_terms,
+        whole_terms,
+        score: 0,
+    }
+}
+
+pub(super) fn exact_metadata_field(session: &SessionInfo, query: &str) -> bool {
+    [&session.title, &session.short_name, &session.id]
+        .iter()
+        .any(|field| field.trim().to_lowercase() == query)
+        || session
+            .save_label
+            .as_ref()
+            .is_some_and(|label| label.trim().to_lowercase() == query)
+}
+
+impl SearchRank {
+    pub(super) fn with_intent_terms(mut self, terms: usize) -> Self {
+        self.intent_terms = terms;
+        self
+    }
+
+    pub(super) fn with_exact_field(mut self, exact: bool) -> Self {
+        self.exact_field = exact;
+        self
+    }
+}
+
+fn fuzzy_metadata_rank(index: &str, tokens: &[String]) -> SearchRank {
+    let mut rank = literal_metadata_rank(index, tokens);
+    // Score every term, including terms already matched literally. Scoring
+    // only the missing terms perversely rewarded candidates with fewer hits.
+    rank.score = tokens
+        .iter()
+        .filter_map(|token| {
+            let query = jcode_fuzzy::PreparedTokenQuery::new(token);
+            index
+                .split_whitespace()
+                // Match the boolean search's DP bound for minified data/URLs.
+                .filter(|word| word.chars().count() <= 128)
+                .filter_map(|word| query.score(word))
+                .max()
+                .map(i64::from)
+        })
+        .sum();
+    rank
+}
+
 struct Candidate {
     id: String,
     paths: Vec<PathBuf>,
     search_index: String,
     missing_tokens: Vec<String>,
+    exact_field: bool,
 }
 
 #[derive(Default)]
@@ -28,10 +106,9 @@ pub(super) struct TranscriptSearch {
     query: String,
     candidates: Vec<Candidate>,
     started_at: Option<Instant>,
-    receiver: Option<mpsc::Receiver<(String, bool)>>,
+    receiver: Option<mpsc::Receiver<(String, SearchRank)>>,
     cancel: Arc<AtomicBool>,
-    matches: HashSet<String>,
-    literal_matches: HashSet<String>,
+    ranks: HashMap<String, SearchRank>,
     defer_metadata: bool,
 }
 
@@ -79,6 +156,7 @@ impl TranscriptSearch {
                 paths,
                 search_index: session.search_index.clone(),
                 missing_tokens,
+                exact_field: exact_metadata_field(session, query),
             });
         }
         if !self.candidates.is_empty() {
@@ -87,11 +165,15 @@ impl TranscriptSearch {
     }
 
     pub(super) fn contains(&self, id: &str) -> bool {
-        self.matches.contains(id)
+        self.ranks.contains_key(id)
     }
 
     pub(super) fn contains_literal(&self, id: &str) -> bool {
-        self.literal_matches.contains(id)
+        self.ranks.get(id).is_some_and(|rank| rank.literal)
+    }
+
+    pub(super) fn rank(&self, id: &str) -> SearchRank {
+        self.ranks.get(id).copied().unwrap_or_default()
     }
 
     pub(super) fn defers_metadata(&self) -> bool {
@@ -111,6 +193,7 @@ impl TranscriptSearch {
             self.started_at = None;
             let candidates = std::mem::take(&mut self.candidates);
             let cancel = self.cancel.clone();
+            let tokens = search_query_tokens(&self.query);
             let (sender, receiver) = mpsc::channel();
             match std::thread::Builder::new()
                 .name("jcode-transcript-search".into())
@@ -127,7 +210,9 @@ impl TranscriptSearch {
                             .missing_tokens
                             .retain(|token| !candidate.search_index.contains(token.as_str()));
                         if candidate.missing_tokens.is_empty() {
-                            if sender.send((candidate.id, true)).is_err() {
+                            let rank = literal_metadata_rank(&candidate.search_index, &tokens)
+                                .with_exact_field(candidate.exact_field);
+                            if sender.send((candidate.id, rank)).is_err() {
                                 return;
                             }
                             continue;
@@ -140,22 +225,24 @@ impl TranscriptSearch {
                             return;
                         }
                         let mut fuzzy_missing = candidate.missing_tokens.clone();
+                        let rank = fuzzy_metadata_rank(&candidate.search_index, &tokens)
+                            .with_exact_field(candidate.exact_field);
                         fuzzy_missing.retain(|token| {
                             !jcode_fuzzy::PreparedTokenQuery::new(token)
                                 .matches_search_text(&candidate.search_index)
                         });
                         candidate.search_index = String::new();
                         if fuzzy_missing.is_empty() {
-                            if sender.send((candidate.id.clone(), false)).is_err() {
+                            if sender.send((candidate.id.clone(), rank)).is_err() {
                                 return;
                             }
                         }
                         if !candidate.paths.is_empty() {
-                            transcripts.push((candidate, fuzzy_missing));
+                            transcripts.push((candidate, fuzzy_missing, rank));
                         }
                     }
                     let mut fuzzy_transcripts = Vec::new();
-                    for (candidate, fuzzy_missing) in transcripts {
+                    for (candidate, fuzzy_missing, rank) in transcripts {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
@@ -165,21 +252,30 @@ impl TranscriptSearch {
                             &cancel,
                             false,
                         ) {
-                            if sender.send((candidate.id, true)).is_err() {
+                            if sender
+                                .send((
+                                    candidate.id,
+                                    SearchRank {
+                                        literal: true,
+                                        ..rank
+                                    },
+                                ))
+                                .is_err()
+                            {
                                 return;
                             }
                         } else if !fuzzy_missing.is_empty() {
-                            fuzzy_transcripts.push((candidate, fuzzy_missing));
+                            fuzzy_transcripts.push((candidate, fuzzy_missing, rank));
                         }
                     }
                     // Exact transcript hits must not wait behind typo-tolerant
                     // scans of unrelated, potentially very large sessions.
-                    for (candidate, missing) in fuzzy_transcripts {
+                    for (candidate, missing, rank) in fuzzy_transcripts {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
                         if paths_match(&candidate.paths, &missing, &cancel)
-                            && sender.send((candidate.id, false)).is_err()
+                            && sender.send((candidate.id, rank)).is_err()
                         {
                             return;
                         }
@@ -195,11 +291,13 @@ impl TranscriptSearch {
         if let Some(receiver) = &self.receiver {
             for _ in 0..64 {
                 match receiver.try_recv() {
-                    Ok((id, literal)) => {
-                        if literal {
-                            changed |= self.literal_matches.insert(id.clone());
+                    Ok((id, rank)) => {
+                        // Progressive evidence may upgrade a match, never
+                        // erase a stronger earlier rank when a scan finishes.
+                        if self.ranks.get(&id).is_none_or(|previous| rank > *previous) {
+                            self.ranks.insert(id, rank);
+                            changed = true;
                         }
-                        changed |= self.matches.insert(id);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -452,3 +550,7 @@ fn log_scan_error(path: &Path, record: Option<usize>, scan: &Scan<'_>, error: &s
 #[cfg(test)]
 #[path = "transcript_search_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "relevance_tests.rs"]
+mod relevance_tests;
