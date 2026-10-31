@@ -35,30 +35,44 @@ pub(super) fn draw_images(
     frame: &mut Frame,
     area: Rect,
     regions: &[jcode_tui_messages::ImageRegion],
-    scroll: usize,
+    source_rows: &[usize],
+    reserved: Option<Rect>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let visible_end = scroll.saturating_add(area.height as usize);
     for region in regions {
-        let start = region.abs_line_idx.max(scroll);
-        let end = region.end_line.min(visible_end);
+        let start = source_rows.partition_point(|row| *row < region.abs_line_idx);
+        let end = source_rows.partition_point(|row| *row < region.end_line);
         if region.height == 0 || start >= end {
             continue;
         }
-        let image_area = Rect {
+        let source_start = source_rows[start];
+        let mut image_area = Rect {
             x: area.x,
-            y: area.y + (start - scroll) as u16,
+            y: area.y + start as u16,
             width: area.width,
             height: (end - start).min(u16::MAX as usize) as u16,
         };
+        if let Some(panel) = reserved
+            && image_area.y < panel.bottom()
+            && panel.y < image_area.bottom()
+        {
+            image_area.width = panel
+                .x
+                .saturating_sub(area.x)
+                .saturating_sub(1)
+                .min(area.width);
+        }
+        if image_area.width == 0 {
+            continue;
+        }
         let fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
         if fit {
             let cols = if region.width == 0 {
-                area.width
+                image_area.width
             } else {
-                region.width.min(area.width)
+                region.width.min(image_area.width)
             };
             if !super::super::ui::inline_image_ui::ensure_drawable(region.hash, cols, region.height)
             {
@@ -70,7 +84,7 @@ pub(super) fn draw_images(
                 frame.buffer_mut(),
                 cols,
                 region.height,
-                (start - region.abs_line_idx).min(u16::MAX as usize) as u16,
+                (source_start - region.abs_line_idx).min(u16::MAX as usize) as u16,
                 false,
                 true,
             ) {
@@ -88,9 +102,9 @@ pub(super) fn draw_images(
                 image_area,
                 frame.buffer_mut(),
                 false,
-                start > region.abs_line_idx,
+                source_start > region.abs_line_idx,
             );
-            if rows == 0 && start == region.abs_line_idx {
+            if rows == 0 && source_start == region.abs_line_idx {
                 frame.render_widget(Paragraph::new("↗ mermaid diagram unavailable"), image_area);
             }
         }

@@ -1,7 +1,7 @@
 //! Interactive session picker with preview
 //!
-//! Shows a list of sessions on the left, with a preview of the selected session's
-//! conversation on the right. Sessions are grouped by server for multi-server support.
+//! Shows the selected conversation as a full-screen canvas with a compact
+//! session/search panel reserved on the right.
 
 #[path = "session_picker_presence.rs"]
 mod presence;
@@ -34,12 +34,14 @@ pub use jcode_tui_session_picker::{
     SessionSource,
 };
 
+mod canvas;
 mod cloud_preview;
 mod filter;
 mod loading;
 mod memory;
 mod navigation;
 mod preview_chrome;
+mod preview_flow;
 mod preview_refresh;
 mod render;
 mod saved_placement;
@@ -232,6 +234,8 @@ struct PreviewRenderCache {
     /// Wrapped lines at the final (post-scrollbar-decision) width.
     wrapped_lines: Vec<Line<'static>>,
     image_regions: Vec<jcode_tui_messages::ImageRegion>,
+    /// Tail bounds depend only on cached content and canvas/card geometry.
+    flow_tail_bounds: Vec<(Rect, Rect, usize)>,
     /// (wrapped line index, display number, text) for every user prompt.
     user_prompt_markers: Vec<(usize, usize, String)>,
     /// Whether the content overflows and a scrollbar column is reserved.
@@ -267,6 +271,8 @@ pub struct SessionPicker {
     crashed_session_ids: HashSet<String>,
     last_list_area: Option<Rect>,
     last_preview_area: Option<Rect>,
+    /// Positive-space reservation for the compact session/search panel.
+    reserved_panel_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
     show_test_sessions: bool,
     /// Current list filter mode
@@ -361,6 +367,7 @@ impl SessionPicker {
             crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -412,6 +419,7 @@ impl SessionPicker {
             crashed_session_ids: HashSet::new(),
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -495,6 +503,7 @@ impl SessionPicker {
             crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -1457,8 +1466,14 @@ impl SessionPicker {
             .border_type(BorderType::Rounded)
             .title(" Preview ")
             .border_style(Style::default().fg(preview_border_color));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = if self.reserved_panel_area.is_some() {
+            // The conversation is the canvas, not a boxed second pane.
+            area
+        } else {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            inner
+        };
         if inner.width == 0 || inner.height == 0 {
             return;
         }
@@ -1492,7 +1507,7 @@ impl SessionPicker {
         }
         // Read cache geometry through a short-lived borrow so the scroll-offset
         // clamp below can take `&mut self` without conflict.
-        let (show_scrollbar, total_lines, first_match_line) = {
+        let (mut show_scrollbar, total_lines, first_match_line) = {
             let cache = self
                 .preview_cache
                 .as_ref()
@@ -1504,8 +1519,19 @@ impl SessionPicker {
             )
         };
 
+        if let Some(panel) = self.reserved_panel_area {
+            show_scrollbar |= self.preview_flow_tail_start(inner, panel) > 0;
+        }
+
         let (text_area, scrollbar_area) =
             super::ui::split_native_scrollbar_area(inner, show_scrollbar);
+        let band_width = self.reserved_panel_area.map_or(text_area.width, |panel| {
+            panel
+                .x
+                .saturating_sub(text_area.x)
+                .saturating_sub(1)
+                .min(text_area.width)
+        });
 
         // Pinned todo band, rendered beneath the sticky previous-prompt header
         // exactly like the live chat viewport (`display.pin_todos`).
@@ -1517,7 +1543,7 @@ impl SessionPicker {
             todos_payload.as_deref(),
             false,
             diff_mode,
-            text_area.width,
+            band_width,
             text_area.height,
         );
         let todo_lines = todo_band.len() as u16;
@@ -1528,10 +1554,19 @@ impl SessionPicker {
             total_lines.saturating_sub(text_area.height.saturating_sub(todo_lines) as usize);
         for _ in 0..4 {
             let header = self
-                .preview_prompt_header_lines(max_scroll, text_area.width, align)
+                .preview_prompt_header_lines(max_scroll, band_width, align)
                 .len() as u16;
-            let adjusted = total_lines
-                .saturating_sub(text_area.height.saturating_sub(header + todo_lines) as usize);
+            let top_band = (header + todo_lines).min(text_area.height);
+            let body = Rect {
+                y: text_area.y + top_band,
+                height: text_area.height - top_band,
+                ..text_area
+            };
+            let adjusted = if let Some(panel) = self.reserved_panel_area {
+                self.preview_flow_tail_start(body, panel)
+            } else {
+                total_lines.saturating_sub(body.height as usize)
+            };
             if adjusted == max_scroll {
                 break;
             }
@@ -1569,7 +1604,7 @@ impl SessionPicker {
         }
         let scroll = self.scroll_offset as usize;
 
-        let header_lines = self.preview_prompt_header_lines(scroll, text_area.width, align);
+        let header_lines = self.preview_prompt_header_lines(scroll, band_width, align);
         let header_height = (header_lines.len() as u16).min(text_area.height);
         let top_band = (header_height + todo_lines).min(text_area.height);
         let content_area = Rect {
@@ -1585,25 +1620,53 @@ impl SessionPicker {
         // viewport uses the same visible-slice strategy). This makes a scroll
         // tick O(viewport height) rather than O(total wrapped lines).
         let visible_end = (scroll + visible_height).min(total_lines);
-        let visible_lines: Vec<Line<'static>> = {
+        let (visible_lines, source_rows): (Vec<Line<'static>>, Vec<usize>) = {
             let cache = self
                 .preview_cache
                 .as_ref()
                 .expect("preview cache populated above");
-            if scroll < visible_end {
-                cache.wrapped_lines[scroll..visible_end].to_vec()
+            if self.reserved_panel_area.is_some() {
+                let flow = preview_flow::layout(
+                    &cache.wrapped_lines,
+                    scroll,
+                    content_area,
+                    self.reserved_panel_area,
+                );
+                (flow.lines, flow.source_rows)
+            } else if scroll < visible_end {
+                (
+                    cache.wrapped_lines[scroll..visible_end].to_vec(),
+                    (scroll..visible_end).collect(),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         };
         frame.render_widget(Paragraph::new(visible_lines.clone()), content_area);
         if let Some(cache) = self.preview_cache.as_ref() {
-            preview_chrome::draw_images(frame, content_area, &cache.image_regions, scroll);
+            preview_chrome::draw_images(
+                frame,
+                content_area,
+                &cache.image_regions,
+                &source_rows,
+                self.reserved_panel_area,
+            );
         }
+        let widget_offset = self.reserved_panel_area.map_or(0, |panel| {
+            panel
+                .bottom()
+                .saturating_sub(content_area.y)
+                .min(content_area.height)
+        });
+        let widget_area = Rect {
+            y: content_area.y + widget_offset,
+            height: content_area.height - widget_offset,
+            ..content_area
+        };
         preview_chrome::draw_widgets(
             frame,
-            content_area,
-            &visible_lines,
+            widget_area,
+            visible_lines.get(widget_offset as usize..).unwrap_or(&[]),
             &session,
             self.preview_extras.get(&session.id),
             &self
@@ -1611,14 +1674,17 @@ impl SessionPicker {
                 .as_ref()
                 .expect("preview cache populated above")
                 .image_regions,
-            scroll,
+            source_rows
+                .get(widget_offset as usize)
+                .copied()
+                .unwrap_or(scroll),
         );
 
         if todo_lines > 0 && header_height < text_area.height {
             let band_area = Rect {
                 x: text_area.x,
                 y: text_area.y + header_height,
-                width: text_area.width,
+                width: band_width,
                 height: todo_lines.min(text_area.height - header_height),
             };
             frame.render_widget(Clear, band_area);
@@ -1628,7 +1694,7 @@ impl SessionPicker {
             let header_area = Rect {
                 x: text_area.x,
                 y: text_area.y,
-                width: text_area.width.saturating_sub(1),
+                width: band_width.saturating_sub(1),
                 height: header_height,
             };
             frame.render_widget(Clear, header_area);
@@ -1773,10 +1839,31 @@ impl SessionPicker {
             key,
             wrapped_lines,
             image_regions,
+            flow_tail_bounds: Vec::new(),
             user_prompt_markers,
             show_scrollbar,
             first_match_line,
         }
+    }
+
+    fn preview_flow_tail_start(&mut self, area: Rect, panel: Rect) -> usize {
+        let cache = self
+            .preview_cache
+            .as_mut()
+            .expect("preview cache populated above");
+        if let Some((_, _, start)) = cache
+            .flow_tail_bounds
+            .iter()
+            .find(|(cached_area, cached_panel, _)| *cached_area == area && *cached_panel == panel)
+        {
+            return *start;
+        }
+        let start = preview_flow::tail_start(&cache.wrapped_lines, area, Some(panel));
+        if cache.flow_tail_bounds.len() >= 8 {
+            cache.flow_tail_bounds.remove(0);
+        }
+        cache.flow_tail_bounds.push((area, panel, start));
+        start
     }
 
     /// Apply search-match highlighting to already-built preview lines in place.
@@ -2032,9 +2119,16 @@ impl SessionPicker {
         if has_onboarding && self.visible_sessions.is_empty() {
             self.last_list_area = None;
             self.last_preview_area = None;
+            self.reserved_panel_area = None;
             self.render_onboarding_band(frame, frame.area());
             return;
         }
+
+        if !has_onboarding {
+            self.render_resume_canvas(frame);
+            return;
+        }
+        self.reserved_panel_area = None;
 
         // Build vertical constraints
         let mut v_constraints = Vec::new();

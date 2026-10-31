@@ -103,6 +103,12 @@ impl SessionPicker {
     /// Whether a screen coordinate falls inside the preview pane (used by the
     /// host App to route wheel events into the shared scroll-momentum queue).
     pub fn mouse_over_preview(&self, col: u16, row: u16) -> bool {
+        if self
+            .reserved_panel_area
+            .is_some_and(|r| Self::point_in_rect(col, row, r))
+        {
+            return false;
+        }
         self.last_preview_area
             .map(|r| Self::point_in_rect(col, row, r))
             .unwrap_or(false)

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
 #[test]
-fn session_sidebar_is_on_right_with_spatial_focus_and_mouse_regions() {
+fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_regions() {
     for width in [20, 80, 120] {
         let session = make_session("right-sidebar", "sidebar", false, SessionStatus::Closed);
         let mut picker = SessionPicker::new(vec![session]);
@@ -13,10 +13,12 @@ fn session_sidebar_is_on_right_with_spatial_focus_and_mouse_regions() {
         terminal.draw(|frame| picker.render(frame)).unwrap();
         let preview = picker.last_preview_area.unwrap();
         let sidebar = picker.last_list_area.unwrap();
-        assert_eq!(preview.x, 0);
-        assert_eq!(preview.right(), sidebar.x);
-        assert_eq!(sidebar.right(), width);
-        assert!(preview.width > sidebar.width);
+        assert_eq!(preview, Rect::new(0, 0, width, 30));
+        assert!(sidebar.x > preview.x);
+        assert!(sidebar.right() < preview.right());
+        assert!(sidebar.height < preview.height);
+        assert!(sidebar.bottom() < preview.bottom());
+        assert!(picker.mouse_over_preview(sidebar.x + 1, sidebar.bottom() + 1));
         assert!(picker.mouse_over_preview(preview.x + 1, preview.y + 1));
         assert!(!picker.mouse_over_preview(sidebar.x + 1, sidebar.y + 1));
         for key in [KeyCode::Left, KeyCode::Char('h')] {
@@ -28,6 +30,37 @@ fn session_sidebar_is_on_right_with_spatial_focus_and_mouse_regions() {
             assert_eq!(picker.focus, PaneFocus::Sessions);
         }
     }
+}
+
+#[test]
+fn resume_canvas_uses_right_columns_below_search_card() {
+    let mut session = make_session("canvas-flow", "canvas", false, SessionStatus::Closed);
+    session.messages_preview = vec![PreviewMessage {
+        role: "assistant".into(),
+        content: (0..80)
+            .map(|_| "W".repeat(115))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+        timestamp: None,
+    }];
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.auto_scroll_preview = false;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let panel = picker.reserved_panel_area.unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (panel.bottom()..38).any(|y| (panel.x..115).any(|x| buffer[(x, y)].symbol() == "W")),
+        "Transcript must reclaim the right-side columns below the bounded card"
+    );
+    let search: String = (panel.x..panel.right())
+        .map(|x| buffer[(x, panel.y)].symbol())
+        .collect();
+    assert!(search.contains("Search sessions"));
 }
 
 #[test]
@@ -2410,16 +2443,15 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
         .expect("render picker");
     let buffer = terminal.backend().buffer().clone();
 
-    // The preview pane occupies the left 60% of the width; its inner content
-    // starts just inside the rounded border. Read the first inner content row and
+    // The preview occupies the full canvas; its header precedes the transcript.
+    // Read the first transcript content row and
     // confirm it carries the "N›" sticky-header marker.
     let preview = picker.last_preview_area.expect("preview pane");
-    let preview_inner_x = preview.x + 1;
+    let preview_inner_x = preview.x;
     let header_y = preview.y
-        + 1
         + crate::tui::ui::header::build_preview_header(
             picker.selected_session().expect("selected session"),
-            preview.width.saturating_sub(2),
+            preview.width,
         )
         .len() as u16;
     let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
@@ -2524,12 +2556,11 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     assert!(!picker.auto_scroll_preview);
 
     let preview = picker.last_preview_area.expect("preview pane");
-    let preview_inner_x = preview.x + 1;
+    let preview_inner_x = preview.x;
     let header_y = preview.y
-        + 1
         + crate::tui::ui::header::build_preview_header(
             picker.selected_session().expect("selected session"),
-            preview.width.saturating_sub(2),
+            preview.width,
         )
         .len() as u16;
     let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
