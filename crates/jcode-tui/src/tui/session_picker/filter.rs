@@ -130,6 +130,35 @@ impl SessionPicker {
                 })
             });
         }
+        if !self.search_query.trim().is_empty() {
+            let tokens =
+                loading::search_query_tokens(&Self::normalized_search_query(&self.search_query));
+            // A renamed conversation can have an unrelated title (for example
+            // "power-triage") while its opening request says "battery life".
+            // Tool output and directory listings are searchable too, but must
+            // not bury that direct evidence beneath incidental newer matches.
+            // Stable sorting preserves the existing relevance/recency order
+            // within each intent tier, and literal hits still beat typo hits.
+            filtered.sort_by_cached_key(|session_ref| {
+                std::cmp::Reverse(self.session_by_ref(*session_ref).map(|session| {
+                    let fields = [
+                        session.title.as_str(),
+                        session.save_label.as_deref().unwrap_or_default(),
+                        session.first_user_prompt.as_deref().unwrap_or_default(),
+                    ];
+                    let fields = fields.map(str::to_lowercase);
+                    let intent_terms = tokens
+                        .iter()
+                        .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
+                        .count();
+                    let literal = tokens
+                        .iter()
+                        .all(|token| session.search_index.contains(token.as_str()))
+                        || self.transcript_search.contains_literal(&session.id);
+                    (literal, intent_terms)
+                }))
+            });
+        }
         if filter_mode != SessionFilterMode::Active && self.search_query.trim().is_empty() {
             filtered.sort_by_key(|session_ref| {
                 std::cmp::Reverse(self.session_by_ref(*session_ref).and_then(|session| {

@@ -1277,6 +1277,47 @@ fn resume_search_ranks_literal_matches_before_newer_typo_matches() {
 }
 
 #[test]
+fn resume_search_battery_prompt_outranks_incidental_tool_mentions() {
+    let mut whale = make_session("whale", "power-triage", false, SessionStatus::Closed);
+    whale.first_user_prompt = Some("Can you help me optimize my BATTERY life?".into());
+    whale.search_index = "power-triage can you help me optimize my battery life?".into();
+    let mut sessions = vec![whale.clone()];
+    for i in 0..97 {
+        let mut incidental = make_session(
+            &format!("unrelated-{i}"),
+            "Health check",
+            false,
+            SessionStatus::Closed,
+        );
+        incidental.first_user_prompt = Some("check my niri".into());
+        incidental.search_index =
+            "health check check my niri tool output battery-notify.desktop".into();
+        incidental.last_message_time = whale.last_message_time + chrono::Duration::seconds(i + 1);
+        sessions.push(incidental);
+    }
+    let mut picker = SessionPicker::new(sessions);
+    picker.search_query = "battery".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 98);
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "whale"
+    );
+    picker.search_query.clear();
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "unrelated-96"
+    );
+}
+
+#[test]
 fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
