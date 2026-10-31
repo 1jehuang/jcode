@@ -445,6 +445,13 @@ impl Config {
                 _ => {}
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SWARM_FORCE_DEFAULTS") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.agents.force_swarm_defaults = true,
+                "0" | "false" | "no" | "off" => self.agents.force_swarm_defaults = false,
+                _ => {}
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }

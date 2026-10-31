@@ -6,6 +6,7 @@
 
 /// Capability tokens, kept sorted so the output is stable.
 const TOKENS: &[&str] = &[
+    "agent_definition_policy",
     "agent_definitions",
     "project_trust",
     "swarm_identity",

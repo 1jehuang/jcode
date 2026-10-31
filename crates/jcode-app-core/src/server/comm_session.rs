@@ -594,8 +594,19 @@ pub(super) async fn spawn_swarm_agent(
     let configured_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
-    let selection = resolve_swarm_spawn_selection(
+    let (applied_policy, policy_request) = super::swarm::swarm_agent_policy::for_spawn(
+        definition.as_ref(),
+        agents_config,
+        resolved_working_dir.as_deref(),
         requested_model.clone(),
+        requested_effort.clone(),
+        matches!(
+            resolved_spawn_mode,
+            SwarmSpawnMode::Visible | SwarmSpawnMode::Auto
+        ),
+    );
+    let selection = resolve_swarm_spawn_selection(
+        policy_request.model.clone(),
         configured_swarm_model.clone(),
         &coordinator,
     );
@@ -603,7 +614,7 @@ pub(super) async fn spawn_swarm_agent(
     let spawn_provider_key = selection.provider_key.clone();
     let spawn_route_api_method = selection.route_api_method.clone();
     let spawn_effort = resolve_swarm_spawn_effort(
-        requested_effort.as_deref(),
+        policy_request.effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
     );
     crate::logging::info(&format!(
@@ -733,14 +744,6 @@ pub(super) async fn spawn_swarm_agent(
             &brief,
         ));
     }
-    if is_headless_fallback {
-        super::swarm::swarm_agent_defs::deliver_headless_persona(
-            sessions,
-            &new_session_id,
-            definition.as_ref(),
-        )
-        .await;
-    }
     {
         let mut plans = swarm_plans.write().await;
         if let Some(plan) = plans.get_mut(swarm_id)
@@ -780,19 +783,17 @@ pub(super) async fn spawn_swarm_agent(
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
-    super::swarm::swarm_hooks::worker_spawned(&super::swarm::swarm_hooks::SpawnedWorker::new(
-        &new_session_id,
+    super::swarm::swarm_agent_defs::StartedWorker {
+        sessions,
+        session_id: &new_session_id,
         swarm_id,
-        req_session_id,
-        label.as_deref(),
-        definition.as_ref().map(|d| d.name.as_str()),
-        if is_headless_fallback {
-            "headless"
-        } else {
-            "visible"
-        },
-        resolved_working_dir.as_deref(),
-    ));
+        coordinator_session_id: req_session_id,
+        label: label.as_deref(),
+        headless: is_headless_fallback,
+        working_dir: resolved_working_dir.as_deref(),
+    }
+    .finish(definition.as_ref(), &applied_policy)
+    .await;
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
         swarms_by_id: Arc::clone(swarms_by_id),

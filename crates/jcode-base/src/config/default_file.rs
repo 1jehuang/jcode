@@ -610,6 +610,12 @@ swarm_max_concurrent_agents = 32
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
 #
+# Agent definitions (.jcode/agents, .claude/agents) may set model, effort and
+# tools for a worker. By default a definition beats swarm_model and swarm_effort
+# above, because a person wrote the file. Set this to make swarm_model,
+# swarm_effort and your tool policy always win. Env: JCODE_SWARM_FORCE_DEFAULTS.
+# force_swarm_defaults = false
+#
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
 # Unset = built-in default (40%). Lower values keep more transcript visible; set
 # near the minimum to collapse the gallery to a thin strip.

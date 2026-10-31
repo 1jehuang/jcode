@@ -598,6 +598,12 @@ pub struct AgentsConfig {
     /// Env override: `JCODE_SWARM_STALL_NUDGE`.
     #[serde(default)]
     pub swarm_stall_nudge: bool,
+    /// Make `swarm_model` and `swarm_effort` always win over an agent
+    /// definition's `model`, `effort` and `tools`. By default a definition
+    /// written by a person beats these defaults. Env override:
+    /// `JCODE_SWARM_FORCE_DEFAULTS`.
+    #[serde(default)]
+    pub force_swarm_defaults: bool,
 }
 
 fn default_swarm_stall_after_secs() -> u64 {
@@ -664,6 +670,7 @@ impl Default for AgentsConfig {
             swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
             swarm_stall_after_secs: default_swarm_stall_after_secs(),
             swarm_stall_nudge: false,
+            force_swarm_defaults: false,
         }
     }
 }

@@ -56,4 +56,7 @@ compact separators) of that scope's content, so other tools can recompute it:
 
 - `mcp`: per server, `command`, `args`, `env`, `shared`, `transport`, `url`,
   `headers`, `enabled`, `disabled`, after environment expansion.
-- `hooks`, `agents`: described in `HOOKS.md` and `AGENT_DEFINITIONS.md`.
+- `hooks`: the project's `[hooks]` table, see [HOOKS.md](HOOKS.md).
+- `agents`: for each project definition that has policy fields, its `name`,
+  `model`, `effort`, `tools` and `disallowed_tools`, sorted by name, see
+  [AGENT_DEFINITIONS.md](AGENT_DEFINITIONS.md).

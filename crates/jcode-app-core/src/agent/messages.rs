@@ -22,6 +22,22 @@ impl Agent {
         id
     }
 
+    /// Narrow this worker's tool surface to an agent definition's policy. The
+    /// result never widens what the global policy allows: the current effective
+    /// set is intersected with `allow` (when given) and `deny` is removed. The
+    /// tool list is unlocked so the next request picks the change up.
+    pub(crate) async fn narrow_tools(&mut self, allow: Option<&[String]>, deny: &[String]) {
+        let mut names: HashSet<String> = self.tool_names().await.into_iter().collect();
+        if let Some(allow) = allow {
+            names.retain(|name| allow.iter().any(|allowed| allowed == name));
+        }
+        for denied in deny {
+            names.remove(denied);
+        }
+        self.allowed_tools = Some(names);
+        self.locked_tools = None;
+    }
+
     /// Add a hidden persona message (an agent definition body) to the
     /// transcript of a freshly spawned worker. The system prompt is unchanged.
     pub(crate) fn add_persona_message(&mut self, text: &str) {

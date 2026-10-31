@@ -302,6 +302,72 @@ pub fn agent_definition_summaries(working_dir: Option<&Path>) -> Vec<(String, St
         .collect()
 }
 
+/// Project definitions that carry policy, visible from `working_dir`: the
+/// content of the `agents` trust scope.
+pub fn project_policy_definitions(working_dir: Option<&Path>) -> Vec<AgentDefinition> {
+    load_agent_definitions(working_dir)
+        .into_values()
+        .filter(|d| d.origin == DefinitionOrigin::Project && !d.policy.is_empty())
+        .collect()
+}
+
+/// Digest of the `agents` scope for `definitions`: canonical JSON of each
+/// definition's name and policy fields, sorted by name. Persona text is not
+/// part of it, because a persona is prompt-only and never needs trust.
+pub fn agents_digest(definitions: &[&AgentDefinition]) -> String {
+    let mut entries: Vec<serde_json::Value> = definitions
+        .iter()
+        .map(|definition| {
+            serde_json::json!({
+                "name": definition.name,
+                "model": definition.policy.model,
+                "effort": definition.policy.effort,
+                "tools": definition.policy.tools,
+                "disallowed_tools": definition.policy.disallowed_tools,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    crate::project_trust::digest_json(&serde_json::Value::Array(entries))
+}
+
+/// What the `agents` scope would let `path`'s project change, for `jcode trust`.
+pub fn agents_scope_review(path: &Path) -> Option<crate::project_trust::ScopeReview> {
+    let definitions = project_policy_definitions(Some(path));
+    if definitions.is_empty() {
+        return None;
+    }
+    let refs: Vec<&AgentDefinition> = definitions.iter().collect();
+    let safe = crate::project_trust::safe_terminal_text;
+    let mut lines = Vec::new();
+    for definition in &definitions {
+        lines.push(format!("  - {}", safe(&definition.name)));
+        let policy = &definition.policy;
+        if let Some(model) = &policy.model {
+            lines.push(format!("    model: {:?}", safe(model)));
+        }
+        if let Some(effort) = &policy.effort {
+            lines.push(format!("    effort: {:?}", safe(effort)));
+        }
+        if let Some(tools) = &policy.tools {
+            lines.push(format!("    tools: {}", safe(&tools.join(", "))));
+        }
+        if !policy.disallowed_tools.is_empty() {
+            lines.push(format!(
+                "    disallowed tools: {}",
+                safe(&policy.disallowed_tools.join(", "))
+            ));
+        }
+    }
+    Some(crate::project_trust::ScopeReview {
+        scope: crate::project_trust::Scope::Agents,
+        digest: agents_digest(&refs),
+        lines,
+        item_count: definitions.len(),
+        redacted: false,
+    })
+}
+
 #[cfg(test)]
 #[path = "agent_def_tests.rs"]
 mod tests;
