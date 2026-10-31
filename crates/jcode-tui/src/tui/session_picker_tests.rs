@@ -4,6 +4,33 @@ use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
 #[test]
+fn session_sidebar_is_on_right_with_spatial_focus_and_mouse_regions() {
+    for width in [20, 80, 120] {
+        let session = make_session("right-sidebar", "sidebar", false, SessionStatus::Closed);
+        let mut picker = SessionPicker::new(vec![session]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|frame| picker.render(frame)).unwrap();
+        let preview = picker.last_preview_area.unwrap();
+        let sidebar = picker.last_list_area.unwrap();
+        assert_eq!(preview.x, 0);
+        assert_eq!(preview.right(), sidebar.x);
+        assert_eq!(sidebar.right(), width);
+        assert!(preview.width > sidebar.width);
+        assert!(picker.mouse_over_preview(preview.x + 1, preview.y + 1));
+        assert!(!picker.mouse_over_preview(sidebar.x + 1, sidebar.y + 1));
+        for key in [KeyCode::Left, KeyCode::Char('h')] {
+            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
+            assert_eq!(picker.focus, PaneFocus::Preview);
+        }
+        for key in [KeyCode::Right, KeyCode::Char('l')] {
+            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
+            assert_eq!(picker.focus, PaneFocus::Sessions);
+        }
+    }
+}
+
+#[test]
 fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
     let mut session = make_session(
         "render-parity",

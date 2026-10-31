@@ -197,11 +197,11 @@ impl SessionPicker {
     ) -> bool {
         match code {
             KeyCode::Char('h') | KeyCode::Left => {
-                self.focus = PaneFocus::Sessions;
+                self.focus = PaneFocus::Preview;
                 true
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.focus = PaneFocus::Preview;
+                self.focus = PaneFocus::Sessions;
                 true
             }
             KeyCode::Tab => {

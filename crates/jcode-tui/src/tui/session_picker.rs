@@ -2100,17 +2100,17 @@ impl SessionPicker {
 
         let main_area = v_chunks[chunk_idx];
 
-        // Split main area horizontally for list and preview
+        // Keep the transcript on the left and the session sidebar on the right.
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(main_area);
 
-        self.last_list_area = Some(chunks[0]);
-        self.last_preview_area = Some(chunks[1]);
+        self.last_list_area = Some(chunks[1]);
+        self.last_preview_area = Some(chunks[0]);
 
-        self.render_session_list(frame, chunks[0]);
-        self.render_preview(frame, chunks[1]);
+        self.render_session_list(frame, chunks[1]);
+        self.render_preview(frame, chunks[0]);
         self.render_claude_takeover_confirmation(frame);
     }
 
