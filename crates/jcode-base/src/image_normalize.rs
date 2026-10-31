@@ -21,6 +21,11 @@ pub const PROVIDER_IMAGE_MEDIA_TYPES: [&str; 4] =
 /// larger source image. Applied once as image content enters a session.
 pub const SESSION_IMAGE_MAX_EDGE: u32 = 1568;
 
+// Session startup can load several transcripts at once. Decoding one large
+// screenshot can transiently allocate a full RGBA buffer, so serialize this
+// work across sessions instead of multiplying that peak by the load workers.
+static SESSION_IMAGE_NORMALIZE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// True when `media_type` is one of [`PROVIDER_IMAGE_MEDIA_TYPES`].
 pub fn is_provider_media_type(media_type: &str) -> bool {
     PROVIDER_IMAGE_MEDIA_TYPES
@@ -131,6 +136,29 @@ pub fn normalize_image_bytes(data: Vec<u8>) -> Result<ProviderImage, String> {
 /// decoded pixels and source bytes are dropped before return. Non-PNG and
 /// already-small payloads remain byte-for-byte unchanged.
 pub fn downscale_session_png(media_type: &str, data_b64: &mut String) -> bool {
+    with_session_image_normalization_gate(|| {
+        let changed = downscale_session_png_locked(media_type, data_b64);
+        if changed {
+            // The resize temporaries are gone before returning from the helper.
+            // Keep the gate held through the debounced purge so another resize
+            // cannot immediately refill the freed pages.
+            crate::process_memory::release_retained_heap_debounced(
+                "session_image_downscale",
+                std::time::Duration::from_secs(2),
+            );
+        }
+        changed
+    })
+}
+
+fn with_session_image_normalization_gate<T>(operation: impl FnOnce() -> T) -> T {
+    let _guard = SESSION_IMAGE_NORMALIZE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    operation()
+}
+
+fn downscale_session_png_locked(media_type: &str, data_b64: &mut String) -> bool {
     use base64::Engine as _;
 
     if !media_type.eq_ignore_ascii_case("image/png") {
@@ -188,6 +216,40 @@ fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_image_normalization_is_serialized_across_threads() {
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+
+        let start = Arc::new(Barrier::new(3));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                std::thread::spawn(move || {
+                    start.wait();
+                    with_session_image_normalization_gate(|| {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
+                })
+            })
+            .collect();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
 
     fn tiny_bmp() -> Vec<u8> {
         // 2x2 24-bit BMP, rows padded to 4 bytes.
