@@ -3120,8 +3120,6 @@ fn suspend_terminal_for_editor() {
 }
 
 fn resume_terminal_after_editor() {
-    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
-
     // Defense in depth for the run_interactive_editor_with early return: a
     // termination signal already recorded that the process is exiting, so
     // enabling modes here would leave them active on the shell after death
@@ -3135,16 +3133,12 @@ fn resume_terminal_after_editor() {
     // ratatui Terminal remains usable and the next loop iteration redraws it.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
     let policy = crate::perf::tui_policy();
-    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
-    if policy.enable_focus_change {
-        let _ = crossterm::execute!(std::io::stdout(), EnableFocusChange);
-    }
-    if policy.enable_mouse_capture {
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
-    }
-    if policy.enable_keyboard_enhancement {
-        crate::tui::enable_keyboard_enhancement();
-    }
+    let _ = crate::tui::reapply_terminal_modes_to(
+        &mut std::io::stdout(),
+        policy.enable_mouse_capture,
+        policy.enable_keyboard_enhancement,
+        policy.enable_focus_change,
+    );
 }
 
 #[cfg(all(test, unix))]
