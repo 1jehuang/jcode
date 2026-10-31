@@ -383,12 +383,17 @@ pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool 
 /// This intentionally avoids transcript file I/O. Transcript-backed content can
 /// still become searchable after preview load because the picker refreshes the
 /// session's cached `search_index` from the loaded preview.
+///
+/// Tokens with a `key:value` shape are search qualifiers, not free text: they
+/// filter on structured session fields (see [`parse_search_query`]) instead of
+/// the search index, mirroring the `session_search` tool's filter options so the
+/// session list can express every filter the search exposes. Time qualifiers
+/// additionally accept relative offsets (`30m`, `2h`) beyond the tool's
+/// RFC3339/`YYYY-MM-DD` forms, since the search bar is typed character by
+/// character and fixed dates are awkward to compose live.
 pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -> bool {
-    let tokens = search_query_tokens(query);
-    tokens.is_empty()
-        || tokens
-            .iter()
-            .all(|token| session.search_index.contains(token))
+    let parsed = parse_search_query(query);
+    parsed.matches(session)
 }
 
 /// Split a raw query into normalized (lowercased, whitespace-trimmed) search
@@ -398,6 +403,351 @@ pub(super) fn search_query_tokens(query: &str) -> Vec<String> {
         .split_whitespace()
         .map(|token| token.to_lowercase())
         .collect()
+}
+
+/// A picker search query split into free-text tokens and structured qualifiers.
+///
+/// Qualifier tokens use a `key:value` shape; anything else is free text matched
+/// against the session's search index. Unknown keys and malformed values degrade
+/// gracefully: an unparseable qualifier is kept as free text so the query still
+/// does something predictable while typing (e.g. the half-typed `after:2`),
+/// while an unknown key like `foo:bar` falls back to plain text matching.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ParsedSearchQuery {
+    /// Lowercased free-text tokens that must all appear in the search index.
+    pub free_tokens: Vec<String>,
+    /// Case-insensitive substring filter on the session model.
+    pub model: Option<String>,
+    /// Case-insensitive substring filter on the provider key.
+    pub provider: Option<String>,
+    /// Source filter using the same aliases as `session_search` (claude-code,
+    /// codex, pi, opencode, cursor, jcode, all).
+    pub source: Option<String>,
+    /// Case-insensitive substring filter on the working directory.
+    pub dir: Option<String>,
+    /// Saved-bookmark flag filter (`saved:yes`/`saved:no`, `saved:true`/`false`).
+    pub saved: Option<bool>,
+    /// Debug/test flag filter.
+    pub debug: Option<bool>,
+    /// Canary flag filter.
+    pub canary: Option<bool>,
+    /// Only sessions with last activity at or after this instant.
+    pub after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Only sessions with last activity at or before this instant.
+    pub before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ParsedSearchQuery {
+    /// True when there is nothing to match on: every session qualifies.
+    pub fn is_empty(&self) -> bool {
+        self.free_tokens.is_empty()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.source.is_none()
+            && self.dir.is_none()
+            && self.saved.is_none()
+            && self.debug.is_none()
+            && self.canary.is_none()
+            && self.after.is_none()
+            && self.before.is_none()
+    }
+
+    /// All-session reference point for the time window: live sessions publish
+    /// `last_active_at`, older ones fall back to the last stored message time.
+    fn last_activity(session: &SessionInfo) -> chrono::DateTime<chrono::Utc> {
+        session.last_active_at.unwrap_or(session.last_message_time)
+    }
+
+    /// Resume-origin-based label for `source:`/`provider:` matching. The
+    /// session's own `source` field groups by model for display, so a native
+    /// session running a Codex model is labeled `codex` there; the `source:`
+    /// filter answers "where does this conversation come from", which only the
+    /// resume target knows.
+    fn origin_source_label(session: &SessionInfo) -> &'static str {
+        match session.resume_target {
+            ResumeTarget::JcodeSession { .. } => "jcode",
+            ResumeTarget::ClaudeCodeSession { .. } => "claude",
+            ResumeTarget::CodexSession { .. } => "codex",
+            ResumeTarget::PiSession { .. } => "pi",
+            ResumeTarget::OpenCodeSession { .. } => "opencode",
+            ResumeTarget::CursorSession { .. } => "cursor",
+        }
+    }
+
+    pub fn matches(&self, session: &SessionInfo) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        // Free-text tokens are a logical AND against the search index.
+        if !self
+            .free_tokens
+            .iter()
+            .all(|token| session.search_index.contains(token))
+        {
+            return false;
+        }
+        if let Some(model) = &self.model
+            && !session
+                .model
+                .as_deref()
+                .is_some_and(|m| m.to_ascii_lowercase().contains(model))
+        {
+            return false;
+        }
+        if let Some(provider) = &self.provider {
+            // Same shape as the tool's provider filter: the provider key can
+            // match, or the resume origin can stand in when no key is
+            // recorded (e.g. external Claude Code sessions resume via
+            // Claude Code).
+            let key_matches = session
+                .provider_key
+                .as_deref()
+                .is_some_and(|p| p.to_ascii_lowercase().contains(provider));
+            let source_matches = Self::origin_source_label(session).contains(provider);
+            if !key_matches && !source_matches {
+                return false;
+            }
+        }
+        if let Some(source) = &self.source
+            && !Self::origin_source_label(session).eq_ignore_ascii_case(source)
+        {
+            return false;
+        }
+        if let Some(dir) = &self.dir {
+            // Same matcher as the tool's working-dir filter: normalized path
+            // equality/prefix for absolute filters, fragment fallback for
+            // project-name fragments like `jcode`.
+            let matches_dir = session
+                .working_dir
+                .as_deref()
+                .is_some_and(|d| jcode_session_types::session_search_working_dir_matches(d, dir));
+            if !matches_dir {
+                return false;
+            }
+        }
+        if self.saved.is_some_and(|expected| session.saved != expected) {
+            return false;
+        }
+        if self
+            .debug
+            .is_some_and(|expected| session.is_debug != expected)
+        {
+            return false;
+        }
+        if self
+            .canary
+            .is_some_and(|expected| session.is_canary != expected)
+        {
+            return false;
+        }
+        if let Some(after) = self.after
+            && Self::last_activity(session) < after
+        {
+            return false;
+        }
+        if let Some(before) = self.before
+            && Self::last_activity(session) > before
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Split a raw query into free-text tokens and `key:value` qualifiers.
+///
+/// Known keys: `model:`, `provider:`, `source:`, `dir:`, `saved:`, `debug:`,
+/// `canary:`, `after:`, `before:`. Values are single whitespace-delimited tokens;
+/// unknown or malformed tokens stay free text. Repeating a key keeps the last
+/// occurrence (matches how a user edits the value in place). An unparseable
+/// time value imposes no constraint yet, so the list stays stable while a
+/// date is being typed (`after:2026-1` -> `after:2026-10-12`).
+pub(super) fn parse_search_query(query: &str) -> ParsedSearchQuery {
+    let mut parsed = ParsedSearchQuery::default();
+    for token in query.split_whitespace() {
+        let Some((key, value)) = token.split_once(':') else {
+            parsed.free_tokens.push(token.to_lowercase());
+            continue;
+        };
+        // An empty value means the qualifier is not typed yet: no constraint,
+        // and it must not fall back to free text either (that would flash the
+        // list empty between `saved:` and `saved:yes`). This only applies to
+        // *recognized* keys; an unknown colon token (`http:`) is not a
+        // qualifier at all, so it stays free text in both the parser and the
+        // incremental cache guard (`is_qualifier_token`), keeping cached and
+        // fresh searches consistent.
+        if value.is_empty() && qualifier_key(key).is_some() {
+            continue;
+        }
+        match qualifier_key(key) {
+            Some(QualifierKey::Model) => parsed.model = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Provider) => parsed.provider = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Dir) => parsed.dir = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Source) => {
+                // `source:all` mirrors the tool's `all` option: it clears any
+                // earlier `source:` in the same query (last-value-wins, like
+                // every other repeated qualifier) instead of leaving a stale
+                // constraint active.
+                if value.eq_ignore_ascii_case("all") {
+                    parsed.source = None;
+                } else {
+                    parsed.source = Some(normalize_source_alias(value));
+                }
+            }
+            Some(QualifierKey::Saved) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.saved = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::Debug) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.debug = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::Canary) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.canary = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::After) | Some(QualifierKey::Before) => {
+                if let Ok(Some(dt)) = parse_time_qualifier(value) {
+                    if matches!(qualifier_key(key), Some(QualifierKey::After)) {
+                        parsed.after = Some(dt);
+                    } else {
+                        parsed.before = Some(dt);
+                    }
+                }
+            }
+            None => parsed.free_tokens.push(token.to_lowercase()),
+        }
+    }
+    parsed
+}
+
+/// The qualifier keys the picker search understands. `query_is_pure_free_text`
+/// and `parse_search_query` share this list so the cache guard and the parser
+/// can never drift apart on what counts as a qualifier.
+enum QualifierKey {
+    Model,
+    Provider,
+    Source,
+    Dir,
+    Saved,
+    Debug,
+    Canary,
+    After,
+    Before,
+}
+
+/// Recognize a qualifier key (case-insensitive). `None` means the token is
+/// free text, not a qualifier the picker interprets.
+fn qualifier_key(key: &str) -> Option<QualifierKey> {
+    match key.to_ascii_lowercase().as_str() {
+        "model" => Some(QualifierKey::Model),
+        "provider" => Some(QualifierKey::Provider),
+        "source" => Some(QualifierKey::Source),
+        "dir" => Some(QualifierKey::Dir),
+        "saved" => Some(QualifierKey::Saved),
+        "debug" => Some(QualifierKey::Debug),
+        "canary" => Some(QualifierKey::Canary),
+        "after" => Some(QualifierKey::After),
+        "before" => Some(QualifierKey::Before),
+        _ => None,
+    }
+}
+
+/// Normalize a `source:` value using the same aliases `session_search` accepts
+/// (e.g. `claude-code` -> `claude`). Unknown values are passed through: they
+/// simply match nothing, which keeps behavior obvious while typing.
+fn normalize_source_alias(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    match lower.as_str() {
+        "claude-code" => "claude".to_string(),
+        _ => lower,
+    }
+}
+
+/// `yes`/`no`/`true`/`false`/`1`/`0` qualifier values. Unrecognized values
+/// return `None` so the token degrades to free text instead of erroring.
+fn parse_bool_qualifier(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "1" => Some(true),
+        "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse an `after:`/`before:` value: RFC3339 timestamps, `YYYY-MM-DD` dates
+/// (UTC midnight), or relative offsets like `2h`, `3d`, `1w`, `30m`.
+/// `Ok(None)` means no constraint: either an empty value or one that has not
+/// finished parsing (the caller keeps the list unfiltered until it does).
+fn parse_time_qualifier(value: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(dt.with_timezone(&chrono::Utc)));
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| {
+                Some(chrono::DateTime::from_naive_utc_and_offset(
+                    naive,
+                    chrono::Utc,
+                ))
+            })
+            .ok_or(());
+    }
+    // Relative: `30m`, `2h`, `3d`, `1w` from now. Strip a trailing ASCII
+    // unit letter explicitly: byte-based `split_at` on the last byte would cut
+    // inside a multibyte character (`after:é`) and panic before the match
+    // below could reject the value.
+    let lower = value.to_ascii_lowercase();
+    let (digits, unit) = lower
+        .strip_suffix(['m', 'h', 'd', 'w'])
+        .map(|digits| (digits, &lower[lower.len() - 1..]))
+        .unwrap_or((lower.as_str(), ""));
+    let Ok(count) = digits.parse::<i64>() else {
+        return Ok(None);
+    };
+    let duration = match unit {
+        "m" => chrono::Duration::try_minutes(count),
+        "h" => chrono::Duration::try_hours(count),
+        "d" => chrono::Duration::try_days(count),
+        "w" => chrono::Duration::try_weeks(count),
+        _ => return Ok(None),
+    };
+    // `before:` is rarely used with a relative past offset, but keep the math
+    // honest: both windows anchor to now and apply the offset toward the past.
+    // `checked_sub_signed` rejects offsets that would leave chrono's supported
+    // date range (e.g. `after:100000000d`) instead of panicking; the query then
+    // simply imposes no constraint while the user keeps typing.
+    duration
+        .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
+        .map(Some)
+        .ok_or(())
+}
+
+/// True when every token is free text: no `key:value` qualifier appears. Used
+/// by the picker's incremental search cache to decide whether a prefix
+/// extension of a previous query is guaranteed to produce a subset of the
+/// previous matches (see `search_matched_session_refs`).
+pub(super) fn query_is_pure_free_text(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .all(|token| !is_qualifier_token(token))
+}
+
+/// A token counts as a qualifier when its key is one the picker interprets
+/// (`qualifier_key`). Anything else (including `foo:bar`) is free text, so the
+/// predicate matches the parser's behavior exactly.
+fn is_qualifier_token(token: &str) -> bool {
+    let Some((key, _)) = token.split_once(':') else {
+        return false;
+    };
+    // An empty value (`model:` while the value is being typed) still flips the
+    // guard off even though it imposes no constraint, because the *previous*
+    // free-text query may have filtered on the bare word `model`.
+    qualifier_key(key).is_some()
 }
 
 #[cfg(test)]
@@ -659,19 +1009,32 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
             .unwrap_or(0)
     }
 
+    // Walk budget: the heap already caps the retained set at `limit`, but
+    // without a traversal ceiling the walk still stats every record in a
+    // session directory (readdir + metadata for tens of thousands of files
+    // before the first result comes back). Sessions are ordered by
+    // recency top-down in practice, so a generous multiple of `limit` keeps
+    // the newest-file guarantee for real workloads while bounding the IO.
+    const VISIT_BUDGET: usize = 500;
+
     fn walk(
         dir: &Path,
         extension: &str,
         limit: usize,
+        budget: &mut usize,
         out: &mut BinaryHeap<Reverse<(u64, PathBuf)>>,
     ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            if *budget == 0 {
+                return;
+            }
+            *budget -= 1;
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, extension, limit, out);
+                walk(&path, extension, limit, budget, out);
             } else if path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -694,7 +1057,8 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
     }
 
     let mut heap: BinaryHeap<Reverse<(u64, PathBuf)>> = BinaryHeap::new();
-    walk(root, extension, limit, &mut heap);
+    let mut budget = VISIT_BUDGET * limit.max(1);
+    walk(root, extension, limit, &mut budget, &mut heap);
     let mut files: Vec<(u64, PathBuf)> = heap.into_iter().map(|entry| entry.0).collect();
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     files.into_iter().map(|(_, path)| path).collect()
@@ -711,6 +1075,16 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
 /// 512 KiB comfortably covers far more than 20 messages for normal transcripts
 /// while bounding the worst case.
 const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Lines of a Pi transcript the stub pass reads while extracting the
+/// model/provider. Model switches are usually near the start, so the prefix
+/// covers the common cases without reading every line of a large transcript.
+pub(super) const PI_STUB_SCAN_LINES: usize = 200;
+
+/// OpenCode message files the stub pass reads while extracting the
+/// model/provider. The first assistant message usually carries the values,
+/// so a small bound covers real sessions without walking every file.
+const OPENCODE_STUB_SCAN_MESSAGES: usize = 50;
 
 /// Read the trailing portion of a file as UTF-8 text, capped at
 /// [`EXTERNAL_PREVIEW_TAIL_BYTES`]. When the file is larger than the cap we seek
@@ -2234,11 +2608,39 @@ pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>
     load_codex_preview_from_path(&path)
 }
 
-pub(super) fn load_pi_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+pub(super) struct PreviewLoadResult {
+    pub preview: Vec<PreviewMessage>,
+    pub model: Option<String>,
+    pub provider_key: Option<String>,
+    /// Transcript-adjacent state the live chat renders around the messages
+    /// (pinned todo band, global prompt numbering offset). External sessions
+    /// have none, so this defaults to empty.
+    pub extras: super::PreviewExtras,
+}
+
+impl PreviewLoadResult {
+    /// Wrap preview messages that carry no model/provider metadata (Claude
+    /// Code, Codex, Cursor transcripts).
+    pub(super) fn from_preview(preview: Vec<PreviewMessage>) -> Self {
+        Self {
+            preview,
+            model: None,
+            provider_key: None,
+            extras: super::PreviewExtras::default(),
+        }
+    }
+}
+
+pub(super) fn load_pi_preview_from_path(path: &Path) -> Option<PreviewLoadResult> {
     load_pi_session_info(path)
         .ok()
         .flatten()
-        .map(|session| session.messages_preview)
+        .map(|session| PreviewLoadResult {
+            model: session.model,
+            provider_key: session.provider_key,
+            preview: session.messages_preview,
+            extras: super::PreviewExtras::default(),
+        })
 }
 
 fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
@@ -2254,6 +2656,56 @@ fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Bounded scan of Pi transcript lines for the model/provider behind the
+/// `model:`/`provider:` qualifiers. Mirrors `load_pi_session_info`'s rules
+/// (`model_change` entries, message-level `model` field) but stops after
+/// [`PI_STUB_SCAN_LINES`] lines so the stub pass stays cheap; both values can
+/// evolve mid-session, and the last one seen in the prefix wins.
+fn scan_pi_model_provider(
+    lines: impl Iterator<Item = std::io::Result<String>>,
+) -> (Option<String>, Option<String>) {
+    let mut model: Option<String> = None;
+    let mut provider_key: Option<String> = Some("pi".to_string());
+    for line in lines.take(PI_STUB_SCAN_LINES) {
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("model_change") => {
+                provider_key = value
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or(provider_key);
+                model = value
+                    .get("modelId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or(model);
+            }
+            Some("message") => {
+                if model.is_none()
+                    && let Some(message) = value.get("message")
+                {
+                    model = message
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    (model, provider_key)
 }
 
 fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
@@ -2290,6 +2742,14 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // `model:`/`provider:` qualifiers must filter external sessions too, so
+    // pull the model and provider out of the transcript instead of leaving
+    // them None. Scan only a bounded prefix: sessions can switch models
+    // mid-run, and a recent value is better than reading every line of a
+    // multi-MB transcript during the stub pass.
+    let (model, provider_key) = scan_pi_model_provider(lines.by_ref());
+
     let short_name = format!("pi {}", jcode_core::util::truncate_str(&session_id, 8));
     let title = format!(
         "Pi session {}",
@@ -2317,8 +2777,8 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         last_message_time,
         last_active_at: Some(last_message_time),
         working_dir,
-        model: None,
-        provider_key: Some("pi".to_string()),
+        model,
+        provider_key,
         is_canary: false,
         is_debug: false,
         saved: false,
@@ -2520,11 +2980,68 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     .collect()
 }
 
-pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<PreviewLoadResult> {
     load_opencode_session_info(path)
         .ok()
         .flatten()
-        .map(|session| session.messages_preview)
+        .map(|session| PreviewLoadResult {
+            model: session.model,
+            provider_key: session.provider_key,
+            preview: session.messages_preview,
+            extras: super::PreviewExtras::default(),
+        })
+}
+
+/// Bounded scan of an OpenCode session's message records for the
+/// model/provider behind the `model:`/`provider:` qualifiers, mirroring
+/// `load_opencode_session_info`'s extraction (`modelID`/`providerID`, with
+/// the nested `model.modelID`/`model.providerID` Go-storage shape as a
+/// fallback). Reads at most [`OPENCODE_STUB_SCAN_MESSAGES`] message files so
+/// the stub pass stays cheap; the first value found wins.
+fn scan_opencode_model_provider(messages_root: &Path) -> (Option<String>, Option<String>) {
+    let mut model: Option<String> = None;
+    // Extracted `providerID` must win over the "opencode" fallback, so the
+    // seed is applied only after the scan.
+    let mut provider_key: Option<String> = None;
+    let mut scanned = 0usize;
+    if messages_root.exists() {
+        // Newest-first candidates only: the scan stops after
+        // OPENCODE_STUB_SCAN_MESSAGES files, so eagerly collecting and
+        // sorting the full history (2 metadata lookups per comparison)
+        // made listing large OpenCode sessions measurably slow.
+        for msg_path in
+            collect_recent_files_recursive(messages_root, "json", OPENCODE_STUB_SCAN_MESSAGES)
+        {
+            if scanned >= OPENCODE_STUB_SCAN_MESSAGES {
+                break;
+            }
+            let Ok(file) = File::open(&msg_path) else {
+                continue;
+            };
+            scanned += 1;
+            let Ok(msg_value) = serde_json::from_reader::<_, serde_json::Value>(file) else {
+                continue;
+            };
+            if model.is_none() {
+                model = msg_value
+                    .get("modelID")
+                    .or_else(|| msg_value.get("model").and_then(|m| m.get("modelID")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+            if provider_key.is_none() {
+                provider_key = msg_value
+                    .get("providerID")
+                    .or_else(|| msg_value.get("model").and_then(|m| m.get("providerID")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+            if model.is_some() && provider_key.is_some() {
+                break;
+            }
+        }
+    }
+    (model, provider_key.or_else(|| Some("opencode".to_string())))
 }
 
 fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
@@ -2554,6 +3071,16 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .get("directory")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // `model:`/`provider:` qualifiers must filter external sessions too, so
+    // pull the model and provider out of the session's message records
+    // instead of leaving them None.
+    let messages_root = crate::storage::user_home_path(format!(
+        ".local/share/opencode/storage/message/{session_id}",
+    ));
+    let (model, provider_key) = match messages_root {
+        Ok(root) => scan_opencode_model_provider(&root),
+        Err(_) => (None, Some("opencode".to_string())),
+    };
     let short_name = format!(
         "opencode {}",
         jcode_core::util::truncate_str(&session_id, 8)
@@ -2590,8 +3117,8 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         last_message_time,
         last_active_at: Some(last_message_time),
         working_dir,
-        model: None,
-        provider_key: Some("opencode".to_string()),
+        model,
+        provider_key,
         is_canary: false,
         is_debug: false,
         saved: false,
@@ -2659,7 +3186,9 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut preview = Vec::new();
     let mut user_message_count = 0usize;
     let mut assistant_message_count = 0usize;
-    let mut provider_key: Option<String> = Some("opencode".to_string());
+    // Extracted `providerID` must win over the "opencode" fallback, so the
+    // seed is applied only after the scan.
+    let mut provider_key: Option<String> = None;
     let mut model: Option<String> = None;
 
     if messages_root.exists() {
@@ -2726,6 +3255,7 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         .iter()
         .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
         .map(|msg| msg.content.clone());
+    let provider_key = provider_key.or_else(|| Some("opencode".to_string()));
 
     Ok(Some(SessionInfo {
         id: format!("opencode:{session_id}"),

@@ -36,6 +36,10 @@ pub use jcode_session_types::ResumeTarget;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SessionFilterMode {
     All,
+    /// Flat view of every session sorted strictly by last activity, newest
+    /// first: no current-dir pinning, no headers, no running-state triage.
+    /// Backs the "latest" sort so users get an undecorated recency list.
+    Latest,
     /// Sessions whose working directory matches the directory `/resume` was
     /// opened from.
     CurrentDir,
@@ -47,6 +51,10 @@ pub enum SessionFilterMode {
     /// annotated with whether each is still streaming a response or is ready
     /// for input. Backs the opt-in "active sessions manager" view.
     Active,
+    /// Sessions whose live process is streaming a response right now: the
+    /// "working" subset of the Active view (a live-but-idle session is ready
+    /// for input, not working).
+    Working,
     ClaudeCode,
     Codex,
     Pi,
@@ -61,12 +69,14 @@ pub enum SessionFilterMode {
 impl SessionFilterMode {
     pub fn next(self) -> Self {
         match self {
-            Self::All => Self::CurrentDir,
+            Self::All => Self::Latest,
+            Self::Latest => Self::CurrentDir,
             Self::CurrentDir => Self::CatchUp,
             Self::CatchUp => Self::Saved,
             Self::Saved => Self::Cloud,
             Self::Cloud => Self::Active,
-            Self::Active => Self::ClaudeCode,
+            Self::Active => Self::Working,
+            Self::Working => Self::ClaudeCode,
             Self::ClaudeCode => Self::Codex,
             Self::Codex => Self::Pi,
             Self::Pi => Self::OpenCode,
@@ -81,12 +91,14 @@ impl SessionFilterMode {
     pub fn previous(self) -> Self {
         match self {
             Self::All => Self::Cursor,
-            Self::CurrentDir => Self::All,
+            Self::Latest => Self::All,
+            Self::CurrentDir => Self::Latest,
             Self::CatchUp => Self::CurrentDir,
             Self::Saved => Self::CatchUp,
             Self::Cloud => Self::Saved,
             Self::Active => Self::Cloud,
-            Self::ClaudeCode => Self::Active,
+            Self::Working => Self::Active,
+            Self::ClaudeCode => Self::Working,
             Self::Codex => Self::ClaudeCode,
             Self::Pi => Self::Codex,
             Self::OpenCode => Self::Pi,
@@ -98,11 +110,13 @@ impl SessionFilterMode {
     pub fn label(self) -> Option<&'static str> {
         match self {
             Self::All => None,
+            Self::Latest => Some("🕐 latest"),
             Self::CurrentDir => Some("📁 current dir"),
             Self::CatchUp => Some("⏭ catch up"),
             Self::Saved => Some("📌 saved"),
             Self::Cloud => Some("☁ cloud"),
             Self::Active => Some("⚡ active"),
+            Self::Working => Some("⚙ working"),
             Self::ClaudeCode => Some("🧵 Claude Code"),
             Self::Codex => Some("🧠 Codex"),
             Self::Pi => Some("π Pi"),
@@ -193,6 +207,13 @@ pub enum PickerItem {
     SavedHeader {
         session_count: usize,
     },
+    /// Sessions whose working directory matches the directory the picker was
+    /// opened from, pinned to the top of the All view so the user's current
+    /// project is immediately visible.
+    CurrentDirHeader {
+        label: String,
+        session_count: usize,
+    },
 }
 
 pub fn session_is_claude_code(source: SessionSource, id: &str) -> bool {
@@ -266,11 +287,13 @@ mod tests {
     fn filter_cycle_includes_cloud_immediately_after_saved() {
         let cycle = [
             SessionFilterMode::All,
+            SessionFilterMode::Latest,
             SessionFilterMode::CurrentDir,
             SessionFilterMode::CatchUp,
             SessionFilterMode::Saved,
             SessionFilterMode::Cloud,
             SessionFilterMode::Active,
+            SessionFilterMode::Working,
             SessionFilterMode::ClaudeCode,
             SessionFilterMode::Codex,
             SessionFilterMode::Pi,
@@ -283,6 +306,33 @@ mod tests {
             assert_eq!(next.previous(), mode);
         }
         assert_eq!(SessionFilterMode::Cloud.label(), Some("☁ cloud"));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn session_filter_mode_round_trips_through_serde() {
+        // The enum is serde-derived behind a feature flag that jcode-tui
+        // always enables. Nothing persists it today, but the wire shape is
+        // externally visible (`"All" | "Latest" | ...`), so pin the variant
+        // names: renaming or reordering must stay a deliberate act.
+        let modes = [
+            SessionFilterMode::All,
+            SessionFilterMode::Latest,
+            SessionFilterMode::CurrentDir,
+            SessionFilterMode::CatchUp,
+            SessionFilterMode::Saved,
+            SessionFilterMode::Active,
+            SessionFilterMode::Cursor,
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).expect("serialize mode");
+            let back: SessionFilterMode = serde_json::from_str(&json).expect("deserialize mode");
+            assert_eq!(back, mode);
+        }
+        assert_eq!(
+            serde_json::to_string(&SessionFilterMode::Latest).expect("serialize"),
+            "\"Latest\""
+        );
     }
 
     #[test]

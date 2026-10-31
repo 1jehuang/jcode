@@ -81,9 +81,11 @@ impl SessionPicker {
 
     /// Normalized search tokens used for highlighting, or an empty vec when there
     /// is no active search. Mirrors the matcher's tokenization so highlighting and
-    /// filtering agree on what counts as a match.
+    /// filtering agree on what counts as a match. Qualifier tokens
+    /// (`model:`, `after:`, ...) filter structured fields, not the rendered
+    /// text, so they are excluded here.
     pub(super) fn active_highlight_tokens(&self) -> Vec<String> {
-        super::loading::search_query_tokens(&self.search_query)
+        super::loading::parse_search_query(&self.search_query).free_tokens
     }
 
     /// Split `text` into spans, applying `base` to non-matching segments and a
@@ -481,6 +483,27 @@ impl SessionPicker {
                     Style::default().fg(dim),
                 )])),
             ]
+        } else if self.items.is_empty()
+            && self.filter_mode == jcode_tui_session_picker::SessionFilterMode::Working
+        {
+            vec![
+                ListItem::new(Line::from(vec![Span::styled(
+                    "  No sessions working right now",
+                    Style::default()
+                        .fg(rgb(220, 220, 220))
+                        .add_modifier(Modifier::BOLD),
+                )])),
+                ListItem::new(Line::from(vec![Span::styled(
+                    // Same clipping class as the folder header: the help row
+                    // renders into the narrow list column, so fit it to the
+                    // actual width rather than clipping.
+                    fit_to_width(
+                        "     live-but-idle sessions show as ready · s cycles · Esc closes",
+                        area.width as usize,
+                    ),
+                    Style::default().fg(dim),
+                )])),
+            ]
         } else {
             self.items
                 .iter()
@@ -543,6 +566,33 @@ impl SessionPicker {
                                 ),
                                 Span::styled(
                                     format!("  {}", session_count),
+                                    Style::default().fg(dim),
+                                ),
+                            ]);
+                            ListItem::new(vec![line1])
+                        }
+                        PickerItem::CurrentDirHeader {
+                            label,
+                            session_count,
+                        } => {
+                            // Same green as the per-row "this folder" highlight
+                            // so the pinned group reads as one visual unit.
+                            // short_dir_label caps the label at 40 chars, but
+                            // the fixed prefix/suffix still overflow narrow
+                            // list columns and clip silently; fit the whole
+                            // header to the actual width instead.
+                            let dir_color: Color = rgb(120, 200, 140);
+                            let fixed_cells = 25; // "📁 This folder  " + " · {n}"
+                            let label_budget = (area.width as usize).saturating_sub(fixed_cells);
+                            let label_text = fit_to_width(label, label_budget);
+                            let line1 = Line::from(vec![
+                                Span::styled("📁 ", Style::default().fg(dir_color)),
+                                Span::styled(
+                                    "This folder",
+                                    Style::default().fg(dir_color).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!("  {} · {}", label_text, session_count),
                                     Style::default().fg(dim),
                                 ),
                             ]);
@@ -662,7 +712,9 @@ impl SessionPicker {
         } else if self.transcript_search.pending() {
             " searching full transcripts… · type to refine · Ctrl+C cancel ".to_string()
         } else if self.search_active {
-            " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
+            // Qualifier keys moved to the dedicated search row; this line stays
+            // short so the query echo keeps room in the title bar.
+            " Ctrl+J/K nav · Esc cancel ".to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {

@@ -4418,6 +4418,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-session-types",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
