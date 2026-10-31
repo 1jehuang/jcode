@@ -16,3 +16,10 @@ jcode-applet-types = { path = "../jcode-applet-types" }
 jcode-todo-policy = { path = "../jcode-todo-policy" }
 
 [dev-dependencies]
+
+[[example]]
+name = 'harness_repl'
+required-features = ['unix-demo']
+
+[features]
+unix-demo = []

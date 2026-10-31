@@ -122,6 +122,8 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             intent: None,
             thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     for width in [40, 72, 120] {
         for mode in [
@@ -2087,6 +2089,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -2171,6 +2174,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -2288,6 +2292,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
         serde_json::to_string_pretty(&update).unwrap(),
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -2399,6 +2404,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             duration_secs: None,
             title: Some("1 todos".to_string()),
             tool_data,
+            tool_duration_ms: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -2498,6 +2504,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         "--- [1] todo ---\n{todo_output}\n\n--- [2] ls ---\n./\n\n0 files, 0 directories\n\nCompleted: 2 succeeded, 0 failed"
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -2592,6 +2599,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -2673,6 +2681,7 @@ fn render_system_message_uses_scheduled_task_card() {
 fn render_tool_message_uses_scheduled_card() {
     let _guard = system_glyph_env_lock();
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
         tool_calls: Vec::new(),
@@ -2799,6 +2808,7 @@ fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
     let live = DisplayMessage {
         tool_calls: Vec::new(),
@@ -3045,6 +3055,7 @@ fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
 #[test]
 fn render_tool_message_prefers_subagent_title_with_model() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "done".to_string(),
         tool_calls: Vec::new(),
@@ -3076,6 +3087,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
 fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -3107,6 +3119,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
 #[test]
 fn render_tool_message_hides_technical_preview_by_default() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -3142,6 +3155,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Error: command not found: cargoo".to_string(),
         tool_calls: Vec::new(),
@@ -3184,6 +3198,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 #[test]
 fn render_tool_message_shows_token_badge() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "x".repeat(7_600),
         tool_calls: Vec::new(),
@@ -3241,6 +3256,8 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                     intent: intent.map(str::to_string),
                     thought_signature: None,
                 }),
+            
+                tool_duration_ms: None,
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
             assert_eq!(lines.len(), 2, "{name}");
@@ -3318,6 +3335,8 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
                 {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
             ]}), intent: None, thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 4);
@@ -3370,6 +3389,8 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
             intent: Some("Inspect sources".to_string()),
             thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
@@ -3480,6 +3501,7 @@ fn tool_failure_reason_handles_exit_codes_fallback_and_unicode_widths() {
 #[test]
 fn render_tool_message_hides_bash_output() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
         tool_calls: Vec::new(),
@@ -3507,6 +3529,7 @@ fn render_tool_message_hides_bash_output() {
 fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "one\ntwo\nthree\nfour".to_string(),
         tool_calls: Vec::new(),
@@ -3539,6 +3562,7 @@ include!("gmail_drafts_tests.rs");
 fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),

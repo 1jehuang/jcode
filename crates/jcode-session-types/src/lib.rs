@@ -76,9 +76,6 @@ pub struct ResponseStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
-    /// Execution duration for a completed tool row, when recorded by the runner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_duration_ms: Option<u64>,
     /// Present only on the final visible assistant row of a completed stored
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +90,11 @@ pub struct RenderedMessage {
     /// transcript (issue #432).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_index: Option<usize>,
+    /// Tool execution duration in milliseconds, recorded by the agent loop
+    /// when the tool result was stored (#1453). Tool rows show it as a
+    /// compact duration badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

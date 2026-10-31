@@ -1306,7 +1306,7 @@ impl BashTool {
                 notify,
                 wake,
 				move |output_path| async move {
-                    #[cfg(test)]
+                    #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
 					cmd.envs(cloud_environment);
