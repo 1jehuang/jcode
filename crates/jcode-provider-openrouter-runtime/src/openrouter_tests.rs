@@ -122,6 +122,9 @@ fn test_has_credentials() {
 #[path = "openrouter_tests/catalog_shape_tests.rs"]
 mod catalog_shape_tests;
 
+#[path = "openrouter_tests/obscurify_ai_catalog_tests.rs"]
+mod obscurify_ai_catalog_tests;
+
 #[test]
 fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
     let _lock = ENV_LOCK.lock();

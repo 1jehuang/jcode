@@ -99,6 +99,7 @@ pub fn redact_secrets(text: &str) -> String {
         compile_static_regexes(&[
             r"sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}",
             r"sk-or-v1-[A-Za-z0-9_-]{20,}",
+            r"sk-obs1_[A-Za-z0-9_-]{20,}",
             r"ghp_[A-Za-z0-9]{20,}",
             r"github_pat_[A-Za-z0-9_]{20,}",
             r"ya29\.[A-Za-z0-9._-]{20,}",
@@ -140,6 +141,7 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(VENICE_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OBSCURIFY_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(BELVEDIR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
@@ -181,6 +183,7 @@ pub fn redact_secrets(text: &str) -> String {
         "CHUTES_API_KEY",
         "CEREBRAS_API_KEY",
         "VENICE_API_KEY",
+        "OBSCURIFY_API_KEY",
         "BELVEDIR_API_KEY",
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",

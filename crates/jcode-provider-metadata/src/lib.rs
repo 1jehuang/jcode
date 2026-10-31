@@ -365,6 +365,28 @@ mod tests {
     }
 
     #[test]
+    fn obscurify_ai_login_uses_openai_compatible_profile() {
+        let provider = resolve_login_selection("obscurify-ai", &cli_login_providers())
+            .expect("Obscurify.ai CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Obscurify.ai should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "obscurify-ai");
+        assert_eq!(profile.display_name, "Obscurify.ai");
+        assert_eq!(profile.api_base, "https://obscurify.ai/v1");
+        assert_eq!(profile.api_key_env, "OBSCURIFY_API_KEY");
+        assert_eq!(profile.env_file, "obscurify-ai.env");
+        assert_eq!(profile.default_model, Some("deepseek/deepseek-v4-flash"));
+        assert!(profile.requires_api_key);
+
+        for alias in ["obscurifyai", "obscurify.ai"] {
+            let resolved = resolve_login_provider(alias).expect("Obscurify.ai alias");
+            assert_eq!(resolved.id, "obscurify-ai");
+        }
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),

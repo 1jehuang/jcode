@@ -326,6 +326,59 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
 }
 
 #[test]
+fn agent_failover_never_targets_obscurify_ai_routes() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        crate::env::set_var("OBSCURIFY_API_KEY", "sk-obs1_test");
+        let provider = agent_failover_fixture(&["gpt-6-astra"]);
+        let obscurify_route = |model: &str| ModelRoute {
+            model: model.into(),
+            provider: "Obscurify.ai".into(),
+            api_method: "openai-compatible:obscurify-ai".into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        };
+        let models = ["deepseek/deepseek-v4-flash", "gpt-6-astra"];
+        let routes = || models.map(obscurify_route).to_vec();
+
+        for model in models {
+            assert!(!MultiProvider::is_failover_route_pool_approved(&format!(
+                "obscurify-ai:{model}"
+            )));
+        }
+
+        agent_failover_catalog(&provider, routes());
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            None
+        );
+
+        // Control: the same catalog plus a pool member fails over to that member.
+        let mut with_openai = routes();
+        with_openai.push(build_openai_api_key_route("gpt-6-astra", true, ""));
+        agent_failover_catalog(&provider, with_openai);
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            Some("openai-api:gpt-6-astra".into())
+        );
+
+        // Adding the key to the pool by hand does not make the route a target.
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        pool.members.retain(|key| key != "openai-api");
+        pool.members.push("obscurify-ai".into());
+        pool.save().unwrap();
+        agent_failover_catalog(&provider, routes());
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            None
+        );
+    });
+}
+
+#[test]
 fn agent_failover_same_model_rotation_precedes_config_and_respects_context() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();
