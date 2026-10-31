@@ -655,6 +655,38 @@ impl Drop for ProcessGroupKillGuard {
     }
 }
 
+/// Stop the owned Windows process tree and wait for its root to exit.
+#[cfg(windows)]
+async fn terminate_windows_background_tree(child: &mut tokio::process::Child) -> Result<()> {
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    let Some(pid) = child.id() else {
+        child.wait().await?;
+        return Ok(());
+    };
+    // Do not fall back to killing only the root: that can leave descendants alive.
+    let status = tokio::time::timeout(
+        Duration::from_secs(10),
+        TokioCommand::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out terminating background process tree {pid}"))??;
+    if !status.status.success() {
+        anyhow::bail!(
+            "Failed to terminate background process tree {pid}: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for background process {pid} to exit"))??;
+    Ok(())
+}
+
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
@@ -1298,15 +1330,18 @@ impl BashTool {
 
         let wake = params.wake;
         let notify = params.notify || wake;
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let cancellation = if cfg!(windows) { Some(cancel_tx) } else { None };
         let info = crate::background::global()
-            .spawn_with_notify(
+            .spawn_with_notify_and_cancellation(
                 "bash",
                 Some(display_name.clone()),
                 &ctx.session_id,
                 notify,
                 wake,
+                cancellation,
 				move |output_path| async move {
-                    #[cfg(test)]
+                    #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
 					cmd.envs(cloud_environment);
@@ -1352,6 +1387,13 @@ impl BashTool {
 
 	                    while !stdout_done || !stderr_done {
 	                        tokio::select! {
+                                _ = &mut cancel_rx, if cfg!(windows) => {
+                                    #[cfg(windows)]
+                                    {
+                                        terminate_windows_background_tree(&mut child).await?;
+                                        return Ok(TaskResult::cancelled());
+                                    }
+                                }
 	                            _ = async {
 	                                match timeout_sleep.as_mut().as_pin_mut() {
 	                                    Some(sleep) => sleep.await,
@@ -1412,6 +1454,15 @@ impl BashTool {
                         return Ok(TaskResult::failed(Some(124), msg));
                     }
 
+                    #[cfg(windows)]
+                    let status = tokio::select! {
+                        result = child.wait() => result?,
+                        _ = &mut cancel_rx => {
+                            terminate_windows_background_tree(&mut child).await?;
+                            return Ok(TaskResult::cancelled());
+                        }
+                    };
+                    #[cfg(not(windows))]
                     let status = child.wait().await?;
                     #[cfg(unix)]
                     process_group_guard.disarm();
@@ -1491,3 +1542,7 @@ impl BashTool {
 #[cfg(all(test, not(windows)))]
 #[path = "bash_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "bash_windows_tests.rs"]
+mod windows_tests;

@@ -445,6 +445,38 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
+        self.spawn_with_notify_and_cancellation(
+            tool_name,
+            display_name,
+            session_id,
+            notify,
+            wake,
+            None,
+            execute_fn,
+        )
+        .await
+    }
+
+    /// Spawn a task that can complete its own cleanup when cancellation is requested.
+    /// The task must return an error if cleanup fails so cancellation can report it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Cancellation extends the existing background task registration arguments"
+    )]
+    pub async fn spawn_with_notify_and_cancellation<F, Fut>(
+        &self,
+        tool_name: &str,
+        display_name: Option<String>,
+        session_id: &str,
+        notify: bool,
+        wake: bool,
+        cancellation: Option<tokio::sync::oneshot::Sender<()>>,
+        execute_fn: F,
+    ) -> BackgroundTaskInfo
+    where
+        F: FnOnce(PathBuf) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<TaskResult>> + Send,
+    {
         let runtime_activity = crate::runtime_activity::global()
             .enter_session(session_id)
             .await;
@@ -503,6 +535,11 @@ impl BackgroundTaskManager {
         // Spawn the background task
         let handle = tokio::spawn(runtime_activity.scope(async move {
             let result = execute_fn(output_path_clone.clone()).await;
+
+            // The cancelling caller owns status publication, as with aborted tasks.
+            if result.as_ref().is_ok_and(|result| result.cancelled) {
+                return result;
+            }
 
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
@@ -614,6 +651,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
+            cancellation,
             handle,
         };
 
@@ -819,6 +857,7 @@ impl BackgroundTaskManager {
                 exit_code,
                 error,
                 status: Some(status),
+                cancelled: false,
             })
         }));
 
@@ -831,6 +870,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
+            cancellation: None,
             handle: wrapper_handle,
         };
 
@@ -1353,8 +1393,21 @@ impl BackgroundTaskManager {
         // needs both locks before it can exit.
         let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
-            task.handle.abort();
-            let _ = (&mut task.handle).await;
+            if let Some(cancellation) = task.cancellation.take() {
+                if cancellation.send(()).is_err() {
+                    let _ = (&mut task.handle).await;
+                    return Ok(false);
+                }
+                // The task may finish normally before it observes cancellation.
+                // In that case its published result must remain authoritative.
+                let result = (&mut task.handle).await??;
+                if !result.cancelled {
+                    return Ok(false);
+                }
+            } else {
+                task.handle.abort();
+                let _ = (&mut task.handle).await;
+            }
             let _status_guard = self.progress_updates.lock().await;
 
             // Update status file
