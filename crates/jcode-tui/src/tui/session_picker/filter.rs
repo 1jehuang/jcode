@@ -138,7 +138,7 @@ impl SessionPicker {
                         session.save_label.as_deref().unwrap_or_default(),
                         session.first_user_prompt.as_deref().unwrap_or_default(),
                     ];
-                    let fields = fields.map(str::to_lowercase);
+                    let fields = fields.map(transcript_search::lowercase_field);
                     let intent_terms = tokens
                         .iter()
                         .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))

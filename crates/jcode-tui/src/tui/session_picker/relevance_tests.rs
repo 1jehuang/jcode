@@ -252,3 +252,54 @@ fn newly_discovered_stronger_hit_reorders_without_moving_selection() {
     assert_eq!(picker.scroll_offset, 7);
     assert!(!picker.auto_scroll_preview);
 }
+
+#[test]
+fn optimized_literal_rank_preserves_unicode_and_punctuation_boundaries() {
+    for index in [
+        "needle needlework",
+        "needleneedle needle",
+        "café caféine",
+        "éclair éclair",
+        "config-test config",
+        "東京 東京駅",
+        "aa aaa aa",
+    ] {
+        for query in [
+            "needle",
+            "café",
+            "éclair",
+            "config-test",
+            "config",
+            "東京",
+            "aa",
+            "needle café",
+        ] {
+            let tokens = search_query_tokens(query);
+            let rank = literal_metadata_rank(index, &tokens);
+            let expected = tokens
+                .iter()
+                .filter(|token| {
+                    index
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|word| word == token.as_str())
+                })
+                .count();
+            assert_eq!(rank.whole_terms, expected, "{index:?} / {query:?}");
+            assert_eq!(
+                rank.metadata_terms,
+                tokens
+                    .iter()
+                    .filter(|token| index.contains(token.as_str()))
+                    .count()
+            );
+        }
+    }
+    assert!(normalized_equals("  CAFÉ  ", "café"));
+    assert!(normalized_equals(" NEEDLE ", "needle"));
+    assert_eq!(lowercase_field("İSTANBUL"), "i\u{307}stanbul");
+    assert_eq!(lowercase_field("CAFÉ"), "café");
+    assert!(matches!(
+        lowercase_field("already lowercase"),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}

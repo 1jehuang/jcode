@@ -29,18 +29,32 @@ pub(super) struct SearchRank {
 }
 
 pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRank {
-    let metadata_terms = tokens
-        .iter()
-        .filter(|token| index.contains(token.as_str()))
-        .count();
-    let whole_terms = tokens
-        .iter()
-        .filter(|token| {
-            index
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|word| word == token.as_str())
-        })
-        .count();
+    let mut metadata_terms = 0;
+    let mut whole_terms = 0;
+    for token in tokens {
+        let mut matches = index.match_indices(token.as_str()).peekable();
+        if matches.peek().is_none() {
+            continue;
+        }
+        metadata_terms += 1;
+        // Search only occurrences, rather than splitting the entire index
+        // again for each query term. Boundaries retain Unicode word semantics.
+        if token.chars().all(char::is_alphanumeric)
+            && matches.any(|(start, matched)| {
+                let end = start + matched.len();
+                !index[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric)
+                    && !index[end..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric)
+            })
+        {
+            whole_terms += 1;
+        }
+    }
     SearchRank {
         literal: metadata_terms == tokens.len(),
         intent_terms: 0,
@@ -54,11 +68,28 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
 pub(super) fn exact_metadata_field(session: &SessionInfo, query: &str) -> bool {
     [&session.title, &session.short_name, &session.id]
         .iter()
-        .any(|field| field.trim().to_lowercase() == query)
+        .any(|field| normalized_equals(field, query))
         || session
             .save_label
             .as_ref()
-            .is_some_and(|label| label.trim().to_lowercase() == query)
+            .is_some_and(|label| normalized_equals(label, query))
+}
+
+fn normalized_equals(field: &str, query: &str) -> bool {
+    let field = field.trim();
+    if field.is_ascii() && query.is_ascii() {
+        field.eq_ignore_ascii_case(query)
+    } else {
+        field.to_lowercase() == query
+    }
+}
+
+pub(super) fn lowercase_field(field: &str) -> std::borrow::Cow<'_, str> {
+    if field.is_ascii() && !field.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        std::borrow::Cow::Borrowed(field)
+    } else {
+        std::borrow::Cow::Owned(field.to_lowercase())
+    }
 }
 
 impl SearchRank {
