@@ -29,6 +29,24 @@ fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoW
     data
 }
 
+fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> usize {
+    let visible_users = session
+        .messages_preview
+        .iter()
+        .filter(|message| message.role == "user" && !message.content.trim().is_empty())
+        .count();
+    let preview_users = extras
+        .map_or(0, |extras| extras.hidden_prompts)
+        .saturating_add(visible_users);
+    // The index count already includes prompts outside the preview window.
+    // Use the window as a lower bound when an index snapshot is stale, not as
+    // an additional offset that would count hidden prompts twice.
+    session
+        .user_message_count
+        .max(preview_users)
+        .saturating_add(1)
+}
+
 /// Draw only the image rows intersecting the scrolling transcript. Raster
 /// images retain their original fit box when partially scrolled off screen.
 pub(super) fn draw_images(
@@ -148,6 +166,24 @@ pub(super) fn draw(
         );
         transcript.height -= 1;
     }
+    if transcript.height > 1 {
+        let input_area = Rect {
+            y: transcript.bottom() - 1,
+            height: 1,
+            ..transcript
+        };
+        super::super::ui::input_ui::draw_preview_input(
+            frame,
+            input_area,
+            next_prompt_number(session, extras),
+        );
+        transcript.height -= 1;
+    }
+    // The live idle layout keeps a status row immediately above the composer.
+    // No live processing state belongs to this selected-session snapshot.
+    if transcript.height > 1 {
+        transcript.height -= 1;
+    }
     transcript
 }
 
@@ -193,3 +229,7 @@ pub(super) fn draw_widgets(
 #[cfg(test)]
 #[path = "preview_chrome_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "preview_composer_tests.rs"]
+mod composer_tests;

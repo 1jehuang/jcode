@@ -2050,6 +2050,22 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     };
     Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
+
+/// The idle resume composer uses the live input wrapper, but never reads the
+/// currently open session's draft, queue, selection, or cursor state.
+pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
+    let number = next_prompt.to_string();
+    let prompt = "> ";
+    let prompt_len = number.len() + prompt.len();
+    let line_width = (area.width as usize).saturating_sub(prompt_len);
+    if area.height == 0 || line_width == 0 {
+        return;
+    }
+    let (lines, _, _) =
+        wrap_input_text("", 0, line_width, &number, prompt, user_color(), prompt_len);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
