@@ -23,7 +23,8 @@
 //! commands, invoked over `ssh <host>` (or `--transport` for tests).
 //! Jcode-owned OpenAI/Claude OAuth accounts travel separately over
 //! SSH, never in the repository/session tarball. Moving is consent to copy those
-//! accounts to the chosen host. External logins and API keys stay local.
+//! accounts to the chosen host. External logins and API keys stay local unless
+//! explicitly requested through the restricted cloud environment transfer.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -36,9 +37,23 @@ use crate::auth::router_transfer;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
 
+mod transport;
+pub(crate) use transport::Target;
+use transport::retry_ssh;
+
+#[path = "cloud_group.rs"]
+mod group;
+pub(crate) use group::run_migrate;
+
 #[cfg(test)]
 #[path = "cloud_move_repo_tests.rs"]
 mod repo_tests;
+
+#[path = "cloud_replace.rs"]
+mod replace;
+
+#[path = "cloud_env.rs"]
+pub(super) mod environment;
 
 #[cfg(all(test, unix))]
 #[path = "cloud_move_latency_tests.rs"]
@@ -49,11 +64,13 @@ const FORMAT_VERSION: u32 = 1;
 /// Hidden remote subcommands a cloud host must support before anything is
 /// uploaded. Probing all of them up front means an older host fails clearly at
 /// preflight instead of after a partial credential transfer.
-const REQUIRED_REMOTE_COMMANDS: [&str; 4] = [
+const REQUIRED_REMOTE_COMMANDS: [&str; 6] = [
     "receive",
     "credentials",
     "router-credentials",
     "cancel-return",
+    "replace-receive",
+    "group-protocol",
 ];
 const SNAPSHOT_REF_PREFIX: &str = "refs/jcode-cloud";
 /// Environment variables worth carrying. Everything else (DISPLAY, WAYLAND_*,
@@ -317,426 +334,14 @@ pub(crate) struct RepoManifest {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// `ssh` exits 255 for connection-level failures (DNS, refused, reset, timeout
-/// while the machine wakes). Those are safe to retry for idempotent calls.
-const SSH_CONNECTION_FAILURE: i32 = 255;
-const SSH_ATTEMPTS: u32 = 3;
-
-fn ssh_connection_failed(status: &std::process::ExitStatus) -> bool {
-    status.code() == Some(SSH_CONNECTION_FAILURE)
-}
-
-/// Marks an SSH transport drop (exit 255) so idempotent steps can retry.
-#[derive(Debug)]
-struct SshDropped(String);
-
-impl std::fmt::Display for SshDropped {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for SshDropped {}
-
-/// Retry an idempotent remote step when only the SSH connection dropped.
-fn retry_ssh<T>(host: &str, what: &str, mut op: impl FnMut() -> Result<T>) -> Result<T> {
-    let mut attempt = 1;
-    loop {
-        match op() {
-            Err(error)
-                if error.downcast_ref::<SshDropped>().is_some() && attempt < SSH_ATTEMPTS =>
-            {
-                step(
-                    "transfer",
-                    &format!(
-                        "connection to `{host}` dropped during {what}, retrying ({attempt}/{SSH_ATTEMPTS})"
-                    ),
-                );
-                std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
-                attempt += 1;
-            }
-            other => return other,
-        }
-    }
-}
-
-/// Run an idempotent remote command, retrying connection-level SSH failures
-/// with a short backoff. Remote command failures are returned immediately.
-fn output_with_ssh_retry(
-    mut build: impl FnMut() -> Result<Command>,
-    host: &str,
-) -> Result<std::process::Output> {
-    let mut attempt = 1;
-    loop {
-        let output = build()?
-            .output()
-            .with_context(|| format!("failed to reach cloud host `{host}`"))?;
-        if output.status.success()
-            || !ssh_connection_failed(&output.status)
-            || attempt >= SSH_ATTEMPTS
-        {
-            return Ok(output);
-        }
-        step(
-            "prepare",
-            &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
-        );
-        std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
-        attempt += 1;
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Target {
-    pub host: Option<String>,
-    pub remote_binary: Option<String>,
-    pub transport: Option<String>,
-}
-
-impl Target {
-    fn resolve_host(&self) -> Result<String> {
-        if let Some(host) = self.host.clone().filter(|h| !h.trim().is_empty()) {
-            return Ok(host);
-        }
-        if let Ok(host) = std::env::var("JCODE_CLOUD_HOST")
-            && !host.trim().is_empty()
-        {
-            return Ok(host);
-        }
-        if super::cloud_managed::account_available() {
-            return Ok(super::cloud_managed::HOST.to_string());
-        }
-        bail!(
-            "no cloud machine: sign in with `jcode login` to use the Jcode Cloud machine included with your subscription, or pass --host <ssh-alias> / set JCODE_CLOUD_HOST"
-        )
-    }
-
-    fn remote_binary(&self) -> String {
-        self.remote_binary
-            .clone()
-            .or_else(|| std::env::var("JCODE_CLOUD_REMOTE_BINARY").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "jcode".to_string())
-    }
-
-    /// Fail fast, with an actionable message, when the cloud host's jcode is
-    /// too old to speak the move protocol.
-    fn preflight(&self, host: &str) -> Result<()> {
-        if self.transport.is_none() && preflight_is_fresh(&self.preflight_key(host)) {
-            crate::logging::info("cloud move: host preflight skipped, prepared moments ago");
-            return Ok(());
-        }
-        let result = self.preflight_uncached(host);
-        if result.is_ok() && self.transport.is_none() {
-            record_preflight(&self.preflight_key(host));
-        }
-        result
-    }
-
-    fn preflight_key(&self, host: &str) -> String {
-        format!("{host}\n{}", self.remote_binary())
-    }
-
-    fn preflight_uncached(&self, host: &str) -> Result<()> {
-        timed_move_stage("host preflight", || {
-            if super::cloud_managed::is_managed(host) && self.transport.is_none() {
-                // Usually the machine is already running and this is one
-                // authorization request. `connect` reports real wake progress.
-                step("prepare", "connecting to your Jcode Cloud machine");
-                timed_move_stage("cloud api connect", || {
-                    if super::cloud_managed::master_is_live() {
-                        return Ok(());
-                    }
-                    super::cloud_managed::connect(&mut |m| step("prepare", m)).map(|_| ())
-                })?;
-                let home = dirs::home_dir()
-                    .map(|h| h.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                timed_move_stage("host prepare script", || {
-                    self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
-                        .context("prepare the Jcode Cloud machine")
-                })?;
-            }
-            // Preserve custom transports that only support one remote invocation.
-            if self.transport.is_none() {
-                let binary = shell_quote(&self.remote_binary());
-                let mut script =
-                    String::from("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH\n");
-                // Distinguish a missing or broken binary (exit 127/126, or a
-                // dangling wrapper target) from an old one lacking a command.
-                script.push_str(&format!(
-                    "version=$({binary} --no-update --no-selfdev --version 2>&1) || {{ printf 'cloud jcode is not runnable: %s\\n' \"$version\" >&2; exit 3; }}\n"
-                ));
-                for command in REQUIRED_REMOTE_COMMANDS {
-                    script.push_str(&format!(
-                    "out=$({binary} --no-update --no-selfdev cloud {command} --help 2>&1 >/dev/null) || {{ printf '%s\\ncloud protocol probe failed: {command} (remote %s)\\n' \"$out\" \"$version\" >&2; exit 4; }}\n"
-                ));
-                }
-                let output = output_with_ssh_retry(
-                    || {
-                        let mut command = Self::ssh_command(host)?;
-                        command
-                            .arg(&script)
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::piped());
-                        Ok(command)
-                    },
-                    host,
-                )?;
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return match output.status.code() {
-                    Some(0) => Ok(()),
-                    Some(3) => bail!(
-                        "jcode on `{host}` could not start. Reinstall it there (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY): {stderr}"
-                    ),
-                    Some(4) => bail!(
-                        "jcode on `{host}` is too old for cloud handoff. Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build): {stderr}"
-                    ),
-                    Some(SSH_CONNECTION_FAILURE) => bail!(
-                        "could not connect to cloud host `{host}` after {SSH_ATTEMPTS} attempts: {stderr}"
-                    ),
-                    _ => bail!(
-                        "could not run jcode on `{host}` ({}): {stderr}",
-                        output.status
-                    ),
-                };
-            }
-            for command in REQUIRED_REMOTE_COMMANDS {
-                if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
-                    let text = format!("{error:#}");
-                    if text.contains("unrecognized") {
-                        bail!(
-                            "jcode on `{host}` does not support the complete cloud handoff protocol (`{command}`). Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
-                        );
-                    }
-                    return Err(error.context(format!("could not run jcode on `{host}`")));
-                }
-            }
-            Ok(())
-        })
-    }
-
-    /// `ssh` with the options every cloud call uses, including the private
-    /// config for the managed machine.
-    fn ssh_command(host: &str) -> Result<Command> {
-        let mut command = Command::new("ssh");
-        if super::cloud_managed::is_managed(host) {
-            command.args(super::cloud_managed::ssh_args()?);
-        }
-        command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "--"]);
-        command.arg(host);
-        Ok(command)
-    }
-
-    /// Run a raw shell script on the target (managed-machine preparation).
-    fn run_shell(&self, host: &str, script: &str) -> Result<()> {
-        let mut attempt = 1;
-        loop {
-            let mut command = Self::ssh_command(host)?;
-            command.arg("bash -s");
-            command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            let mut child = command.spawn()?;
-            // A dropped connection can close stdin early. The exit status
-            // below is authoritative, so ignore the write error here.
-            let _ = child
-                .stdin
-                .take()
-                .context("ssh stdin")?
-                .write_all(script.as_bytes());
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                return Ok(());
-            }
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            // The prepare script is idempotent and serialized by its own lock.
-            if ssh_connection_failed(&output.status) && attempt < SSH_ATTEMPTS {
-                step(
-                    "prepare",
-                    &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
-                );
-                std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
-                attempt += 1;
-                continue;
-            }
-            if stderr.is_empty() {
-                bail!("remote script failed ({})", output.status);
-            }
-            bail!("{stderr}");
-        }
-    }
-
-    fn remote_command(&self, host: &str, args: &[&str]) -> Result<Command> {
-        let binary = shell_quote(&self.remote_binary());
-        let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
-        let remote_cmd = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {binary} --no-update --no-selfdev {}",
-            quoted.join(" ")
-        );
-        let command = match self.transport.as_deref() {
-            Some(transport) => {
-                let mut parts = transport.split_whitespace();
-                let program = parts
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("empty --transport"))?;
-                let mut command = Command::new(program);
-                command.args(parts).arg(&remote_cmd);
-                command
-            }
-            None => {
-                let mut command = Self::ssh_command(host)?;
-                command.arg(&remote_cmd);
-                command
-            }
-        };
-        Ok(command)
-    }
-
-    /// Run `jcode <args>` on the target, feeding `stdin` and returning stdout.
-    fn run_remote(&self, host: &str, args: &[&str], stdin: Option<&Path>) -> Result<Vec<u8>> {
-        let mut command = self.remote_command(host, args)?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        command.stdin(match stdin {
-            Some(path) => Stdio::from(
-                std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?,
-            ),
-            None => Stdio::null(),
-        });
-        let output = command
-            .output()
-            .with_context(|| format!("failed to reach cloud host `{host}`"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if ssh_connection_failed(&output.status) {
-                return Err(SshDropped(format!(
-                    "lost the connection to cloud host `{host}`: {stderr}"
-                ))
-                .into());
-            }
-            bail!(
-                "remote `jcode {}` on `{host}` failed ({}):\n{stderr}",
-                args.iter().take(2).copied().collect::<Vec<_>>().join(" "),
-                output.status,
-            );
-        }
-        Ok(output.stdout)
-    }
-
-    /// Same private channel as [`Self::exchange_credentials`], for the router
-    /// bundle. Remote stderr is discarded and output is not expected.
-    fn send_router_credentials(&self, host: &str, payload: &[u8]) -> Result<()> {
-        let mut command = self.remote_command(host, &["cloud", "router-credentials"])?;
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command
-            .spawn()
-            .context("start private router credential transfer")?;
-        let written = child
-            .stdin
-            .take()
-            .context("router credential stdin")?
-            .write_all(payload);
-        let status = child
-            .wait()
-            .context("wait for router credential transfer")?;
-        if written.is_ok() && ssh_connection_failed(&status) {
-            return Err(SshDropped(format!(
-                "lost the connection to cloud host `{host}` during provider key transfer"
-            ))
-            .into());
-        }
-        if written.is_err() || !status.success() {
-            bail!("provider key transfer failed ({status}); the session was not moved");
-        }
-        Ok(())
-    }
-
-    /// Secrets travel only in an SSH pipe, never argv, a temporary file, or the
-    /// session archive. Discard remote stderr: even a broken transport must not
-    /// reflect a credential into the local transcript or logs.
-    fn exchange_credentials(
-        &self,
-        host: &str,
-        account: &CloudAccount,
-        payload: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        let mut args = vec![
-            "cloud",
-            "credentials",
-            "--provider",
-            account.provider.as_str(),
-            "--account",
-            account.label.as_str(),
-        ];
-        if payload.is_none() {
-            args.push("--export");
-        }
-        let mut command = self.remote_command(host, &args)?;
-        command.stdin(if payload.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        command.stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = command
-            .spawn()
-            .context("start private cloud credential transfer")?;
-        let result = std::thread::scope(|scope| -> Result<Vec<u8>> {
-            let writer = payload.map(|bytes| {
-                let mut stdin = child.stdin.take().expect("piped credential stdin");
-                scope.spawn(move || stdin.write_all(bytes))
-            });
-            let mut bytes = Vec::new();
-            child
-                .stdout
-                .take()
-                .context("cloud credential stdout")?
-                .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("could not read cloud credential response"))?;
-            if bytes.len() > transfer::MAX_TRANSFER_BYTES {
-                let _ = child.kill();
-                bail!("cloud credential response exceeds the size limit");
-            }
-            if let Some(writer) = writer {
-                writer
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("cloud credential writer failed"))?
-                    .map_err(|_| anyhow::anyhow!("could not send cloud credentials"))?;
-            }
-            let status = child.wait().context("wait for cloud credential transfer")?;
-            if ssh_connection_failed(&status) {
-                return Err(SshDropped(format!(
-                    "lost the connection to cloud host `{host}` during credential transfer"
-                ))
-                .into());
-            }
-            if !status.success() {
-                bail!(
-                    "cloud credential transfer failed ({status}); destination credentials were not accepted"
-                );
-            }
-            if payload.is_some() && !bytes.is_empty() {
-                bail!("unexpected cloud credential import response");
-            }
-            Ok(bytes)
-        });
-        if result.is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        result
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub(crate) struct MoveReport {
     pub session_id: String,
+    /// Empty for legacy single-session transfers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_session_ids: Vec<String>,
     pub host: String,
     pub epoch: u64,
     pub repo_root: Option<String>,
@@ -835,6 +440,8 @@ pub(crate) fn run_move(
 ) -> Result<MoveReport> {
     let host = target.resolve_host()?;
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     if let Some(lease) = storage::read_session_lease(&session_id)
         && let Some(away) = lease.away_host
     {
@@ -1094,6 +701,8 @@ pub(crate) fn run_move(
 
     let report = MoveReport {
         session_id: session_id.clone(),
+        members: Vec::new(),
+        excluded_session_ids: Vec::new(),
         host: host.clone(),
         epoch,
         repo_root: repo.as_ref().map(|r| r.root.clone()),
@@ -1167,11 +776,21 @@ pub(crate) fn run_move(
     {
         mark_memory_sent(&host, &memory, &bytes);
     }
+    if let Some(repo) = &repo {
+        // Ownership has moved. Environment hydration must not turn a successful
+        // migration into an apparent failure that invites a second migration.
+        if environment::sync_saved(Path::new(&repo.root), target).is_err() {
+            step(
+                "environment",
+                "saved environment requirements need attention on the cloud host; the agent can retry through cloud_environment",
+            );
+        }
+    }
     step("done", &format!("session now lives on `{host}`"));
     Ok(report)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReturnReport {
     pub session_id: String,
     pub host: String,
@@ -1180,7 +799,7 @@ pub(crate) struct ReturnReport {
     pub merge: MergeOutcome,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum MergeOutcome {
     NoRepo,
@@ -1203,10 +822,19 @@ pub(crate) fn run_return(
     session_ref: Option<&str>,
     target: &Target,
     refs_only: bool,
+    keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
+    let receipt_path = return_state_path(&session_id, lease.epoch, "receipt.json")?;
+    if lease.is_here() && receipt_path.exists() {
+        let report: ReturnReport = read_json(&receipt_path)?;
+        complete_remote_return(target, &report)?;
+        return Ok(report);
+    }
     let host = match (&lease.away_host, &target.host) {
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
@@ -1216,19 +844,22 @@ pub(crate) fn run_return(
     // ---- export (cloud stops owning at `epoch`) --------------------------
     step("export", &format!("collecting the session from `{host}`"));
     let epoch_arg = epoch.to_string();
+    let completion_supported = target
+        .run_remote(&host, &["cloud", "complete-return", "--help"], None)
+        .is_ok();
     let bytes = retry_ssh(&host, "export", || {
-        target.run_remote(
-            &host,
-            &[
-                "cloud",
-                "export",
-                "--session",
-                &session_id,
-                "--epoch",
-                &epoch_arg,
-            ],
-            None,
-        )
+        let mut args = vec![
+            "cloud",
+            "export",
+            "--session",
+            &session_id,
+            "--epoch",
+            &epoch_arg,
+        ];
+        if completion_supported {
+            args.push("--require-completion");
+        }
+        target.run_remote(&host, &args, None)
     })?;
     let staging = tempfile::Builder::new()
         .prefix("jcode-cloud-return-")
@@ -1241,6 +872,9 @@ pub(crate) fn run_return(
     if manifest.session_id != session_id || manifest.epoch != epoch {
         bail!("cloud returned the wrong session/epoch");
     }
+    // Older hosts do not implement completion and use the historical returned
+    // lease. Only opt in when the archive explicitly advertises this protocol.
+    let requires_completion = stage.join("return-completion-v1").is_file();
 
     // The cloud has stopped running turns, so export its final refreshed tokens.
     // On conflict, restore cloud ownership rather than strand the conversation.
@@ -1264,7 +898,13 @@ pub(crate) fn run_return(
     } else {
         manifest.auth_accounts.clone()
     };
-    for account in &return_accounts {
+    if keep_local_auth {
+        step(
+            "credentials",
+            "keeping local OAuth credentials; cloud credentials will not be imported",
+        );
+    }
+    for account in return_accounts.iter().filter(|_| !keep_local_auth) {
         step(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
@@ -1294,7 +934,7 @@ pub(crate) fn run_return(
                 ..lease.clone()
             })?;
             return Err(
-                error.context("credential return refused; the session remains on the cloud host")
+                error.context("credential return refused; the session remains on the cloud host. To recover without replacing local OAuth credentials, retry with --keep-local-auth")
             );
         }
     }
@@ -1341,6 +981,21 @@ pub(crate) fn run_return(
         ),
     );
     install_session(&sess, stage)?;
+    let report = ReturnReport {
+        session_id: session_id.clone(),
+        host,
+        epoch,
+        messages: sess.messages.len(),
+        merge,
+    };
+    // Persist the completion receipt before switching the local lease. A retry
+    // can acknowledge the remote fence even after a lost SSH response/crash.
+    if requires_completion {
+        write_return_state(
+            &return_state_path(&session_id, epoch, "receipt.json")?,
+            &serde_json::to_vec(&report)?,
+        )?;
+    }
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.clone(),
         epoch,
@@ -1351,13 +1006,72 @@ pub(crate) fn run_return(
         updated_at: chrono::Utc::now().to_rfc3339(),
     })?;
     let _ = std::fs::remove_file(baseline_path(&session_id)?);
+    if requires_completion {
+        complete_remote_return(target, &report)?;
+    }
     step("done", "session is local again");
-    Ok(ReturnReport {
-        session_id,
-        host,
-        epoch,
-        messages: sess.messages.len(),
-        merge,
+    Ok(report)
+}
+
+fn return_state_path(session_id: &str, epoch: u64, name: &str) -> Result<PathBuf> {
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        bail!("invalid cloud return session id");
+    }
+    Ok(storage::jcode_dir()?
+        .join("cloud-returns")
+        .join(session_id)
+        .join(epoch.to_string())
+        .join(name))
+}
+
+fn write_return_state(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("return state has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn complete_remote_return(target: &Target, report: &ReturnReport) -> Result<()> {
+    retry_ssh(&report.host, "complete return", || {
+        target.run_remote(&report.host, &[
+            "cloud", "complete-return", "--session", &report.session_id,
+            "--epoch", &report.epoch.to_string(),
+        ], None)
+    }).with_context(|| format!(
+        "session is safely local, but the cloud checkout remains protected; upgrade the cloud jcode if needed, then retry `jcode cloud return --session {} --refs-only` to finish recovery",
+        report.session_id
+    ))?;
+    Ok(())
+}
+
+fn complete_return(session_id: &str, epoch: u64) -> Result<()> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    let lease = storage::read_session_lease(session_id).context("missing cloud session lease")?;
+    if lease.epoch != epoch
+        || !matches!(
+            lease.away_host.as_deref(),
+            Some("return-pending" | "returned-complete")
+        )
+    {
+        bail!("cloud return completion has a stale epoch or owner");
+    }
+    storage::write_session_lease(&storage::SessionLease {
+        away_host: Some("returned-complete".to_string()),
+        ..lease
     })
 }
 
@@ -1387,7 +1101,12 @@ pub(crate) fn run_receive() -> Result<()> {
     std::io::stdin().read_to_end(&mut data)?;
     std::fs::write(&tarball, &data)?;
     untar(&tarball, stage)?;
+    if stage.join("group.json").exists() {
+        return group::receive(staging);
+    }
     let manifest: MoveManifest = read_json(&stage.join("manifest.json"))?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&manifest.session_id))?;
+    group::reject_member_return(&manifest.session_id)?;
     if manifest.format_version != FORMAT_VERSION {
         bail!(
             "move format {} not supported by this jcode (expects {FORMAT_VERSION}); update jcode on the cloud host",
@@ -1435,6 +1154,16 @@ pub(crate) fn run_receive() -> Result<()> {
 /// Take ownership of a staged move: install transcript, todos and memory.
 pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     let dir = inbox_dir()?.join(format!("{session_id}.{epoch}"));
+    if dir.join("group.json").exists() || group::is_group_root(session_id, epoch)? {
+        return group::activate(session_id, epoch);
+    }
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    group::reject_member_return(session_id)?;
+    if storage::read_session_lease(session_id)
+        .is_some_and(|lease| lease.epoch > epoch || (lease.epoch == epoch && !lease.is_here()))
+    {
+        bail!("stale activation for {session_id} at epoch {epoch}; session ownership has advanced");
+    }
     if !dir.is_dir() {
         // A retried activation whose first attempt succeeded but lost its
         // SSH connection finds the move already installed. Report success.
@@ -1478,17 +1207,44 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
 }
 
 /// Hand the session back: stop owning it here, snapshot repo, stream tarball.
-pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
+pub(crate) fn run_export(session_id: &str, epoch: u64, require_completion: bool) -> Result<()> {
+    let bytes = export_return_archive(session_id, epoch, require_completion)?;
+    std::io::stdout().write_all(&bytes)?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn export_return_archive(
+    session_id: &str,
+    epoch: u64,
+    require_completion: bool,
+) -> Result<Vec<u8>> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
     let lease = storage::read_session_lease(session_id)
         .with_context(|| format!("session {session_id} is not a migrated session on this host"))?;
     // A retried export after a dropped connection finds this host already
-    // released at the same epoch. Snapshotting again only reads, so allow it.
-    let re_export = lease.epoch == epoch && lease.away_host.as_deref() == Some("returned");
+    // released at the same epoch. Replay the durable original archive, never
+    // snapshot a checkout which may have been replaced since the first export.
+    let re_export = lease.epoch == epoch
+        && matches!(
+            lease.away_host.as_deref(),
+            Some("returned" | "return-pending" | "returned-complete")
+        );
     if !re_export && !lease.is_here() {
         bail!("session {session_id} does not live on this host");
     }
     if !re_export && epoch <= lease.epoch {
         bail!("stale export epoch {epoch} (host is at {})", lease.epoch);
+    }
+    let archive_path = return_state_path(session_id, epoch, "export.tar")?;
+    if re_export && archive_path.exists() {
+        return Ok(std::fs::read(&archive_path)?);
+    }
+    if lease.away_host.as_deref() == Some("returned-complete") {
+        bail!(
+            "completed cloud return archive is missing; refusing to snapshot a possibly replaced checkout"
+        );
     }
     if storage::streaming_session_ids().contains(&session_id.to_string()) {
         bail!(
@@ -1497,13 +1253,20 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
     }
     // Stop owning first so nothing new lands after the snapshot.
     storage::write_session_lease(&storage::SessionLease {
-        away_host: Some("returned".to_string()),
+        away_host: Some(
+            if require_completion {
+                "return-pending"
+            } else {
+                "returned"
+            }
+            .to_string(),
+        ),
         epoch,
         updated_at: chrono::Utc::now().to_rfc3339(),
         ..lease.clone()
     })?;
     let result = (|| -> Result<Vec<u8>> {
-        let sess = session::Session::load(session_id)?;
+        let sess = session::Session::load(session_id).context("load cloud return session")?;
         let staging = tempfile::Builder::new()
             .prefix("jcode-cloud-export-")
             .tempdir()?;
@@ -1515,7 +1278,8 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {
             Some(dir) => {
-                let repo = prepare_repo_snapshot(&dir, session_id, stage)?;
+                let repo = prepare_repo_snapshot(&dir, session_id, stage)
+                    .context("snapshot cloud return repository")?;
                 if let Some(repo) = &repo {
                     // The laptop sent `last_sync_head` and the snapshot on top
                     // of it, so it already has that history. Shipping the full
@@ -1568,20 +1332,27 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             serde_json::to_vec_pretty(&manifest)?,
         )?;
         copy_if_exists(&todo_file(session_id)?, &stage.join("todos.json"))?;
+        if require_completion {
+            std::fs::write(stage.join("return-completion-v1"), b"1")?;
+        }
         let tarball = stage.join("return.tar");
         tar_dir(
             stage,
             &tarball,
-            &["manifest.json", "session.json", "todos.json", "repo.bundle"],
+            &[
+                "manifest.json",
+                "session.json",
+                "todos.json",
+                "repo.bundle",
+                "return-completion-v1",
+            ],
         )?;
-        Ok(std::fs::read(&tarball)?)
+        let bytes = std::fs::read(&tarball)?;
+        write_return_state(&archive_path, &bytes)?;
+        Ok(bytes)
     })();
     match result {
-        Ok(bytes) => {
-            std::io::stdout().write_all(&bytes)?;
-            std::io::stdout().flush()?;
-            Ok(())
-        }
+        Ok(bytes) => Ok(bytes),
         Err(error) => {
             // Could not export: keep owning the session here.
             storage::write_session_lease(&lease)?;
@@ -1650,7 +1421,12 @@ pub(crate) fn away_host(session_ref: Option<&str>) -> Result<(String, String)> {
     let lease = storage::read_session_lease(&id).context("session was never moved")?;
     let host = lease
         .away_host
-        .filter(|h| h != "returned")
+        .filter(|h| {
+            !matches!(
+                h.as_str(),
+                "returned" | "return-pending" | "returned-complete"
+            )
+        })
         .context("session lives on this machine")?;
     Ok((id, host))
 }
@@ -2268,6 +2044,18 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::GroupProtocol => {
+            println!("{}", serde_json::json!({ "version": 1 }));
+            Ok(())
+        }
+        C::Replace {
+            target,
+            yes,
+            dry_run,
+            json,
+        } => replace::run(&target_of(target), yes, dry_run, json),
+        C::ReplaceReceive { dry_run } => replace::receive(dry_run),
+        C::Env { action } => environment::run_cli(action),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {
@@ -2281,6 +2069,8 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         }
         C::Move {
             session,
+            include_sessions,
+            session_only,
             target,
             allow_active,
             dry_run,
@@ -2288,7 +2078,17 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             json,
         } => {
             let target = target_of(target);
-            let report = run_move(session.as_deref(), &target, allow_active, dry_run)?;
+            let report = if session_only {
+                run_move(session.as_deref(), &target, allow_active, dry_run)?
+            } else {
+                run_migrate(
+                    session.as_deref(),
+                    &target,
+                    allow_active,
+                    dry_run,
+                    &include_sessions,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if report.dry_run {
@@ -2316,10 +2116,16 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             session,
             target,
             refs_only,
+            keep_local_auth,
             attach,
             json,
         } => {
-            let report = run_return(session.as_deref(), &target_of(target), refs_only)?;
+            let report = run_return(
+                session.as_deref(),
+                &target_of(target),
+                refs_only,
+                keep_local_auth,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -2406,17 +2212,30 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::RouterCredentials => run_router_credentials(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
-        C::Export { session, epoch } => run_export(&session, epoch),
+        C::Export {
+            session,
+            epoch,
+            require_completion,
+        } => run_export(&session, epoch, require_completion),
+        C::CompleteReturn { session, epoch } => complete_return(&session, epoch),
         C::CancelReturn { session, epoch } => {
+            group::reject_member_return(&session)?;
+            let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
             let lease =
                 storage::read_session_lease(&session).context("missing cloud session lease")?;
-            if lease.epoch != epoch || lease.away_host.as_deref() != Some("returned") {
+            if lease.epoch != epoch || lease.away_host.as_deref() != Some("return-pending") {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
             sess.migration_epoch = epoch;
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
+            // Cancellation is serialized with export. Discard the old snapshot
+            // before restoring ownership so a later return includes new work.
+            let archive = return_state_path(&session, epoch, "export.tar")?;
+            if archive.exists() {
+                std::fs::remove_file(archive)?;
+            }
             storage::write_session_lease(&storage::SessionLease {
                 away_host: None,
                 ..lease
@@ -2435,14 +2254,15 @@ fn exec_attach(
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
     command.arg("--ssh").arg(host);
-    if let Some(binary) = &target.remote_binary {
-        command.arg("--ssh-binary").arg(binary);
-    }
+    command.arg("--ssh-binary").arg(target.remote_binary());
     if let Some(root) = repo_root {
         command.arg("--remote-working-dir").arg(root);
         command.env("JCODE_SSH_LOCAL_WORKING_DIR", root);
     }
     command.arg("--resume").arg(session_id);
+    // The bridge still validates the original local lease and expiry. Attaching
+    // does not create a new grant or extend the time granted by the migration.
+    command.env("JCODE_CLOUD_ENV_SESSION", session_id);
     let error = crate::platform::replace_process(&mut command);
     bail!("failed to attach to `{host}`: {error}")
 }
@@ -2559,7 +2379,7 @@ fn append_arrival(sess: &mut session::Session, dangling: &[String], host: &str, 
     sess.add_message_with_display_role(crate::message::Role::User, blocks, role);
 }
 
-fn arrival_notice(manifest: &MoveManifest) -> String {
+fn arrival_context(manifest: &MoveManifest) -> Vec<String> {
     let mut lines = vec![format!(
         "This session was moved from `{}` to cloud host `{}` at {} (migration epoch {}). You are now running on the cloud host. The conversation, todos and project memory came along.",
         manifest.source_host, manifest.target_host, manifest.created_at, manifest.epoch
@@ -2602,7 +2422,15 @@ fn arrival_notice(manifest: &MoveManifest) -> String {
             manifest.mcp_servers.join(", ")
         ));
     }
+    lines
+}
+
+fn arrival_notice(manifest: &MoveManifest) -> String {
+    let mut lines = arrival_context(manifest);
     lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
+    lines.push(crate::cloud_environment::migration_guidance(
+        &manifest.session_id,
+    ));
     lines.join("\n")
 }
 
@@ -2789,6 +2617,12 @@ pub(crate) fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
 
 /// Replace this client with one attached where the session now lives.
 pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
+    let mut command = handoff_command(handoff)?;
+    let error = crate::platform::replace_process(&mut command);
+    bail!("failed to reattach after cloud move: {error}")
+}
+
+fn handoff_command(handoff: crate::tui::CloudHandoff) -> Result<Command> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(&exe);
     // Never inherit the previous SSH attach identity.
@@ -2803,11 +2637,19 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
         "JCODE_SSH_CONFIG",
         "JCODE_SOCKET",
         "JCODE_CLOUD_HANDOFF_PREVIEW_SESSION",
+        "JCODE_CLOUD_ENV_SESSION",
+        "JCODE_CLOUD_CONTINUE_MESSAGE",
     ] {
         command.env_remove(var);
     }
+    let just_migrated = matches!(&handoff, crate::tui::CloudHandoff::Remote { .. });
     match handoff {
         crate::tui::CloudHandoff::Remote {
+            session_id,
+            host,
+            working_dir,
+        }
+        | crate::tui::CloudHandoff::RemoteResume {
             session_id,
             host,
             working_dir,
@@ -2823,10 +2665,13 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
             // Only an explicit handoff may preview the matching local transcript.
             command.env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &session_id);
-            command.env(
-                "JCODE_CLOUD_CONTINUE_MESSAGE",
-                "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
-            );
+            if just_migrated {
+                command.env("JCODE_CLOUD_ENV_SESSION", &session_id);
+                command.env(
+                    "JCODE_CLOUD_CONTINUE_MESSAGE",
+                    "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
+                );
+            }
         }
         crate::tui::CloudHandoff::Local { session_id } => {
             if let Some(root) = storage::read_session_lease(&session_id).and_then(|l| l.repo_root) {
@@ -2835,6 +2680,55 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
         }
     }
-    let error = crate::platform::replace_process(&mut command);
-    bail!("failed to reattach after cloud move: {error}")
+    Ok(command)
+}
+
+#[cfg(test)]
+mod resume_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_resume_handoff_does_not_continue_or_grant_local_resources() {
+        let command = handoff_command(crate::tui::CloudHandoff::RemoteResume {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: Some("/workspace/project".into()),
+        })
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--ssh", "dev-cloud"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "session_cloud_123"])
+        );
+        for name in [
+            "JCODE_CLOUD_CONTINUE_MESSAGE",
+            "JCODE_CLOUD_ENV_SESSION",
+            "JCODE_SOCKET",
+        ] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_migration_handoff_still_continues_the_moved_task() {
+        let command = handoff_command(crate::tui::CloudHandoff::Remote {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: None,
+        })
+        .unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "JCODE_CLOUD_CONTINUE_MESSAGE" && value.is_some())
+        );
+    }
 }

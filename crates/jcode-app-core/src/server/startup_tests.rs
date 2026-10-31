@@ -111,6 +111,40 @@ fn server_initializes_schedule_runner_even_when_ambient_disabled() {
 }
 
 #[tokio::test]
+async fn readiness_probes_do_not_contend_with_group_transfer_admission() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("jcode.sock");
+    let debug_socket_path = temp.path().join("jcode-debug.sock");
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let server = Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let runtime = ServerRuntime::from_server(&server);
+    let main_handle = runtime.spawn_main_accept_loop(Listener::bind(&socket_path).unwrap());
+    let debug_handle = runtime.spawn_debug_accept_loop(
+        Listener::bind(&debug_socket_path).unwrap(),
+        std::time::Instant::now(),
+    );
+
+    // Deterministically overlap the exact read-only health RPC with exclusive
+    // admission, rather than relying on CI to hit the Pong/write-drop race.
+    let idle = crate::runtime_activity::global()
+        .try_idle()
+        .expect("idle runtime");
+    for path in [socket_path, debug_socket_path] {
+        let mut client = Client::connect_with_path(path).await.unwrap();
+        assert!(client.ping().await.expect("read-only Ping during transfer"));
+    }
+    assert!(server.sessions.read().await.is_empty());
+    assert_eq!(*server.client_count.read().await, 0);
+    drop(idle);
+    assert!(crate::runtime_activity::global().try_idle().is_some());
+
+    runtime.shutdown().await;
+    main_handle.await.unwrap();
+    debug_handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn debug_accept_loop_responds_to_ping_without_affecting_client_count() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

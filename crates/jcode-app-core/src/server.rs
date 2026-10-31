@@ -2,6 +2,8 @@ mod account_usage;
 mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
+pub use await_members_state::set_dependency_delivery as set_await_dependency_delivery;
+pub(crate) use await_members_state::subscribe_dependency as subscribe_await_dependency;
 mod background_tasks;
 mod client_actions;
 mod client_api;
@@ -16,6 +18,7 @@ mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;
 mod client_state;
+mod model_refresh;
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
@@ -38,10 +41,17 @@ mod debug_swarm_read;
 mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
+mod group_transfer;
 mod headless;
+pub use group_transfer::{
+    GroupTransferBundle, GroupTransferSelection, GroupTransferSession,
+    handle as handle_group_transfer_command,
+};
+pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
 mod jade_relay;
 mod lifecycle;
+mod live_status;
 mod live_turn;
 mod provider_control;
 mod reload;
@@ -51,6 +61,10 @@ mod reload_trace;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
+mod runtime_ssh_accounts;
+mod runtime_ssh_host;
+mod runtime_ssh_loops;
+mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
 mod swarm;
@@ -112,8 +126,7 @@ use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use jcode_swarm_core::{
-    append_swarm_completion_report_instructions, format_structured_completion_report,
-    summarize_plan_items, truncate_detail,
+    format_structured_completion_report, summarize_plan_items, truncate_detail,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -181,8 +194,23 @@ pub(super) async fn remove_session_entry<T>(
     let removed = sessions.write().await.remove(session_id);
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
+        crate::session_env::remove_session_env(session_id);
     }
     removed
+}
+
+/// Keep session presence locked until the synchronous registry update finishes.
+/// Otherwise a stale attached client could recreate credentials after teardown.
+pub(super) async fn set_live_session_env<T>(
+    sessions: &Arc<RwLock<HashMap<String, T>>>,
+    session_id: &str,
+    env: HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let sessions = sessions.read().await;
+    if !sessions.contains_key(session_id) {
+        anyhow::bail!("Session is no longer active");
+    }
+    crate::session_env::set_session_env(session_id, env)
 }
 
 const SERVER_NAME_ENV: &str = "JCODE_SERVER_NAME";
@@ -677,62 +705,12 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
-mod reload_marker_scope_tests {
-    use super::reload_marker_policy;
-    use super::reload_state::ForeignMarkerPolicy;
-
-    /// Only the shared socket's server may clear a reload marker owned by
-    /// another process; a custom-socket server preserves it, because clearing
-    /// would erase the shared daemon's in-flight `Starting` state (review of
-    /// #1768). Both the bind-time clear and the socket-ready publish consult
-    /// this. The publish path was missed on the first attempt and reopened
-    /// the hole. The policy says nothing about a server's *own* marker, which
-    /// it must always be free to advance.
-    #[test]
-    fn only_shared_socket_server_may_clear_a_foreign_reload_marker() {
-        let _guard = crate::storage::lock_test_env();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-        let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
-        crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
-
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("jcode.sock")),
-            ForeignMarkerPolicy::MayClear
-        );
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("run-isolated.sock")),
-            ForeignMarkerPolicy::Preserve
-        );
-
-        if let Some(prev_runtime) = prev_runtime {
-            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
-        } else {
-            crate::env::remove_var("JCODE_RUNTIME_DIR");
-        }
-    }
-}
+#[path = "server/reload_marker_scope_tests.rs"]
+mod reload_marker_scope_tests;
 
 #[cfg(test)]
-mod idle_monitor_tests {
-    use super::idle_monitor_should_start;
-
-    #[test]
-    fn shared_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn temporary_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn idle_monitor_starts_only_without_clients_or_headless_workers() {
-        assert!(idle_monitor_should_start(0, false));
-        assert!(!idle_monitor_should_start(1, false));
-    }
-}
+#[path = "server/idle_monitor_tests.rs"]
+mod idle_monitor_tests;
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;
@@ -943,7 +921,14 @@ impl Server {
             let members = self.swarm_state.members.read().await;
             members
                 .values()
-                .filter(|member| headless_member_should_restore(&member.status, member.is_headless))
+                .filter(|member| {
+                    // Shutdown can persist `ready` after recording recovery
+                    // intent. On load that becomes `stopped`, but the durable
+                    // continuation must still take priority over that status.
+                    member.is_headless
+                        && (headless_member_should_restore(&member.status, true)
+                            || reload_recovery::has_pending_for_session(&member.session_id))
+                })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
         };
@@ -1314,6 +1299,10 @@ impl Server {
         publish_reload_socket_ready(reload_marker_policy(&self.socket_path));
         signal_ready_fd();
 
+        // Older snapshots predate the resume index. Backfill off the first-frame
+        // path. Lookups retain an authoritative fallback until it completes.
+        crate::recent_session_index::backfill_resume_metadata_in_background();
+
         // Persist auxiliary discovery metadata after the server is already live.
         self.spawn_registry_metadata_publisher(registry_info);
 
@@ -1459,6 +1448,11 @@ impl Server {
                 .await;
             }
         });
+
+        tokio::spawn(swarm::monitor_wait_status(
+            Arc::clone(&self.swarm_state.members),
+            Arc::clone(&self.swarm_state.swarms_by_id),
+        ));
 
         // Stalled-worker watchdog (#1703): flag running workers that went
         // silent with no tool in flight and notify their owner once.
@@ -2091,7 +2085,13 @@ impl Server {
                 break;
             };
             // Keep the envelope alive through asynchronous queue delivery, not
-            // just receipt. An idle upgrade must include every accepted wake.
+            // just receipt. A queued selected-session callback must exclude
+            // transfer even after its original turn/background task exits.
+            let Some(_activity) =
+                self::background_tasks::admit_runtime_delivery(&delivery.event).await
+            else {
+                continue;
+            };
             match delivery.event.clone() {
                 BusEvent::FileTouch(touch) => {
                     let path = touch.path.clone();
@@ -2380,6 +2380,10 @@ impl Server {
                         &swarm_event_tx,
                     )
                     .await;
+                }
+                BusEvent::SessionUpdateStatus(status) => {
+                    let (session_id, event) = runtime_ssh_host::maintenance_event(status);
+                    fanout_session_event(&swarm_members, &session_id, event).await;
                 }
                 BusEvent::UiActivity(activity) => {
                     dispatch_ui_activity(&activity, &swarm_members).await;

@@ -936,6 +936,7 @@ struct BodyCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    compact_thinking: bool,
     /// Mermaid render geometry depends on the scoped transcript/pane aspect
     /// profile as well as width. A vertical terminal resize can change this
     /// bucket without changing `width`, so it must invalidate the prepared body.
@@ -1029,6 +1030,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1051,6 +1053,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1092,6 +1095,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1115,6 +1119,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1217,6 +1222,7 @@ struct FullPrepCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    compact_thinking: bool,
     /// The scoped Mermaid profile can also change when pane geometry changes
     /// while the transcript rectangle stays the same.
     mermaid_aspect_bucket: Option<u16>,
@@ -1575,6 +1581,11 @@ pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
 /// lock, which serialized nothing between them and produced failures that
 /// appeared only under parallelism (same root cause as issue #593). Both now
 /// delegate here.
+///
+/// Lock hierarchy: tests needing both `storage::lock_test_env` and this lock
+/// must acquire the environment lock first. App construction resets render
+/// state while an environment-scoping helper may already hold that lock.
+/// Taking environment after render would deadlock against that reset.
 #[cfg(test)]
 pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -2557,7 +2568,7 @@ fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: 
         let role = message.effective_role();
         // Tool results can be hidden (notably pinned todos). These three roles
         // do not add the usual inter-message separator either.
-        if rows > 0 && !matches!(role, "tool" | "meta" | "swarm") {
+        if rows > 0 && messages::needs_message_separator(message) {
             rows = rows.saturating_add(1);
         }
         rows = rows.saturating_add(match role {
@@ -2950,11 +2961,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         pinned_width,
         app.centered_mode(),
     ));
-    let swarm_beside_todos = viewport::swarm_beside_pinned_todos(app, pinned_width);
+    let workers_in_todos = viewport::pinned_todos_show_workers(app, pinned_width);
     let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
-        && !swarm_beside_todos
         && app.inline_swarm_gallery_active()
-        && (app.swarm_panel_focused() || !super::info_widget::swarm_strip_stands_down_for_dock())
+        && (app.swarm_panel_focused()
+            || (!workers_in_todos && !super::info_widget::swarm_strip_stands_down_for_dock()))
     {
         let members = app.inline_swarm_members();
         if chat_area.width >= 24 {
@@ -2989,8 +3000,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let queued_height = pending_count.min(3) as u16;
 
     // Count user messages to show next prompt number
-    let user_count = app.display_user_message_count();
-    let next_prompt = user_count + 1;
+    let next_prompt = input_ui::next_input_prompt_number(app);
+    let user_count = next_prompt.saturating_sub(1);
 
     // Calculate input height based on the same wrapping logic used for rendering
     // (max 10 lines visible, scrolls if more).
@@ -3646,162 +3657,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     );
 }
 
-pub(crate) fn split_native_scrollbar_area(area: Rect, enabled: bool) -> (Rect, Option<Rect>) {
-    if !enabled || area.width <= 1 {
-        return (area, None);
-    }
-
-    let content = Rect {
-        width: area.width.saturating_sub(1),
-        ..area
-    };
-    let scrollbar = Rect {
-        x: area.x.saturating_add(area.width.saturating_sub(1)),
-        y: area.y,
-        width: 1,
-        height: area.height,
-    };
-    (content, Some(scrollbar))
-}
-
-pub(crate) fn native_scrollbar_visible(
-    enabled: bool,
-    total_lines: usize,
-    visible_height: usize,
-) -> bool {
-    enabled && visible_height > 0 && total_lines > visible_height
-}
-
-/// Geometry of a native scrollbar drawn this frame, kept so the thumb can be
-/// re-stamped on top of overlays (info widgets) that render afterwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NativeScrollbar {
-    pub area: Rect,
-    pub scroll: usize,
-    pub total_lines: usize,
-    pub visible_height: usize,
-    pub focused: bool,
-}
-
-impl NativeScrollbar {
-    pub(crate) fn render(&self, frame: &mut Frame) {
-        render_native_scrollbar(
-            frame,
-            self.area,
-            self.scroll,
-            self.total_lines,
-            self.visible_height,
-            self.focused,
-        );
-    }
-
-    /// Merge only visible thumb cells with docked widget borders. Leave the
-    /// invisible track and all corners outside the thumb untouched.
-    pub(crate) fn render_thumb_overlay(&self, frame: &mut Frame) {
-        let Some(thumb) = native_scrollbar_thumb(
-            self.area,
-            self.scroll,
-            self.total_lines,
-            self.visible_height,
-        ) else {
-            return;
-        };
-        let color = native_scrollbar_thumb_color(self.focused);
-        let buf = frame.buffer_mut();
-        let x = self.area.x;
-        for row in thumb.offset..thumb.offset + thumb.height {
-            let y = self.area.y + row as u16;
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                let junction = matches!(cell.symbol(), "╮" | "╯" | "┐" | "┘" | "┤");
-                cell.set_symbol(if junction { "┤" } else { thumb.glyph(row) })
-                    .set_fg(color);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct NativeScrollbarThumb {
-    offset: usize,
-    height: usize,
-}
-
-impl NativeScrollbarThumb {
-    fn contains(&self, row: usize) -> bool {
-        row >= self.offset && row < self.offset + self.height
-    }
-
-    fn glyph(&self, row: usize) -> &'static str {
-        if self.height == 1 {
-            "•"
-        } else if row == self.offset {
-            "╷"
-        } else if row + 1 == self.offset + self.height {
-            "╵"
-        } else {
-            "│"
-        }
-    }
-}
-
-fn native_scrollbar_thumb(
-    area: Rect,
-    scroll: usize,
-    total_lines: usize,
-    visible_height: usize,
-) -> Option<NativeScrollbarThumb> {
-    if area.width == 0
-        || area.height == 0
-        || !native_scrollbar_visible(true, total_lines, visible_height)
-    {
-        return None;
-    }
-
-    let track_height = area.height as usize;
-    let height = ((visible_height * track_height).div_ceil(total_lines)).clamp(1, track_height);
-    let max_thumb_offset = track_height.saturating_sub(height);
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let offset = if max_scroll == 0 {
-        0
-    } else {
-        scroll.min(max_scroll) * max_thumb_offset / max_scroll
-    };
-    Some(NativeScrollbarThumb { offset, height })
-}
-
-fn native_scrollbar_thumb_color(focused: bool) -> Color {
-    if focused {
-        rgb(188, 208, 240)
-    } else {
-        rgb(136, 148, 172)
-    }
-}
-
-pub(crate) fn render_native_scrollbar(
-    frame: &mut Frame,
-    area: Rect,
-    scroll: usize,
-    total_lines: usize,
-    visible_height: usize,
-    focused: bool,
-) {
-    let Some(thumb) = native_scrollbar_thumb(area, scroll, total_lines, visible_height) else {
-        return;
-    };
-    let thumb_color = native_scrollbar_thumb_color(focused);
-    let lines: Vec<Line> = (0..area.height as usize)
-        .map(|row| {
-            let (glyph, color) = if thumb.contains(row) {
-                (thumb.glyph(row), thumb_color)
-            } else {
-                (" ", Color::Reset)
-            };
-            Line::from(Span::styled(glyph, Style::default().fg(color)))
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
+#[path = "ui/native_scrollbar.rs"]
+mod native_scrollbar;
+pub(crate) use native_scrollbar::{
+    NativeScrollbar, native_scrollbar_visible, render_native_scrollbar, split_native_scrollbar_area,
+};
+#[cfg(test)]
+use native_scrollbar::{native_scrollbar_thumb, native_scrollbar_thumb_color};
 
 #[cfg(test)]
 #[path = "ui_tests/mod.rs"]

@@ -1391,6 +1391,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1403,6 +1404,8 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )

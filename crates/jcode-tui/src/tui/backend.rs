@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod ssh_sessions;
+
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
@@ -237,8 +239,11 @@ pub struct RemoteConnection {
     writer: Arc<Mutex<WriteHalf>>,
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
+    cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
+    pending_runtime_commands: std::collections::HashSet<u64>,
     // Bootstrap Done acknowledgments are not completions of a detached turn.
     // Retain recent ids because target Subscribe can acknowledge twice.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
@@ -289,6 +294,11 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    /// Replay has no outstanding control requests. Live connections track IDs.
+    fn finish_runtime_command(&mut self, _id: u64) -> bool {
+        false
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str);
     fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
@@ -311,6 +321,11 @@ pub(crate) struct ReplayRemoteState {
     tool_diff: RemoteDiffTracker,
     call_output_tokens_seen: u64,
 }
+
+#[path = "backend_auth.rs"]
+mod auth;
+#[path = "backend_cloud.rs"]
+mod cloud;
 
 impl RemoteConnection {
     /// Connect to the server
@@ -347,11 +362,14 @@ impl RemoteConnection {
             writer: Arc::new(Mutex::new(writer)),
             _dummy_peer: None,
             session_id: None,
+            cloud_authority: None,
+            cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // A reattached turn carries the old connection's request id on
             // local sockets as well as SSH. Keep its Done distinct from this
             // connection's Subscribe/GetHistory acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
+            pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -585,8 +603,33 @@ impl RemoteConnection {
             .await
     }
 
+    /// Execute a daemon-owned command without submitting a conversation turn.
+    pub async fn runtime_command(&mut self, command: &str, args: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RuntimeCommand {
+            id,
+            command: command.to_string(),
+            args,
+        })
+        .await?;
+        self.pending_runtime_commands.insert(id);
+        Ok(id)
+    }
+
+    /// Runtime failures share the Error wire variant with chat failures. Keep
+    /// request ownership so the client can render them without ending a turn.
+    pub fn finish_runtime_command(&mut self, id: u64) -> bool {
+        self.pending_runtime_commands.remove(&id)
+    }
+
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
+        let had_cloud_authority = self.cloud_authority.is_some();
+        self.revoke_cloud_authority();
+        if had_cloud_authority {
+            self.configure_cloud_tools(Default::default()).await?;
+        }
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::Clear { id }).await?;
@@ -694,6 +737,14 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Fetch the attached session's current todo card from the daemon.
+    pub async fn request_todos(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetTodos { id }).await?;
+        Ok(id)
+    }
+
     /// Ask the server for the fully route-expanded model catalog.
     ///
     /// The bootstrap `History` payload deliberately ships model *names* only
@@ -728,6 +779,13 @@ impl RemoteConnection {
 
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
+        if self.session_id.as_deref() != Some(session_id) {
+            let had_cloud_authority = self.cloud_authority.is_some();
+            self.revoke_cloud_authority();
+            if had_cloud_authority {
+                self.configure_cloud_tools(Default::default()).await?;
+            }
+        }
         let request = Request::ResumeSession {
             id: self.next_request_id,
             session_id: session_id.to_string(),
@@ -1117,89 +1175,6 @@ impl RemoteConnection {
     }
 
     /// Notify the server that auth credentials changed (e.g., after login)
-    pub async fn notify_auth_changed(&mut self) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged {
-            id,
-            provider: None,
-            auth: None,
-            prefer_strongest: false,
-        })
-        .await
-    }
-
-    /// Notify the server about a typed auth lifecycle change and report
-    /// transport failure to the caller.
-    pub async fn notify_auth_changed_event(
-        &mut self,
-        provider: Option<&str>,
-        auth: Option<AuthChanged>,
-        prefer_strongest: bool,
-    ) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged {
-            id,
-            provider: provider.map(str::to_string),
-            auth,
-            prefer_strongest,
-        })
-        .await
-    }
-
-    /// Notify the server about auth changes without blocking the caller.
-    pub fn notify_auth_changed_detached(&mut self) {
-        self.notify_auth_changed_for_provider_detached(None);
-    }
-
-    /// Notify the server about a provider-specific auth change without blocking the caller.
-    pub fn notify_auth_changed_for_provider_detached(&mut self, provider: Option<&str>) {
-        self.notify_auth_changed_detached_event(provider, None, false);
-    }
-
-    /// Notify the server about a typed auth lifecycle change without blocking the caller.
-    pub fn notify_auth_changed_detached_event(
-        &mut self,
-        provider: Option<&str>,
-        auth: Option<AuthChanged>,
-        prefer_strongest: bool,
-    ) {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request_detached(
-            Request::NotifyAuthChanged {
-                id,
-                provider: provider.map(str::to_string),
-                auth,
-                prefer_strongest,
-            },
-            "notify_auth_changed",
-        );
-    }
-
-    /// Ask server to switch active Anthropic account for this process/session.
-    pub async fn switch_anthropic_account(&mut self, label: &str) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SwitchAnthropicAccount {
-            id,
-            label: label.to_string(),
-        })
-        .await
-    }
-
-    /// Ask server to switch active OpenAI account for this process/session.
-    pub async fn switch_openai_account(&mut self, label: &str) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SwitchOpenAiAccount {
-            id,
-            label: label.to_string(),
-        })
-        .await
-    }
-
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })
@@ -1441,8 +1416,11 @@ impl RemoteConnection {
             writer: Arc::new(Mutex::new(writer)),
             _dummy_peer: Some(b),
             session_id: None,
+            cloud_authority: None,
+            cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
+            pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -1530,6 +1508,10 @@ impl RemoteConnection {
 }
 
 impl RemoteEventState for RemoteConnection {
+    fn finish_runtime_command(&mut self, id: u64) -> bool {
+        Self::finish_runtime_command(self, id)
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str) {
         Self::handle_tool_start(self, id, name);
     }

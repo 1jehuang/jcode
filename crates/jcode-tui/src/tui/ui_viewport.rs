@@ -32,15 +32,6 @@ fn handterm_native_latex_cell_symbol(source: &str, rows: u16, cols: u16) -> Opti
     Some(symbol)
 }
 
-fn copy_badge_alt_label_from_config(configured: &str) -> String {
-    let configured = configured.trim();
-    if configured.is_empty() {
-        COPY_BADGE_ALT_LABEL.to_string()
-    } else {
-        configured.to_string()
-    }
-}
-
 pub(crate) fn shortcut_badge_spans(
     key: char,
     alt_style: Style,
@@ -171,78 +162,10 @@ fn resolve_tail_follow_scroll(max_scroll: usize, viewport_height: usize) -> usiz
 
 use super::selection_highlight::highlight_line_selection;
 
-pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_width: usize) {
-    let mut remaining = max_width;
-    let mut kept: Vec<Span<'static>> = Vec::new();
-
-    for span in line.spans.drain(..) {
-        if remaining == 0 {
-            break;
-        }
-
-        let span_width = span.content.as_ref().width();
-        if span_width <= remaining {
-            remaining = remaining.saturating_sub(span_width);
-            kept.push(span);
-            continue;
-        }
-
-        let mut text = String::new();
-        let mut used = 0usize;
-        for ch in span.content.chars() {
-            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if ch_width > 0 && used.saturating_add(ch_width) > remaining {
-                break;
-            }
-            text.push(ch);
-            used = used.saturating_add(ch_width);
-        }
-        if !text.is_empty() {
-            kept.push(Span::styled(text, span.style));
-        }
-        break;
-    }
-
-    line.spans = kept;
-}
-
-/// Remove trailing plain spaces from a line so an appended badge sits exactly
-/// one separator space after the content, regardless of how the source line
-/// was rendered (code block headers end with a space, blockquote lines don't).
-pub(crate) fn trim_line_trailing_spaces(line: &mut Line<'static>) {
-    while let Some(last) = line.spans.last_mut() {
-        let trimmed = last.content.trim_end_matches(' ');
-        if trimmed.len() == last.content.len() {
-            break;
-        }
-        if trimmed.is_empty() {
-            line.spans.pop();
-        } else {
-            last.content = std::borrow::Cow::Owned(trimmed.to_string());
-            break;
-        }
-    }
-}
-
-/// Prepare a line to host an inline badge within `max_content_width` cells.
-/// When the content already fits, only trailing spaces are trimmed (the badge
-/// separator space is accounted for in the reserved width). When the content
-/// must be cut, end it with a dim ellipsis so the truncation is visible
-/// instead of silently swallowing words.
-pub(crate) fn truncate_line_for_copy_badge(line: &mut Line<'static>, max_content_width: usize) {
-    if max_content_width == 0 {
-        line.spans.clear();
-        return;
-    }
-    if line.width() <= max_content_width {
-        trim_line_trailing_spaces(line);
-        return;
-    }
-    truncate_line_in_place_to_width(line, max_content_width.saturating_sub(1));
-    trim_line_trailing_spaces(line);
-    line.spans
-        .push(Span::styled("…", Style::default().fg(dim_color())));
-}
+#[path = "ui_viewport_text.rs"]
+mod viewport_text;
+use viewport_text::copy_badge_alt_label_from_config;
+pub(crate) use viewport_text::{truncate_line_for_copy_badge, truncate_line_in_place_to_width};
 
 /// Choose the wrapped line that hosts an inline copy badge for a copy target
 /// spanning `block_start..block_end`.
@@ -294,7 +217,7 @@ pub(crate) fn copy_badge_reserved_width(
     reserved
 }
 
-pub(super) fn compute_visible_margins(
+pub(crate) fn compute_visible_margins(
     lines: &[Line],
     visible_user_indices: &[usize],
     area: Rect,
@@ -512,11 +435,7 @@ pub(super) fn draw_messages(
                 .y
                 .saturating_add(prompt_preview_lines)
                 .saturating_add(line as u16),
-            width: if swarm_beside_pinned_todos(app, text_render_area.width) {
-                text_render_area.width / 2
-            } else {
-                text_render_area.width
-            },
+            width: text_render_area.width,
             height: 1,
         }
     }));
@@ -1477,32 +1396,14 @@ pub(super) fn draw_messages(
     (margins, chat_scrollbar)
 }
 
-/// Look-ahead window (in rows) used to compute the "reliable" margin profile that
-/// gates where new info widgets may dock. Small by design: it only needs to cover
-/// the distance content travels in the few frames between a widget being placed and
-/// a nearby long line scrolling into its rows.
-const INFO_WIDGET_LOOKAHEAD_ROWS: usize = 2;
+#[path = "ui_viewport_margins.rs"]
+mod viewport_margins;
+pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 
-/// Per-index minimum over `[i-window, i+window]`. Returns an empty vec for empty
-/// input (callers treat empty reliable profiles as "no look-ahead").
-fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
-    if widths.is_empty() {
-        return Vec::new();
-    }
-    let n = widths.len();
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let lo = i.saturating_sub(window);
-        let hi = (i + window).min(n - 1);
-        out.push(widths[lo..=hi].iter().copied().min().unwrap_or(0));
-    }
-    out
-}
-
-/// Whether the pinned band has room for a separate swarm column.
-pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool {
-    width >= 120
-        && crate::config::config().display.pin_todos
+/// Passive worker status lives in the todo lanes. The focused swarm panel
+/// remains available for keyboard navigation and its transcript controls.
+pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool {
+    crate::config::config().display.pin_todos
         && app.pinned_todos_payload().is_some()
         && app.inline_swarm_gallery_active()
         && !app.inline_swarm_members().is_empty()
@@ -1510,7 +1411,7 @@ pub(crate) fn swarm_beside_pinned_todos(app: &dyn TuiState, width: u16) -> bool 
             app.pinned_todos_payload(),
             app.pinned_todos_expanded(),
             app.diff_mode(),
-            width / 2,
+            width,
             3,
         )
         .0
@@ -1522,37 +1423,37 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let beside = swarm_beside_pinned_todos(app, width);
-    let todo_width = if beside { width / 2 } else { width };
     let (mut lines, more) = pinned_todo_band_lines_for_payload(
         app.pinned_todos_payload(),
         app.pinned_todos_expanded(),
         app.diff_mode(),
-        todo_width,
+        width,
         viewport_height,
     );
-    if beside && !lines.is_empty() {
-        let right_width = width.saturating_sub(todo_width + 2) as usize;
-        let members = app.inline_swarm_members();
-        let swarm = super::info_widget::swarm_gallery::render_swarm_strip_lines(
-            &members,
-            app.swarm_panel_selected(),
-            app.swarm_panel_focused(),
-            &crate::tui::keybind::swarm_panel_focus_key_label(),
-            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize,
-            right_width,
-            ((viewport_height as usize) / 3).clamp(3, 16),
-        );
-        lines.resize_with(lines.len().max(swarm.len()), || Line::from(""));
-        for (index, line) in lines.iter_mut().enumerate() {
-            *line = super::truncate_line_with_ellipsis_to_width(line, todo_width as usize);
-            if let Some(right) = swarm.get(index) {
-                line.spans.push(Span::raw(
-                    " ".repeat((todo_width as usize).saturating_sub(line.width()) + 2),
-                ));
-                line.spans.extend(right.spans.clone());
-            }
-        }
+    if width > 0
+        && viewport_height >= 3
+        && let Some(status) = app.justrust_status()
+    {
+        let color = match status.tone {
+            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
+            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
+            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
+        };
+        let label_color = if status.own_session {
+            ratatui::style::Color::Cyan
+        } else {
+            ratatui::style::Color::Magenta
+        };
+        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(label_color)),
+            Span::styled(format!(" {rest}"), Style::default().fg(color)),
+        ]);
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &line,
+            width as usize,
+        ));
     }
     (lines, more)
 }

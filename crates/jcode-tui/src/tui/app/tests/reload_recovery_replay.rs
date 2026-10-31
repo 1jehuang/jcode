@@ -65,6 +65,45 @@ fn reload_replay_context(session_id: &str) -> ReloadContext {
 }
 
 #[test]
+fn reload_recovery_preserves_visible_turn_timer_through_dispatch() {
+    let _env_guard = crate::storage::lock_test_env();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for has_visible_timer in [true, false] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        app.is_processing = true;
+        let started = Instant::now() - Duration::from_secs(90);
+        app.processing_started = Some(started);
+        app.visible_turn_started = has_visible_timer.then_some(started);
+        let session_id = crate::id::new_id("reload_timer");
+        app.remote_session_id = Some(session_id.clone());
+        let ctx = reload_replay_context(&session_id);
+        ctx.save().unwrap();
+        remote::finalize_reload_reconnect(
+            &mut app,
+            Some(&session_id),
+            remote::ReloadReconnectHints {
+                reload_ctx_for_session: Some(ctx),
+                has_client_reload_marker: true,
+            },
+            true,
+        );
+        assert!(!app.is_processing);
+        assert!(app.processing_started.is_none());
+        assert_eq!(app.visible_turn_started, Some(started));
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        assert!(app.is_processing);
+        assert!(app.current_message_id.is_some());
+        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.elapsed().unwrap() >= Duration::from_secs(90));
+    }
+}
+
+#[test]
 fn reload_recovery_delayed_history_after_dispatch_does_not_send_again() {
     let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();

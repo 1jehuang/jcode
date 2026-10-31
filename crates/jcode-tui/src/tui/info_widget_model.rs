@@ -8,7 +8,6 @@
 
 use super::InfoWidgetData;
 use super::frame::{self, Framed};
-use super::text::truncate_smart;
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 
@@ -86,22 +85,21 @@ struct RuntimeRow {
 
 impl RuntimeRow {
     fn into_line(self, max_len: usize) -> Line<'static> {
-        if self.icon.is_empty() {
-            return Line::from(Span::styled(
-                super::text::truncate_with_ellipsis(&self.text, max_len),
+        let line = if self.icon.is_empty() {
+            Line::from(Span::styled(
+                self.text,
                 Style::default().fg(self.text_color),
-            ));
-        }
-        Line::from(vec![
-            Span::styled(
-                format!("{} ", self.icon),
-                Style::default().fg(self.icon_color),
-            ),
-            Span::styled(
-                truncate_smart(&self.text, max_len.saturating_sub(2)),
-                Style::default().fg(self.text_color),
-            ),
-        ])
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", self.icon),
+                    Style::default().fg(self.icon_color),
+                ),
+                Span::styled(self.text, Style::default().fg(self.text_color)),
+            ])
+        };
+        jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, max_len)
     }
 }
 
@@ -118,7 +116,11 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
         rows.push(RuntimeRow {
             icon: "⚡",
             icon_color: rgb(200, 140, 255),
-            text: format!("{tier} tier"),
+            text: if tier.contains(" ← ") || tier.ends_with(" ?") {
+                tier.to_string()
+            } else {
+                format!("{tier} tier")
+            },
             text_color: rgb(200, 140, 255),
         });
     }
@@ -252,6 +254,28 @@ mod tests {
         assert!(out.contains("fast tier"), "{out}");
         assert!(out.contains("websocket"), "{out}");
         assert!(out.contains("62 tok/s"), "{out}");
+    }
+
+    #[test]
+    fn compact_tier_reports_keep_reported_tier_visible() {
+        let mut d = data();
+        for status in ["default ← Ultrafast", "Ultrafast ?"] {
+            d.service_tier = Some(status.into());
+            let out = text(render_model_info(&d, Rect::new(0, 0, 34, 8)));
+            assert!(out.contains(status), "{out}");
+            assert!(!out.contains(" tier"), "{out}");
+            let framed = text(render_model_widget(&d, Rect::new(0, 0, 38, 8)).all_lines());
+            assert!(framed.contains(status), "{framed}");
+            for width in [18, 24, 34] {
+                let lines = render_model_info(&d, Rect::new(0, 0, width, 8));
+                for line in &lines {
+                    assert!(line.width() <= width as usize, "{line:?}");
+                }
+                if status.starts_with("default") {
+                    assert!(text(lines).contains("default"));
+                }
+            }
+        }
     }
 
     #[test]

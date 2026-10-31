@@ -9,6 +9,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -21,6 +22,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -55,6 +58,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -67,9 +71,12 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -82,6 +89,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -163,6 +172,7 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -175,6 +185,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -893,7 +905,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
                 channel: None,
                 tldr: None,
             },
-            message: "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: elephant\n\nMember statuses:\n  ✓ elephant (completed)\n\nCompletion reports:\n\n--- elephant (completed) ---\nCompact card demo finished.\n\nValidation:\nParser tests pass."
+            message: "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: elephant\n\nMember statuses:\n  ✓ elephant (completed)\n\nRecent outputs:\n\n--- elephant (completed) ---\nCompact card demo finished.\n\nValidation:\nParser tests pass."
                 .to_string(),
         },
         &mut remote,

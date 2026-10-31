@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod cloud_env;
+pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
 mod google;
 mod mcp;
@@ -283,7 +285,11 @@ pub(crate) enum Command {
     Repl,
 
     /// Update jcode to the latest version
-    Update,
+    Update {
+        /// Persist an update channel (stable permits returning from preview).
+        #[arg(long, value_parser = ["preview", "stable"])]
+        channel: Option<String>,
+    },
 
     /// Show build/version information in human or JSON form
     Version {
@@ -721,6 +727,11 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Transfer explicit project environment requirements without exposing values.
+    Env {
+        #[command(subcommand)]
+        action: CloudEnvCommand,
+    },
     /// Manage disposable remote machines with mandatory automatic expiry.
     Ephemeral {
         #[command(subcommand)]
@@ -741,6 +752,32 @@ pub(crate) enum CloudCommand {
         json: bool,
     },
 
+    /// Internal: report the supported coordinated migration protocol.
+    #[command(hide = true)]
+    GroupProtocol,
+
+    /// Replace the cloud checkout with this local Git repository, keeping a backup.
+    /// Does not move a conversation or copy authentication or ignored files.
+    Replace {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Confirm replacing the cloud checkout after preserving a backup.
+        #[arg(long)]
+        yes: bool,
+        /// Validate the incoming snapshot and destination without replacing files.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: receive a repository-only replacement archive.
+    #[command(hide = true)]
+    ReplaceReceive {
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.
@@ -750,6 +787,12 @@ pub(crate) enum CloudCommand {
         /// Session ID or name. Defaults to the session this command runs in.
         #[arg(long)]
         session: Option<String>,
+        /// Include another independent session sharing this repository (repeatable).
+        #[arg(long = "include-session", conflicts_with = "session_only")]
+        include_sessions: Vec<String>,
+        /// Move only this session instead of its associated swarm.
+        #[arg(long)]
+        session_only: bool,
         #[command(flatten)]
         target: CloudMoveTarget,
         /// Allow moving while the session is mid-turn (the agent itself runs /cloud).
@@ -775,6 +818,9 @@ pub(crate) enum CloudCommand {
         /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
         #[arg(long)]
         refs_only: bool,
+        /// Keep local OAuth credentials instead of importing the cloud copy. Useful when recovering an old session after signing in again locally.
+        #[arg(long)]
+        keep_local_auth: bool,
         /// After returning, resume the session in this terminal.
         #[arg(long)]
         attach: bool,
@@ -843,6 +889,18 @@ pub(crate) enum CloudCommand {
     /// Internal: remote side of `cloud return` (writes a bundle tarball to stdout).
     #[command(hide = true)]
     Export {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+        /// Opt in only when the returning client can acknowledge completion.
+        #[arg(long)]
+        require_completion: bool,
+    },
+
+    /// Internal: acknowledge a durable local return and permanently fence the cloud owner.
+    #[command(hide = true)]
+    CompleteReturn {
         #[arg(long)]
         session: String,
         #[arg(long)]

@@ -1,6 +1,106 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn runtime_command_writes_control_request_without_prompt() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let args = vec!["set".to_string(), "model with spaces".to_string()];
+    let id = remote
+        .runtime_command("subagent_model", args.clone())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let request: Request = serde_json::from_str(&line).unwrap();
+    assert!(
+        matches!(request, Request::RuntimeCommand { id: wire_id, command, args: wire_args }
+        if wire_id == id && command == "subagent_model" && wire_args == args)
+    );
+    assert_eq!(remote.next_request_id_for_test(), id + 1);
+    assert!(remote.control_done_ids.lock().unwrap().is_empty());
+    line.clear();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cloud_session_switch_revokes_and_aborts_before_request() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.session_id = Some("old".into());
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    let callback = tokio::spawn(std::future::pending::<()>());
+    remote.track_cloud_callback(&callback);
+    remote.resume_session("new").await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(callback.await.unwrap_err().is_cancelled());
+    for kind in ["configure_tools", "resume_session"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_clear_revokes_before_new_conversation() {
+    let mut remote = RemoteConnection::dummy();
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    remote.clear().await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn cloud_configuration_is_written_before_message() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote
+        .configure_cloud_tools(crate::protocol::SessionToolConfig::default())
+        .await
+        .unwrap();
+    remote.send_message("continue".into()).await.unwrap();
+    for kind in ["configure_tools", "message"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_expiry_revokes_without_midturn_protocol_write() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    RemoteConnection::cloud_expiry_revoke(live.clone(), tokio::time::Instant::now())
+        .await
+        .unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    let mut line = String::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 fn account_usage_poll_is_immediate_then_throttled() {
     let now = Instant::now();

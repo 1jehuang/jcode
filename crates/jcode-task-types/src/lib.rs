@@ -430,6 +430,34 @@ semantic_state! {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoExternalBlocker {
+    /// Concrete external condition preventing useful work. Not a completion.
+    pub reason: String,
+    /// Finite deadline to reassess the blocker, not permission to assume it resolved.
+    pub review_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// No way forward.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoCompleteBlocker {
+    #[serde(deserialize_with = "deserialize_nonempty_blocker_reason")]
+    pub reason: String,
+}
+
+fn deserialize_nonempty_blocker_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "completely blocked reason must be nonempty",
+        ));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: String,
@@ -441,6 +469,11 @@ pub struct TodoItem {
     /// Also accepted as `lane`: the lane this todo belongs to.
     #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Explicit prerequisite todo IDs for this lane. `None` retains the default
+    /// phase barrier. All lane members carry the same nonempty list, referring
+    /// only to todos in earlier phases by first appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_after: Option<Vec<String>>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
     /// closest state on load.
@@ -459,8 +492,8 @@ pub struct TodoItem {
     pub confidence_history: Vec<ConfidenceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
-    /// Existing background task IDs in this session. Dependencies block only
-    /// while running, never after completion (including failure/cancellation).
+    /// Existing background task or durable swarm await IDs in this session.
+    /// Dependencies block only while pending, never after completion or timeout.
     /// An empty array or null clears dependencies.
     #[serde(
         default,
@@ -469,13 +502,20 @@ pub struct TodoItem {
     )]
     pub waiting_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_blocker: Option<TodoExternalBlocker>,
+    /// No way forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completely_blocked: Option<TodoCompleteBlocker>,
+    /// Worker session ID, or reserved `@self` for an explicit start by this
+    /// todo list's agent. Absence means ownership is unknown, not local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only
     /// after every todo in stage 1 is done. Inside a stage, todos that share a
     /// `group` form one lane that runs in list order, and different lanes run
     /// in parallel. `None` means "sequential in list order". Deliberately a
-    /// plain number instead of id-based dependencies so a model cannot create
-    /// cycles or dangling references. Older sessions stored this as `wave`.
+    /// plain number. Optional `lane_after` narrows the default phase barrier
+    /// to explicit earlier-phase prerequisites. Older sessions stored this as `wave`.
     #[serde(
         default,
         alias = "wave",
@@ -496,7 +536,11 @@ fn deserialize_waiting_on<'de, D>(deserializer: D) -> Result<Vec<String>, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+    match Option::<Vec<String>>::deserialize(deserializer)? {
+        Some(dependencies) => Ok(dependencies),
+        // Null explicitly clears dependency references, just like an empty list.
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
@@ -761,6 +805,15 @@ mod semantic_state_tests {
                     serde_json::from_value::<Vec<String>>(value).unwrap()
                 }
             );
+        }
+        for invalid in [
+            serde_json::json!(42),
+            serde_json::json!([null]),
+            serde_json::json!({"task": "a"}),
+        ] {
+            let mut payload = old.clone();
+            payload["waiting_on"] = invalid;
+            assert!(serde_json::from_value::<TodoItem>(payload).is_err());
         }
     }
 

@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn pinned_dependency_label_uses_available_width_and_palette() {
+    let task = TodoCardBackgroundTask {
+        task_id: "resume".into(),
+        label: "Resume lint validation".into(),
+        percent: Some(38.0),
+    };
+    let line = todo_dependency_progress(&[&task], 60);
+    assert!(line.to_string().contains(&task.label));
+    assert_eq!(line.spans[0].style.fg, Some(todo_meta_color()));
+    for width in 0..100 {
+        assert!(todo_dependency_progress(&[&task], width).width() <= width);
+    }
+}
+
+#[test]
 fn expanded_diff_rows_preserve_source_and_align_continuations() {
     let source = "    let result = compute(\"界界 e\u{301}\", argument);";
     let parsed = ParsedDiffLine {
@@ -109,6 +124,8 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             intent: None,
             thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     for width in [40, 72, 120] {
         for mode in [
@@ -628,7 +645,10 @@ fn render_system_message_drops_emoji_variation_selectors() {
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let text: String = lines.iter().map(extract_line_text).collect();
 
-    assert!(text.contains("⚠ KV cache miss"), "got: {text}");
+    assert!(
+        text.contains("336K KV cache miss · harness: prefix changed"),
+        "got: {text}"
+    );
     assert!(!text.contains('\u{FE0F}'), "VS16 must not reach the buffer");
 }
 
@@ -1236,7 +1256,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
     ];
     let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 160);
     let text = extract_line_text(&wide);
-    assert!(text.contains("🕒"), "{text}");
+    assert!(text.contains("◷"), "{text}");
     assert!(!text.contains('○'), "{text}");
     assert!(text.contains("构建 🦀") && text.contains("tests"), "{text}");
     assert!(text.contains('▰') && text.contains('▱'), "{text}");
@@ -1253,7 +1273,7 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
         "",
         80,
     ));
-    assert!(!resolved.contains("🕒") && !resolved.contains('%'));
+    assert!(!resolved.contains("◷") && !resolved.contains('%'));
     assert!(resolved.contains('○'));
     for status in ["completed", "cancelled"] {
         let mut done = todo.clone();
@@ -1265,8 +1285,113 @@ fn background_dependency_todo_card_clock_and_progress_are_width_safe() {
             "",
             80,
         ));
-        assert!(!text.contains("🕒") && !text.contains('%'));
+        assert!(!text.contains("◷") && !text.contains('%'));
     }
+}
+
+#[test]
+fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
+    let mut todo = crate::todo::TodoItem {
+        id: "user".into(),
+        content: "Connect account".into(),
+        status: "in_progress".into(),
+        waiting_on: vec!["build".into()],
+        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only you can authorize\nthis account ✋".into(),
+        }),
+        ..Default::default()
+    };
+    let tasks = [TodoCardBackgroundTask {
+        task_id: "build".into(),
+        label: "Build".into(),
+        percent: Some(50.0),
+    }];
+    let wide = render_todo_item_line_with_background(&todo, &[], &tasks, "", 240).to_string();
+    assert!(wide.contains("✋"));
+    assert!(!wide.contains("Only you can authorize"));
+    assert!(!wide.contains('◷'));
+    assert!(!wide.contains('\n'));
+    for width in 0..140 {
+        let row = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
+        assert!(row.width() <= width, "{width}: {row:?}");
+    }
+    todo.completely_blocked = None;
+    assert!(
+        render_todo_item_line_with_background(&todo, &[], &tasks, "", 240)
+            .to_string()
+            .contains('◷')
+    );
+    todo.waiting_on.clear();
+    assert!(
+        !render_todo_card_item_line(&todo, "", 240)
+            .to_string()
+            .contains("Completely blocked")
+    );
+    for status in ["completed", "cancelled"] {
+        todo.status = status.into();
+        todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            reason: "Only you".into(),
+        });
+        assert!(
+            !render_todo_card_item_line(&todo, "", 240)
+                .to_string()
+                .contains("✋")
+        );
+    }
+}
+
+#[test]
+fn complete_blocker_detail_displays_reason_without_user_action_framing() {
+    let todo = crate::todo::TodoItem {
+        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            reason: "No way forward.".into(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        todo_complete_blocker_detail(&todo),
+        "Completely blocked: No way forward."
+    );
+}
+
+#[test]
+fn external_blocker_todo_row_shows_reason_deadline_and_never_wraps() {
+    let mut todo = crate::todo::TodoItem {
+        content: "Acceptance".into(),
+        status: "pending".into(),
+        external_blocker: Some(crate::todo::TodoExternalBlocker {
+            reason: "Frozen source awaiting coordinator".into(),
+            review_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        }),
+        ..Default::default()
+    };
+    let wide = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        160,
+    ));
+    assert!(
+        wide.contains("blocked: Frozen source awaiting coordinator"),
+        "{wide}"
+    );
+    assert!(wide.contains("review ") && wide.contains("UTC"));
+    for width in 0..160 {
+        let line = render_todo_item_line_with_background(&todo, &[], &[], "", width);
+        assert!(extract_line_text(&line).width() <= width);
+    }
+    todo.external_blocker.as_mut().unwrap().review_at =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
+    let expired = extract_line_text(&render_todo_item_line_with_background(
+        &todo,
+        &[],
+        &[],
+        "",
+        160,
+    ));
+    assert!(expired.contains("review due"));
+    assert_eq!(todo.status, "pending");
 }
 
 #[test]
@@ -1289,7 +1414,7 @@ fn background_dependency_indeterminate_progress_is_not_fabricated() {
         "",
         80,
     ));
-    assert!(text.contains("🕒") && text.contains("running"));
+    assert!(text.contains("◷") && text.contains("running"));
     assert!(!text.contains('%'));
 }
 
@@ -1316,7 +1441,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("🕒") && text.contains("build") && text.contains('%'),
+            text.contains("◷") && text.contains("build") && text.contains('%'),
             "{text}"
         );
         for width in 20..100 {
@@ -1335,6 +1460,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
 fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
+            lane_after: None,
             id: id.to_string(),
             content: content.to_string(),
             status: status.to_string(),
@@ -1344,6 +1470,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             completion_confidence: (status == "completed")
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
+            external_blocker: None,
+            completely_blocked: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -1416,6 +1544,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
 #[test]
 fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         stage: None,
         details: None,
         id: "1".to_string(),
@@ -1425,6 +1554,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
@@ -1477,6 +1608,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
 fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Keep the task visible".to_string(),
         status: "in_progress".to_string(),
@@ -1485,6 +1617,8 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1561,6 +1695,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
 #[test]
 fn render_todos_message_uses_readable_semantic_colors() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Tune the palette".to_string(),
         status: "in_progress".to_string(),
@@ -1569,6 +1704,8 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1610,6 +1747,74 @@ fn render_todos_message_uses_readable_semantic_colors() {
 }
 
 #[test]
+fn finished_chat_todo_cards_show_lane_names_and_dots_without_changing_saved_data() {
+    use unicode_width::UnicodeWidthStr;
+    for staged in [false, true] {
+        let todos = serde_json::json!([
+            {"id":"done", "content":"Finished title 🦀", "details":"Long description", "priority":"high",
+             "status":"completed", "group":"Implementation", "stage":if staged { Some(1) } else { None }},
+            {"id":"cancel", "content":"Cancelled title", "status":"cancelled", "priority":"medium",
+             "group":"Validation", "stage":if staged { Some(2) } else { None }}
+        ]);
+        for legacy in [false, true] {
+            let content = if legacy {
+                todos.to_string()
+            } else {
+                serde_json::json!({"todos":todos,
+                    "plan":{"user_intention":"Verbose intention", "understands_user_intent":"complete"},
+                    "goals":[{"closed_feedback_loop":"strong", "feedback_loop":"Verbose evidence"}]
+                }).to_string()
+            };
+            let msg = DisplayMessage::todos(content.clone());
+            let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 2);
+            assert_eq!(extract_line_text(&lines[0]).trim(), "✓ Implementation  ●");
+            assert_eq!(extract_line_text(&lines[1]).trim(), "○ Validation      ○");
+            for width in 0..110 {
+                let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(lines.len(), 2);
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| extract_line_text(line).width() <= width as usize),
+                    "width={width}"
+                );
+            }
+            assert_eq!(msg.content, content);
+            let pinned =
+                render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+                    .iter()
+                    .map(extract_line_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            assert!(pinned.contains("Finished title"), "{pinned}");
+        }
+    }
+}
+
+#[test]
+fn unfinished_chat_todo_cards_retain_item_titles() {
+    for status in ["pending", "in_progress", "blocked"] {
+        let msg = DisplayMessage::todos(
+            serde_json::json!({"todos":[
+                {"id":"done", "content":"Finished title", "status":"completed", "priority":"high"},
+                {"id":"open", "content":"Unfinished title", "status":status, "priority":"medium"}
+            ]})
+            .to_string(),
+        );
+        let text = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Finished title") && text.contains("Unfinished title"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn render_todos_message_hides_item_confidence_transitions() {
     let todo: crate::todo::TodoItem = serde_json::from_value(serde_json::json!({
         "id": "hidden-confidence", "content": "Completed task", "status": "completed",
@@ -1623,7 +1828,7 @@ fn render_todos_message_hides_item_confidence_transitions() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("✓ Completed"), "{text}");
+        assert_eq!(text.trim(), "●", "{text}");
         assert!(
             !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
             "{text}"
@@ -1680,6 +1885,7 @@ fn render_todos_message_color_codes_every_intent_state() {
 #[test]
 fn render_todos_message_collapses_passing_quality_gates() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Verify the result".to_string(),
         status: "completed".to_string(),
@@ -1688,6 +1894,8 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence: None,
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1705,7 +1913,9 @@ fn render_todos_message_collapses_passing_quality_gates() {
     }];
     let msg =
         DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
-    let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    // The detailed pinned view still exposes assessments. Finished transcript
+    // cards deliberately hide all prose, including passing quality summaries.
+    let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     let plain = lines
         .iter()
         .map(extract_line_text)
@@ -1731,6 +1941,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
 #[test]
 fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Render the card".to_string(),
         status: "in_progress".to_string(),
@@ -1739,6 +1950,8 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1773,6 +1986,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 #[test]
 fn render_todos_message_packs_multiple_goal_gates_per_row() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         id: "1".to_string(),
         content: "Render the card".to_string(),
         status: "in_progress".to_string(),
@@ -1781,6 +1995,8 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1841,6 +2057,7 @@ fn render_todos_message_bad_payload_falls_back_to_system() {
 #[test]
 fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     let todos = vec![crate::todo::TodoItem {
+        lane_after: None,
         stage: None,
         details: None,
         id: "render".to_string(),
@@ -1850,6 +2067,8 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),
@@ -3054,6 +3273,8 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                     intent: intent.map(str::to_string),
                     thought_signature: None,
                 }),
+            
+                tool_duration_ms: None,
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
             assert_eq!(lines.len(), 2, "{name}");
@@ -3132,6 +3353,8 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
                 {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
             ]}), intent: None, thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 4);
@@ -3186,6 +3409,8 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
             intent: Some("Inspect sources".to_string()),
             thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
@@ -3408,6 +3633,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     assert!(plain.contains("nested.rs"), "{plain}");
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
+
 
 fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {
     DisplayMessage {
@@ -4644,3 +4870,4 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
         }
     }
 }
+

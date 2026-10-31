@@ -29,6 +29,16 @@ pub use notifications::{
     parse_background_task_started_notification_markdown, strip_ansi_escape_sequences,
 };
 
+/// Legacy persisted wakes can retain the provider's user role even though
+/// their display role is a background notification, never a human prompt.
+pub fn is_background_task_notification_content(content: &str) -> bool {
+    content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+        || parse_background_task_notification_markdown(content).is_some()
+        || parse_background_task_progress_notification_markdown(content).is_some()
+}
+
 fn compile_static_regex(pattern: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),

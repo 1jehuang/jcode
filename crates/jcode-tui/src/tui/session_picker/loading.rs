@@ -279,167 +279,83 @@ pub fn load_cached_sessions_grouped() -> Option<(Vec<ServerGroup>, Vec<SessionIn
     Some((cache.server_groups, cache.orphan_sessions))
 }
 
-fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
-    if *budget == 0 || src.is_empty() {
-        return;
+/// Recover the exact recently closed sessions without enumerating historical
+/// transcripts or waiting for the large search cache to deserialize.
+fn load_recently_closed_sessions() -> Vec<SessionInfo> {
+    let window = Duration::from_secs(crate::config::config().display.resume_recent_close_seconds);
+    let closures = session::recent_window_closures(window);
+    if closures.is_empty() {
+        return Vec::new();
     }
-
-    let mut end = src.len().min(*budget);
-    while end > 0 && !src.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == 0 {
-        return;
-    }
-
-    dst.push_str(&src[..end]);
-    *budget = budget.saturating_sub(end);
-}
-
-fn suffix_at_most(value: &str, max_bytes: usize) -> &str {
-    let mut start = value.len().saturating_sub(max_bytes);
-    while start < value.len() && !value.is_char_boundary(start) {
-        start += 1;
-    }
-    &value[start..]
-}
-
-/// Keep a bounded sample from both ends of a growing transcript. Keeping only
-/// the first 64 KiB made `/resume` search silently blind to every later turn in
-/// a long session. The first half retains titles and early prompts while the
-/// second half continuously follows the newest transcript content.
-fn push_sampled_search_text(dst: &mut String, src: &str, limit: usize) {
-    if src.is_empty() || limit == 0 {
-        return;
-    }
-    if dst.len().saturating_add(1).saturating_add(src.len()) <= limit {
-        dst.push(' ');
-        dst.push_str(src);
-        return;
-    }
-
-    // An oversized first message has no existing session head to preserve. Keep
-    // both ends of that message instead of retaining only its suffix.
-    if dst.is_empty() {
-        let head_budget = limit / 2;
-        let mut head_end = src.len().min(head_budget);
-        while head_end > 0 && !src.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        dst.push_str(&src[..head_end]);
-        dst.push_str(suffix_at_most(src, limit.saturating_sub(head_end)));
-        return;
-    }
-
-    let head_budget = limit / 2;
-    let mut head_end = dst.len().min(head_budget);
-    while head_end > 0 && !dst.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let head = dst[..head_end].to_string();
-
-    let tail_budget = limit.saturating_sub(head.len());
-    let tail = if src.len().saturating_add(1) >= tail_budget {
-        suffix_at_most(src, tail_budget).to_string()
-    } else {
-        let old_budget = tail_budget.saturating_sub(src.len() + 1);
-        let old_tail = suffix_at_most(&dst[head_end..], old_budget);
-        let mut tail = String::with_capacity(old_tail.len() + 1 + src.len());
-        tail.push_str(old_tail);
-        tail.push(' ');
-        tail.push_str(src);
-        tail
+    let Ok(home) = storage::jcode_dir() else {
+        return Vec::new();
     };
-
-    dst.clear();
-    dst.push_str(&head);
-    dst.push_str(&tail);
+    let sessions_dir = home.join("sessions");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let mut ids: Vec<_> = closures.into_iter().collect();
+    ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    parallel_map(ids, |(id, _)| {
+        parse_jcode_session_info(&sessions_dir, &id, &catchup)
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
-pub(super) fn build_search_index(
-    id: &str,
-    short_name: &str,
-    title: &str,
-    working_dir: Option<&str>,
-    save_label: Option<&str>,
-    messages_preview: &[PreviewMessage],
-) -> String {
-    let mut combined = String::new();
-    combined.push_str(title);
-    combined.push(' ');
-    combined.push_str(short_name);
-    combined.push(' ');
-    combined.push_str(id);
-
-    if let Some(dir) = working_dir {
-        combined.push(' ');
-        combined.push_str(dir);
+/// Shared staged loader for the standalone and in-session pickers. A just-closed
+/// session is actionable before loading either the cache or the historical list.
+pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::SessionListUpdate>) {
+    let recent = load_recently_closed_sessions();
+    if !recent.is_empty()
+        && sender
+            .send(super::SessionListUpdate::Cached((
+                Vec::new(),
+                recent.clone(),
+            )))
+            .is_err()
+    {
+        return;
     }
-
-    if let Some(label) = save_label {
-        combined.push(' ');
-        combined.push_str(label);
-    }
-
-    let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
-    for msg in messages_preview {
-        let content = msg.content.trim();
-        if content.is_empty() {
-            continue;
+    if let Some((mut groups, mut orphans)) = load_cached_sessions_grouped() {
+        // Do not let an older cached snapshot remove or roll back the recovered
+        // session while the full refresh is still running.
+        let ids: HashSet<_> = recent.iter().map(|s| s.id.as_str()).collect();
+        for group in &mut groups {
+            group.sessions.retain(|s| !ids.contains(s.id.as_str()));
         }
-        combined.push(' ');
-        push_with_byte_budget(&mut combined, content, &mut budget);
-        if budget == 0 {
-            break;
-        }
-    }
-
-    combined.to_lowercase()
-}
-
-fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {
-    if budget == 0 {
-        return None;
-    }
-    let raw = raw.get();
-    let budget = budget.min(MESSAGE_SEARCH_EXCERPT_BYTES);
-    let mut excerpt = String::new();
-    push_sampled_search_text(&mut excerpt, raw, budget);
-    (!excerpt.is_empty()).then_some(excerpt)
-}
-
-fn raw_value_display_text(raw: &RawValue) -> Option<String> {
-    fn collect_text(value: &serde_json::Value, out: &mut String) {
-        match value {
-            serde_json::Value::String(text) => {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(text);
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    collect_text(item, out);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
-                    out.push_str(text);
-                }
-            }
-            _ => {}
+        orphans.retain(|s| !ids.contains(s.id.as_str()));
+        orphans.extend(recent.iter().cloned());
+        if sender
+            .send(super::SessionListUpdate::Cached((groups, orphans)))
+            .is_err()
+        {
+            return;
         }
     }
-
-    let value: serde_json::Value = serde_json::from_str(raw.get()).ok()?;
-    let mut text = String::new();
-    collect_text(&value, &mut text);
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    let result = load_sessions_grouped().map(|(groups, mut orphans)| {
+        // A long-idle transcript can fall outside the bounded historical scan.
+        // Keep it recoverable after the full refresh too, without replacing a
+        // newer snapshot when that scan did include it.
+        let loaded: HashSet<_> = orphans
+            .iter()
+            .map(|s| s.id.clone())
+            .chain(
+                groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter().map(|s| s.id.clone())),
+            )
+            .collect();
+        orphans.extend(recent.into_iter().filter(|s| !loaded.contains(&s.id)));
+        (groups, orphans)
+    });
+    let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
+
+#[path = "loading_search_text.rs"]
+mod search_text;
+pub(super) use search_text::{
+    build_search_index, push_sampled_search_text, raw_value_display_text, raw_value_search_excerpt,
+};
 
 #[cfg(test)]
 pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool {
@@ -1944,6 +1860,11 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     });
     sessions.extend(external_sessions);
 
+    // A moved session's local snapshot stops changing. Keep it discoverable
+    // even after it falls outside the recency window, without waking the host
+    // or making an SSH connection just to open the picker.
+    include_cloud_sessions(&sessions_dir, &catchup_seen, &mut sessions);
+
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
     #[cfg(test)]
@@ -2110,8 +2031,16 @@ pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<Prev
 }
 
 pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
-    let session = crate::import::list_claude_code_sessions()
-        .ok()?
+    let sessions = match crate::import::list_claude_code_sessions() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Could not discover Claude Code preview sessions: {error}"
+            ));
+            return None;
+        }
+    };
+    let session = sessions
         .into_iter()
         .find(|session| session.session_id == session_id)?;
     load_claude_code_preview_from_path(Path::new(&session.full_path))
@@ -3021,10 +2950,109 @@ pub fn load_servers() -> Vec<ServerInfo> {
     }
 }
 
+fn include_cloud_sessions(
+    sessions_dir: &Path,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+    sessions: &mut Vec<SessionInfo>,
+) {
+    let Some(entries) = storage::session_leases_dir().and_then(|dir| std::fs::read_dir(dir).ok())
+    else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(lease) = storage::read_session_lease(id) else {
+            continue;
+        };
+        let Some(host) = lease
+            .away_host
+            .as_ref()
+            .filter(|host| !host.trim().is_empty())
+        else {
+            continue;
+        };
+        if lease.session_id != id {
+            continue;
+        }
+        if !sessions.iter().any(|session| session.id == id) {
+            let session = parse_jcode_session_info(sessions_dir, id, catchup_seen)
+                .unwrap_or_else(|| cloud_session_stub(&lease));
+            sessions.push(session);
+        }
+        if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
+            session.server_name = Some(format!("cloud: {host}"));
+            session.server_icon = Some("☁".to_string());
+            session
+                .search_index
+                .push_str(&format!(" cloud {}", host.to_lowercase()));
+        }
+    }
+}
+
+/// A migration can leave only a lease or a hidden handoff notice locally.
+/// The ownership record is enough to attach without inventing transcript data.
+fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
+    let id = &lease.session_id;
+    let short_name = extract_session_name(id).unwrap_or(id).to_string();
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or_default();
+    let title = format!("{short_name} (cloud session)");
+    let search_index = build_search_index(
+        id,
+        &short_name,
+        &title,
+        lease.repo_root.as_deref(),
+        None,
+        &[],
+    );
+    SessionInfo {
+        id: id.clone(),
+        parent_id: None,
+        icon: session_icon(&short_name).to_string(),
+        short_name,
+        title,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        created_at: updated_at,
+        last_message_time: updated_at,
+        last_active_at: Some(updated_at),
+        working_dir: lease.repo_root.clone(),
+        model: None,
+        provider_key: None,
+        is_canary: false,
+        is_debug: false,
+        saved: false,
+        save_label: None,
+        status: SessionStatus::Closed,
+        needs_catchup: false,
+        estimated_tokens: 0,
+        first_user_prompt: None,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source: SessionSource::Jcode,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: id.clone(),
+        },
+        external_path: None,
+    }
+}
+
 pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
-    let all_sessions = load_sessions()?;
+    // An explicit picker refresh must see newly closed/created sessions even
+    // when another scan populated the five-second in-process cache recently.
+    let all_sessions = load_sessions_inner(true)?;
     let servers = load_servers();
 
     let mut session_to_server: HashMap<String, &ServerInfo> = HashMap::new();
@@ -3035,9 +3063,17 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     }
 
     let mut server_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    let mut cloud_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
     let mut orphan_sessions: Vec<SessionInfo> = Vec::new();
 
     for mut session in all_sessions {
+        // Remote ownership wins over a stale entry in the local live registry.
+        if session.server_icon.as_deref() == Some("☁")
+            && let Some(name) = session.server_name.clone()
+        {
+            cloud_sessions.entry(name).or_default().push(session);
+            continue;
+        }
         if let Some(server) = session_to_server.get(&session.short_name) {
             session.server_name = Some(server.name.clone());
             session.server_icon = Some(server.icon.clone());
@@ -3064,6 +3100,20 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
             }
         })
         .collect();
+
+    groups.extend(
+        cloud_sessions
+            .into_iter()
+            .map(|(name, sessions)| ServerGroup {
+                name,
+                icon: "☁".to_string(),
+                version: String::new(),
+                git_hash: String::new(),
+                // The lease records ownership, not whether the remote daemon is live.
+                is_running: false,
+                sessions,
+            }),
+    );
 
     groups.sort_by(|a, b| {
         let a_latest = a.sessions.iter().map(|s| s.last_message_time).max();

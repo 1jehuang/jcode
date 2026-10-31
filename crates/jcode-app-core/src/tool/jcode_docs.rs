@@ -6,7 +6,37 @@ use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::HashSet;
 
-include!(concat!(env!("OUT_DIR"), "/jcode_docs.rs"));
+use std::sync::OnceLock;
+
+/// Version-matched documentation supplied by the final executable.
+pub type BundledDocs = &'static [(&'static str, &'static str)];
+
+static DOCUMENTS: OnceLock<BundledDocs> = OnceLock::new();
+
+/// Install the executable's immutable documentation corpus at startup.
+///
+/// Keeping the data at the composition root means a documentation edit does
+/// not invalidate the application core or the TUI. Repeated startup setup is
+/// harmless: the first corpus remains authoritative for this process.
+pub fn register_bundled_docs(docs: BundledDocs) {
+    if DOCUMENTS.set(docs).is_err() {
+        crate::logging::debug(
+            "Bundled documentation already registered, preserving the original corpus",
+        );
+    }
+}
+
+/// The executable's registered corpus, or an explicit setup error.
+pub fn bundled_docs() -> Result<BundledDocs> {
+    // Unit tests exercise the real corpus, without making normal app-core or
+    // TUI builds depend on that changing data.
+    #[cfg(test)]
+    DOCUMENTS.get_or_init(jcode_docs_data::documents);
+    DOCUMENTS
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow!("bundled Jcode documentation was not registered by the executable"))
+}
 
 const DEFAULT_LIMIT: usize = 5;
 const MAX_LIMIT: usize = 10;
@@ -83,8 +113,10 @@ impl Tool for JcodeDocsTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: JcodeDocsInput = serde_json::from_value(input)?;
+        let docs = bundled_docs()?;
         let output = match params.action.as_str() {
             "search" => search(
+                docs,
                 params
                     .query
                     .as_deref()
@@ -92,12 +124,13 @@ impl Tool for JcodeDocsTool {
                 params.limit,
             ),
             "read" => read_doc(
+                docs,
                 params
                     .path
                     .as_deref()
                     .ok_or_else(|| anyhow!("path is required for read"))?,
             )?,
-            "list" => list_docs(),
+            "list" => list_docs(docs),
             other => {
                 return Err(anyhow!(
                     "unknown action {other:?}; use search, read, or list"
@@ -108,12 +141,9 @@ impl Tool for JcodeDocsTool {
     }
 }
 
-fn list_docs() -> String {
-    let mut output = format!(
-        "Bundled Jcode documentation ({} files):\n",
-        JCODE_DOCS.len()
-    );
-    for (path, body) in JCODE_DOCS {
+fn list_docs(docs: BundledDocs) -> String {
+    let mut output = format!("Bundled Jcode documentation ({} files):\n", docs.len());
+    for (path, body) in docs {
         let title = body
             .lines()
             .find_map(|line| line.strip_prefix("# "))
@@ -123,8 +153,8 @@ fn list_docs() -> String {
     output
 }
 
-fn read_doc(path: &str) -> Result<String> {
-    let (_, body) = JCODE_DOCS
+fn read_doc(docs: BundledDocs, path: &str) -> Result<String> {
+    let (_, body) = docs
         .iter()
         .find(|(candidate, _)| *candidate == path)
         .ok_or_else(|| {
@@ -135,12 +165,12 @@ fn read_doc(path: &str) -> Result<String> {
     ))
 }
 
-fn search(query: &str, limit: Option<usize>) -> String {
+fn search(docs: BundledDocs, query: &str, limit: Option<usize>) -> String {
     let terms = terms(query);
     if terms.is_empty() {
         return "Search query must contain at least one word.".to_string();
     }
-    let mut matches = sections()
+    let mut matches = sections(docs)
         .into_iter()
         .filter_map(|section| {
             let heading = section.heading.to_lowercase();
@@ -200,9 +230,9 @@ fn terms(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn sections() -> Vec<Section<'static>> {
+fn sections(docs: BundledDocs) -> Vec<Section<'static>> {
     let mut result = Vec::new();
-    for (path, document) in JCODE_DOCS {
+    for (path, document) in docs {
         let mut heading = "Overview".to_string();
         let mut body = String::new();
         for line in document.lines() {
@@ -261,25 +291,26 @@ mod tests {
 
     #[test]
     fn corpus_includes_current_docs_but_not_plans() {
-        assert!(JCODE_DOCS.iter().any(|(path, _)| *path == "README.md"));
-        assert!(JCODE_DOCS.iter().any(|(path, _)| *path == "docs/README.md"));
-        assert!(
-            !JCODE_DOCS
-                .iter()
-                .any(|(path, _)| path.starts_with("docs/plans/"))
-        );
+        let docs = bundled_docs().unwrap();
+        assert!(docs.iter().any(|(path, _)| *path == "README.md"));
+        assert!(docs.iter().any(|(path, _)| *path == "docs/README.md"));
+        assert!(!docs.iter().any(|(path, _)| path.starts_with("docs/plans/")));
     }
 
     #[test]
     fn search_finds_relevant_version_matched_documentation() {
-        let output = search("How does swarm coordination work?", Some(3));
+        let output = search(
+            bundled_docs().unwrap(),
+            "How does swarm coordination work?",
+            Some(3),
+        );
         assert!(output.contains("docs/SWARM_ARCHITECTURE.md"), "{output}");
         assert!(output.contains("bundled with this Jcode build"));
     }
 
     #[test]
     fn exact_document_can_be_read() {
-        let output = read_doc("docs/README.md").unwrap();
+        let output = read_doc(bundled_docs().unwrap(), "docs/README.md").unwrap();
         assert!(output.contains("# jcode Docs"));
     }
 }

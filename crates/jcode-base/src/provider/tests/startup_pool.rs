@@ -1,7 +1,57 @@
 use super::*;
 
 #[test]
-fn startup_pool_config_default_wins_over_pool_head() {
+fn startup_pool_tiers_override_last_account_then_fall_back_when_exhausted() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        let mut pool = startup_pool_fixture();
+        // Last-used work login is first in the old saved order, but lower tier.
+        pool.members = vec!["openai:openai-fox".into(), "openai:openai-otter".into()];
+        pool.set_priority("openai:openai-fox", 1);
+        pool.set_priority("openai:openai-otter", 0);
+        crate::config::Config::set_default_model(
+            Some("openai-oauth@openai-fox:gpt-5.5"),
+            Some("openai-oauth"),
+        )
+        .unwrap();
+        pool.save().unwrap();
+        let router = MultiProvider::new_fast();
+        assert_eq!(
+            router.oauth_account_label().as_deref(),
+            Some("openai-otter")
+        );
+        assert_eq!(router.model(), "gpt-5.5");
+        models::record_provider_unavailable_for_account_label(
+            "openai",
+            Some("openai-otter"),
+            "quota exhausted",
+        );
+        assert_eq!(
+            router
+                .fork_for_new_session()
+                .oauth_account_label()
+                .as_deref(),
+            Some("openai-fox")
+        );
+        models::clear_openai_provider_unavailability_for_account_label(Some("openai-otter"));
+        assert_eq!(
+            router
+                .fork_for_new_session()
+                .oauth_account_label()
+                .as_deref(),
+            Some("openai-otter")
+        );
+        assert_eq!(
+            auth::codex::active_account_label().as_deref(),
+            Some("openai-fox")
+        );
+        assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
+    });
+}
+
+#[test]
+fn startup_pool_ready_priority_head_wins_over_saved_provider_default() {
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
@@ -26,19 +76,19 @@ fn startup_pool_config_default_wins_over_pool_head() {
         pool.save().unwrap();
         models::clear_provider_unavailable_for_account("claude");
         let router = MultiProvider::new_fast();
-        assert_eq!(router.active_provider(), ActiveProvider::OpenAI);
-        assert_eq!(router.model(), "gpt-5.5");
+        assert_eq!(router.active_provider(), ActiveProvider::Claude);
+        assert!(router.model().starts_with("claude"));
         assert_eq!(router.credential_mode(), CredentialMode::OAuth);
-        assert_eq!(router.fork().model(), "gpt-5.5");
+        assert_eq!(router.fork().model(), router.model());
         let fresh = router.fork_for_new_session();
-        assert_eq!(fresh.name(), "OpenAI");
-        assert_eq!(fresh.model(), "gpt-5.5");
+        assert_eq!(fresh.oauth_account_label().as_deref(), Some(label.as_str()));
+        assert!(fresh.model().starts_with("claude"));
         assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
     });
 }
 
 #[test]
-fn startup_pool_config_default_preserves_non_head_account() {
+fn startup_pool_saved_account_does_not_pin_new_sessions() {
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
@@ -56,11 +106,14 @@ fn startup_pool_config_default_preserves_non_head_account() {
             assert_eq!(provider.model(), "gpt-5.5");
             assert_eq!(
                 provider.oauth_account_label().as_deref(),
-                Some("openai-fox")
+                Some("openai-otter")
             );
             assert_eq!(provider.credential_mode(), CredentialMode::OAuth);
         }
-        assert_eq!(router.oauth_account_label().as_deref(), Some("openai-fox"));
+        assert_eq!(
+            router.oauth_account_label().as_deref(),
+            Some("openai-otter")
+        );
         assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
         let config_after = crate::config::Config::load().provider;
         assert_eq!(config_after.default_model, config_before.default_model);
@@ -146,6 +199,7 @@ fn startup_pool_fixture() -> crate::auth::account_pool::AccountPool {
     let pool = crate::auth::account_pool::AccountPool {
         members: vec!["openai:openai-otter".into(), "openai:openai-fox".into()],
         excluded: vec!["openai:openai-panda".into()],
+        ..Default::default()
     };
     pool.save().unwrap();
     pool

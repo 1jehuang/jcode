@@ -1,6 +1,91 @@
 // Tests for the inline chat todo card (`/todos` command + todo-card hotkey).
 
 #[test]
+fn ssh_todos_command_renders_remote_card() {
+    if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
+        return;
+    }
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("remote-render-test".into());
+    assert!(super::commands_dispatch::dispatch_local_command(
+        &mut app, "/todos"
+    ));
+    assert!(app.remote_todos_refresh_due());
+    assert!(
+        !app.remote_todos_refresh_due(),
+        "refresh requests are throttled"
+    );
+    app.receive_remote_todos("remote-render-test".into(), serde_json::json!({
+        "todos": [{"id":"remote-task", "content":"Cloud todo visible", "priority":"high", "status":"pending"}],
+        "plan": {}, "goals": []
+    }).to_string());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Cloud todo visible"), "{text}");
+    assert!(!text.contains("unavailable in SSH"), "{text}");
+}
+
+#[test]
+fn remote_todos_render_and_refresh_without_reading_local_todos() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("cloud-todos-test".into());
+    let payload = |status: &str| {
+        serde_json::json!({
+        "todos": [{"id":"cloud-only", "content":"Remote task", "priority":"high", "status":status}],
+        "plan": {}, "goals": []
+    }).to_string()
+    };
+    app.receive_remote_todos("cloud-todos-test".into(), payload("pending"));
+    app.toggle_todo_card();
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(card.content.contains("Remote task"));
+    app.receive_remote_todos("cloud-todos-test".into(), payload("completed"));
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(card.content.contains("completed"));
+    app.set_todos_view_enabled(true, true);
+    assert!(app.todos_view_markdown.contains("Remote task"));
+
+    // Late replies and cached state from the old session must not leak.
+    app.remote_session_id = Some("another-cloud-session".into());
+    app.receive_remote_todos("cloud-todos-test".into(), payload("pending"));
+    app.refresh_todo_card_if_needed();
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(!card.content.contains("Remote task"));
+}
+
+#[test]
+fn todos_command_requires_a_token_boundary() {
+    let mut app = create_test_app();
+    assert!(!super::todos_view::handle_todos_view_command(
+        &mut app,
+        "/todos-custom-skill"
+    ));
+}
+
+#[test]
 fn toggle_todo_card_pushes_then_dismisses_trailing_card() {
     let mut app = create_test_app();
     assert!(!app.display_messages.iter().any(|m| m.role == "todos"));
@@ -78,6 +163,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
     let session_id = app.session.id.clone();
 
     let todo = |content: &str, status: &str| crate::todo::TodoItem {
+        lane_after: None,
         id: "t1".to_string(),
         content: content.to_string(),
         status: status.to_string(),
@@ -86,6 +172,8 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -125,6 +213,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     let todos = [crate::todo::TodoItem {
+        lane_after: None,
         id: "t1".to_string(),
         content: "render scores".to_string(),
         status: "in_progress".to_string(),
@@ -133,6 +222,8 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -185,6 +276,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
 /// Simple todo used by the pinned-band tests.
 fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
+        lane_after: None,
         id: id.to_string(),
         content: content.to_string(),
         status: status.to_string(),
@@ -193,6 +285,8 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
+        external_blocker: None,
+        completely_blocked: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -783,4 +877,84 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
             .contains("\"failed\"")
     );
     let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let mut item = pinned_band_todo("a", "Verify live status", "in_progress");
+    item.stage = Some(1);
+    item.group = Some("validation".into());
+    item.assigned_to = Some("session_fox_1700000000".into());
+    crate::todo::save_todos(&app.session.id, &[item]).unwrap();
+    app.remote_swarm_members =
+        vec![
+        serde_json::from_value(serde_json::json!({
+            "session_id":"session_fox_1700000000", "friendly_name":"fox", "status":"running",
+            "runtime":{"live_status":{"phase":"running_tool", "elapsed_ms":12300,
+                "input_tokens":12345,"output_tokens":456,"connection_type":"https/sse",
+                "tool_name":"bash","tool_intent":"Verify live status"}}
+        })).unwrap(),
+        serde_json::from_value(serde_json::json!({
+            "session_id":"session_raccoon_1700000001", "friendly_name":"raccoon", "status":"running"
+        })).unwrap(),
+    ];
+    app.refresh_pinned_todos_now();
+    let (rows, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 160, 40);
+    let text = rows
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("↑12k ↓456") && !text.contains("https") && text.contains("12s"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('🦝'),
+        "Unassigned passive gallery must not appear: {text}"
+    );
+    assert!(rows.iter().all(|row| row.width() <= 160));
+    // Focus remains a separate interactive control surface, not a second passive list.
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    app.swarm_panel_focused = true;
+    let backend = ratatui::backend::TestBackend::new(160, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let focused = render_and_snap(&app, &mut terminal);
+    assert!(
+        focused.contains('🦝'),
+        "Focused worker navigation must remain available: {focused}"
+    );
+    crate::todo::save_todos(&app.session.id, &[]).unwrap();
+}
+
+#[test]
+fn debug_inject_todos_preserves_role_and_renders_fixture() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "completely_blocked":{"reason":"Only the owner can approve"}}]});
+    let response = app.handle_debug_command(&format!("inject:todos:{payload}"));
+    assert!(
+        response.starts_with("OK: injected todos message"),
+        "{response}"
+    );
+    let message = app.display_messages.last().unwrap();
+    assert_eq!(message.role, "todos");
+    assert_eq!(message.title.as_deref(), Some("Todos"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&message.content).unwrap(),
+        payload
+    );
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("✋") && text.contains("Completely blocked"),
+        "{text}"
+    );
 }

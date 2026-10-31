@@ -1,0 +1,251 @@
+name: V1 preview
+
+on:
+  push:
+    branches: [master]
+
+# A new master push cancels the sleep, CI wait, and any obsolete builds.
+# No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
+concurrency:
+  group: v1-preview-master
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  JCODE_CI: "1"
+  JCODE_RELEASE_BUILD: "1"
+  JCODE_CI_BUILD: "1"
+  JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+  JUSTRUST_TOOLCHAIN: system
+  JUSTRUST_SLOTS: "0"
+  JUSTRUST_NO_TELEMETRY: "1"
+
+jobs:
+  quiet-and-ci:
+    if: github.repository == '1jehuang/jcode' && vars.JCODE_V1_PREVIEW_ENABLED != 'false' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 205
+    steps:
+      - name: Require 15 quiet minutes on master
+        run: sleep 900
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reject superseded master commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER"
+      - name: Require successful exact-commit source CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+
+  build:
+    needs: quiet-and-ci
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: jcode-linux-x86_64
+            compat: true
+            hosted: true
+          # Match the x86 tenant host for the source-pinned justrust bootstrap.
+          # ARM execution separately consumes this job's uploaded archive.
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            artifact: jcode-linux-aarch64
+            hosted: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: jcode-macos-aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: jcode-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: jcode-windows-x86_64
+            msvc: amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: jcode-windows-aarch64
+            msvc: amd64_arm64
+            cargo_args: --no-default-features --features pdf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.msvc }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted != true
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.hosted != true
+        with:
+          key: preview-${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.hosted == true
+        with:
+          toolchain: 1.99.0
+      - name: Install pinned justrust
+        if: matrix.hosted != true
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+      - name: Install source-pinned hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        run: bash scripts/install_justrust_hosted_ci.sh
+      - name: Build Linux preview on hosted justrust
+        if: matrix.hosted == true
+        shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/build_preview_linux_hosted.sh "${{ matrix.target }}"
+      - name: Verify and package portable hosted Linux preview
+        if: matrix.compat == true
+        shell: bash
+        run: bash scripts/package_preview_linux_hosted.sh
+      - name: Build native preview
+        if: matrix.hosted != true && runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXTRA_ARGS: ${{ matrix.cargo_args }}
+          # SDK-backed hosted macOS/MSVC builds still need provisioning.
+          JUSTRUST_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          # Positional parameters also expand safely when empty on macOS Bash 3.2.
+          set --
+          if [ -n "$EXTRA_ARGS" ]; then
+            read -r -a extra_args <<< "$EXTRA_ARGS"
+            set -- "${extra_args[@]}"
+          fi
+          justrust build --local --locked --release --target "$TARGET" -p jcode --bin jcode "$@"
+      - name: Build Windows preview with MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          EXTRA_ARGS: ${{ matrix.cargo_args }}
+          JUSTRUST_DISABLE: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Git Bash prepends its Unix link.exe ahead of the MSVC linker.
+          # PowerShell preserves the developer-command-prompt PATH ordering.
+          $extraArgs = @()
+          if ($env:EXTRA_ARGS) {
+            $extraArgs = $env:EXTRA_ARGS -split '\s+'
+          }
+          & justrust build --local --locked --release --target $env:TARGET -p jcode --bin jcode @extraArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package native binary
+        if: matrix.compat != true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          extension=""
+          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
+          cp "target/$TARGET/release/jcode$extension" "dist/$ARTIFACT$extension"
+          if [ "$RUNNER_OS" = macOS ]; then
+            codesign --force --sign - --identifier com.jcode.cli "dist/$ARTIFACT"
+            codesign -dv "dist/$ARTIFACT" 2>&1 | grep -qx 'Identifier=com.jcode.cli'
+          fi
+          # Never execute cross-built ARM on the x86 packaging caller.
+          if [ "$TARGET" != aarch64-unknown-linux-gnu ]; then
+            "dist/$ARTIFACT$extension" --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
+            grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+          fi
+          tar czf "dist/$ARTIFACT.tar.gz" -C dist "$ARTIFACT$extension"
+      - name: Verify portable preview version
+        if: matrix.compat == true
+        shell: bash
+        run: |
+          dist/jcode-linux-x86_64 --no-update --no-selfdev --version | tee "$RUNNER_TEMP/preview-version.txt"
+          grep -F "$JCODE_BUILD_SEMVER" "$RUNNER_TEMP/preview-version.txt"
+      - name: Verify locked source
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  native-arm-runtime:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Consume the same immutable upload as publish, never rebuild or repackage.
+      # No hosted credentials enter this job.
+      - uses: actions/download-artifact@v4
+        with:
+          name: preview-jcode-linux-aarch64
+          path: dist
+      - name: Verify uploaded ARM archive on native Ubuntu 24.04
+        shell: bash
+        run: python3 scripts/verify_preview_arm_runtime.py dist/jcode-linux-aarch64.tar.gz
+
+  publish:
+    needs: [quiet-and-ci, build, native-arm-runtime]
+    if: github.repository == '1jehuang/jcode' && vars.JCODE_V1_PREVIEW_ENABLED != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preview-jcode-*
+          merge-multiple: true
+          path: dist
+      - name: Publish complete preview only if master is still current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist
+
+  announce:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # GITHUB_TOKEN suppresses release events. Reuse the announcement workflow's
+      # per-tag concurrency and marker-based duplicate prevention explicitly.
+      - name: Dispatch opt-in preview announcement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run discord-release.yml --repo "$GITHUB_REPOSITORY" --ref master -f "tag=$JCODE_BUILD_SEMVER"

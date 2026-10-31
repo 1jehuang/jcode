@@ -499,12 +499,12 @@ fn test_swarm_prompt_prefers_project_then_global_then_default() {
 }
 
 #[test]
-fn test_default_swarm_prompt_mentions_model_and_list_models() {
-    assert!(DEFAULT_SWARM_PROMPT.contains("list_models"));
-    assert!(DEFAULT_SWARM_PROMPT.contains("model"));
+fn test_default_swarm_prompt_defines_lane_ownership_and_parallel_work() {
+    assert!(DEFAULT_SWARM_PROMPT.contains("named todo lane is the source of truth"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("prepopulated into the worker"));
     assert!(!DEFAULT_SWARM_PROMPT.contains("Pass `effort`"));
-    assert!(DEFAULT_SWARM_PROMPT.contains("Spawn workers to implement"));
-    assert!(DEFAULT_SWARM_PROMPT.contains("Do not spawn reviewers, auditors"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("Spawn workers when work can be parallelized"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("Avoid reviewers, auditors"));
     assert!(DEFAULT_SWARM_PROMPT.contains("Only the root session may spawn agents"));
     assert!(!DEFAULT_SWARM_PROMPT.contains("swarm-deep"));
 }

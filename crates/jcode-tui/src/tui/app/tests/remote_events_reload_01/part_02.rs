@@ -121,6 +121,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 123,
             output: 45,
             cache_read_input: None,
@@ -170,6 +171,7 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -182,6 +184,8 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -226,6 +230,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -237,6 +242,8 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
                 assigned_to: None,
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::from_legacy_score(0),
@@ -293,6 +300,7 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -305,6 +313,8 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -355,6 +365,7 @@ fn test_remote_poke_status_and_off_update_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -367,6 +378,8 @@ fn test_remote_poke_status_and_off_update_state() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -419,7 +432,7 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     app.is_remote = true;
     app.session.messages.clear();
     app.push_display_message(DisplayMessage::user("hello"));
-    app.push_display_message(DisplayMessage::assistant("hi there"));
+    app.push_display_message(DisplayMessage::assistant("hi\nthere"));
 
     app.input = "/rewind".to_string();
     app.cursor_pos = app.input.len();
@@ -430,6 +443,29 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - hello"));
     assert!(last.content.contains("2 🤖 Assistant - hi there"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rows: Vec<String> =
+        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("1 👤 User - hello"))
+        .expect("first entry visible");
+    let second = rows
+        .iter()
+        .position(|row| row.contains("2 🤖 Assistant - hi there"))
+        .expect("second entry visible");
+    assert!(
+        first < second,
+        "rewind entries must occupy separate ordered rows: {rows:?}"
+    );
     assert!(!last.content.contains("No messages in conversation"));
 }
 
@@ -559,6 +595,8 @@ fn test_remote_done_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     status: "completed".into(),
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
+                    external_blocker: None,
+                    completely_blocked: None,
                     waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()

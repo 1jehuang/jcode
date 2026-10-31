@@ -510,6 +510,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                         output: *output,
                         cache_read_input: *cache_read,
                         cache_creation_input: *cache_creation,
+                        effective_budget: None,
                     }),
                 ));
             }

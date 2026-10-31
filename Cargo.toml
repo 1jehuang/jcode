@@ -10,6 +10,7 @@ members = [
     ".",
     "crates/jcode-agent-runtime",
     "crates/jcode-app-core",
+    "crates/jcode-docs-data",
     "crates/jcode-base",
     "crates/jcode-tui",
     "crates/jcode-build-meta",
@@ -186,6 +187,7 @@ unicode-width = "0.2"
 
 # PDF parsing (behind feature flag)
 jcode-build-meta = { path = "crates/jcode-build-meta" }
+jcode-docs-data = { path = "crates/jcode-docs-data" }
 # Tiny leaf helpers (console/env/fs/id) used directly by the cli layer.
 # Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
 # compiled as a separate rustc unit. It re-exports the application core

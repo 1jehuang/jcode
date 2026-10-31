@@ -153,6 +153,7 @@ include!("comm_control_tests/task_control.rs");
 include!("comm_control_tests/assign_next_dependency.rs");
 include!("comm_control_tests/assign_next_metadata.rs");
 include!("comm_control_tests/await_late_joiners.rs");
+include!("comm_control_tests/await_dependencies.rs");
 include!("comm_control_tests/await_disconnect.rs");
 include!("comm_control_tests/await_any.rs");
 include!("comm_control_tests/await_reload_deadline.rs");

@@ -1,5 +1,6 @@
 #[path = "key_handling/rewind.rs"]
 mod rewind;
+mod update;
 use rewind::*;
 
 use super::*;
@@ -7,64 +8,95 @@ use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 
-pub(in crate::tui::app) fn handle_remote_char_input(app: &mut App, c: char) {
-    input::handle_text_input(app, &c.to_string());
+/// Canonical runtime commands never run the similarly named laptop handler.
+/// Keep argument validation and destructive-action confirmation on the daemon.
+fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
+    if let Some(command) = super::ssh_host::command(input) {
+        return Some(command);
+    }
+    let mut words = input.split_whitespace();
+    let token = words.next()?;
+    let command = match token {
+        "/poke" => "poke",
+        "/improve" => "improve",
+        "/refactor" => "refactor",
+        "/fix" => "fix",
+        "/skills" => "skills",
+        "/refresh-model-list" => "refresh_model_list",
+        "/context" => "context",
+        "/info" => "info",
+        "/cache" => "cache",
+        "/agents" => "agents",
+        "/subagent-model" => "subagent_model",
+        "/autoreview" => "autoreview",
+        "/autojudge" => "autojudge",
+        "/review" => "review",
+        "/judge" => "judge",
+        "/subagent" => "subagent",
+        "/telemetry" => "telemetry",
+        "/subscription" => "subscription",
+        "/overnight" => "overnight",
+        "/productivity" | "/wrapped" => "productivity",
+        "/initiatives" | "/goals" => "initiatives",
+        "/auth" => "auth",
+        "/logout" => "logout",
+        "/remote" => "remote",
+        "/provider-test-coverage" | "/model-status" => "provider_test_coverage",
+        "/z" | "/zz" | "/zzz" | "/zstatus" => "premium",
+        _ => return None,
+    };
+    let mut args = Vec::new();
+    match token {
+        "/z" => args.push("normal".to_string()),
+        "/zz" => args.push("toggle-one".to_string()),
+        "/zzz" => args.push("toggle-zero".to_string()),
+        "/zstatus" => args.push("status".to_string()),
+        _ => {}
+    }
+    args.extend(words.map(str::to_string));
+    Some((command, args))
 }
 
-pub(in crate::tui::app) async fn send_interleave_now(
-    app: &mut App,
-    content: String,
-    images: Vec<(String, String)>,
-    remote: &mut RemoteConnection,
-) {
-    if content.trim().is_empty() {
-        return;
-    }
-    let msg_clone = content.clone();
-    match remote.soft_interrupt(content, images, false).await {
-        Err(e) => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to send interleave: {}",
-                e
-            )));
+#[cfg(test)]
+mod ssh_runtime_routing_tests {
+    #[test]
+    fn ssh_runtime_aliases_preserve_arguments_and_confirmation() {
+        for (input, command, args) in [
+            ("/logout openai", "logout", vec!["openai"]),
+            (
+                "/logout openai confirm",
+                "logout",
+                vec!["openai", "confirm"],
+            ),
+            ("/wrapped status", "productivity", vec!["status"]),
+            ("/goals", "initiatives", vec![]),
+            ("/model-status", "provider_test_coverage", vec![]),
+            ("/z", "premium", vec!["normal"]),
+            ("/zz", "premium", vec!["toggle-one"]),
+            ("/zzz", "premium", vec!["toggle-zero"]),
+            ("/zstatus", "premium", vec!["status"]),
+        ] {
+            let (actual, actual_args) = super::ssh_runtime_command(input).unwrap();
+            assert_eq!(actual, command, "{input}");
+            assert_eq!(actual_args, args, "{input}");
         }
-        Ok(request_id) => {
-            app.track_pending_soft_interrupt(request_id, msg_clone);
-            app.set_status_notice("⏭ Interleave sent");
+        for input in [
+            "/contextual skill",
+            "/home/vm/info",
+            "/logout-custom-skill",
+            "/improve-custom-skill",
+            "/fast-default-custom",
+        ] {
+            assert!(super::ssh_runtime_command(input).is_none(), "{input}");
         }
     }
 }
 
-pub(in crate::tui::app) async fn handle_remote_update_command(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-) -> Result<()> {
-    if crate::tui::is_ssh_remote() {
-        app.set_status_notice("Update the client and SSH server separately, then reconnect");
-        return Ok(());
-    }
-    reload_stale_remote_server_before_update(app, remote).await?;
-
-    let session_id = app
-        .remote_session_id
-        .clone()
-        .unwrap_or_else(|| crate::id::new_id("ses"));
-    app.start_background_client_update(session_id);
-    Ok(())
-}
-
-pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-) -> Result<bool> {
-    if app.remote_server_has_update != Some(true) {
-        return Ok(false);
-    }
-
-    app.append_reload_message("Reloading stale server before checking for client updates...");
-    remote.reload().await?;
-    Ok(true)
-}
+#[cfg(test)]
+pub(in crate::tui::app) use update::reload_stale_remote_server_before_update;
+pub(in crate::tui::app) use update::{
+    handle_remote_char_input, handle_remote_update_command, send_interleave_now,
+};
 
 /// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
 async fn apply_remote_speed_direction(
@@ -406,9 +438,8 @@ async fn handle_remote_key_internal(
     }
 
     if app.dictation_key_matches(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local dictation") {
-            return Ok(());
-        }
+        // The microphone belongs to this terminal. Completed transcripts use
+        // the same remote input path as typed prompts.
         app.handle_dictation_trigger();
         return Ok(());
     }
@@ -547,7 +578,9 @@ async fn handle_remote_key_internal(
     }
     {
         use crate::tui::TuiState as _;
-        if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+        if app.handle_swarm_agent_shortcut(code, modifiers)
+            || (app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers))
+        {
             return Ok(());
         }
     }
@@ -585,10 +618,10 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local todo view") {
-            return Ok(());
-        }
         app.toggle_todo_card();
+        if crate::tui::is_ssh_remote() {
+            remote.request_todos().await?;
+        }
         return Ok(());
     }
     if app.centered_toggle_keys.matches(code, modifiers) {
@@ -687,6 +720,10 @@ async fn handle_remote_key_internal(
     }
 
     if app.handle_command_suggestion_key(code, modifiers) {
+        return Ok(());
+    }
+
+    if input::handle_account_shortcut(app, code, modifiers) {
         return Ok(());
     }
 
@@ -1085,6 +1122,50 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
         let prepared = input::take_prepared_input(app);
+        return submit_prepared_remote_enter_input(app, remote, prepared).await;
+    }
+    Ok(())
+}
+
+/// Already-expanded input shares Enter's wire-backed handlers without touching
+/// the composer or consulting the laptop's skill catalog in SSH mode.
+pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    prepared: input::PreparedInput,
+) -> Result<()> {
+    {
+        if !prepared.images.is_empty()
+            && matches!(
+                app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()),
+                Some(
+                    app_mod::commands_cloud::CloudCommand::Move { .. }
+                        | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                        | app_mod::commands_cloud::CloudCommand::Return
+                )
+            )
+        {
+            // Alternate slash submissions already consumed the composer, so
+            // the regular handoff guard cannot see these attachments anymore.
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
+            app.push_display_message(DisplayMessage::error(
+                "Cloud handoff not queued: attached images would be lost. Send or save them, then retry. Nothing was removed.",
+            ));
+            return Ok(());
+        }
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
+            return Ok(());
+        }
+        if app.cloud_handoff_blocks_work()
+            && app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()).is_none()
+        {
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
+            app.set_status_notice(
+                "Cloud handoff pending. Use /cloud cancel before submitting more work.",
+            );
+            return Ok(());
+        }
         let trimmed = prepared.expanded.trim();
 
         // Before the SSH gate: `/local` must work from a client attached
@@ -1094,7 +1175,10 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             if crate::tui::is_ssh_remote()
                 && matches!(
                     app_mod::commands_cloud::parse_cloud_command(trimmed),
-                    Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                    Some(
+                        app_mod::commands_cloud::CloudCommand::Move { .. }
+                            | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                    )
                 )
             {
                 app.push_display_message(DisplayMessage::error(
@@ -1104,7 +1188,10 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             }
             if matches!(
                 app_mod::commands_cloud::parse_cloud_command(trimmed),
-                Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                Some(
+                    app_mod::commands_cloud::CloudCommand::Move { .. }
+                        | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
+                )
             ) {
                 // A fresh session is not on disk until its first message, and
                 // `jcode cloud move` loads it from disk. The daemon holds the
@@ -1120,7 +1207,72 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if app_mod::auth::handle_ssh_usage_command_remote(app, trimmed, remote).await? {
+            return Ok(());
+        }
+        if super::ssh_sessions::handle_command(app, remote, trimmed).await? {
+            return Ok(());
+        }
+        if crate::tui::is_ssh_remote()
+            && let Some((command, args)) = ssh_runtime_command(trimmed)
+        {
+            remote.runtime_command(command, args).await?;
+            app.set_status_notice(format!("Requested remote {command}"));
+            return Ok(());
+        }
+
+        if crate::tui::is_ssh_remote() && trimmed == "/client-reload" {
+            let Some(session_id) = app
+                .remote_session_id
+                .clone()
+                .or_else(|| app.resume_session_id.clone())
+            else {
+                app.push_display_message(DisplayMessage::system(
+                    "Wait for the remote session to connect before reloading the client."
+                        .to_string(),
+                ));
+                return Ok(());
+            };
+            app.save_input_for_reload(&session_id);
+            app.reload_requested = Some(session_id);
+            app.should_quit = true;
+            return Ok(());
+        }
+        if app_mod::commands_dispatch::handle_ssh_presentation_command(app, trimmed) {
+            if matches!(trimmed.split_whitespace().next(), Some("/todos" | "/todo")) {
+                remote.request_todos().await?;
+            }
+            return Ok(());
+        }
+
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
+            return Ok(());
+        }
+
+        if crate::tui::is_ssh_remote() && trimmed.starts_with('/') {
+            let token = trimmed.split_whitespace().next();
+            if !app_mod::registered_command_names().any(|name| Some(name) == token) {
+                // Local prefix parsers are not a remote skill resolver. In
+                // particular /plan-custom and /improve-custom must not become
+                // client-side loop commands or consult laptop session storage.
+                return submit_prepared_remote_input(app, remote, prepared).await;
+            }
+        }
+
+        if crate::tui::is_ssh_remote() && trimmed.split_whitespace().next() == Some("/git") {
+            if matches!(trimmed, "/git" | "/git status") {
+                // The daemon resolves its own CWD. Never consult local git or
+                // interpolate the remote working directory into a shell string.
+                super::input_dispatch::submit_remote_input_shell(
+                    app,
+                    remote,
+                    prepared.raw_input,
+                    "git status --short --branch".to_string(),
+                )
+                .await?;
+            } else {
+                app.push_display_message(DisplayMessage::error("Usage: /git or /git status"));
+            }
             return Ok(());
         }
 
@@ -1238,7 +1390,9 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::model_context::is_refresh_model_list_command(trimmed) {
+        if app_mod::model_context::is_refresh_model_list_command(trimmed)
+            || matches!(trimmed, "/model refresh" | "/models refresh")
+        {
             app.pending_remote_model_refresh_snapshot = Some((
                 app.remote_available_entries.clone(),
                 app.remote_model_options.clone(),
@@ -1900,7 +2054,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             }
             // Attached images belong to the forked prompt, not the
             // parent's next message.
-            let images = std::mem::take(&mut app.pending_images);
+            let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
@@ -1910,17 +2064,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed == "/todo" || trimmed == "/todos" || trimmed.starts_with("/todos ") {
+            app_mod::todos_view::handle_todos_view_command(app, trimmed);
+            if crate::tui::is_ssh_remote() {
+                remote.request_todos().await?;
+            }
+            return Ok(());
+        }
+
         if trimmed == "/observe"
             || trimmed == "/observe on"
             || trimmed == "/observe off"
             || trimmed == "/observe status"
-            || trimmed == "/todo"
-            || trimmed == "/todos"
-            || trimmed == "/todos card"
-            || trimmed == "/todos panel"
-            || trimmed == "/todos on"
-            || trimmed == "/todos off"
-            || trimmed == "/todos status"
             || trimmed == "/splitview"
             || trimmed == "/splitview on"
             || trimmed == "/splitview off"
@@ -2738,6 +2893,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
         }
 
         if trimmed.starts_with('/') {
+            if crate::tui::is_ssh_remote() {
+                // Known client commands must never fall through as an agent
+                // prompt. Unknown skills and absolute paths belong to the VM.
+                let token = trimmed.split_whitespace().next();
+                if (app_mod::registered_command_names().any(|name| Some(name) == token)
+                    || app_mod::commands_dispatch::ssh_presentation_command(trimmed))
+                    && app_mod::commands_dispatch::dispatch_local_command(app, trimmed)
+                {
+                    return Ok(());
+                }
+                return submit_prepared_remote_input(app, remote, prepared).await;
+            }
             submit_remote_slash_input(app, remote, prepared).await?;
             return Ok(());
         }

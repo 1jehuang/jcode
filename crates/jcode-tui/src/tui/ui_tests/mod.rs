@@ -2,6 +2,9 @@ use super::*;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
 
+#[path = "../session_picker/live_chrome_parity_tests.rs"]
+mod picker_chrome_parity;
+
 /// Delegates to the single shared render-state lock so viewport-snapshot tests
 /// serialize against every other rendering test, not just each other (#593).
 fn viewport_snapshot_test_lock() -> crate::tui::ui::RenderStateTestGuard {
@@ -240,10 +243,14 @@ struct TestState {
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     pinned_todos_payload: Option<String>,
+    justrust_status: Option<crate::tui::justrust_status::StatusRow>,
     swarm_panel_full_page: bool,
 }
 
 impl crate::tui::TuiState for TestState {
+    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.as_ref()
+    }
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload.as_deref()
     }
@@ -604,6 +611,7 @@ fn reset_prompt_viewport_state_for_test() {
 
 #[path = "pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
+mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;

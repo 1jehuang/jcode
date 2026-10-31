@@ -99,7 +99,9 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
 
     assert!(app.session_picker_overlay.is_none());
     assert_eq!(
-        app.workspace_client.take_pending_resume_session().as_deref(),
+        app.workspace_client
+            .take_pending_resume_session()
+            .as_deref(),
         Some("session_here_123")
     );
 }
@@ -117,6 +119,53 @@ fn slash_resume_opens_session_picker_overlay_locally() {
     assert_eq!(app.session_picker_mode, SessionPickerMode::Resume);
     assert!(app.pending_session_picker_load.is_some());
     assert!(app.input.is_empty());
+}
+
+#[test]
+fn session_picker_cached_update_keeps_fresh_refresh_pending() {
+    use crate::tui::session_picker::{SessionListUpdate, SessionPicker};
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(SessionPicker::loading()));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+
+    sender
+        .send(SessionListUpdate::Cached((vec![], vec![])))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app.pending_session_picker_load.is_some());
+    assert!(!app.poll_session_picker_load());
+
+    sender
+        .send(SessionListUpdate::Fresh(Ok((vec![], vec![]))))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app.pending_session_picker_load.is_none());
+}
+
+#[test]
+fn session_picker_closed_overlay_is_not_reopened_by_cached_or_fresh_results() {
+    use crate::tui::session_picker::SessionListUpdate;
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = None;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+
+    sender
+        .send(SessionListUpdate::Cached((vec![], vec![])))
+        .unwrap();
+    assert!(!app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_none());
+    sender
+        .send(SessionListUpdate::Fresh(Ok((vec![], vec![]))))
+        .unwrap();
+    assert!(!app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_none());
+    assert!(app.pending_session_picker_load.is_none());
 }
 
 #[test]
@@ -326,10 +375,7 @@ fn slash_provider_test_coverage_with_args_shows_provider_detail() {
             .starts_with("# Provider test coverage")
     );
     assert!(app.model_status_content.contains("Provider: fpt"));
-    assert!(
-        app.model_status_content
-            .contains("Model: FPT.AI-KIE-v1.7")
-    );
+    assert!(app.model_status_content.contains("Model: FPT.AI-KIE-v1.7"));
 }
 
 #[test]
@@ -606,22 +652,6 @@ fn test_triage_command_includes_focus_in_prompt() {
     assert!(prompt.contains("Triage the open GitHub issues"));
     assert!(prompt.contains("Additional focus from the user: only crash reports"));
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[test]
 fn test_help_topic_shows_catchup_command_details() {
@@ -1090,10 +1120,7 @@ fn test_fork_command_with_prompt_forks_session() {
     app.input = "/fork try the other approach".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("created for the next prompt"));
     let session_id = msg
@@ -1126,10 +1153,7 @@ fn test_fork_command_without_prompt_forks_idle_session() {
     app.input = "/fork".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("✂ Fork →"));
     let session_id = msg
@@ -1408,7 +1432,9 @@ fn test_observe_updates_latest_tool_context_only() {
         id: "tool_1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs", "start_line": 1, "end_line": 10}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&tool_call);
 
     let page = app.side_panel.focused_page().expect("missing observe page");
@@ -1447,7 +1473,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_read".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_result(&read_tool, "fn main() {}", false, Some("read"));
     let before = app
         .side_panel
@@ -1460,7 +1488,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_side_panel".to_string(),
         name: "side_panel".to_string(),
         input: serde_json::json!({"action": "write", "page_id": "plan"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&noise_tool);
     app.observe_tool_result(&noise_tool, "ok", false, Some("side_panel"));
 

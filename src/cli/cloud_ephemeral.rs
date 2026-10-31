@@ -174,16 +174,13 @@ fn print_machine(machine: &Machine, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(machine)?);
     } else {
+        let name_suffix = match &machine.name {
+            Some(name) => format!("  {name}"),
+            None => String::new(),
+        };
         println!(
             "{}  {}  expires {}{}",
-            machine.id,
-            machine.connection.state,
-            machine.expires_at,
-            machine
-                .name
-                .as_ref()
-                .map(|n| format!("  {n}"))
-                .unwrap_or_default()
+            machine.id, machine.connection.state, machine.expires_at, name_suffix
         );
     }
     Ok(())
@@ -203,15 +200,14 @@ fn create_body(
             .to_string(),
         None => uuid::Uuid::new_v4().to_string(),
     };
-    if let Some(name) = &name {
-        if name.is_empty()
+    if let Some(name) = &name
+        && (name.is_empty()
             || name.len() > 64
             || !name
                 .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        {
-            bail!("name must be 1..64 letters, digits, hyphens or underscores");
-        }
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)))
+    {
+        bail!("name must be 1..64 letters, digits, hyphens or underscores");
     }
     let mut body = serde_json::json!({"request_id": request_id, "ttl_seconds": ttl_seconds});
     if let Some(name) = name {
@@ -244,7 +240,9 @@ pub(crate) fn run_cli(action: CloudEphemeralCommand) -> Result<()> {
             // Printed before I/O so an uncertain network outcome can be retried safely.
             eprintln!(
                 "[jcode cloud] request-id: {} (reuse with --request-id if interrupted)",
-                body["request_id"].as_str().unwrap()
+                body["request_id"]
+                    .as_str()
+                    .context("missing provisioning request ID")?
             );
             let machine: Machine =
                 cloud_managed::request_json("POST", "cloud/machines", Some(body))?;

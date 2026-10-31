@@ -47,6 +47,95 @@ class DiscordReleaseTests(unittest.TestCase):
     def setUp(self) -> None:
         WebhookHandler.response_status = 200
 
+    def test_formats_preview_as_explicit_opt_in_with_download_and_commands(self) -> None:
+        message = MODULE.format_message(
+            tag="v1.0.0-preview.12", name="v1 preview", body="@everyone stable notes",
+            url="https://example.test/releases/v1.0.0-preview.12",
+        )
+        self.assertIn("v1 Preview · opt-in", message)
+        self.assertIn("not a stable release", message)
+        self.assertIn("https://example.test/releases/v1.0.0-preview.12", message)
+        self.assertIn("jcode update --channel preview", message)
+        self.assertIn("jcode update --channel stable", message)
+        self.assertIn("current stable has no `--channel` option", message)
+        self.assertIn("Download your OS/architecture", message)
+        self.assertIn("SHA256SUMS", message)
+        self.assertIn("extract the entire archive", message)
+        self.assertIn("full path", message)
+        self.assertIn("reinstall stable", message)
+        self.assertIn("stable `v1.0.0` tag", message)
+        self.assertNotIn("@everyone", message)
+        self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+
+    def test_preview_includes_summary_categories_and_commits_before_setup(self) -> None:
+        notes = (
+            "## What changed\n3 commits in this preview.\n"
+            "### Fixes\n- Restore model switching.\n"
+            "## Commits\n- [abc1234](https://example.test/commit/abc1234) Fix picker\n"
+        )
+        message = MODULE.format_message(
+            tag="v1.0.0-preview.12", name="Preview",
+            body=notes + "## First-time preview setup\nDO NOT DUPLICATE SETUP",
+            url="https://example.test/releases/preview",
+        )
+        self.assertIn(notes.strip(), message)
+        self.assertLess(message.index("Fix picker"), message.index("First time:"))
+        self.assertNotIn("DO NOT DUPLICATE SETUP", message)
+        self.assertNotIn("Full notes:", message)
+        self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+
+    def test_preview_long_notes_keep_guidance_and_full_notes_link(self) -> None:
+        for url in ("https://example.test/preview", "https://example.test/" + "x" * 236,
+                    "https://example.test/" + "x" * 10_000):
+            with self.subTest(url_length=len(url)):
+                message = MODULE.format_message(
+                    tag="v1.0.0-preview.12", name="Preview",
+                    body="## What changed\n500 commits.\n## Commits\n" + "- Fix picker\n" * 5_000,
+                    url=url,
+                )
+                self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+                self.assertIn("500 commits.", message)
+                self.assertIn("- Fix picker", message)
+                self.assertIn("… Full notes: <", message)
+                self.assertIn("not upgraded automatically", message)
+                self.assertIn("SHA256SUMS", message)
+                self.assertIn("jcode update --channel stable", message)
+                expected = url if len(url) <= 256 else "https://github.com/1jehuang/jcode/releases"
+                self.assertIn(f"Download binaries and notes: <{expected}>", message)
+
+    def test_preview_without_summary_keeps_install_guidance(self) -> None:
+        for body in ("", "Legacy notes", "## What changed\n\n## First-time preview setup\nsetup"):
+            with self.subTest(body=body):
+                message = MODULE.format_message(
+                    tag="v1.0.0-preview.12", name="Preview", body=body,
+                    url="https://example.test/preview",
+                )
+                self.assertNotIn("## What changed", message)
+                self.assertIn("First time:", message)
+                self.assertIn("opt-in", message)
+                self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+
+    def test_preview_announcement_requires_public_prerelease(self) -> None:
+        for flags in ({"draft": True, "prerelease": True},
+                      {"draft": False, "prerelease": False}):
+            with (self.subTest(flags=flags),
+                  mock.patch.object(MODULE, "fetch_release", return_value=flags),
+                  mock.patch.object(MODULE, "post_to_discord") as post,
+                  self.assertRaises(RuntimeError)):
+                MODULE.announce_release(repository="owner/repo", tag="v1.0.0-preview.12",
+                                        token="token", webhook_url="https://discord.test/webhook")
+            post.assert_not_called()
+
+    def test_preview_reuses_tag_specific_duplicate_prevention(self) -> None:
+        tag = "v1.0.0-preview.12"
+        release = {"draft": False, "prerelease": True,
+                   "body": MODULE.announcement_marker(tag)}
+        with (mock.patch.object(MODULE, "fetch_release", return_value=release),
+              mock.patch.object(MODULE, "post_to_discord") as post):
+            self.assertIsNone(MODULE.announce_release(repository="owner/repo", tag=tag,
+                              token="token", webhook_url="https://discord.test/webhook"))
+        post.assert_not_called()
+
     def test_formats_release_and_removes_platform_availability(self) -> None:
         body = """## Highlights
 

@@ -322,14 +322,14 @@ impl DisplayMessage {
         let header = prefix.strip_prefix("[tool timing:")?.split_once(']')?.0;
         let value = header.split_once("duration=")?.1.trim();
         let seconds = if let Some(ms) = value.strip_suffix("ms") {
-            ms.parse::<u64>().ok()? as f64 / 1000.0
+            parse_timing_number::<u64>(ms)? as f64 / 1000.0
         } else if let Some((minutes, seconds)) = value.split_once("m ") {
-            minutes.parse::<u64>().ok()? as f64 * 60.0
-                + seconds.strip_suffix('s')?.parse::<u64>().ok()? as f64
+            parse_timing_number::<u64>(minutes)? as f64 * 60.0
+                + parse_timing_number::<u64>(seconds.strip_suffix('s')?)? as f64
         } else if let Some(minutes) = value.strip_suffix('m') {
-            minutes.parse::<u64>().ok()? as f64 * 60.0
+            parse_timing_number::<u64>(minutes)? as f64 * 60.0
         } else {
-            value.strip_suffix('s')?.parse::<f64>().ok()?
+            parse_timing_number::<f64>(value.strip_suffix('s')?)?
         };
         (seconds.is_finite() && seconds >= 0.0 && seconds <= f32::MAX as f64)
             .then_some(seconds as f32)
@@ -599,7 +599,6 @@ mod tests {
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
             response_stats: None,
-            tool_duration_ms: None,
             role: "assistant".to_string(),
             content: "done".to_string(),
             tool_calls: vec!["read".to_string()],
@@ -662,5 +661,19 @@ mod tests {
             latest_user_transcript_preview(messages.iter().copied(), 20),
             Some("hello world".to_string())
         );
+    }
+}
+
+/// Reject malformed or partial timing fields without dropping their diagnostics.
+fn parse_timing_number<T: std::str::FromStr>(value: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match value.parse() {
+        Ok(number) => Some(number),
+        Err(error) => {
+            jcode_logging::debug(&format!("Ignoring malformed tool timing number: {error}"));
+            None
+        }
     }
 }

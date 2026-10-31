@@ -23,12 +23,13 @@ pub(super) fn show_remote_rewind_history(app: &mut App) {
             "assistant" => "🤖 Assistant",
             _ => "💬 Message",
         };
-        let preview = crate::util::truncate_str(&msg.content, 80);
+        let content = msg.content.replace('\n', " ");
+        let preview = crate::util::truncate_str(content.trim(), 80);
         history.push_str(&format!("  {} {} - {}\n", i + 1, role_str, preview));
     }
     history.push_str("\nUse /rewind N to rewind to message N (removes all messages after).");
     history.push_str(" After rewinding, use /rewind undo to restore the removed messages.");
-    app.push_display_message(DisplayMessage::system(history));
+    app.push_display_message(DisplayMessage::system(history).with_title("Rewind"));
 }
 
 pub(super) async fn handle_remote_rewind_command(

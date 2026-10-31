@@ -200,6 +200,9 @@ fn selected_route_notice_text(
 }
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
+    if picker.kind == crate::tui::PickerKind::Account {
+        return Some(" [ higher priority · ] lower priority · Ctrl+R automatic · Enter select");
+    }
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
         && picker.entries.iter().any(|entry| {
             matches!(
@@ -310,6 +313,34 @@ fn account_picker_entry_title(
     (format!("{}{}", provider_prefix, display_name), prefix_chars)
 }
 
+/// Normalize over the visible effective tiers, not their absolute values. A
+/// picker containing only a single tier always gets full brightness.
+fn account_priority_color(
+    base: Color,
+    priority: u32,
+    priorities: impl Iterator<Item = u32>,
+) -> Color {
+    let mut tiers: Vec<_> = priorities.collect();
+    tiers.sort_unstable();
+    tiers.dedup();
+    let rank = tiers.binary_search(&priority).unwrap_or(0);
+    let dimming = if tiers.len() < 2 {
+        0
+    } else {
+        rank * 40 / (tiers.len() - 1)
+    };
+    if dimming == 0 {
+        return base;
+    }
+    let (r, g, b) = match base {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+        _ => return base,
+    };
+    let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+    Color::Rgb(scale(r), scale(g), scale(b))
+}
+
 fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'static str {
     entry.account_state_label().unwrap_or("-")
 }
@@ -346,7 +377,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
             .min(title_cap)
             .min(budget.max(min_title_width.min(budget)));
 
-        return marker_width + title_width + state_width;
+        return (marker_width + title_width + state_width).min(max_width);
     }
 
     let mut max_model_len = display_width(picker.primary_label());
@@ -858,7 +889,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             }) => Some(rgb(150, 190, 255)),
             _ => None,
         };
-        let primary_style = if unavailable {
+        let mut primary_style = if unavailable {
             Style::default().fg(rgb(80, 80, 80))
         } else if is_row_selected && col == 0 {
             Style::default().fg(Color::White).bg(rgb(60, 60, 80)).bold()
@@ -875,6 +906,21 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         } else {
             Style::default().fg(rgb(200, 200, 220))
         };
+
+        if is_account_picker
+            && !is_row_selected
+            && let Some(priority) = entry.account_priority()
+            && let Some(base) = primary_style.fg
+        {
+            primary_style = primary_style.fg(account_priority_color(
+                base,
+                priority,
+                picker
+                    .filtered
+                    .iter()
+                    .filter_map(|&index| picker.entries[index].account_priority()),
+            ));
+        }
 
         if is_account_picker {
             let (title_text, title_prefix_chars) =

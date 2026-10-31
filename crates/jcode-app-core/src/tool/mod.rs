@@ -33,6 +33,7 @@ pub mod applet;
 mod goal;
 pub mod inflight;
 mod jcode_docs;
+pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
 mod name_suggestions;
@@ -63,13 +64,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) fn tool_name_is_allowed(allowed: &HashSet<String>, name: &str) -> bool {
-    allowed.contains(name)
-        || (allowed.contains("mcp") && is_mcp_tool_name(name))
-        || (name == "mcp" && allowed.iter().any(|tool| is_mcp_tool_name(tool)))
-        || (is_fixed_mcp_tool(name) && allowed.iter().any(|tool| tool.starts_with("mcp__")))
-}
-
+#[path = "name_policy.rs"]
+mod name_policy;
+pub(crate) use name_policy::tool_name_is_allowed;
 /// The unified schema may be exposed for a restricted MCP allowlist. That
 /// must not grant management privileges or bypass a disabled legacy surface.
 fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {
@@ -989,7 +986,8 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
@@ -1081,17 +1079,28 @@ impl Registry {
         .await;
 
         // User-configured pre_tool gate: external policy hook that can block
-        // this call (exit 2). Skipped entirely when not configured.
+        // this call (exit 2 or JSON deny), rewrite its input, or attach
+        // context for the model. Skipped entirely when not configured.
+        let mut input = input;
+        let mut gate_context: Vec<String> = Vec::new();
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let decision = crate::hooks::run_pre_tool_gate(
+            let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),
                 resolved_name,
                 &input_json,
             )
             .await;
-            if let crate::hooks::GateDecision::Block { reason } = decision {
+            gate_context = outcome.additional_context;
+            if let Some(updated) = outcome.updated_input {
+                input = updated;
+            }
+            if let crate::hooks::GateDecision::Block { mut reason } = outcome.decision {
+                for context in &gate_context {
+                    reason.push_str("\n\n[pre_tool context]\n");
+                    reason.push_str(context);
+                }
                 let mut fields =
                     Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
                 fields.push(("block_reason".to_string(), reason.clone()));
@@ -1122,10 +1131,23 @@ impl Registry {
                 fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
                 fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
                 crate::logging::event_warn("TOOL_LIFECYCLE", fields);
-                return Err(error);
+                if gate_context.is_empty() {
+                    return Err(error);
+                }
+                return Err(anyhow::anyhow!(
+                    "{error:#}\n\n[pre_tool context]\n{}",
+                    gate_context.join("\n")
+                ));
             }
         };
 
+        for context in &gate_context {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str("\n[pre_tool context]\n");
+            output.output.push_str(context);
+        }
         Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
@@ -1894,33 +1916,8 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod mcp_allow_list_tests {
-    use super::{tool_name_is_allowed, tool_name_is_disabled};
-    use std::collections::HashSet;
-
-    #[test]
-    fn allowing_mcp_also_allows_dynamic_server_tools() {
-        let allowed = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_allowed(&allowed, "mcp"));
-        assert!(tool_name_is_allowed(&allowed, "mcp__filesystem__read_file"));
-        assert!(!tool_name_is_allowed(&allowed, "mcpish"));
-        assert!(!tool_name_is_allowed(&allowed, "bash"));
-    }
-
-    #[test]
-    fn disabling_mcp_also_disables_dynamic_server_tools() {
-        let disabled = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_disabled(&disabled, "mcp"));
-        assert!(tool_name_is_disabled(
-            &disabled,
-            "mcp__filesystem__read_file"
-        ));
-        assert!(!tool_name_is_disabled(&disabled, "mcpish"));
-        assert!(!tool_name_is_disabled(&disabled, "bash"));
-    }
-}
+#[path = "registry_mcp_allow_list_tests.rs"]
+mod mcp_allow_list_tests;
 
 #[cfg(test)]
 mod tests;

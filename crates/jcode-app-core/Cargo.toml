@@ -31,6 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+toml = "0.8"
 
 # CLI
 
@@ -125,6 +126,9 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+# The application consumes a corpus registered by the executable. Only its
+# own documentation tests need to embed the real corpus directly.
+jcode-docs-data = { path = "../jcode-docs-data" }
 # Paused-time browser tests must compile when this package is tested alone,
 # without inheriting test-util from another workspace package's dev-dependencies.
 tokio = { version = "1", features = ["test-util"] }

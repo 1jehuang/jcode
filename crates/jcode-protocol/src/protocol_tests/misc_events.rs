@@ -682,11 +682,9 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
             ..
         }
     ));
-    assert!(
-        serde_json::to_value(&legacy)?
-            .get("native_ssh_protocol")
-            .is_none()
-    );
+    assert!(serde_json::to_value(&legacy)?
+        .get("native_ssh_protocol")
+        .is_none());
     Ok(())
 }
 
@@ -737,5 +735,48 @@ fn tool_done_duration_ms_roundtrip_and_legacy_omission() -> Result<()> {
         serde_json::to_value(legacy)?,
         serde_json::json!({"type":"tool_done","id":"t1","name":"bash","output":"ok"})
     );
+    Ok(())
+}
+
+#[test]
+fn context_cap_wire_roundtrip() -> Result<()> {
+    for effective_budget in [None, Some(90_000)] {
+        let mut wire = serde_json::json!({"type": "tokens", "input": 10, "output": 5});
+        if let Some(budget) = effective_budget {
+            wire["effective_budget"] = serde_json::json!(budget);
+        }
+        let decoded: ServerEvent = serde_json::from_value(wire)?;
+        assert!(
+            matches!(decoded, ServerEvent::TokenUsage { effective_budget: actual, .. } if actual == effective_budget)
+        );
+    }
+    for cap in [None, Some(0), Some(100_000)] {
+        let request = Request::SetContextCap {
+            id: 1971,
+            session_id: "s1".into(),
+            max_context_tokens: cap,
+        };
+        let decoded = parse_request_json(&serde_json::to_string(&request)?)?;
+        assert_eq!(decoded.id(), 1971);
+        assert!(
+            matches!(decoded, Request::SetContextCap { max_context_tokens, .. } if max_context_tokens == cap)
+        );
+        let event = ServerEvent::ContextCapChanged {
+            id: 1971,
+            session_id: "s1".into(),
+            max_context_tokens: cap.filter(|n| *n != 0),
+            effective_budget: 90_000,
+        };
+        let wire = serde_json::to_value(event)?;
+        assert_eq!(wire["type"], "context_cap_changed");
+        let decoded: ServerEvent = serde_json::from_value(wire)?;
+        assert!(matches!(
+            decoded,
+            ServerEvent::ContextCapChanged {
+                effective_budget: 90_000,
+                ..
+            }
+        ));
+    }
     Ok(())
 }

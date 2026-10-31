@@ -189,7 +189,13 @@ pub(crate) fn create_test_app() -> App {
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Keep background-task semantics without allocating a host-sized worker
+    // pool per fixture (hosted machines can expose dozens of CPU cores).
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -203,7 +209,11 @@ fn create_named_provider_test_app(name: &'static str, model: &'static str) -> Ap
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(NamedMockProvider { name, model });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -229,7 +239,11 @@ fn create_refresh_summary_test_app(summary: crate::provider::ModelCatalogRefresh
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(RefreshSummaryProvider { summary });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -246,7 +260,11 @@ fn create_openrouter_spec_capture_test_app() -> (App, StdArc<StdMutex<Vec<String
     let provider: Arc<dyn Provider> = Arc::new(OpenRouterSpecCaptureProvider {
         set_model_calls: set_model_calls.clone(),
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;

@@ -16,6 +16,7 @@ pub(super) struct Target {
     binary: String,
     cwd: Option<String>,
     socket: Option<String>,
+    account_label: Option<String>,
 }
 
 impl Target {
@@ -30,6 +31,7 @@ impl Target {
             binary: std::env::var("JCODE_SSH_BINARY").unwrap_or_else(|_| "jcode".into()),
             cwd: std::env::var("JCODE_SSH_WORKING_DIR").ok(),
             socket: std::env::var("JCODE_SSH_SERVER_SOCKET").ok(),
+            account_label: None,
         };
         if target.host.starts_with('-')
             || target.host.chars().any(char::is_whitespace)
@@ -42,6 +44,11 @@ impl Target {
             return Err("Invalid SSH login configuration");
         }
         Ok(target)
+    }
+
+    pub(super) fn with_account_label(mut self, label: &str) -> Self {
+        self.account_label = Some(label.to_string());
+        self
     }
 
     fn command(&self, provider: &str, flow: &str, operation: Operation) -> tokio::process::Command {
@@ -93,8 +100,18 @@ impl Target {
         } else if operation == Operation::Import {
             format!("auth import --provider {} --stdin --json", quote(provider))
         } else {
+            // Only Begin accepts --account. Completion and cancellation use
+            // the account pinned in the remote flow, and reject --account.
+            let account = if operation == Operation::Begin {
+                self.account_label
+                    .as_deref()
+                    .map(|label| format!(" --account {}", quote(label)))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             format!(
-                "login --provider {} --no-browser --json --flow-id {} {}",
+                "login --provider {} --no-browser --json --flow-id {} {}{account}",
                 quote(provider),
                 quote(flow),
                 operation.flag(),
@@ -482,12 +499,47 @@ impl Drop for Task {
 mod tests {
     use super::*;
     #[test]
+    fn named_ssh_login_only_passes_account_during_begin() {
+        let target = Target {
+            host: "test-host".into(),
+            binary: "jcode".into(),
+            cwd: None,
+            socket: None,
+            account_label: Some("work ' team".into()),
+        };
+        for operation in [
+            Operation::Begin,
+            Operation::Callback,
+            Operation::Code,
+            Operation::Complete,
+            Operation::Cancel,
+            Operation::Status,
+        ] {
+            let cmd = target.command("openai", "safe_flow", operation);
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let remote = args.last().unwrap();
+            if operation == Operation::Begin {
+                assert!(remote.contains("--account 'work '\\'' team'"));
+            } else {
+                assert!(!remote.contains("--account"));
+            }
+            assert!(args.iter().any(|arg| arg == "ForwardAgent=no"));
+            assert!(args.iter().any(|arg| arg == "ClearAllForwardings=yes"));
+        }
+    }
+
+    #[test]
     fn ssh_status_reuses_hardened_target_without_login_or_import_arguments() {
         let target = Target {
             host: "test-host".into(),
             binary: "/srv/a'b/jcode".into(),
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
+            account_label: None,
         };
         let cmd = target.command("unused-provider", "unused-flow", Operation::Status);
         let args: Vec<_> = cmd
@@ -648,6 +700,7 @@ mod tests {
             binary: "/srv/a'b/jcode".into(),
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
+            account_label: None,
         };
         let cmd = target.command("openai", "random_flow", Operation::Callback);
         let args: Vec<_> = cmd
@@ -689,6 +742,7 @@ mod tests {
             binary: "/srv/a'b/jcode".into(),
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
+            account_label: None,
         };
         for provider in ["openai", "claude"] {
             let cmd = target.command(provider, "unused-flow", Operation::Import);

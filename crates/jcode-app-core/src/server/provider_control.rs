@@ -83,44 +83,9 @@ pub(super) fn try_available_models_catalog(
     Some(super::available_models_cache::for_agent(&agent_guard))
 }
 
-fn format_auth_catalog_refresh_complete(
-    provider_name: Option<&str>,
-    provider_model: Option<&str>,
-    summary: &ModelCatalogRefreshSummary,
-    has_warning: bool,
-) -> String {
-    let provider_label = provider_name.unwrap_or("provider");
-    let title = provider_model
-        .map(|model| format!("**Model ready:** `{model}`"))
-        .unwrap_or_else(|| "**Model access refreshed**".to_string());
-    let changed = summary.models_added > 0
-        || summary.models_removed > 0
-        || summary.routes_added > 0
-        || summary.routes_removed > 0
-        || summary.routes_changed > 0;
-    let catalog_status = if has_warning {
-        if changed {
-            format!("{provider_label} catalog changed; some routes missing. Use `/model`.")
-        } else {
-            format!("{provider_label} catalog unchanged; some routes missing. Use `/model`.")
-        }
-    } else if changed {
-        format!(
-            "{provider_label} catalog changed: models +{}/-{}, routes +{}/-{}/~{}. Use `/model`.",
-            summary.models_added,
-            summary.models_removed,
-            summary.routes_added,
-            summary.routes_removed,
-            summary.routes_changed,
-        )
-    } else {
-        format!(
-            "{provider_label} catalog unchanged: {} models, {} routes. Use `/model`.",
-            summary.model_count_after, summary.route_count_after,
-        )
-    };
-    format!("{title}\n{catalog_status}")
-}
+#[path = "provider_control/catalog_activity.rs"]
+mod catalog_activity;
+use catalog_activity::format_auth_catalog_refresh_complete;
 
 fn log_provider_control_deferred(operation: &'static str, id: u64) -> Instant {
     let queued_at = Instant::now();
@@ -816,6 +781,11 @@ pub(super) async fn handle_refresh_models(
                 }
             }
         };
+        // Unified refresh can return an error after publishing fresh catalogs
+        // for other providers. Send the current snapshot on both paths.
+        crate::bus::Bus::global().publish_models_updated();
+        let event = available_models_updated_event(&agent_clone).await;
+        let _ = client_event_tx_clone.send(event);
         match result {
             Ok(_) => {
                 send_catalog_activity(
@@ -825,9 +795,6 @@ pub(super) async fn handle_refresh_models(
                         Some(95),
                     ),
                 );
-                crate::bus::Bus::global().publish_models_updated();
-                let event = available_models_updated_event(&agent_clone).await;
-                let _ = client_event_tx_clone.send(event);
                 send_catalog_activity(
                     &client_event_tx_clone,
                     &crate::message::format_model_refresh_progress_markdown(
@@ -865,6 +832,48 @@ fn send_catalog_activity(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, m
             tldr: None,
         },
         message: message.to_string(),
+    });
+}
+
+/// Apply at a turn boundary, without blocking the connection's request reader.
+pub(super) async fn handle_set_context_cap(
+    id: u64,
+    session_id: String,
+    max_context_tokens: Option<usize>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let agent = Arc::clone(agent);
+    let client_event_tx = client_event_tx.clone();
+    crate::runtime_activity::spawn(async move {
+        let mut agent = agent.lock().await;
+        if agent.session_id() != session_id {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!(
+                    "target session changed before context cap could be applied: {session_id}"
+                ),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        match agent.set_context_cap(max_context_tokens).await {
+            Ok(effective_budget) => {
+                let _ = client_event_tx.send(ServerEvent::ContextCapChanged {
+                    id,
+                    session_id: agent.session_id().to_string(),
+                    max_context_tokens: max_context_tokens.filter(|cap| *cap > 0),
+                    effective_budget,
+                });
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
+            }
+        }
     });
 }
 
@@ -1438,6 +1447,84 @@ pub(super) async fn handle_invalidate_anthropic_usage(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+fn account_switch_selection(
+    agent: &Agent,
+    provider_kind: &str,
+    account_label: &str,
+) -> anyhow::Result<RouteSelection> {
+    use jcode_provider_core::{ActiveProvider, RuntimeKey};
+    let (target, runtime_key, method, provider_label, provider_id) = match provider_kind {
+        "anthropic" => (
+            ActiveProvider::Claude,
+            RuntimeKey::ClaudeOAuth,
+            "claude-oauth",
+            "Claude",
+            "claude",
+        ),
+        "openai" => (
+            ActiveProvider::OpenAI,
+            RuntimeKey::OpenAIOAuth,
+            "openai-oauth",
+            "OpenAI",
+            "openai",
+        ),
+        _ => anyhow::bail!("Unsupported account provider: {provider_kind}"),
+    };
+    let provider = agent.provider_handle();
+    let model = if jcode_provider_core::parse_provider_hint(provider.name()) == Some(target) {
+        // A same-provider account switch must not silently select another model.
+        provider.model()
+    } else {
+        let routes = provider.model_routes();
+        let models: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route.available
+                    && RouteSelection::from_model_route(route).runtime_key == runtime_key
+            })
+            .map(|route| route.model.as_str())
+            .collect();
+        crate::auth::lifecycle::preferred_model_for_provider(provider_id, &models)
+            .or_else(|| models.first().map(|model| (*model).to_string()))
+            .or_else(|| {
+                crate::auth::lifecycle::default_model_for_provider(provider_id).map(str::to_owned)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No OAuth model is available for {provider_label}"))?
+    };
+    Ok(RouteSelection {
+        model,
+        runtime_key,
+        api_method: format!("{method}@{account_label}"),
+        provider_label: provider_label.to_string(),
+        detail: String::new(),
+    })
+}
+
+fn apply_account_switch(
+    id: u64,
+    provider_kind: &str,
+    account_label: &str,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let current = agent.provider_model();
+    let result = account_switch_selection(agent, provider_kind, account_label)
+        .and_then(|selection| agent.set_route_selection(&selection))
+        .map(|_| {
+            agent.reset_provider_session();
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        });
+    // A global login preference is not this session's credential. The explicit
+    // route binds a replacement runtime to the requested account and persists
+    // that pin. Acknowledge it even when the model itself did not change.
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
@@ -1471,20 +1558,27 @@ fn spawn_account_switch_refresh(
                 ("request_id", id.to_string()),
             ],
         );
-        let provider = if let Ok(mut agent_guard) = agent.try_lock() {
-            let provider = agent_guard.provider_handle();
-            agent_guard.reset_provider_session();
-            provider
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
         } else {
             let queued_at = log_provider_control_deferred("account_switch_refresh", id);
             let mut agent_guard = agent.lock().await;
             log_provider_control_lock_acquired("account_switch_refresh", id, queued_at);
-            let provider = agent_guard.provider_handle();
-            agent_guard.reset_provider_session();
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
             log_provider_control_completed("account_switch_refresh", id, queued_at);
-            provider
-        };
-        provider.invalidate_credentials().await;
+        }
 
         match provider_kind {
             "anthropic" => {

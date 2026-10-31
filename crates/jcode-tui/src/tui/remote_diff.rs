@@ -24,10 +24,15 @@ impl RemoteDiffTracker {
     }
 
     pub(crate) fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        if let Some(id) = id.or(self.current_tool_id.as_deref())
-            && let Some(input) = self.tool_inputs.get_mut(id)
-        {
-            input.push_str(delta);
+        if let Some(id) = id.or(self.current_tool_id.as_deref()) {
+            // Hosted tools may supply their input only after execution begins.
+            // Still ignore input for unknown or already-finished calls.
+            if self.tool_exec_starts.contains_key(id) {
+                self.tool_inputs.entry(id.to_string()).or_default();
+            }
+            if let Some(input) = self.tool_inputs.get_mut(id) {
+                input.push_str(delta);
+            }
         }
     }
 
@@ -74,6 +79,7 @@ impl RemoteDiffTracker {
     }
 
     pub(crate) fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
+        self.tool_inputs.remove(id);
         self.tool_exec_starts.remove(id);
         if let Some(pending) = self.pending_diffs.remove(id) {
             let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
