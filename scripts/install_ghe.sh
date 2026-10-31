@@ -143,6 +143,10 @@ handle_failure() {
   trap - ERR HUP INT TERM
   set +e
   if [[ "$HAS_CHANGED_CHANNELS" == 1 ]]; then
+    flock -w 30 8 || {
+      printf 'WARNING: could not reacquire the build store lock for rollback. Recovery data: %s\n' "$BACKUP_DIR" >&2
+      exit "$status"
+    }
     printf 'Install failed; restoring the previous channels from %s.\n' "$BACKUP_DIR" >&2
     if restore_channels; then
       if [[ "$HAS_ATTEMPTED_RELOAD" == 1 && -x "$PREVIOUS_SERVER" ]]; then
@@ -260,6 +264,8 @@ main() {
   replace_marker "$version" "$BUILDS_DIR/shared-server-version"
   replace_link "$BUILDS_DIR/current/jcode" "$INSTALL_DIR/jcode"
   HAS_ATTEMPTED_RELOAD=1
+  # Do not hold the store lock while the reloaded daemon repairs its channel.
+  flock -u 8
   reload_server "$version_dir/jcode"
   HAS_CHANGED_CHANNELS=0
   printf 'Installed: %s\nStable channel untouched. Shared server gracefully reloaded if active.\n' "$version_dir/jcode"
