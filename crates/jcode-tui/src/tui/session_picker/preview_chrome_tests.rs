@@ -137,7 +137,7 @@ fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
     let mut actual = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let mut expected = Terminal::new(TestBackend::new(120, 30)).unwrap();
     actual
-        .draw(|frame| draw_widgets(frame, area, &lines, &session, Some(&extras)))
+        .draw(|frame| draw_widgets(frame, area, &lines, &session, Some(&extras), &[], 0))
         .unwrap();
     expected
         .draw(|frame| info_widget::render_all(frame, &placements.visible, &data))
@@ -150,6 +150,37 @@ fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
             .content
             .iter()
             .any(|cell| cell.symbol() != " ")
+    );
+    let image_regions = [jcode_tui_messages::ImageRegion {
+        abs_line_idx: 0,
+        end_line: 100,
+        hash: 0,
+        height: 100,
+        width: 120,
+        render: jcode_tui_messages::ImageRegionRender::Crop,
+    }];
+    let mut occupied = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    occupied
+        .draw(|frame| {
+            draw_widgets(
+                frame,
+                area,
+                &[],
+                &session,
+                Some(&extras),
+                &image_regions,
+                10,
+            )
+        })
+        .unwrap();
+    assert!(
+        occupied
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .all(|cell| cell.symbol() == " "),
+        "widgets must not dock over image rows after scrolling"
     );
     if !was_enabled {
         info_widget::toggle_enabled();

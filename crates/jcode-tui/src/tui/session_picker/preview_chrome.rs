@@ -145,9 +145,27 @@ pub(super) fn draw_widgets(
     lines: &[Line<'static>],
     session: &SessionInfo,
     extras: Option<&PreviewExtras>,
+    image_regions: &[jcode_tui_messages::ImageRegion],
+    scroll: usize,
 ) {
     let data = selected_info(session, extras);
-    let margins = super::super::ui::viewport::compute_visible_margins(lines, &[], area, false);
+    let mut margins = super::super::ui::viewport::compute_visible_margins(lines, &[], area, false);
+    let visible_end = scroll.saturating_add(area.height as usize);
+    for region in image_regions {
+        let start = region.abs_line_idx.max(scroll);
+        let end = region.end_line.min(visible_end);
+        let width = if region.width == 0 {
+            area.width
+        } else {
+            region.width.min(area.width)
+        };
+        for row in start..end {
+            let index = row - scroll;
+            if let Some(right) = margins.right_widths.get_mut(index) {
+                *right = (*right).min(area.width.saturating_sub(width));
+            }
+        }
+    }
     let placements = super::super::info_widget_layout::calculate_placements_anchored(
         area,
         &margins,

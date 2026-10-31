@@ -4,6 +4,64 @@ use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
 #[test]
+fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
+    let mut session = make_session(
+        "render-parity",
+        "render-parity",
+        false,
+        SessionStatus::Closed,
+    );
+    session.messages_preview.push(PreviewMessage {
+        role: "tool".into(),
+        content: "Build succeeded".into(),
+        tool_calls: Vec::new(),
+        duration_secs: Some(2.3),
+        title: Some("Saved tool title".into()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "timed-preview".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "echo hello"}),
+            intent: Some("Check saved timing".into()),
+            thought_signature: None,
+        }),
+        timestamp: None,
+    });
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let mode = crate::config::DiffDisplayMode::Off;
+    let hash = picker.preview_content_hash(&session, mode);
+    for width in [8, 30, 80] {
+        let inner = Rect::new(0, 0, width, 20);
+        let key = PreviewCacheKey {
+            content_hash: hash,
+            inner_width: width,
+            inner_height: 20,
+            diff_mode: mode,
+            search_query: String::new(),
+        };
+        let cache = picker.build_preview_cache(&session, inner, inner, key, Alignment::Left, mode);
+        let messages: Vec<_> = session
+            .messages_preview
+            .iter()
+            .map(|msg| DisplayMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                duration_secs: msg.duration_secs,
+                title: msg.title.clone(),
+                tool_data: msg.tool_data.clone(),
+            })
+            .collect();
+        let live = super::super::ui::prepare::prepare_history_preview(&messages, 0, width, mode);
+        assert_eq!(cache.wrapped_lines, live.wrapped_lines, "width={width}");
+    }
+    session.messages_preview.last_mut().unwrap().duration_secs = Some(4.5);
+    let changed_timing = picker.preview_content_hash(&session, mode);
+    assert_ne!(hash, changed_timing);
+    session.messages_preview.last_mut().unwrap().title = Some("Updated title".into());
+    assert_ne!(changed_timing, picker.preview_content_hash(&session, mode));
+}
+
+#[test]
 fn completed_empty_preview_is_not_loaded_again() {
     let mut session = make_session("empty_preview", "empty", false, SessionStatus::Closed);
     session.messages_preview.clear();

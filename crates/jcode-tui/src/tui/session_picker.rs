@@ -231,10 +231,8 @@ struct PreviewRenderCache {
     key: PreviewCacheKey,
     /// Wrapped lines at the final (post-scrollbar-decision) width.
     wrapped_lines: Vec<Line<'static>>,
-    /// For each pre-wrap source line, the index of its first wrapped line. Used
-    /// to locate user prompts for the sticky "previous prompt" header.
-    prewrap_to_wrapped: Vec<usize>,
-    /// (pre-wrap line index, display number, text) for every user prompt.
+    image_regions: Vec<jcode_tui_messages::ImageRegion>,
+    /// (wrapped line index, display number, text) for every user prompt.
     user_prompt_markers: Vec<(usize, usize, String)>,
     /// Whether the content overflows and a scrollbar column is reserved.
     show_scrollbar: bool,
@@ -1599,12 +1597,21 @@ impl SessionPicker {
             }
         };
         frame.render_widget(Paragraph::new(visible_lines.clone()), content_area);
+        if let Some(cache) = self.preview_cache.as_ref() {
+            preview_chrome::draw_images(frame, content_area, &cache.image_regions, scroll);
+        }
         preview_chrome::draw_widgets(
             frame,
             content_area,
             &visible_lines,
             &session,
             self.preview_extras.get(&session.id),
+            &self
+                .preview_cache
+                .as_ref()
+                .expect("preview cache populated above")
+                .image_regions,
+            scroll,
         );
 
         if todo_lines > 0 && header_height < text_area.height {
@@ -1663,6 +1670,11 @@ impl SessionPicker {
         is_loading.hash(&mut h);
         diff_mode.hash(&mut h);
         crate::config::config().display.pin_todos.hash(&mut h);
+        crate::config::config()
+            .display
+            .compact_thinking
+            .hash(&mut h);
+        super::mermaid::deferred_render_epoch().hash(&mut h);
         if let Some(extras) = self.preview_extras.get(&session.id) {
             extras.hidden_prompts.hash(&mut h);
             extras.todos_payload.hash(&mut h);
@@ -1689,13 +1701,12 @@ impl SessionPicker {
     fn build_preview_cache(
         &self,
         session: &SessionInfo,
-        area: Rect,
+        _area: Rect,
         inner: Rect,
         key: PreviewCacheKey,
-        align: Alignment,
+        _align: Alignment,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> PreviewRenderCache {
-        let _ = (area, align);
         let hidden_prompts = self
             .preview_extras
             .get(&session.id)
@@ -1719,6 +1730,14 @@ impl SessionPicker {
             diff_mode,
         );
         let mut wrapped_lines = prepared.wrapped_lines;
+        let image_regions = prepared.image_regions;
+        // The live viewport consumes these marker rows as image metadata, never
+        // printable text. Preserve their reserved rows and draw the images below.
+        for region in &image_regions {
+            if let Some(line) = wrapped_lines.get_mut(region.abs_line_idx) {
+                *line = Line::default();
+            }
+        }
         let user_prompt_markers = prepared
             .wrapped_user_prompt_starts
             .iter()
@@ -1726,8 +1745,6 @@ impl SessionPicker {
             .enumerate()
             .map(|(idx, (&line, text))| (line, hidden_prompts + idx + 1, text.clone()))
             .collect();
-        // Markers already refer to wrapped rows from the live pipeline.
-        let prewrap_to_wrapped = (0..=wrapped_lines.len()).collect();
         if wrapped_lines.is_empty() {
             let loading = self
                 .pending_preview_load
@@ -1755,7 +1772,7 @@ impl SessionPicker {
         PreviewRenderCache {
             key,
             wrapped_lines,
-            prewrap_to_wrapped,
+            image_regions,
             user_prompt_markers,
             show_scrollbar,
             first_match_line,
@@ -1806,22 +1823,16 @@ impl SessionPicker {
         if scroll == 0 || !crate::config::config().display.prompt_preview {
             return Vec::new();
         }
-        // Read the prompt markers + wrap map from the cached preview content so
+        // Read the wrapped prompt markers from the cached preview content so
         // the header costs nothing extra during a scroll burst.
         let Some(cache) = self.preview_cache.as_ref() else {
             return Vec::new();
         };
-        let prewrap_to_wrapped = &cache.prewrap_to_wrapped;
-        let Some((_, prompt_num, text)) =
-            cache
-                .user_prompt_markers
-                .iter()
-                .rev()
-                .find(|(prewrap_idx, _, _)| {
-                    prewrap_to_wrapped
-                        .get(*prewrap_idx)
-                        .is_some_and(|wrapped_start| *wrapped_start < scroll)
-                })
+        let Some((_, prompt_num, text)) = cache
+            .user_prompt_markers
+            .iter()
+            .rev()
+            .find(|(wrapped_start, _, _)| *wrapped_start < scroll)
         else {
             return Vec::new();
         };
