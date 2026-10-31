@@ -341,6 +341,15 @@ Notable presets include:
 - Default model hint: `MiniMax-M2.7`
 - Docs: <https://platform.minimax.io/docs/guides/text-generation>
 
+### Obscurify.ai
+- Login: `jcode login --provider obscurify-ai`
+- Stored env file: `~/.config/jcode/obscurify-ai.env`
+- API key env var: `OBSCURIFY_API_KEY`
+- Base URL: `https://obscurify.ai/v1`
+- Default model hint: `deepseek/deepseek-v4-flash` (the public list with context lengths is at <https://obscurify.ai/v1/models>)
+- Get a key: <https://obscurify.ai/account?utm_source=jcode> ("Show API Key")
+- Docs: <https://obscurify.ai/api-docs>
+
 These are first-class jcode provider presets, not just manual custom endpoint examples.
 You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.
 
