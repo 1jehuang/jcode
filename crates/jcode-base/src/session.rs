@@ -164,6 +164,9 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// First session directory, retained when the session moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_working_dir: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -257,6 +260,8 @@ struct SessionStartupStub {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -367,6 +372,7 @@ impl Session {
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
+        session.original_working_dir = stub.original_working_dir;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -407,6 +413,7 @@ impl Session {
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
+        session.original_working_dir = snapshot.original_working_dir;
         session.short_name = snapshot.short_name;
         session.status = snapshot.status;
         session.last_pid = snapshot.last_pid;
@@ -551,6 +558,7 @@ impl Session {
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
+            original_working_dir: self.original_working_dir.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -758,6 +766,7 @@ impl Session {
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
+        self.original_working_dir = meta.original_working_dir;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -802,6 +811,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -861,6 +871,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1803,6 +1814,8 @@ struct RemoteStartupSessionSnapshot {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]

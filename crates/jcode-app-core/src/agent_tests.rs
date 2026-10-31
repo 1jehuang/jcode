@@ -39,6 +39,37 @@ struct NativeAutoCompactionProvider;
 struct BoundSavedAccountProvider;
 
 #[tokio::test]
+async fn working_directory_moves_preserve_first_active_session_origin() {
+    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
+    agent.session.messages.clear();
+    agent.session.working_dir = Some("/daemon".into());
+    agent.set_working_dir("/projects/start");
+    assert_eq!(
+        agent.session.original_working_dir, None,
+        "initial subscription is not a move"
+    );
+    agent.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".into(),
+            cache_control: None,
+        }],
+    );
+    agent.set_working_dir("/projects/second");
+    agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
+    assert_eq!(
+        agent.session.original_working_dir.as_deref(),
+        Some("/projects/start")
+    );
+    assert_eq!(agent.working_dir(), Some("/projects/third"));
+    agent.set_working_dir("/projects/start");
+    assert_eq!(
+        agent.session.original_working_dir.as_deref(),
+        Some("/projects/start")
+    );
+}
+
+#[tokio::test]
 async fn user_response_capability_updates_locked_tool_surface() {
     let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
     assert!(

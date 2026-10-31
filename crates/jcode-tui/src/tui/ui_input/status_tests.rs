@@ -2,6 +2,53 @@ use super::*;
 use ratatui::style::Modifier;
 
 #[test]
+fn overscroll_directory_transition_only_shows_real_moves() {
+    assert_eq!(
+        overscroll_directory_transition(None, Some("/a/start")),
+        Some("/a/start".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start/"), Some("/a/start")),
+        Some("/a/start".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start"), Some("/b/current")),
+        Some("/a/start → /b/current".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/a/start"), None),
+        None
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/"), Some("/b")),
+        Some("/ → /b".into())
+    );
+    assert_eq!(
+        overscroll_directory_transition(Some("/one/a/b"), Some("/two/a/b")),
+        Some("/one/a/b → /two/a/b".into())
+    );
+}
+
+#[test]
+fn overscroll_directory_transition_fits_unicode_terminal_widths() {
+    let data = crate::tui::info_widget::InfoWidgetData {
+        original_working_dir: Some("/projects/起点".into()),
+        working_dir: Some("/projects/現在".into()),
+        ..Default::default()
+    };
+    let wide = preview_overscroll_line(&data, 100);
+    let text = wide
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("/projects/起点 → /projects/現在"), "{text}");
+    for width in 0..80 {
+        assert!(preview_overscroll_line(&data, width).width() <= width as usize);
+    }
+}
+
+#[test]
 fn image_tags_are_colored_without_changing_input_geometry() {
     for width in [3, 8, 80] {
         let input = "界 [image 1] hi [image 22]";

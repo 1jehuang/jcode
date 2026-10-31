@@ -686,6 +686,8 @@ pub struct InfoWidgetData {
     pub session_name: Option<String>,
     /// Current working directory for this session.
     pub working_dir: Option<String>,
+    /// Session origin, if its working directory has changed.
+    pub original_working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,

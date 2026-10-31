@@ -1478,7 +1478,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
         machine: crate::tui::ssh_remote_host(),
-        dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            app.working_dir().as_deref(),
+        ),
         branch: overscroll_git_branch(&data),
         git: data.git_info.clone(),
         context: overscroll_context_usage(&data),
@@ -1516,7 +1519,10 @@ pub(crate) fn preview_overscroll_line(
 ) -> Line<'static> {
     let facts = OverscrollFacts {
         machine: None,
-        dir: data.working_dir.as_deref().and_then(overscroll_dir_label),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            data.working_dir.as_deref(),
+        ),
         branch: overscroll_git_branch(data),
         git: data.git_info.clone(),
         context: overscroll_context_usage(data),
@@ -1626,10 +1632,10 @@ fn overscroll_fact_spans(
         let label = if levels.dir == 0 {
             dir.clone()
         } else {
-            dir.rsplit('/')
-                .find(|seg| !seg.is_empty())
-                .unwrap_or(dir)
-                .to_string()
+            dir.split(" → ")
+                .map(|path| path.rsplit('/').find(|seg| !seg.is_empty()).unwrap_or(path))
+                .collect::<Vec<_>>()
+                .join(" → ")
         };
         let mut group = machine_spans(levels);
         if group.is_empty() {
@@ -1872,6 +1878,27 @@ fn overscroll_git_status_spans(
 
 fn overscroll_dir_label(path: &str) -> Option<String> {
     session_facts::dir_label_short(path)
+}
+
+fn overscroll_directory_transition(
+    original: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let current = current.filter(|path| !path.trim().is_empty())?;
+    let label = overscroll_dir_label(current).unwrap_or_else(|| current.to_string());
+    let Some(original) = original.filter(|path| !path.trim().is_empty()) else {
+        return Some(label);
+    };
+    if std::path::Path::new(original) == std::path::Path::new(current) {
+        return Some(label);
+    }
+    let origin_label = overscroll_dir_label(original).unwrap_or_else(|| original.to_string());
+    // Elision can hide the differing ancestor. Keep both paths distinguishable.
+    if origin_label == label {
+        Some(format!("{original} → {current}"))
+    } else {
+        Some(format!("{origin_label} → {label}"))
+    }
 }
 
 /// Placeholder header strings used during remote startup; not real model names.

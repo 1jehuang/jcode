@@ -47,6 +47,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) is_canary: bool,
     pub(super) testing_build: Option<String>,
     pub(super) working_dir: Option<String>,
+    #[serde(default)]
+    pub(super) original_working_dir: Option<String>,
     pub(super) short_name: Option<String>,
     pub(super) status: SessionStatus,
     pub(super) last_pid: Option<u32>,
@@ -115,6 +117,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.is_canary != current.is_canary
         || prev.testing_build != current.testing_build
         || prev.working_dir != current.working_dir
+        || prev.original_working_dir != current.original_working_dir
         || prev.short_name != current.short_name
         || prev.status != current.status
         || prev.is_debug != current.is_debug

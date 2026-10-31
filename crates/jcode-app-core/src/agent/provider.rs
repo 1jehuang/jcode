@@ -461,6 +461,15 @@ impl Agent {
         if self.session.working_dir.as_deref() == Some(dir) {
             return;
         }
+        if self.session.original_working_dir.is_none()
+            && self
+                .session
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User)
+        {
+            self.session.original_working_dir = self.session.working_dir.clone();
+        }
         self.session.working_dir = Some(dir.to_string());
         self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();

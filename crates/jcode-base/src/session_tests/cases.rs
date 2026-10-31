@@ -806,6 +806,40 @@ fn context_cap_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
 }
 
 #[test]
+fn original_working_dir_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let id = "session_original_working_dir_test";
+    let mut session = Session::create_with_id(id.into(), None, None);
+    session.working_dir = Some("/projects/start".into());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2 * 1024 * 1024),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    session.original_working_dir = session.working_dir.clone();
+    session.working_dir = Some("/projects/current".into());
+    session.save()?;
+    assert!(session_journal_path(id)?.exists());
+    for loaded in [
+        Session::load(id)?,
+        Session::load_startup_stub(id)?,
+        Session::load_for_remote_startup(id)?,
+    ] {
+        assert_eq!(
+            loaded.original_working_dir.as_deref(),
+            Some("/projects/start")
+        );
+        assert_eq!(loaded.working_dir.as_deref(), Some("/projects/current"));
+    }
+    Ok(())
+}
+
+#[test]
 fn context_cap_missing_is_backward_compatible_for_all_snapshot_types() -> Result<()> {
     let session = Session::create_with_id("session_context_cap_legacy".into(), None, None);
     let value = serde_json::to_value(&session)?;
