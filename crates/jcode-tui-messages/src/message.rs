@@ -572,6 +572,7 @@ mod tests {
             tool_calls: vec![],
             tool_data: None,
             stored_index: None,
+            timestamp: None,
         };
         assert_eq!(
             DisplayMessage::from_rendered_message(row.clone()).duration_secs,

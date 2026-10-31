@@ -471,6 +471,7 @@ pub fn render_messages_and_images_with_compacted_history(
         tool_data: None,
         stored_index: None,
         tool_duration_ms: None,
+        timestamp: None,
     };
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
         while errors

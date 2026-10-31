@@ -1266,7 +1266,7 @@ fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
             intent: Some(title.into()),
             thought_signature: None,
         }),
-    
+        timestamp: None,
         tool_duration_ms: None,
     };
     let state = TestState {

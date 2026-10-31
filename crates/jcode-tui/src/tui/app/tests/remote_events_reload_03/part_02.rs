@@ -35,6 +35,8 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
             tool_calls: None,
             tool_data: None,
             response_stats: None,
+            timestamp: None,
+            tool_duration_ms: None,
         })
         .collect();
         assert!(app.handle_server_event(

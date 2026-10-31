@@ -92,7 +92,6 @@ fn tool_duration_remote_completion_and_local_update() {
             output: "failed".into(),
             error: Some("failed".into()),
             duration_ms: Some(1_234),
-            duration_ms: None,
         },
         &mut remote,
     );

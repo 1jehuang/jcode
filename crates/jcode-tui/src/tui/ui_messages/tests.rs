@@ -124,8 +124,6 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             intent: None,
             thought_signature: None,
         }),
-    
-        tool_duration_ms: None,
     };
     for width in [40, 72, 120] {
         for mode in [
@@ -3273,8 +3271,6 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                     intent: intent.map(str::to_string),
                     thought_signature: None,
                 }),
-            
-                tool_duration_ms: None,
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
             assert_eq!(lines.len(), 2, "{name}");
@@ -3353,8 +3349,6 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
                 {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
             ]}), intent: None, thought_signature: None,
         }),
-    
-        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 4);
@@ -3409,8 +3403,6 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
             intent: Some("Inspect sources".to_string()),
             thought_signature: None,
         }),
-    
-        tool_duration_ms: None,
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
