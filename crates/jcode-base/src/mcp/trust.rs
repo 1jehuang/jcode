@@ -1,13 +1,10 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use super::McpConfig;
-
-const TRUST_STORE_VERSION: u32 = 1;
-const TRUST_STORE_FILE: &str = "mcp-project-trust.json";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProjectMcpServerReview {
@@ -24,22 +21,6 @@ pub struct ProjectMcpReview {
     pub servers: Vec<ProjectMcpServerReview>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ProjectMcpTrustStore {
-    version: u32,
-    #[serde(default)]
-    projects: BTreeMap<String, String>,
-}
-
-impl Default for ProjectMcpTrustStore {
-    fn default() -> Self {
-        Self {
-            version: TRUST_STORE_VERSION,
-            projects: BTreeMap::new(),
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct FingerprintServer<'a> {
     command: &'a str,
@@ -53,25 +34,8 @@ struct FingerprintServer<'a> {
     disabled: Option<bool>,
 }
 
-fn trust_store_path() -> PathBuf {
-    crate::storage::durable_state_dir().join(TRUST_STORE_FILE)
-}
-
 fn canonical_project_root(project_root: &Path) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(project_root).with_context(|| {
-        format!(
-            "failed to resolve project directory {}",
-            project_root.display()
-        )
-    })?;
-    if !canonical.is_dir() {
-        anyhow::bail!("project path is not a directory: {}", canonical.display());
-    }
-    Ok(canonical)
-}
-
-fn project_key(project_root: &Path) -> String {
-    project_root.to_string_lossy().into_owned()
+    crate::project_trust::project_root(project_root)
 }
 
 fn stable_map(map: &HashMap<String, String>) -> BTreeMap<&str, &str> {
@@ -105,30 +69,6 @@ fn fingerprint(config: &McpConfig) -> Result<String> {
     Ok(hex::encode(Sha256::digest(encoded)))
 }
 
-fn load_store() -> ProjectMcpTrustStore {
-    let path = trust_store_path();
-    if !path.exists() {
-        return ProjectMcpTrustStore::default();
-    }
-    match crate::storage::read_json::<ProjectMcpTrustStore>(&path) {
-        Ok(store) if store.version == TRUST_STORE_VERSION => store,
-        Ok(store) => {
-            crate::logging::warn(&format!(
-                "MCP trust store version {} is unsupported; project-local MCP remains blocked",
-                store.version
-            ));
-            ProjectMcpTrustStore::default()
-        }
-        Err(error) => {
-            crate::logging::warn(&format!(
-                "Failed to read MCP trust store {}; project-local MCP remains blocked: {error}",
-                path.display()
-            ));
-            ProjectMcpTrustStore::default()
-        }
-    }
-}
-
 pub(super) fn review_project_config(
     project_root: &Path,
     config: &McpConfig,
@@ -156,8 +96,7 @@ pub(super) fn review_project_config(
             )
         })
         .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .map(|(_, review)| review)
+        .into_values()
         .collect();
     Ok(Some(ProjectMcpReview {
         project_root,
@@ -174,30 +113,89 @@ pub fn project_mcp_review(project_root: &Path) -> Result<Option<ProjectMcpReview
     review_project_config(project_root, &config)
 }
 
+/// Digest stored in the shared project trust store for `review`.
+fn store_digest(review: &ProjectMcpReview) -> String {
+    format!("sha256:{}", review.fingerprint)
+}
+
 pub fn project_mcp_is_trusted(review: &ProjectMcpReview) -> bool {
-    load_store()
-        .projects
-        .get(&project_key(&review.project_root))
-        .is_some_and(|fingerprint| fingerprint == &review.fingerprint)
+    crate::project_trust::is_trusted(
+        &review.project_root,
+        crate::project_trust::Scope::Mcp,
+        &store_digest(review),
+    )
 }
 
 pub fn trust_project_mcp(review: &ProjectMcpReview) -> Result<()> {
-    let mut store = load_store();
-    store.projects.insert(
-        project_key(&review.project_root),
-        review.fingerprint.clone(),
-    );
-    crate::storage::write_json(&trust_store_path(), &store)
+    crate::project_trust::grant(
+        &review.project_root,
+        crate::project_trust::Scope::Mcp,
+        &store_digest(review),
+    )
+    .map(drop)
 }
 
 pub fn revoke_project_mcp(project_root: &Path) -> Result<bool> {
-    let project_root = canonical_project_root(project_root)?;
-    let mut store = load_store();
-    let removed = store.projects.remove(&project_key(&project_root)).is_some();
-    if removed {
-        crate::storage::write_json(&trust_store_path(), &store)?;
+    crate::project_trust::revoke(project_root, Some(crate::project_trust::Scope::Mcp))
+}
+
+fn key_looks_secret(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+    ]
+    .iter()
+    .any(|word| key.contains(word))
+}
+
+/// What the `mcp` scope would let `path`'s project run, for `jcode trust`.
+pub fn mcp_scope_review(path: &Path) -> Result<Option<crate::project_trust::ScopeReview>> {
+    let Some(review) = project_mcp_review(path)? else {
+        return Ok(None);
+    };
+    let mut redacted = false;
+    let mut lines = Vec::new();
+    for server in &review.servers {
+        use crate::project_trust::safe_terminal_text as safe;
+        lines.push(format!("  - {}", safe(&server.name)));
+        lines.push(format!("    command: {:?}", safe(&server.command)));
+        if !server.args.is_empty() {
+            lines.push("    arguments:".to_string());
+            lines.extend(
+                server
+                    .args
+                    .iter()
+                    .map(|arg| format!("      - {:?}", safe(arg))),
+            );
+        }
+        if !server.env.is_empty() {
+            lines.push("    environment:".to_string());
+            for (key, value) in &server.env {
+                let assignment = format!("{key}={value}");
+                let mut shown = crate::message::redact_secrets(&assignment);
+                // Opaque values under bare names (`TOKEN`, `PASSWORD`, ...)
+                // have no recognisable shape, so also judge by the key.
+                if shown == assignment && key_looks_secret(key) {
+                    shown = format!("{key}=[redacted]");
+                }
+                redacted |= shown != assignment;
+                lines.push(format!("      - {:?}", safe(&shown)));
+            }
+        }
     }
-    Ok(removed)
+    Ok(Some(crate::project_trust::ScopeReview {
+        scope: crate::project_trust::Scope::Mcp,
+        digest: store_digest(&review),
+        lines,
+        item_count: review.servers.len(),
+        redacted,
+    }))
 }
 
 #[cfg(test)]
@@ -333,11 +331,13 @@ mod tests {
         )
         .unwrap();
 
+        // Remote servers run no local command: nothing to approve, and they
+        // keep loading as before.
         assert!(project_mcp_review(project.path()).unwrap().is_none());
         assert!(
             McpConfig::load_for_dir(Some(project.path()))
                 .servers
-                .is_empty()
+                .contains_key("remote")
         );
     }
 
@@ -358,5 +358,96 @@ mod tests {
         assert!(revoke_project_mcp(project.path()).unwrap());
         assert!(!project_mcp_is_trusted(&review));
         assert!(!revoke_project_mcp(project.path()).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod shared_store_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_grant_lands_in_shared_store_under_the_mcp_scope_only() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"t":{"command":"tool"}}}"#,
+        )
+        .unwrap();
+        let review = project_mcp_review(project.path()).unwrap().unwrap();
+        trust_project_mcp(&review).unwrap();
+        let entries = crate::project_trust::list();
+        let result = (
+            entries.len(),
+            entries[0].1,
+            crate::project_trust::is_trusted(
+                project.path(),
+                crate::project_trust::Scope::Hooks,
+                &entries[0].2.digest,
+            ),
+        );
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        assert_eq!(result.0, 1);
+        assert_eq!(result.1, crate::project_trust::Scope::Mcp);
+        assert!(!result.2, "granting mcp must not grant hooks");
+    }
+
+    #[test]
+    fn scope_review_lists_commands_and_redacts_secret_env() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"t":{"command":"tool","args":["--x"],"env":{"API_KEY":"sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789"}}}}"#,
+        )
+        .unwrap();
+        let review = mcp_scope_review(project.path()).unwrap().unwrap();
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        assert_eq!(review.item_count, 1);
+        assert!(review.lines.iter().any(|l| l.contains("tool")));
+        assert!(review.redacted);
+        assert!(review.digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn opaque_values_under_secret_looking_names_are_redacted() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"t":{"command":"tool","env":{"TOKEN":"opaque-value-1","PASSWORD":"hunter2","MODE":"fast"}}}}"#,
+        )
+        .unwrap();
+        let review = mcp_scope_review(project.path()).unwrap().unwrap();
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        let shown = review.lines.join("\n");
+        assert!(
+            !shown.contains("opaque-value-1") && !shown.contains("hunter2"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("MODE=fast"),
+            "non-secret values stay visible: {shown}"
+        );
+        assert!(review.redacted);
     }
 }

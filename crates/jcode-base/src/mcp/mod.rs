@@ -26,6 +26,6 @@ pub use tool::{
     dispatch_name, dispatch_names, take_accept_large_output,
 };
 pub use trust::{
-    ProjectMcpReview, ProjectMcpServerReview, project_mcp_is_trusted, project_mcp_review,
-    revoke_project_mcp, trust_project_mcp,
+    ProjectMcpReview, ProjectMcpServerReview, mcp_scope_review, project_mcp_is_trusted,
+    project_mcp_review, revoke_project_mcp, trust_project_mcp,
 };

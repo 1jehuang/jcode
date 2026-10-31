@@ -774,6 +774,15 @@ impl McpConfig {
         let mut merged_is_expanded = false;
         if let Some(project_root) = project_dir {
             let mut project_config = Self::load_project_locals(project_root);
+            // Remote (HTTP/SSE) servers run no local command, so they keep
+            // loading as before. Only command servers go through the gate.
+            let remote_project_servers: std::collections::HashMap<_, _> = project_config
+                .servers
+                .iter()
+                .filter(|(_, server)| !server.is_stdio())
+                .map(|(name, server)| (name.clone(), server.clone()))
+                .collect();
+            Self::merge_servers_preferring_runnable(&mut merged.servers, remote_project_servers);
             project_config.servers.retain(|_, server| server.is_stdio());
             let project_server_names: std::collections::HashSet<_> =
                 project_config.servers.keys().cloned().collect();
@@ -797,7 +806,7 @@ impl McpConfig {
                 }
                 Ok(Some(review)) => {
                     crate::logging::warn(&format!(
-                        "MCP: blocked {} untrusted project-local server(s) for {:?}; run `jcode mcp trust` from that directory to review them",
+                        "MCP: blocked {} untrusted project-local server(s) for {:?}; run `jcode trust grant --scope mcp` from that directory to review them",
                         review.servers.len(),
                         review.project_root
                     ));
