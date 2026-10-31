@@ -490,12 +490,12 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
         "long preview should auto-scroll to the bottom on first render"
     );
 
-    // A wheel up over the preview pane (right ~60% of width) routes through the
+    // A wheel up over the preview pane (left ~60% of width) routes through the
     // shared mouse-scroll momentum (enqueue + drain) instead of an instant jump,
     // and actually moves the preview offset.
     let scroll_only = app.handle_mouse_event(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::ScrollUp,
-        column: 90,
+        column: 20,
         row: 10,
         modifiers: crossterm::event::KeyModifiers::empty(),
     });

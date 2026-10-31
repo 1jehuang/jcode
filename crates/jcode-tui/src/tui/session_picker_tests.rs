@@ -2410,16 +2410,19 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
         .expect("render picker");
     let buffer = terminal.backend().buffer().clone();
 
-    // The preview pane occupies the right 60% of the width; its inner content
+    // The preview pane occupies the left 60% of the width; its inner content
     // starts just inside the rounded border. Read the first inner content row and
     // confirm it carries the "N›" sticky-header marker.
-    let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
-    let header_y = 1 + crate::tui::ui::header::build_preview_header(
-        picker.selected_session().expect("selected session"),
-        w.saturating_sub(preview_inner_x + 1),
-    )
-    .len() as u16;
-    let header_row: String = (preview_inner_x..w.saturating_sub(1))
+    let preview = picker.last_preview_area.expect("preview pane");
+    let preview_inner_x = preview.x + 1;
+    let header_y = preview.y
+        + 1
+        + crate::tui::ui::header::build_preview_header(
+            picker.selected_session().expect("selected session"),
+            preview.width.saturating_sub(2),
+        )
+        .len() as u16;
+    let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(
@@ -2520,13 +2523,16 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     assert_eq!(picker.scroll_offset, user_offset);
     assert!(!picker.auto_scroll_preview);
 
-    let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
-    let header_y = 1 + crate::tui::ui::header::build_preview_header(
-        picker.selected_session().expect("selected session"),
-        w.saturating_sub(preview_inner_x + 1),
-    )
-    .len() as u16;
-    let header_row: String = (preview_inner_x..w.saturating_sub(1))
+    let preview = picker.last_preview_area.expect("preview pane");
+    let preview_inner_x = preview.x + 1;
+    let header_y = preview.y
+        + 1
+        + crate::tui::ui::header::build_preview_header(
+            picker.selected_session().expect("selected session"),
+            preview.width.saturating_sub(2),
+        )
+        .len() as u16;
+    let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(
