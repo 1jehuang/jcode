@@ -1116,10 +1116,21 @@ fn resume_search_recovers_matches_as_typo_query_grows() {
         picker.search_query = query.into();
         picker.rebuild_items();
     }
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
     picker.search_query = "deply conifg".into();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
+}
+
+fn wait_for_picker_search(picker: &mut SessionPicker) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while picker.transcript_search.pending() {
+        assert!(std::time::Instant::now() < deadline, "search timed out");
+        picker.poll_transcript_search();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 #[test]
@@ -1132,6 +1143,7 @@ fn resume_search_ranks_literal_matches_before_newer_typo_matches() {
     let mut picker = SessionPicker::new(vec![typo, exact]);
     picker.search_query = "config".into();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 2);
     assert_eq!(
         picker

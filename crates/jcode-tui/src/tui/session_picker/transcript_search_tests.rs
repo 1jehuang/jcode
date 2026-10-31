@@ -1,5 +1,6 @@
 use super::super::{SessionPicker, SessionSource, SessionStatus};
 use super::*;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 fn external_session(id: &str, path: &Path) -> SessionInfo {
     let now = chrono::Utc::now();
@@ -183,6 +184,110 @@ fn typing_debounces_disk_work_and_metadata_search_stays_immediate() {
     picker.rebuild_items();
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(!picker.transcript_search.pending());
+}
+
+#[test]
+fn fuzzy_metadata_matching_is_debounced_and_never_runs_on_keystroke() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = external_session("one", &temp.path().join("absent.jsonl"));
+    session.search_index = "config deploy".into();
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.search_query = "conifg".into();
+    picker.rebuild_items();
+    assert!(picker.visible_sessions.is_empty());
+    assert!(picker.transcript_search.receiver.is_none());
+    assert_eq!(picker.transcript_search.candidates.len(), 1);
+    assert_eq!(
+        picker.transcript_search.candidates[0].missing_tokens,
+        ["conifg"]
+    );
+    wait_for_search(&mut picker);
+    assert_eq!(picker.selected_session().unwrap().id, "one");
+    assert!(!picker.transcript_search.contains_literal("one"));
+}
+
+#[test]
+#[ignore = "manual typing latency benchmark, prints old synchronous matching versus key handling"]
+fn benchmark_resume_search_keystroke_latency() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions: Vec<_> = (0..100)
+        .map(|i| {
+            let mut session =
+                external_session(&format!("bench-{i}"), &temp.path().join("absent.jsonl"));
+            session.search_index =
+                "deployment performance synchronization throughput ".repeat(1400);
+            session
+        })
+        .collect();
+    let baseline = Instant::now();
+    let tokens = search_query_tokens("modal cli");
+    let fuzzy = jcode_fuzzy::PreparedTokenQuery::new("modal cli");
+    for session in &sessions {
+        for token in &tokens {
+            std::hint::black_box(
+                jcode_fuzzy::PreparedTokenQuery::new(token)
+                    .matches_search_text(&session.search_index),
+            );
+        }
+        std::hint::black_box(fuzzy.matches_search_text(&session.search_index));
+    }
+    let baseline = baseline.elapsed();
+    let mut picker = SessionPicker::new(sessions);
+    picker.search_active = true;
+    picker.search_query = "modal cl".into();
+    let start = Instant::now();
+    picker
+        .handle_search_key(KeyCode::Char('i'), KeyModifiers::NONE)
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(picker.search_query, "modal cli");
+    assert!(picker.transcript_search.receiver.is_none());
+    eprintln!(
+        "100 sessions x 64 KiB: old synchronous matching {baseline:?}, new full key handler {elapsed:?}"
+    );
+}
+
+#[test]
+fn large_history_defers_even_literal_metadata_matching() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = external_session("large", &temp.path().join("absent.jsonl"));
+    session.search_index = format!("{} modal cli", "x".repeat(IMMEDIATE_METADATA_BYTES + 1));
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.search_query = "modal cli".into();
+    picker.rebuild_items();
+    assert!(picker.transcript_search.defers_metadata());
+    assert!(picker.visible_sessions.is_empty());
+    assert_eq!(
+        picker.transcript_search.candidates[0].missing_tokens,
+        ["modal", "cli"]
+    );
+    wait_for_search(&mut picker);
+    assert_eq!(picker.selected_session().unwrap().id, "large");
+    assert!(picker.transcript_search.contains_literal("large"));
+}
+
+#[test]
+fn literal_transcript_hit_outranks_newer_fuzzy_metadata_hit() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("transcript.jsonl");
+    std::fs::write(
+        &path,
+        r#"{"text":"optimizing muse kernels with modal cli"}"#,
+    )
+    .unwrap();
+    let exact = external_session("kernels", &path);
+    let mut fuzzy = external_session("unrelated", &temp.path().join("absent.jsonl"));
+    fuzzy.search_index = "model cli".into();
+    fuzzy.last_message_time = exact.last_message_time + chrono::Duration::seconds(10);
+    let mut picker = SessionPicker::new(vec![fuzzy, exact]);
+    picker.search_query = "modal cli".into();
+    picker.rebuild_items();
+    wait_for_search(&mut picker);
+    assert_eq!(picker.visible_sessions.len(), 2);
+    let first = picker.session_by_ref(picker.visible_sessions[0]).unwrap();
+    assert_eq!(first.id, "kernels");
+    assert!(picker.transcript_search.contains_literal("kernels"));
+    assert!(!picker.transcript_search.contains_literal("unrelated"));
 }
 
 #[test]

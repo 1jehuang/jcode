@@ -50,17 +50,20 @@ impl SessionPicker {
             return self.all_session_refs();
         }
 
-        // Fuzzy matches are not monotonic: adding a character can increase the
-        // error budget or turn a short literal query into a typo-tolerant one.
-        // Reconsider every session rather than narrowing the previous results.
+        // Keep literal matches immediate. Expensive typo-tolerant matching is
+        // debounced in the worker alongside transcript search, not performed
+        // on every keypress. Reconsider all sessions for new worker results.
         let candidates = self.all_session_refs();
-        let fuzzy = jcode_fuzzy::PreparedTokenQuery::new(&normalized);
+        let tokens = loading::search_query_tokens(&normalized);
 
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    fuzzy.matches_search_text(&session.search_index)
+                    (!self.transcript_search.defers_metadata()
+                        && tokens
+                            .iter()
+                            .all(|token| session.search_index.contains(token)))
                         || self.transcript_search.contains(&session.id)
                 })
             })
@@ -121,8 +124,9 @@ impl SessionPicker {
         if !self.search_query.trim().is_empty() {
             filtered.sort_by_cached_key(|session_ref| {
                 !self.session_by_ref(*session_ref).is_some_and(|session| {
-                    Self::session_matches_search(session, &self.search_query)
-                        || self.transcript_search.contains(&session.id)
+                    (!self.transcript_search.defers_metadata()
+                        && Self::session_matches_search(session, &self.search_query))
+                        || self.transcript_search.contains_literal(&session.id)
                 })
             });
         }
