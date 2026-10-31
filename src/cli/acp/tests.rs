@@ -206,6 +206,8 @@ fn event_mapper_maps_tool_lifecycle() {
         name: "bash".to_string(),
         output: "ok".to_string(),
         error: None,
+    
+        duration_ms: None,
     });
     assert_eq!(done[0]["status"], "completed");
     assert_eq!(done[0]["content"][0]["content"]["text"], "ok");

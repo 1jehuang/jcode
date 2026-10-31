@@ -1665,3 +1665,4 @@ fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
 }
 
 include!("math_selection.rs");
+

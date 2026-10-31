@@ -15,6 +15,7 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     }
 }
 
@@ -103,6 +104,8 @@ fn batched_discovery_renders_without_disclosure_notice() {
             intent: None,
             thought_signature: None,
         }),
+    
+        tool_duration_ms: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);

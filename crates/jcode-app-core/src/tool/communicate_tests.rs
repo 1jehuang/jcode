@@ -710,6 +710,8 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             content: " earlier ".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
         HistoryMessage {
             response_stats: None,
@@ -717,6 +719,8 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             content: "ignored".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
         HistoryMessage {
             response_stats: None,
@@ -724,6 +728,8 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             content: " final report ".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
     ];
 

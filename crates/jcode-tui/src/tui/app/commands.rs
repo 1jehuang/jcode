@@ -677,6 +677,8 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
+        timestamp: None,
+        tool_duration_ms: None,
     });
 
     let content_blocks = vec![ContentBlock::ToolUse {
@@ -2049,6 +2051,8 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: rendered.tool_data,
+                timestamp: rendered.timestamp,
+                tool_duration_ms: rendered.tool_duration_ms,
             });
         }
 
@@ -2130,6 +2134,8 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         duration_secs: None,
                         title: None,
                         tool_data: rendered.tool_data,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
 
@@ -3555,6 +3561,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
+                            tool_duration_ms: None,
                         });
                     }
                     Err(reason) => {
@@ -3569,6 +3577,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
+                            tool_duration_ms: None,
                         });
                     }
                 }
@@ -3581,6 +3591,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
         }
@@ -3610,6 +3622,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -3628,6 +3642,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             Err(e) => {
@@ -3638,6 +3654,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
         }
@@ -3657,6 +3675,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
                 return true;
             }

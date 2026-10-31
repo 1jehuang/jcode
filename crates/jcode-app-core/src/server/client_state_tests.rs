@@ -1029,6 +1029,8 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         })
         .collect()
 }
