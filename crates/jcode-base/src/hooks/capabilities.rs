@@ -5,7 +5,12 @@
 //! numbers. Each feature adds its own token here in the change that ships it.
 
 /// Capability tokens, kept sorted so the output is stable.
-const TOKENS: &[&str] = &["agent_definitions", "swarm_identity", "swarm_member_events"];
+const TOKENS: &[&str] = &[
+    "agent_definitions",
+    "project_trust",
+    "swarm_identity",
+    "swarm_member_events",
+];
 
 /// Sorted, de-duplicated capability tokens supported by this build.
 pub fn hook_capabilities() -> Vec<&'static str> {
