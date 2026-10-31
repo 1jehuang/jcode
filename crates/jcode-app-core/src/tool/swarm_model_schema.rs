@@ -24,7 +24,15 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
 /// Resolved from the process working directory and user directories; the spawn
 /// handler re-validates against the coordinator's own working directory.
 pub(super) fn apply_agent_definitions(schema: &mut Value) {
-    let cwd = std::env::current_dir().ok();
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "No working directory for agent definitions: {error}"
+            ));
+            None
+        }
+    };
     apply_agent_definitions_for(
         schema,
         crate::agent_def::agent_definition_summaries(cwd.as_deref()),
@@ -42,7 +50,7 @@ pub(super) fn apply_agent_definitions_for(schema: &mut Value, summaries: Vec<(St
     let listing = summaries
         .iter()
         .map(|(name, description)| {
-            let first_line = description.lines().next().unwrap_or_default();
+            let first_line = description.lines().next().unwrap_or("");
             let short: String = first_line.chars().take(120).collect();
             format!("{name}: {short}")
         })

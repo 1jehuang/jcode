@@ -190,8 +190,7 @@ fn parse_file(path: &Path, origin: DefinitionOrigin) -> Parsed {
         .map(|list| map_claude_tools(&list.into_entries()));
     let disallowed_tools = front
         .disallowed_tools
-        .map(|list| map_claude_tools(&list.into_entries()))
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |list| map_claude_tools(&list.into_entries()));
     let policy = DefinitionPolicy {
         model: front
             .model

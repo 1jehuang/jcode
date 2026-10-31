@@ -574,7 +574,7 @@ pub(super) async fn spawn_swarm_agent(
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let definition =
-        super::swarm_agent_defs::resolve(agent.as_deref(), resolved_working_dir.as_deref())?;
+        super::swarm::swarm_agent_defs::resolve(agent.as_deref(), resolved_working_dir.as_deref())?;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
     let coordinator_is_canary = coordinator.is_canary;
     // Capture the requesting client's terminal env so spawn hooks place the new
@@ -640,7 +640,7 @@ pub(super) async fn spawn_swarm_agent(
             |session_id, cwd, selfdev_requested, provider_key| {
                 crate::session_env::inherit_session_env(req_session_id, session_id);
                 if let Some(definition) = definition.as_ref() {
-                    super::swarm_agent_defs::persist_persona(session_id, definition);
+                    super::swarm::swarm_agent_defs::persist_persona(session_id, definition);
                 }
                 if let Some(lane_id) = lane_id.as_deref() {
                     let brief = super::swarm_todo_link::seed_spawn_lane(
@@ -725,7 +725,7 @@ pub(super) async fn spawn_swarm_agent(
         ));
     }
     if is_headless_fallback {
-        super::swarm_agent_defs::deliver_headless_persona(
+        super::swarm::swarm_agent_defs::deliver_headless_persona(
             sessions,
             &new_session_id,
             definition.as_ref(),
@@ -946,7 +946,7 @@ pub(super) async fn handle_comm_spawn(
             effort.clone().unwrap_or_default(),
             model.clone().unwrap_or_default(),
             label.clone().unwrap_or_default(),
-            agent.clone().unwrap_or_default(),
+            agent.as_deref().unwrap_or("").to_owned(),
         ],
     );
     let Some(mutation_state) = begin_or_replay(
