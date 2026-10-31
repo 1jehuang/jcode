@@ -778,6 +778,13 @@ swarm_stall_after_secs = 600
 # post_tool_feedback = "~/bin/jcode-vale"
 # post_tool_feedback_timeout_ms = 10000
 #
+# Synchronous hook for every new user message. The prompt arrives as JSON on
+# stdin (never in env) with its origin (person or host-generated). Plain stdout
+# or additionalContext is added as a hidden reminder; exit 2 or
+# {"decision":"block"} rejects the message. Fails open.
+# user_prompt_submit = "~/bin/prompt-hook"
+# user_prompt_submit_timeout_ms = 5000
+#
 # Observers in the coordinator's context when a swarm worker starts or ends.
 # They receive a Claude-shaped SubagentStart/SubagentStop JSON document on
 # stdin. Inside a worker every hook also gets JCODE_HOOK_SWARM_ID,
