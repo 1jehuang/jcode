@@ -476,9 +476,30 @@ fn ordinary_click_preserves_existing_bridge_dispatch() {
     assert!(params.get("dispatchEvents").is_none());
 }
 
+pub(super) struct HandoffEnvGuard(&'static str, Option<std::ffi::OsString>);
+
+impl HandoffEnvGuard {
+    pub(super) fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        jcode_base::env::set_var(key, value);
+        Self(key, previous)
+    }
+}
+
+impl Drop for HandoffEnvGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => jcode_base::env::set_var(self.0, value),
+            None => jcode_base::env::remove_var(self.0),
+        }
+    }
+}
+
 #[test]
 fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
+    let _disabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "0");
     let tool = BrowserTool::new();
     assert!(
         tool.description()
@@ -514,13 +535,21 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
 
     let _guard = jcode_base::storage::lock_test_env();
     let _restore = RestoreEnv(std::env::var_os(KEY));
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
     let tool = BrowserTool::new();
-    for value in [None, Some("0"), Some("1")] {
+    for (enabled, value) in [
+        ("0", None),
+        ("false", Some("0")),
+        ("1", None),
+        ("true", Some("0")),
+        ("1", Some("1")),
+    ] {
+        jcode_base::env::set_var("JCODE_BROWSER_HANDOFF", enabled);
         match value {
             Some(value) => jcode_base::env::set_var(KEY, value),
             None => jcode_base::env::remove_var(KEY),
         }
-        let disabled = value == Some("1");
+        let disabled = value == Some("1") || matches!(enabled, "0" | "false");
         assert_eq!(browser_handoff_disabled(), disabled);
         let schema = tool.parameters_schema();
         let properties = &schema["properties"];

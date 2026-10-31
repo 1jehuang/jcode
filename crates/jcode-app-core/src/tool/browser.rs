@@ -28,10 +28,11 @@ fn browser_tool_description_text() -> &'static str {
     "Check action='status' first; setup only if not ready. Use action='handoff' by default for browser tasks with goal and tab_id, or url+new_tab=true to create and bind a fresh tab. Untargeted open creates a new tab; reuse its returned tab_id. Jev handles the entire task until complete or genuinely blocked; navigation alone is not completion. Direct actions: setup, tabs, blocked handoffs. list_tabs includes signed-in tabs. On requested_help=script/text, provide exact executable script candidates or exact text_values and resume. On requested_help=user_login, ask user to complete CAPTCHA in that tab, wait, then resume the handoff."
 }
 
-/// Opt-in process-local control for direct-only benchmark arms. Normal sessions
-/// retain the default handoff policy unless the switch is explicitly set to 1.
+/// Handoff requires explicit opt-in. Keep the legacy benchmark kill switch
+/// authoritative even when the config or enable environment variable opts in.
 fn browser_handoff_disabled() -> bool {
     std::env::var("JCODE_BROWSER_HANDOFF_DISABLED").is_ok_and(|value| value == "1")
+        || !crate::config::Config::load().tools.browser_handoff
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -396,7 +397,7 @@ impl Tool for BrowserTool {
         let mut params: BrowserInput = serde_json::from_value(input)?;
         if params.action == "handoff" && browser_handoff_disabled() {
             anyhow::bail!(
-                "Browser handoff is disabled by JCODE_BROWSER_HANDOFF_DISABLED=1. Use direct browser actions instead."
+                "Browser handoff is disabled. Use direct browser actions instead. To opt in, set [tools] browser_handoff = true in ~/.jcode/config.toml or JCODE_BROWSER_HANDOFF=1. JCODE_BROWSER_HANDOFF_DISABLED=1 overrides opt-in."
             );
         }
         let provider = resolve_provider(params.browser.as_deref())?;

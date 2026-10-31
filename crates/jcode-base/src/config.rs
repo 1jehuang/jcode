@@ -810,6 +810,8 @@ impl McpToolsMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolConfig {
+    /// Opt into Jev browser handoff. Direct browser actions remain available.
+    pub browser_handoff: bool,
     /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
     pub auto_background_timeout_ms: u64,
     /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
@@ -841,6 +843,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            browser_handoff: false,
             auto_background_timeout_ms: 3_000,
             profile: String::new(),
             enabled: Vec::new(),

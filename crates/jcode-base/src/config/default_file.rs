@@ -415,6 +415,9 @@ bing_market = "en-US"
 # snippet_pointer = "/snippet"
 
 [tools]
+# Opt into Jev browser handoff. Default off, direct browser actions still work.
+# Env override: JCODE_BROWSER_HANDOFF=1 to enable.
+browser_handoff = false
 # Automatically hand long-running tool calls to the background after this many
 # milliseconds. Default: 3000 (3 seconds). Set 0 to disable automatic handoff.
 # Applies to streaming, nonstreaming, and SDK calls. bg wait stays foreground.
