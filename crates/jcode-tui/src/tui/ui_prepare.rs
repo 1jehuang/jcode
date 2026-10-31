@@ -1148,7 +1148,8 @@ pub(super) fn build_body_from_base(
 /// builders. Holding this in one place keeps the single per-message renderer
 /// (`render_message_into`) free of divergence between the two entry points.
 struct BodyRenderCtx<'a> {
-    app: &'a dyn TuiState,
+    app: Option<&'a dyn TuiState>,
+    diff_mode: crate::config::DiffDisplayMode,
     width: u16,
     centered: bool,
     /// Number rendered next to the first user prompt = global prompt count +
@@ -1160,6 +1161,51 @@ struct BodyRenderCtx<'a> {
     inline_images_visible: bool,
     messages: &'a [DisplayMessage],
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
+}
+
+/// Render saved history through the live dispatcher and wrapping pipeline.
+/// No active App is borrowed: expansion state, images and in-flight swarm work
+/// from the session behind the picker must never leak into this transcript.
+pub(crate) fn prepare_history_preview(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> PreparedMessages {
+    markdown::with_center_code_blocks(false, || {
+        let ctx = BodyRenderCtx {
+            app: None,
+            diff_mode,
+            width,
+            centered: false,
+            prompt_number_offset: hidden_prompts,
+            total_prompts: messages
+                .iter()
+                .filter(|msg| msg.effective_role() == "user")
+                .count(),
+            pending_count: 0,
+            anchored_images: Arc::new(Default::default()),
+            inline_images_visible: false,
+            messages,
+            swarm_members: Vec::new(),
+        };
+        let mut acc = BodyAcc::default();
+        for (idx, msg) in messages.iter().enumerate() {
+            render_message_into(&ctx, &mut acc, msg, idx);
+        }
+        wrap_lines_with_map(
+            acc.lines,
+            &acc.raw_plain_lines,
+            &acc.line_raw_overrides,
+            &acc.line_copy_offsets,
+            &acc.user_line_indices,
+            &acc.user_prompt_texts,
+            width,
+            &acc.edit_tool_line_ranges,
+            &acc.copy_targets,
+            &acc.segments,
+        )
+    })
 }
 
 /// Mutable accumulator for one body build. Both `prepare_body` (full) and
@@ -1235,7 +1281,7 @@ fn render_message_into(
 ) {
     let width = ctx.width;
     let centered = ctx.centered;
-    let app = ctx.app;
+    let diff_mode = ctx.diff_mode;
     let role = msg.effective_role();
     // The pinned band is the canonical todo presentation while enabled. Keep
     // todo tool messages in display_messages for history/session fidelity, but
@@ -1287,7 +1333,9 @@ fn render_message_into(
             if !crate::session::is_attached_image_label_text(&msg.content) {
                 let ordinal = acc.anchor_prompt_ordinal;
                 acc.anchor_prompt_ordinal += 1;
-                if let Some(items) = ctx.anchored_images.by_prompt.get(&ordinal) {
+                if let (Some(app), Some(items)) =
+                    (ctx.app, ctx.anchored_images.by_prompt.get(&ordinal))
+                {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,
                         width,
@@ -1301,25 +1349,14 @@ fn render_message_into(
         }
         "assistant" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_assistant_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_assistant_message);
             let message_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
             for target in message_copy_targets {
                 acc.copy_targets
                     .push(offset_copy_target(target, acc.lines.len()));
             }
-            let aux = assistant_aux_data(
-                msg,
-                &cached,
-                content_width,
-                centered,
-                app.diff_mode(),
-                align,
-            );
+            let aux = assistant_aux_data(msg, &cached, content_width, centered, diff_mode, align);
             let content_line_count = aux.content_line_count;
             let logical_plain_lines = &aux.logical_plain_lines;
             let raw_base = acc.raw_plain_lines.len();
@@ -1380,7 +1417,7 @@ fn render_message_into(
         }
         "tool" => {
             let tool_start_line = acc.lines.len();
-            let cached = get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
+            let cached = get_cached_message_lines(msg, width, diff_mode, render_tool_message);
             if let Some(target) = tool_message_copy_target(msg, cached.len()) {
                 acc.copy_targets
                     .push(offset_copy_target(target, tool_start_line));
@@ -1426,7 +1463,7 @@ fn render_message_into(
                         .unwrap_or_else(|| "unknown".to_string());
                     // Outside the inline modes the diff body is hidden entirely,
                     // so any edit with a diff can be expanded into full inline.
-                    let expandable = if app.diff_mode().is_inline() {
+                    let expandable = if diff_mode.is_inline() {
                         messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
                     } else {
                         messages::edit_tool_has_inline_diff(tc, &msg.content)
@@ -1439,7 +1476,8 @@ fn render_message_into(
                         expandable,
                     ));
                 }
-                if let Some(items) = ctx.anchored_images.by_tool.get(&tc.id) {
+                if let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
+                {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,
                         width,
@@ -1453,12 +1491,8 @@ fn render_message_into(
         }
         "system" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_system_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_system_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1475,12 +1509,8 @@ fn render_message_into(
         }
         "reasoning" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_reasoning_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_reasoning_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1490,7 +1520,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 render_background_task_message,
             );
             for line in cached {
@@ -1500,7 +1530,7 @@ fn render_message_into(
         "swarm" => {
             let content_width = width.saturating_sub(4);
             let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_swarm_message);
+                get_cached_message_lines(msg, content_width, diff_mode, render_swarm_message);
             for line in cached {
                 let line = align_if_unset(line, align);
                 let plain = ui::line_plain_text(&line);
@@ -1548,7 +1578,7 @@ fn render_message_into(
         "usage" => {
             let content_width = width.saturating_sub(4);
             let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_usage_message);
+                get_cached_message_lines(msg, content_width, diff_mode, render_usage_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1558,7 +1588,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 super::messages::render_overnight_message,
             );
             for line in cached {
@@ -1570,7 +1600,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 super::messages::render_todos_message,
             );
             for line in cached {
@@ -1665,7 +1695,8 @@ pub(super) fn prepare_body_incremental(
     };
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -1991,7 +2022,8 @@ pub(super) fn prepare_body_prepended(
     markdown::set_center_code_blocks(centered);
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -2244,7 +2276,8 @@ pub(super) fn prepare_body(
     let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
     let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),

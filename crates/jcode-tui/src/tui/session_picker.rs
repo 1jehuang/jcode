@@ -1671,6 +1671,8 @@ impl SessionPicker {
             msg.role.hash(&mut h);
             msg.content.hash(&mut h);
             msg.tool_calls.hash(&mut h);
+            msg.duration_secs.map(f32::to_bits).hash(&mut h);
+            msg.title.hash(&mut h);
             if let Some(tool) = &msg.tool_data {
                 tool.id.hash(&mut h);
                 tool.name.hash(&mut h);
@@ -1693,304 +1695,55 @@ impl SessionPicker {
         align: Alignment,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> PreviewRenderCache {
-        let user_color: Color = theme::user_color();
-        let user_text: Color = theme::user_text();
-        let dim_color: Color = rgb(80, 80, 80);
-
-        let preview_inner_width = area.width.saturating_sub(2);
-        let assistant_width = preview_inner_width.saturating_sub(2);
-
-        // Build preview content
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        // Picker metadata belongs in the session list, not the transcript.
-        // Messages preview - styled like the actual TUI
-        let extras = self.preview_extras.get(&session.id);
-        let hidden_prompts = extras.map_or(0, |extras| extras.hidden_prompts);
-        // The pinned todo band is the canonical todo presentation while
-        // enabled, so omit duplicate todo tool cards exactly like the live chat.
-        let hide_todo_tools = crate::config::config().display.pin_todos;
-        let is_hidden_todo_tool = |msg: &PreviewMessage| {
-            hide_todo_tools
-                && msg.role == "tool"
-                && msg.tool_data.as_ref().is_some_and(|tool| {
-                    super::ui::tools_ui::canonical_tool_name(&tool.name) == "todo"
-                })
-        };
-        let total_prompts = session
+        let _ = (area, align);
+        let hidden_prompts = self
+            .preview_extras
+            .get(&session.id)
+            .map_or(0, |extras| extras.hidden_prompts);
+        let messages: Vec<DisplayMessage> = session
             .messages_preview
             .iter()
-            .filter(|msg| msg.role == "user" && !msg.content.trim().is_empty())
-            .count();
-        let mut local_prompt_num = 0usize;
-        let mut prompt_num = hidden_prompts;
-        let mut rendered_messages = 0usize;
-        // Track the pre-wrap line index + display number + text of every user
-        // prompt so we can render a sticky "previous prompt" header (matching the
-        // main TUI's `prompt_preview`) once it scrolls out of view.
-        let mut user_prompt_markers: Vec<(usize, usize, String)> = Vec::new();
-        for msg in &session.messages_preview {
-            if msg.content.trim().is_empty() || is_hidden_todo_tool(msg) {
-                continue;
-            }
-
-            if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" && msg.role != "swarm"
-            {
-                lines.push(Line::from("").alignment(align));
-            }
-
-            let display_msg = DisplayMessage {
+            .map(|msg| DisplayMessage {
                 role: msg.role.clone(),
                 content: msg.content.clone(),
                 tool_calls: msg.tool_calls.clone(),
-                duration_secs: None,
-                title: None,
+                duration_secs: msg.duration_secs,
+                title: msg.title.clone(),
                 tool_data: msg.tool_data.clone(),
-            };
-
-            match msg.role.as_str() {
-                "user" => {
-                    prompt_num += 1;
-                    local_prompt_num += 1;
-                    user_prompt_markers.push((
-                        lines.len(),
-                        prompt_num,
-                        display_msg.content.clone(),
-                    ));
-                    // Same prompt rendering as the live chat: rainbow number by
-                    // recency, accent chevron, prompt background, one row per
-                    // source line with a hanging indent.
-                    let distance = total_prompts + 1 - local_prompt_num.min(total_prompts);
-                    let num_color = theme::rainbow_prompt_color(distance);
-                    let bg = theme::user_bg();
-                    let num_str = prompt_num.to_string();
-                    let prefix_width = unicode_width::UnicodeWidthStr::width(num_str.as_str())
-                        + unicode_width::UnicodeWidthStr::width("› ");
-                    let (visible, transcribed) =
-                        jcode_session_types::strip_transcription(&display_msg.content);
-                    let content = if transcribed {
-                        format!("🎙 {visible}")
-                    } else {
-                        display_msg.content.clone()
-                    };
-                    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-                    for (line_idx, content_line) in normalized.split('\n').enumerate() {
-                        let mut spans = if line_idx == 0 {
-                            vec![
-                                Span::styled(
-                                    num_str.clone(),
-                                    Style::default().fg(num_color).bg(bg),
-                                ),
-                                Span::styled("› ", Style::default().fg(user_color).bg(bg)),
-                            ]
-                        } else {
-                            vec![Span::styled(
-                                " ".repeat(prefix_width),
-                                Style::default().fg(user_color).bg(bg),
-                            )]
-                        };
-                        spans.push(Span::styled(
-                            content_line.to_string(),
-                            Style::default().fg(user_text).bg(bg),
-                        ));
-                        lines.push(Line::from(spans).alignment(align));
-                    }
-                    rendered_messages += 1;
-                }
-                "assistant" => {
-                    let md_lines = super::ui::render_assistant_message(
-                        &display_msg,
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    let mut skip_mermaid_blank = false;
-
-                    for line in md_lines {
-                        if super::mermaid::parse_image_placeholder(&line).is_some()
-                            || super::mermaid::parse_inline_image_placeholder(&line).is_some()
-                        {
-                            lines.push(
-                                Line::from(vec![Span::styled(
-                                    "[mermaid diagram]",
-                                    Style::default().fg(dim_color),
-                                )])
-                                .alignment(align),
-                            );
-                            skip_mermaid_blank = true;
-                            rendered_messages += 1;
-                            continue;
-                        }
-
-                        if skip_mermaid_blank
-                            && line.spans.len() == 1
-                            && line.spans[0].content.trim().is_empty()
-                        {
-                            continue;
-                        }
-
-                        skip_mermaid_blank = false;
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "tool" => {
-                    let tool_lines = super::ui::render_tool_message(
-                        &display_msg,
-                        preview_inner_width,
-                        diff_mode,
-                    );
-                    for line in tool_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "meta" => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(dim_color),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "system" => {
-                    let md_lines = super::ui::render_system_message(
-                        &DisplayMessage {
-                            role: msg.role.clone(),
-                            content: msg.content.clone(),
-                            tool_calls: msg.tool_calls.clone(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: msg.tool_data.clone(),
-                        },
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    for line in md_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "background_task" => {
-                    let md_lines = super::ui::render_background_task_message(
-                        &DisplayMessage {
-                            role: msg.role.clone(),
-                            content: msg.content.clone(),
-                            tool_calls: msg.tool_calls.clone(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: msg.tool_data.clone(),
-                        },
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    for line in md_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "memory" => {
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled("🧠 ", Style::default()),
-                            Span::styled(
-                                msg.content.clone(),
-                                Style::default().fg(rgb(140, 210, 255)),
-                            ),
-                        ])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "usage" => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(dim_color),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "error" => {
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled("✗ ", Style::default().fg(Color::Red)),
-                            Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                        ])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                _ => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(Color::White),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-            }
-        }
-
-        if rendered_messages == 0 {
-            let preview_loading = session.messages_preview.is_empty()
-                && self
-                    .pending_preview_load
-                    .as_ref()
-                    .is_some_and(|pending| pending.session_id == session.id);
-            let text = if preview_loading {
+            })
+            .collect();
+        let prepared = super::ui::prepare::prepare_history_preview(
+            &messages,
+            hidden_prompts,
+            inner.width,
+            diff_mode,
+        );
+        let mut wrapped_lines = prepared.wrapped_lines;
+        let user_prompt_markers = prepared
+            .wrapped_user_prompt_starts
+            .iter()
+            .zip(prepared.user_prompt_texts.iter())
+            .enumerate()
+            .map(|(idx, (&line, text))| (line, hidden_prompts + idx + 1, text.clone()))
+            .collect();
+        // Markers already refer to wrapped rows from the live pipeline.
+        let prewrap_to_wrapped = (0..=wrapped_lines.len()).collect();
+        if wrapped_lines.is_empty() {
+            let loading = self
+                .pending_preview_load
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session.id);
+            let text = if loading {
                 "Loading preview…"
             } else if self.preview_load_failures.contains(&session.id) {
                 "Preview unavailable (session could not be read)"
             } else {
                 "(empty session)"
             };
-            lines.push(
-                Line::from(vec![Span::styled(text, Style::default().fg(dim_color))])
-                    .alignment(align),
-            );
+            wrapped_lines.push(Line::styled(text, Style::default().fg(rgb(80, 80, 80))));
         }
-
-        // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
-        // Two-pass so the content reserves the scrollbar column before wrapping
-        // (matching the main chat viewport): wrap at the full inner width, and if
-        // that overflows the viewport we re-wrap one column narrower to leave room
-        // for the scrollbar. Narrowing only ever adds lines, so the decision is
-        // stable. We also record, for each pre-wrap line, its first wrapped-line
-        // index so we can locate user prompts for the sticky header.
-        let visible_height = inner.height as usize;
-        let source_lines = lines;
-        let wrap_lines_tracked = |width: usize| -> (Vec<Line<'static>>, Vec<usize>) {
-            let mut mapped = Vec::with_capacity(source_lines.len() + 1);
-            let mut wrapped: Vec<Line> = Vec::new();
-            for line in source_lines.iter().cloned() {
-                mapped.push(wrapped.len());
-                if width > 0 {
-                    wrapped.extend(markdown::wrap_lines(vec![line], width));
-                } else {
-                    wrapped.push(line);
-                }
-            }
-            mapped.push(wrapped.len());
-            (wrapped, mapped)
-        };
-
-        let full_width = inner.width as usize;
-        let (full_lines, full_map) = wrap_lines_tracked(full_width);
         let show_scrollbar =
-            super::ui::native_scrollbar_visible(true, full_lines.len(), visible_height);
-
-        let (mut wrapped_lines, prewrap_to_wrapped) = if show_scrollbar {
-            let content_width = inner.width.saturating_sub(1) as usize;
-            wrap_lines_tracked(content_width)
-        } else {
-            // Reuse the full-width wrap; the map already matches.
-            (full_lines, full_map)
-        };
+            super::ui::native_scrollbar_visible(true, wrapped_lines.len(), inner.height as usize);
 
         // Highlight active search matches in the wrapped preview body and record
         // the first wrapped line that contains a hit, so the caller can scroll it
