@@ -1578,7 +1578,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if app.is_processing {
         if let Some(interleave_msg) = app.interleave_message.take()
-            && !interleave_msg.trim().is_empty()
+            && (!interleave_msg.trim().is_empty() || !app.interleave_images.is_empty())
         {
             let interleave_images = std::mem::take(&mut app.interleave_images);
             let msg_clone = interleave_msg.clone();
@@ -1610,7 +1610,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         // passing `vec![]`, which silently dropped every image on an interleaved
         // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
-        if !interleave_msg.trim().is_empty() {
+        if !interleave_msg.trim().is_empty() || !interleave_images.is_empty() {
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: interleave_msg.clone(),
