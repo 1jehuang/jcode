@@ -419,6 +419,17 @@ impl Session {
         session.trim_compacted_prefix();
         session.trim_old_history_in_memory(256);
         let decayed_tool_images = session.decay_old_tool_images();
+        let downscaled_images = session.downscale_loaded_images();
+        if downscaled_images > 0 {
+            crate::logging::event_info(
+                "SESSION_PERSISTENCE",
+                vec![
+                    ("phase", "oversized_images_downscaled_on_load".to_string()),
+                    ("session_id", session.id.clone()),
+                    ("images", downscaled_images.to_string()),
+                ],
+            );
+        }
         if decayed_tool_images > 0 {
             crate::logging::event_info(
                 "SESSION_PERSISTENCE",
@@ -580,6 +591,7 @@ impl Session {
         session.trim_compacted_prefix();
         session.trim_old_history_in_memory(256);
         session.decay_old_tool_images();
+        session.downscale_loaded_images();
         session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
         // Parsing a large snapshot allocates several times its size transiently;

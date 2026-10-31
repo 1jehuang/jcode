@@ -17,6 +17,10 @@
 pub const PROVIDER_IMAGE_MEDIA_TYPES: [&str; 4] =
     ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
+/// Bound retained screenshot pixels even when the provider accepts a much
+/// larger source image. Applied once as image content enters a session.
+pub const SESSION_IMAGE_MAX_EDGE: u32 = 1568;
+
 /// True when `media_type` is one of [`PROVIDER_IMAGE_MEDIA_TYPES`].
 pub fn is_provider_media_type(media_type: &str) -> bool {
     PROVIDER_IMAGE_MEDIA_TYPES
@@ -119,6 +123,61 @@ pub fn normalize_image_bytes(data: Vec<u8>) -> Result<ProviderImage, String> {
     }
 }
 
+/// Downscale an oversized PNG image payload in place for session retention.
+///
+/// A high-resolution PNG expands to tens of MiB whenever the TUI or provider
+/// materializes it. Capping the longest edge bounds RGBA pixels to about 10 MiB
+/// while keeping only the compressed PNG representation after this call. The
+/// decoded pixels and source bytes are dropped before return. Non-PNG and
+/// already-small payloads remain byte-for-byte unchanged.
+pub fn downscale_session_png(media_type: &str, data_b64: &mut String) -> bool {
+    use base64::Engine as _;
+
+    if !media_type.eq_ignore_ascii_case("image/png") {
+        return false;
+    }
+    if data_b64.len() < 32 {
+        return false;
+    }
+    // PNG dimensions are available in the first 24 bytes. Decode only the
+    // header on the common small-image path, avoiding a full base64 copy.
+    let Ok(header) = base64::engine::general_purpose::STANDARD.decode(&data_b64.as_bytes()[..32])
+    else {
+        return false;
+    };
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if header.len() < 24 || header[..8] != PNG_SIGNATURE {
+        return false;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    if width.max(height) <= SESSION_IMAGE_MAX_EDGE {
+        return false;
+    }
+    let Ok(source_bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
+    else {
+        return false;
+    };
+    if source_bytes.len() < 24 || source_bytes[..8] != PNG_SIGNATURE {
+        return false;
+    }
+
+    let Ok(decoded) = image::load_from_memory(&source_bytes) else {
+        return false;
+    };
+    let resized = decoded.thumbnail(SESSION_IMAGE_MAX_EDGE, SESSION_IMAGE_MAX_EDGE);
+    let mut output = std::io::Cursor::new(Vec::new());
+    if resized
+        .write_to(&mut output, image::ImageFormat::Png)
+        .is_err()
+    {
+        return false;
+    }
+
+    *data_b64 = base64::engine::general_purpose::STANDARD.encode(output.into_inner());
+    true
+}
+
 fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory(data).ok()?;
     let mut out = std::io::Cursor::new(Vec::new());
@@ -179,6 +238,45 @@ mod tests {
         assert_eq!(out.media_type, "image/png");
         assert_eq!(out.data, png);
         assert_eq!(out.converted_from, None);
+    }
+
+    #[test]
+    fn oversized_session_png_is_downscaled_once_and_kept_compressed() {
+        use base64::Engine as _;
+
+        let pixels = image::RgbaImage::from_pixel(
+            SESSION_IMAGE_MAX_EDGE + 128,
+            900,
+            image::Rgba([9, 8, 7, 255]),
+        );
+        let mut source = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut source, image::ImageFormat::Png)
+            .unwrap();
+        let mut encoded = base64::engine::general_purpose::STANDARD.encode(source.into_inner());
+
+        assert!(downscale_session_png("image/png", &mut encoded));
+        let resized = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap();
+        let decoded = image::load_from_memory(&resized).unwrap();
+        let (width, height) = (decoded.width(), decoded.height());
+        assert_eq!((width, height), (SESSION_IMAGE_MAX_EDGE, 832));
+        assert!(!downscale_session_png("image/png", &mut encoded));
+    }
+
+    #[test]
+    fn session_png_downscale_leaves_small_or_non_png_payloads_untouched() {
+        use base64::Engine as _;
+
+        let mut small = base64::engine::general_purpose::STANDARD.encode(tiny_png());
+        let original = small.clone();
+        assert!(!downscale_session_png("image/png", &mut small));
+        assert_eq!(small, original);
+
+        let mut not_png = "bm90LWEtcG5n".to_string();
+        assert!(!downscale_session_png("image/jpeg", &mut not_png));
+        assert_eq!(not_png, "bm90LWEtcG5n");
     }
 
     #[test]

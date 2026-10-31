@@ -120,3 +120,75 @@ fn loading_legacy_transcript_decays_old_screenshots() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn loading_legacy_transcript_downscales_large_png_in_memory_only() -> Result<()> {
+    use base64::Engine as _;
+
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-image-downscale-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_large_image_load";
+    let pixels = image::RgbaImage::from_pixel(
+        crate::image_normalize::SESSION_IMAGE_MAX_EDGE + 128,
+        900,
+        image::Rgba([9, 8, 7, 255]),
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let original_data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+
+    let mut fresh = Session::create_with_id("session_new_image_ingest".to_string(), None, None);
+    fresh.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: original_data.clone(),
+        }],
+    );
+    let ContentBlock::Image { data, .. } = &fresh.messages[0].content[0] else {
+        panic!("new screenshot image remains in the transcript")
+    };
+    assert_ne!(data, &original_data);
+
+    let mut legacy = Session::create_with_id(session_id.to_string(), None, None);
+    legacy.messages = vec![StoredMessage {
+        id: "screenshot".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: original_data.clone(),
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }];
+    std::fs::create_dir_all(session_path(session_id)?.parent().unwrap())?;
+    crate::storage::write_json(&session_path(session_id)?, &legacy)?;
+    let disk_before = std::fs::read(session_path(session_id)?)?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(loaded.messages.len(), 1);
+    let ContentBlock::Image { data, .. } = &loaded.messages[0].content[0] else {
+        panic!("screenshot image remains in the transcript")
+    };
+    assert_ne!(data, &original_data);
+    let resized = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    let decoded = image::load_from_memory(&resized).unwrap();
+    let dimensions = (decoded.width(), decoded.height());
+    assert_eq!(
+        dimensions,
+        (crate::image_normalize::SESSION_IMAGE_MAX_EDGE, 832)
+    );
+    assert_eq!(std::fs::read(session_path(session_id)?)?, disk_before);
+    Ok(())
+}

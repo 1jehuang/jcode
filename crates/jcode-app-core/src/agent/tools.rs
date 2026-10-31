@@ -5,6 +5,11 @@ use crate::tool::ToolOutput;
 pub(super) const MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY: usize = 512 * 1024;
 
 pub(super) fn cap_tool_output_for_history(tool_name: &str, mut output: ToolOutput) -> ToolOutput {
+    // Shrink screenshots before side-pane events clone their payload into the
+    // client image list and before the tool result enters provider history.
+    for image in &mut output.images {
+        crate::image_normalize::downscale_session_png(&image.media_type, &mut image.data);
+    }
     if output.output.chars().count() <= MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY {
         return output;
     }

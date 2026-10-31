@@ -1404,7 +1404,8 @@ request in this new forked session, using the inherited conversation only as con
         id
     }
 
-    pub fn append_stored_message(&mut self, message: StoredMessage) {
+    pub fn append_stored_message(&mut self, mut message: StoredMessage) {
+        downscale_session_images(&mut message.content);
         self.memory_profile_cache.messages_count += 1;
         self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
         self.memory_profile_cache
@@ -1417,6 +1418,21 @@ request in this new forked session, using the inherited conversation only as con
         if adds_tool_image {
             self.decay_old_tool_images();
         }
+    }
+
+    /// Downscale oversized screenshot PNGs already resident in a loaded
+    /// transcript. Unlike newly ingested messages, this in-memory cleanup does
+    /// not mark the source snapshot dirty, so loading alone never rewrites the
+    /// original image payloads on disk.
+    pub(crate) fn downscale_loaded_images(&mut self) -> usize {
+        let mut changed = 0;
+        for message in &mut self.messages {
+            changed += downscale_session_images(&mut message.content);
+        }
+        if changed > 0 {
+            self.mark_memory_profile_dirty();
+        }
+        changed
     }
 
     /// Replace inline screenshots from older tool results with short text
@@ -1880,6 +1896,19 @@ request in this new forked session, using the inherited conversation only as con
             }
         }
     }
+}
+
+fn downscale_session_images(content: &mut [ContentBlock]) -> usize {
+    content
+        .iter_mut()
+        .filter_map(|block| match block {
+            ContentBlock::Image { media_type, data } => Some(
+                crate::image_normalize::downscale_session_png(media_type, data),
+            ),
+            _ => None,
+        })
+        .filter(|changed| *changed)
+        .count()
 }
 
 fn redact_json_value(value: &mut serde_json::Value) {
