@@ -40,8 +40,8 @@ struct Review {
     pending: Option<Pending>,
 }
 type Reviews = HashMap<String, (Instant, Arc<Mutex<Review>>)>;
-static REVIEWS: OnceLock<Mutex<Reviews>> = OnceLock::new();
 type Removals = HashMap<String, (Instant, String, String)>;
+static REVIEWS: OnceLock<Mutex<Reviews>> = OnceLock::new();
 static REMOVALS: OnceLock<Mutex<Removals>> = OnceLock::new();
 
 async fn remove_account(

@@ -1,8 +1,9 @@
 {
-  "total": 170,
+  "total": 175,
   "tracked_files": {
     "crates/jcode-app-core/src/agent/provider.rs": 1,
     "crates/jcode-app-core/src/agent/tool_markup_recovery.rs": 2,
+    "crates/jcode-app-core/src/server/runtime_ssh_loops.rs": 1,
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/bash.rs": 2,
     "crates/jcode-app-core/src/tool/browser.rs": 2,
@@ -45,10 +46,12 @@
     "crates/jcode-tui-style/examples/light_bench.rs": 1,
     "crates/jcode-tui-style/src/theme_mode.rs": 1,
     "crates/jcode-tui/src/tui/app/auth.rs": 3,
+    "crates/jcode-tui/src/tui/app/auth_account_commands.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote.rs": 12,
     "crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote/picker.rs": 1,
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": 2,
+    "crates/jcode-tui/src/tui/app/remote/ssh_sessions.rs": 2,
     "crates/jcode-tui/src/tui/app/usage_reset.rs": 1,
     "crates/jcode-tui/src/tui/session_picker.rs": 2,
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": 1,
@@ -57,7 +60,7 @@
     "src/cli/cloud_managed.rs": 1,
     "src/cli/commands/menubar.rs": 1,
     "src/cli/login/device_login.rs": 9,
-    "src/cli/ssh.rs": 1,
+    "src/cli/ssh.rs": 2,
     "src/cli/tui_launch.rs": 1
   },
   "version": 1
