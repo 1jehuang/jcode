@@ -16,7 +16,8 @@ repository**, and asks again when the files change.
 | `agents` | `model`, `effort`, `tools` of project agent definitions | `.jcode/agents`, `.claude/agents` (used by later changes) |
 
 The `agents` scope is reserved here: until the change that uses it lands,
-`trust grant --scope agents` has nothing to approve. Scopes are independent. Granting one never grants another. Not gated: skills,
+`trust grant --scope agents` has nothing to approve. Scopes are independent.
+Granting one never grants another. Not gated: skills,
 `AGENTS.md`, prompt overlays, global config and global MCP. Remote (HTTP/SSE)
 MCP servers run no local command and are not gated.
 
