@@ -103,8 +103,8 @@ Define plans as **phases → lanes → items**, including plans with only one ph
           "lane": "implementation",
           "items": [
             {
-              "id": "implement",
-              "content": "Implement the change",
+              "name": "Implement the change",
+              "description": "Implement and validate the requested behavior",
               "status": "in_progress",
               "priority": "high",
               "confidence": "validated"
@@ -117,22 +117,24 @@ Define plans as **phases → lanes → items**, including plans with only one ph
 }
 ```
 
-Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `id` rather than resending the hierarchy. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
+Phases execute in declared order. Lanes within a phase can run in parallel, while items within a lane run in order. Items inherit phase and lane membership from their enclosing containers. Update existing items by `name` rather than resending the hierarchy. Names must be nonblank and globally unique across all phases and lanes. Use `description` for longer context and `rename_to` for an explicit rename, for example `{"update":[{"name":"Implement the change","rename_to":"Implement the feature"}]}`. Internal IDs are generated automatically and preserved when replacing a plan with the same task names. Legacy `id`/`content`/`details` calls remain accepted for compatibility. Flat saved todo lists remain compatible internally with storage, swarm coordination, and rendering.
 
 A lane can optionally replace the default whole-prior-phase barrier with specific
-prerequisite todo IDs from strictly earlier phases. For example, add this phase
+prerequisite task names from strictly earlier phases. For example, add this phase
 after the phase above:
 
 ```json
-{"phase": 2, "lanes": [{"lane": "tests", "after": ["implement"], "items": [
-  {"id": "test", "content": "Test the change", "status": "pending", "priority": "high"}
+{"phase": 2, "lanes": [{"lane": "tests", "after": ["Implement the change"], "items": [
+  {"name": "Test the change", "status": "pending", "priority": "high"}
 ]}]}
 ```
 
-The tests lane can start as soon as `implement` is successfully completed, even
+The tests lane can start as soon as `Implement the change` is successfully completed, even
 if an unrelated lane in phase 1 is still running. Omit `after` to retain the
-phase barrier. When present, `after` must contain unique, existing todo IDs and
-must not be empty. Saved items
+phase barrier. When present, `after` must contain unique, existing task names and
+must not be empty. `remove`, `add.after`, and `update.lane_after` also reference
+task names. Ambiguous names in legacy saved lists are rejected rather than
+selecting an arbitrary task. Saved items
 carry this setting as `lane_after`. Cancelled or deleted prerequisites do not
 satisfy the dependency. The TUI shows concise `tests: after 1/1 · met`
 progress and does not dim a prerequisite-ready lane merely because its phase is
@@ -149,7 +151,7 @@ No way forward.
 {
   "update": [
     {
-      "id": "recover-source",
+      "name": "Recover source data",
       "completely_blocked": {
         "reason": "Required source data no longer exists"
       }
