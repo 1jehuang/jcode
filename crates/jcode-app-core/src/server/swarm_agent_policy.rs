@@ -46,11 +46,17 @@ pub(in crate::server) struct AppliedPolicy {
     pub notice: Option<String>,
 }
 
-fn project_policy_trusted(working_dir: Option<&Path>) -> bool {
+/// Whether the policy of `applied` is covered by an approval. The approved set
+/// is rebuilt with `applied` substituted for its on-disk counterpart, so a file
+/// edited after the definition was resolved yields a different digest and is
+/// refused: what is approved is exactly what gets applied.
+fn project_policy_trusted(applied: &AgentDefinition, working_dir: Option<&Path>) -> bool {
     let Some(dir) = working_dir else {
         return false;
     };
-    let definitions = project_policy_definitions(Some(dir));
+    let mut definitions = project_policy_definitions(Some(dir));
+    definitions.retain(|d| d.name != applied.name);
+    definitions.push(applied.clone());
     let refs: Vec<&AgentDefinition> = definitions.iter().collect();
     project_trust::is_trusted(dir, Scope::Agents, &agents_digest(&refs))
 }
@@ -80,7 +86,9 @@ pub(in crate::server) fn applied_policy(
             ..AppliedPolicy::default()
         };
     }
-    if definition.origin == DefinitionOrigin::Project && !project_policy_trusted(working_dir) {
+    if definition.origin == DefinitionOrigin::Project
+        && !project_policy_trusted(definition, working_dir)
+    {
         return AppliedPolicy {
             notice: Some(format!(
                 "agent '{}' is a project definition whose model, effort and tools are not trusted; run `jcode trust grant --scope agents` to apply them (persona only for now)",

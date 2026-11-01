@@ -242,6 +242,41 @@ fn project_definition_policy_needs_the_agents_trust_scope() {
 }
 
 #[test]
+fn a_definition_edited_after_approval_is_not_applied_from_a_stale_snapshot() {
+    let f = fx();
+    let _ = &f.home;
+    let project_defs = project_policy_definitions(Some(f.project.path()));
+    let refs: Vec<_> = project_defs.iter().collect();
+    project_trust::grant(f.project.path(), Scope::Agents, &agents_digest(&refs)).unwrap();
+
+    // The definition is resolved while approved...
+    let defs = crate::agent_def::load_agent_definitions(Some(f.project.path()));
+    let approved = &defs["worker"];
+    assert!(
+        applied_policy(approved, &agents(false), Some(f.project.path()))
+            .model
+            .is_some()
+    );
+
+    // ...then the file changes. A snapshot with the new policy must not ride
+    // on the approval of the old one, whichever order the reads happen in.
+    std::fs::write(
+        f.project.path().join(".claude/agents/worker.md"),
+        "---\nname: worker\ndescription: d\nmodel: opus\neffort: max\ntools: Read, Bash\n---\nbody\n",
+    )
+    .unwrap();
+    let edited = crate::agent_def::load_agent_definitions(Some(f.project.path()));
+    let applied = applied_policy(&edited["worker"], &agents(false), Some(f.project.path()));
+    assert_eq!(applied.tools, None);
+
+    // And the approved snapshot, applied after the edit, is judged by its own
+    // content rather than the file now on disk.
+    let stale = applied_policy(approved, &agents(false), Some(f.project.path()));
+    assert_eq!(stale.model.as_deref(), Some("opus"));
+    assert_eq!(stale.tools.as_deref(), Some(&["read".to_string()][..]));
+}
+
+#[test]
 fn policy_digest_is_order_independent() {
     let a = def(
         DefinitionOrigin::Project,

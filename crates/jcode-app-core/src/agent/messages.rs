@@ -36,6 +36,13 @@ impl Agent {
         }
         self.allowed_tools = Some(names);
         self.locked_tools = None;
+        // Nested calls (batch and friends) are checked against the registered
+        // session policy, so it must narrow with the agent's own filter.
+        self._tool_policy_registration = crate::tool::register_session_tool_policy(
+            &self.session.id,
+            self.allowed_tools.clone(),
+            self.disabled_tools.clone(),
+        );
     }
 
     /// Add a hidden persona message (an agent definition body) to the
