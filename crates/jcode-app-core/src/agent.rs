@@ -19,7 +19,6 @@ mod status;
 mod streaming;
 #[cfg(test)]
 mod swarm_reminder_tests;
-mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;
@@ -63,8 +62,6 @@ pub use jcode_agent_runtime::{
 };
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
