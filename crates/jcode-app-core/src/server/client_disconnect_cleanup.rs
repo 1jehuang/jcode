@@ -248,6 +248,11 @@ pub(super) async fn cleanup_client_connection(
         handle.abort();
     }
 
+    // Removing the session forgets its swarm hook identity, but the final
+    // status update below still needs it to fire `swarm_member_end`. Keep a
+    // copy and drop it once that update has been delivered.
+    let ending_identity = crate::hooks::swarm_identity(client_session_id);
+
     {
         if let Some(agent_arc) = super::remove_session_entry(sessions, client_session_id).await {
             let lock_result =
@@ -339,6 +344,9 @@ pub(super) async fn cleanup_client_connection(
                 ("stopped", Some("server reload in progress".to_string()))
             }
         };
+        if let Some(identity) = ending_identity.clone() {
+            crate::hooks::register_swarm_identity(client_session_id, identity);
+        }
         update_member_status(
             client_session_id,
             status,
@@ -350,6 +358,7 @@ pub(super) async fn cleanup_client_connection(
             Some(swarm_event_tx),
         )
         .await;
+        crate::hooks::forget_swarm_identity(client_session_id);
 
         let (swarm_id, removed_name) = {
             let mut members = swarm_members.write().await;
