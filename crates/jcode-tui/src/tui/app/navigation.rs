@@ -293,7 +293,8 @@ impl App {
             });
             return true;
         }
-        let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(target) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -390,7 +391,8 @@ impl App {
         F: FnMut(&str) -> Result<(), E>,
         E: std::fmt::Display,
     {
-        let Some(url) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(url) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 

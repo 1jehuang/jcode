@@ -1703,6 +1703,7 @@ pub(crate) fn draw_onboarding_welcome_for_tests(
 #[derive(Clone)]
 enum CopyViewportData {
     Dense {
+        link_lines: Option<Arc<Vec<Line<'static>>>>,
         wrapped_plain_lines: Arc<Vec<String>>,
         wrapped_copy_offsets: Arc<Vec<usize>>,
         raw_plain_lines: Arc<Vec<String>>,
@@ -1905,6 +1906,7 @@ fn record_copy_pane_snapshot(
             *copy_snapshot_slot_mut(&mut state.borrow_mut(), pane) = Some(CopyViewportSnapshot {
                 pane,
                 data: CopyViewportData::Dense {
+                    link_lines: None,
                     wrapped_plain_lines,
                     wrapped_copy_offsets,
                     raw_plain_lines,
@@ -1923,6 +1925,7 @@ fn record_copy_pane_snapshot(
         *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
             pane,
             data: CopyViewportData::Dense {
+                link_lines: None,
                 wrapped_plain_lines,
                 wrapped_copy_offsets,
                 raw_plain_lines,
@@ -1977,6 +1980,7 @@ fn record_copy_viewport_frame_snapshot(
     reason = "Viewport snapshot helpers carry explicit render state to avoid hidden globals in call sites"
 )]
 pub(crate) fn record_side_pane_snapshot_precomputed(
+    lines: &[Line<'static>],
     wrapped_plain_lines: Arc<Vec<String>>,
     wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
@@ -1997,6 +2001,33 @@ pub(crate) fn record_side_pane_snapshot_precomputed(
         content_area,
         left_margins,
     );
+    record_link_lines(crate::tui::CopySelectionPane::SidePane, lines);
+}
+
+fn record_link_lines(pane: crate::tui::CopySelectionPane, lines: &[Line<'static>]) {
+    // Only retain styled lines when they contain links. The common plain-text
+    // pane path should not duplicate an entire rendered document every frame.
+    let lines = lines
+        .iter()
+        .any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        })
+        .then(|| Arc::new(lines.to_vec()));
+    let update = |state: &mut CopyViewportSnapshots| {
+        if let Some(snapshot) = copy_snapshot_slot_mut(state, pane).as_mut()
+            && let CopyViewportData::Dense { link_lines, .. } = &mut snapshot.data
+        {
+            *link_lines = lines;
+        }
+    };
+    #[cfg(test)]
+    TEST_COPY_VIEWPORT.with(|state| update(&mut state.borrow_mut()));
+    #[cfg(not(test))]
+    if let Ok(mut state) = copy_viewport_state().lock() {
+        update(&mut state);
+    }
 }
 
 #[expect(
@@ -2152,6 +2183,7 @@ fn record_pane_snapshot_from_lines(
         content_area,
         visible_left_margins,
     );
+    record_link_lines(pane, wrapped_lines);
 }
 
 pub(crate) fn copy_point_from_screen(
@@ -2399,6 +2431,70 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     }
     let snapshot = copy_snapshot_for_pane(point.pane)?;
     link_target_from_snapshot(&snapshot, point)
+}
+
+/// Resolve styled markdown labels against their owning source before falling
+/// back to the existing bare-URL hit tester. No global label-to-URL registry is
+/// used, so repeated labels cannot leak destinations between messages.
+pub(crate) fn link_target_from_screen_with_state(
+    column: u16,
+    row: u16,
+    app: &dyn TuiState,
+) -> Option<String> {
+    let point = copy_point_from_screen(column, row)?;
+    if point.pane == crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let target = match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared.sections.iter().find_map(|section| {
+            let local = point.abs_line.checked_sub(section.line_start)?;
+            if local >= section.prepared.wrapped_lines.len() {
+                return None;
+            }
+            let (source, start, end) = match section.kind {
+                PreparedSectionKind::Body => {
+                    let boundaries = &section.prepared.message_boundaries;
+                    let index =
+                        boundaries.partition_point(|boundary| boundary.wrapped_len <= local);
+                    let message = app.display_messages().get(index)?;
+                    let end = boundaries.get(index)?.wrapped_len;
+                    let start = index
+                        .checked_sub(1)
+                        .map(|i| boundaries[i].wrapped_len)
+                        .unwrap_or(0);
+                    (message.content.as_str(), start, end)
+                }
+                PreparedSectionKind::Streaming => (
+                    app.streaming_text(),
+                    0,
+                    section.prepared.wrapped_lines.len(),
+                ),
+                _ => return None,
+            };
+            jcode_tui_markdown::markdown_link_target(
+                source,
+                section.prepared.wrapped_lines.get(start..end)?,
+                local - start,
+                point.column,
+            )
+        }),
+        CopyViewportData::Dense {
+            link_lines: Some(lines),
+            ..
+        } if point.pane == crate::tui::CopySelectionPane::SidePane => {
+            app.side_panel().focused_page().and_then(|page| {
+                jcode_tui_markdown::markdown_link_target(
+                    &page.content,
+                    lines,
+                    point.abs_line,
+                    point.column,
+                )
+            })
+        }
+        _ => None,
+    };
+    target.or_else(|| link_target_from_screen(column, row))
 }
 
 /// Short OAuth link labels resolve against the source card, not a printed URL.

@@ -209,7 +209,7 @@ impl App {
             let image_id = crate::tui::ui::inline_image_expand_target_from_screen(col, row);
             let body_id =
                 crate::tui::ui::inline_image_body_target_from_screen(col, row, self.centered);
-            let link = crate::tui::ui::link_target_from_screen(col, row);
+            let link = crate::tui::ui::link_target_from_screen_with_state(col, row, self);
             serde_json::json!({
                 "col": col,
                 "row": row,

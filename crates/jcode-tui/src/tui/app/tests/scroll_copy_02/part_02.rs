@@ -713,6 +713,84 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
 }
 
 #[test]
+fn test_rendered_markdown_link_labels_open_their_own_message_targets() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.set_centered(false);
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::assistant(
+        "First [guide](https://one.example/docs).",
+    ));
+    app.push_display_message(DisplayMessage::assistant(
+        "Second [**guide**](https://two.example/docs).",
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    for (prefix, expected) in [
+        ("First guide", "https://one.example/docs"),
+        ("Second guide", "https://two.example/docs"),
+    ] {
+        let row = rows
+            .iter()
+            .position(|row| row.contains(prefix))
+            .expect("rendered link label");
+        let col = rows[row].find("guide").unwrap();
+        assert_eq!(
+            crate::tui::ui::link_target_from_screen_with_state(col as u16, row as u16, &app)
+                .as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            crate::tui::ui::link_target_from_screen_with_state((col - 2) as u16, row as u16, &app),
+            None
+        );
+    }
+}
+
+#[test]
+fn test_rendered_wrapped_markdown_link_label_is_clickable() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.set_centered(false);
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::assistant(
+        "Read [a long linked guide with several words and destination](https://wrapped.example).",
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(35, 30)).unwrap();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    let row = rows
+        .iter()
+        .position(|row| row.contains("destination"))
+        .expect("wrapped label tail");
+    let col = rows[row].find("destination").unwrap();
+    assert_eq!(
+        crate::tui::ui::link_target_from_screen_with_state(col as u16, row as u16, &app).as_deref(),
+        Some("https://wrapped.example")
+    );
+}
+
+#[test]
+fn test_side_pane_markdown_link_label_is_clickable() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.side_panel = test_side_panel_snapshot("links", "Links");
+    app.side_panel.pages[0].content = "Read [the guide](https://pane.example/docs).".to_string();
+    let lines = crate::tui::markdown::render_markdown(&app.side_panel.pages[0].content);
+    let row = lines
+        .iter()
+        .position(|line| line.to_string().contains("the guide"))
+        .unwrap();
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_side_pane_snapshot(&lines, 0, lines.len(), Rect::new(40, 2, 40, 10));
+    assert_eq!(
+        crate::tui::ui::link_target_from_screen_with_state(46, 2 + row as u16, &app).as_deref(),
+        Some("https://pane.example/docs")
+    );
+}
+
+#[test]
 fn test_repository_markdown_link_cannot_escape_working_directory() {
     let parent = tempfile::tempdir().unwrap();
     let repository = parent.path().join("repo");

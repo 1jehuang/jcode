@@ -716,6 +716,7 @@ pub(super) fn draw_side_panel_markdown(
         .get(clamped_scroll..visible_end.min(rendered.left_margins.len()))
         .unwrap_or(&[]);
     record_side_pane_snapshot_precomputed(
+        &rendered.lines,
         rendered.wrapped_plain_lines.clone(),
         rendered.wrapped_copy_offsets.clone(),
         rendered.raw_plain_lines.clone(),
