@@ -976,7 +976,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         tool_calls: None,
         tool_data: None,
     };
-    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let messages = [message("user", "hi"), message("assistant", "hello")];
     let whole =
         crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
     // Pinned value: client and server may run different builds, so the
@@ -990,7 +990,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     assert_eq!(streaming.base().count, 2);
     assert_ne!(first, whole);
     // Field boundaries must not alias.
-    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    let shifted = [message("user", "hia"), message("ssistant", "hello")];
     assert_ne!(
         crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
         whole

@@ -493,7 +493,7 @@ fn virtualized_session_list_matches_full_ratatui_list() {
                     actual.list_state = ListState::default()
                         .with_offset(offset)
                         .with_selected(selected);
-                    expected.list_state = actual.list_state.clone();
+                    expected.list_state = actual.list_state;
                     a.draw(|f| actual.render_session_list_impl(f, f.area(), true))
                         .unwrap();
                     b.draw(|f| expected.render_session_list_impl(f, f.area(), false))
