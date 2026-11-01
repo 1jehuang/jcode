@@ -140,6 +140,47 @@ async fn prompt_hook_receives_stdin_json_adds_context_and_blocks() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn context_only_messages_run_the_hook_too() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let hook = script(
+        home.path(),
+        "hook.sh",
+        "#!/bin/sh\nif grep -q BLOCKME; then echo 'not allowed' >&2; exit 2; fi\necho 'context-only-marker'\nexit 0\n",
+    );
+    let _env = EnvGuard::set(&[
+        ("JCODE_HOME", home.path().display().to_string()),
+        ("JCODE_HOOK_USER_PROMPT_SUBMIT", hook),
+    ]);
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = new_agent(&calls);
+
+    // A blocked context-only message is not saved, so a later turn cannot send it.
+    let before = agent.messages().len();
+    let error = agent
+        .append_user_context_message("please BLOCKME", Vec::new())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not allowed"), "{error}");
+    assert_eq!(agent.messages().len(), before);
+
+    // An allowed one is saved with the hook's context and starts no model turn.
+    agent
+        .append_user_context_message("just remember this", Vec::new())
+        .await
+        .unwrap();
+    assert!(calls.lock().unwrap().is_empty());
+    let text = agent
+        .messages()
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect::<String>();
+    assert!(text.contains("just remember this"), "{text}");
+    assert!(text.contains("context-only-marker"), "{text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn prompt_hook_fails_open_on_timeout_and_odd_exit() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
