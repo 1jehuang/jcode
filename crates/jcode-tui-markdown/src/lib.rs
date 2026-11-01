@@ -28,6 +28,8 @@ pub use types::{
 pub struct MarkdownConfigSnapshot {
     pub diagram_mode: DiagramDisplayMode,
     pub markdown_spacing: MarkdownSpacingMode,
+    /// Append link destinations after labels. Disabled by default.
+    pub show_link_urls: bool,
     pub mermaid_enabled: bool,
     pub latex_rendering: LatexRenderingMode,
 }
@@ -37,6 +39,7 @@ impl Default for MarkdownConfigSnapshot {
         Self {
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
+            show_link_urls: false,
             mermaid_enabled: true,
             latex_rendering: LatexRenderingMode::default(),
         }

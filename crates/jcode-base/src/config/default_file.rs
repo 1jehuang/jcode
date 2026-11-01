@@ -204,6 +204,10 @@ reasoning_display = "full"
 # Markdown spacing style: "compact" (chat/TUI) or "document" (docs-like)
 # markdown_spacing = "compact"
 
+# Append destinations after Markdown link labels, e.g. label (https://example.com).
+# Link labels remain visible and styled when disabled (default: false).
+# show_link_urls = false
+
 # LaTeX rendering: "none" (show source), "unicode" (terminal text), or "image" (typeset PNG, default).
 # Image mode uses `latex` + `dvipng`, or `pdflatex` + `pdftocairo` as a fallback.
 # When neither toolchain is available, formulas fall back to Unicode.
