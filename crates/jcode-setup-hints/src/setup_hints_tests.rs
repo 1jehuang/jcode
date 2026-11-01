@@ -29,9 +29,13 @@ fn launches_after_third_do_not_show_generic_alignment_tip() {
 #[cfg(target_os = "macos")]
 #[test]
 fn first_three_launches_can_include_hotkey_notice_too() {
+    // The spawn notice is opt-in: state starts dismissed (`a402d2326`), so
+    // this test opts back in explicitly, the way a user who re-enables the
+    // notice does.
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 
