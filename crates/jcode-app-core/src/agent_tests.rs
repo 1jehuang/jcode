@@ -34,6 +34,7 @@ mod mcp_remote_cache;
 #[path = "agent_tests/prompt_hook.rs"]
 mod prompt_hook;
 
+#[cfg(unix)]
 #[path = "agent_tests/stop_hook.rs"]
 mod stop_hook;
 

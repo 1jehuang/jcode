@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-struct CountingProvider(Arc<std::sync::Mutex<Vec<Vec<Message>>>>);
+struct CountingProvider(Arc<std::sync::Mutex<Vec<Vec<Message>>>>, &'static str);
 
 #[async_trait]
 impl Provider for CountingProvider {
@@ -16,7 +16,7 @@ impl Provider for CountingProvider {
         Ok(Box::pin(futures::stream::iter(vec![
             Ok(StreamEvent::TextDelta("answer".into())),
             Ok(StreamEvent::MessageEnd {
-                stop_reason: Some("end_turn".into()),
+                stop_reason: Some(self.1.into()),
             }),
         ])))
     }
@@ -77,8 +77,15 @@ fn all_text(calls: &[Message]) -> String {
 }
 
 fn agent(calls: &Arc<std::sync::Mutex<Vec<Vec<Message>>>>) -> Agent {
+    agent_with_stop_reason(calls, "end_turn")
+}
+
+fn agent_with_stop_reason(
+    calls: &Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    stop_reason: &'static str,
+) -> Agent {
     let mut agent = Agent::new_with_session(
-        Arc::new(CountingProvider(Arc::clone(calls))),
+        Arc::new(CountingProvider(Arc::clone(calls), stop_reason)),
         Registry::empty(),
         Session::create(None, None),
         None,
@@ -132,6 +139,27 @@ async fn stop_hook_continues_in_turn_with_reminder_then_ends() {
     assert_eq!(docs[0]["stop_hook_active"], false);
     assert_eq!(docs[1]["stop_hook_active"], true);
     assert_eq!(docs[0]["last_assistant_message"], "answer");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_hook_does_not_run_after_a_provider_refusal() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = Env::set(&[
+        ("JCODE_HOME", home.path().display().to_string()),
+        ("JCODE_HOOK_STOP", counting_hook(home.path(), 1000)),
+    ]);
+    for reason in ["refusal", "content_filter", "safety"] {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = agent_with_stop_reason(&calls, reason);
+        agent.run_once_capture("do the thing").await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1, "no retry after {reason}");
+    }
+    assert!(
+        !home.path().join("count").exists(),
+        "hook was never consulted"
+    );
 }
 
 #[cfg(unix)]
