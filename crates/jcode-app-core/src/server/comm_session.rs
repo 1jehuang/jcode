@@ -573,8 +573,17 @@ pub(super) async fn spawn_swarm_agent(
         .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
-    let definition =
-        super::swarm::swarm_agent_defs::resolve(agent.as_deref(), resolved_working_dir.as_deref())?;
+    // Definitions are looked up from the coordinator's own directory, not the
+    // worker's: sending a worker to another checkout must not change which
+    // persona the name refers to.
+    let coordinator_dir =
+        resolve_spawn_working_dir(None, req_session_id, sessions, swarm_members).await;
+    let definition = super::swarm::swarm_agent_defs::resolve(
+        agent.as_deref(),
+        coordinator_dir
+            .as_deref()
+            .or(resolved_working_dir.as_deref()),
+    )?;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
     let coordinator_is_canary = coordinator.is_canary;
     // Capture the requesting client's terminal env so spawn hooks place the new

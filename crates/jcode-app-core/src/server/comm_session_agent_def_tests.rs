@@ -155,3 +155,113 @@ async fn spawn_with_agent_delivers_persona_first_and_sets_agent_type() {
     assert_eq!(plain_identity.unwrap().agent_type, None);
     assert!(!plain_has_persona);
 }
+
+#[tokio::test]
+async fn definition_comes_from_the_coordinator_dir_not_the_worker_dir() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let coordinator_project = tempfile::TempDir::new().unwrap();
+    let other_checkout = tempfile::TempDir::new().unwrap();
+    for dir in [coordinator_project.path(), other_checkout.path()] {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+    }
+    std::fs::create_dir_all(coordinator_project.path().join(".claude/agents")).unwrap();
+    std::fs::write(
+        coordinator_project
+            .path()
+            .join(".claude/agents/reviewer.md"),
+        "---\nname: reviewer\ndescription: Reviews code\n---\nCOORDINATOR_PERSONA\n",
+    )
+    .unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let sessions: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<crate::agent::Agent>>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let provider: Arc<dyn Provider> = Arc::new(QuietProvider);
+    let state = crate::server::SwarmState::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    state.members.write().await.insert(
+        "coord".to_string(),
+        crate::server::SwarmMember {
+            session_id: "coord".to_string(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: Some(coordinator_project.path().to_path_buf()),
+            swarm_id: Some("agent-def-swarm".to_string()),
+            swarm_enabled: true,
+            status: "ready".to_string(),
+            detail: None,
+            friendly_name: Some("coord".to_string()),
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "coordinator".to_string(),
+            joined_at: std::time::Instant::now(),
+            last_status_change: std::time::Instant::now(),
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        },
+    );
+    let mcp = Arc::new(crate::mcp::SharedMcpPool::new(
+        crate::mcp::McpConfig::default(),
+    ));
+    let worker_dir = other_checkout.path().to_string_lossy().into_owned();
+    let child_id = spawn_swarm_agent(
+        "coord",
+        "agent-def-swarm",
+        None,
+        Some(worker_dir),
+        None,
+        Some(crate::config::SwarmSpawnMode::Headless),
+        None,
+        None,
+        Some("review".into()),
+        Some("reviewer".into()),
+        &sessions,
+        &Arc::new(RwLock::new(String::new())),
+        &provider,
+        &state.members,
+        &state.swarms_by_id,
+        &state.coordinators,
+        &state.plans,
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &broadcast::channel(16).0,
+        &mcp,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await;
+    let persona_text = match &child_id {
+        Ok(id) => {
+            let child = sessions.read().await.get(id).cloned().unwrap();
+            let child = child.lock().await;
+            format!("{:?}", child.messages())
+        }
+        Err(_) => String::new(),
+    };
+    if let Ok(id) = &child_id {
+        crate::hooks::forget_swarm_identity(id);
+    }
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    assert!(
+        child_id.is_ok(),
+        "the coordinator's definition must resolve: {child_id:?}"
+    );
+    assert!(
+        persona_text.contains("COORDINATOR_PERSONA"),
+        "{persona_text}"
+    );
+}

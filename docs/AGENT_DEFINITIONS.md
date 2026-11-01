@@ -33,8 +33,12 @@ not the file name. A file without `name` is treated as documentation and
 skipped silently. A missing `description`, an invalid `name` or bad YAML skips
 the file with one warning. Unknown frontmatter keys are ignored.
 
-The `agent` property in the swarm tool schema lists the loaded names with their
-descriptions. An unknown name is an error that lists the valid names.
+The `agent` property in the swarm tool schema is a plain string. It describes
+the user-level definitions only, because the tool schema is shared by every
+session and cannot know which project a session works in. Project definitions
+are looked up from the coordinator's working directory, never from the
+`working_dir` the worker is sent to. An unknown name is an error that lists
+the valid names.
 
 ## Identity
 

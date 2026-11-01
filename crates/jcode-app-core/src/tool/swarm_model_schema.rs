@@ -18,50 +18,39 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
     }
 }
 
-/// Constrain `agent` to the loaded definition names, with their descriptions,
-/// and leave it out entirely when no definitions exist, so the model never sees
-/// a dead knob.
-/// Resolved from the process working directory and user directories; the spawn
-/// handler re-validates against the coordinator's own working directory.
+/// Offer `agent` on `spawn`. The schema is built once per process and cannot
+/// know which project a given session works in, so it never lists project
+/// definitions: it names only the user-level ones and says project definitions
+/// are resolved from the coordinator's working directory. Spawn validates the
+/// name there and its error lists the valid choices.
 pub(super) fn apply_agent_definitions(schema: &mut Value) {
-    let cwd = match std::env::current_dir() {
-        Ok(dir) => Some(dir),
-        Err(error) => {
-            crate::logging::debug(&format!(
-                "No working directory for agent definitions: {error}"
-            ));
-            None
-        }
-    };
-    apply_agent_definitions_for(
-        schema,
-        crate::agent_def::agent_definition_summaries(cwd.as_deref()),
-    );
+    apply_agent_definitions_for(schema, crate::agent_def::agent_definition_summaries(None));
 }
 
-pub(super) fn apply_agent_definitions_for(schema: &mut Value, summaries: Vec<(String, String)>) {
+pub(super) fn apply_agent_definitions_for(schema: &mut Value, user_level: Vec<(String, String)>) {
     let Some(properties) = schema["properties"].as_object_mut() else {
         return;
     };
-    if summaries.is_empty() {
-        return;
+    let mut description = String::from(
+        "For spawn: name of an agent definition for the worker (.jcode/agents or .claude/agents in the coordinator's project, or ~/.jcode/agents).",
+    );
+    if !user_level.is_empty() {
+        let listing = user_level
+            .iter()
+            .map(|(name, description)| {
+                let first_line = description.lines().next().unwrap_or("");
+                let short: String = first_line.chars().take(120).collect();
+                format!("{name}: {short}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        description.push_str(&format!(" User-level definitions: {listing}."));
     }
-    let names: Vec<&str> = summaries.iter().map(|(name, _)| name.as_str()).collect();
-    let listing = summaries
-        .iter()
-        .map(|(name, description)| {
-            let first_line = description.lines().next().unwrap_or("");
-            let short: String = first_line.chars().take(120).collect();
-            format!("{name}: {short}")
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
     properties.insert(
         "agent".to_string(),
         json!({
             "type": "string",
-            "enum": names,
-            "description": format!("For spawn: agent definition for the worker. {listing}"),
+            "description": description,
         }),
     );
 }
@@ -75,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_lists_loaded_names_with_descriptions() {
+    fn user_level_names_are_listed_with_descriptions_but_not_enforced() {
         let mut schema = base();
         apply_agent_definitions_for(
             &mut schema,
@@ -84,19 +73,26 @@ mod tests {
                 ("b".into(), "Second\nline".into()),
             ],
         );
-        assert_eq!(schema["properties"]["agent"]["enum"], json!(["a", "b"]));
-        let description = schema["properties"]["agent"]["description"]
-            .as_str()
-            .unwrap();
+        let agent = &schema["properties"]["agent"];
+        assert_eq!(agent["type"], "string");
+        assert!(
+            agent.get("enum").is_none(),
+            "project names are unknown here"
+        );
+        let description = agent["description"].as_str().unwrap();
         assert!(description.contains("a: First one") && description.contains("b: Second"));
         assert!(!description.contains("line"));
     }
 
     #[test]
-    fn no_definitions_leaves_the_property_out() {
-        let mut schema = json!({"properties": {"label": {"type": "string"}}});
+    fn agent_is_offered_even_without_user_level_definitions() {
+        let mut schema = base();
         apply_agent_definitions_for(&mut schema, vec![]);
-        assert!(schema["properties"].get("agent").is_none());
+        let description = schema["properties"]["agent"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("coordinator's project"));
+        assert!(!description.contains("User-level definitions"));
         assert!(schema["properties"].get("label").is_some());
     }
 }
