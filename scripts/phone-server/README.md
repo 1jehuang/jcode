@@ -79,7 +79,7 @@ The legacy `AWS/Billing/EstimatedCharges` alarms were removed because the accoun
 
 ## Rebuild from scratch (≈15 min)
 
-1. Launch AL2023 x86_64 with an encrypted 30GB gp3 root volume, the Bedrock + SSM instance role, and a security group with no inbound rules. Associate an Elastic IP for outbound internet while running.
+1. Launch a vendor-patched AL2023 x86_64 image with an encrypted 30GB gp3 root volume, the Bedrock + SSM instance role, and a security group with no inbound rules. Associate an Elastic IP for outbound internet while running. Before accepting connections, verify the running kernel is fixed for CVE-2026-98432 using the AWS advisory and the [Linux host safety runbook](../../docs/security-linux-cve-2026-98432.md). Installing a kernel without rebooting does not satisfy this check.
 2. Install jcode, Tailscale, tmux, and git. Join the tailnet as `jcode-phone`; set the jcode gateway host to `100.109.78.41`.
 3. Copy `units/jcode-serve.service` and the idle-autostop unit/script; enable linger and the required services. The legacy pair service is not required.
 4. Deploy `wake-lambda.py` as `waker.py`, set `WAKE_TOKEN`, `INSTANCE_ID`, and `JCODE_GATEWAY_HOST=100.109.78.41`, and grant scoped EC2/SSM permissions. API Gateway HTTP API routes to the Lambda.
