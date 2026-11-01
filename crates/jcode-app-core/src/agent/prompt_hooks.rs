@@ -8,6 +8,12 @@ pub(in crate::agent) struct PromptHookDecision {
 }
 
 impl Agent {
+    /// Like `run_once_capture` for a prompt the host generated.
+    pub async fn run_once_capture_as(&mut self, origin: PromptOrigin, msg: &str) -> Result<String> {
+        crate::hooks::set_pending_prompt_origin(&self.session.id, origin);
+        self.run_once_capture(msg).await
+    }
+
     /// Run the `user_prompt_submit` hook for a new user message.
     ///
     /// `default_origin` applies when no caller declared one with
@@ -40,7 +46,7 @@ impl Agent {
                     "user_prompt_submit hook blocked a message for session {}",
                     self.session.id
                 ));
-                anyhow::bail!("Prompt blocked by user_prompt_submit hook: {reason}")
+                Err(crate::hooks::PromptBlocked(reason).into())
             }
             Some(PromptSubmitOutcome::Allow { context, notices }) => {
                 for notice in notices {

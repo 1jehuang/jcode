@@ -346,6 +346,7 @@ pub use origin::{
     set_pending_prompt_origin, set_pending_prompt_origin_named,
 };
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
+pub use prompt_submit::PromptBlocked;
 pub use prompt_submit::{
     PromptSubmit, PromptSubmitOutcome, combine as combine_prompt_verdicts, prompt_payload,
     run_user_prompt_submit,

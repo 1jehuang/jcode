@@ -129,6 +129,16 @@ async fn prompt_hook_receives_stdin_json_adds_context_and_blocks() {
     assert_eq!(stdin["origin"]["kind"], "host");
     assert_eq!(stdin["jcode"]["origin_detail"], "swarm_spawn");
 
+    // A host-generated capture (ambient, overnight) is not a person typing.
+    agent
+        .run_once_capture_as(PromptOrigin::System, "scheduled")
+        .await
+        .unwrap();
+    let stdin: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(stdin["origin"]["kind"], "host");
+    assert_eq!(stdin["jcode"]["origin_detail"], "system");
+
     // A blocked prompt is never appended and never reaches the provider.
     let before_messages = agent.messages().len();
     let before_calls = calls.lock().unwrap().len();
@@ -136,6 +146,34 @@ async fn prompt_hook_receives_stdin_json_adds_context_and_blocks() {
     assert!(error.to_string().contains("not allowed"), "{error}");
     assert_eq!(agent.messages().len(), before_messages);
     assert_eq!(calls.lock().unwrap().len(), before_calls);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn declared_origins_reach_the_hook_for_context_messages() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let seen = home.path().join("seen.json");
+    let hook = script(
+        home.path(),
+        "hook.sh",
+        &format!("#!/bin/sh\ncat > {}\nexit 0\n", seen.display()),
+    );
+    let _env = EnvGuard::set(&[
+        ("JCODE_HOME", home.path().display().to_string()),
+        ("JCODE_HOOK_USER_PROMPT_SUBMIT", hook),
+    ]);
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = new_agent(&calls);
+
+    crate::hooks::set_pending_prompt_origin_named(agent.session_id(), Some("sdk"));
+    agent
+        .append_user_context_message("from the harness", Vec::new())
+        .await
+        .unwrap();
+    let payload = std::fs::read_to_string(&seen).unwrap();
+    assert!(payload.contains("\"origin_detail\":\"sdk\""), "{payload}");
+    assert!(!payload.contains("\"person\""), "{payload}");
 }
 
 #[cfg(unix)]

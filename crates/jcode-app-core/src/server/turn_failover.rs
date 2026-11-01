@@ -257,6 +257,9 @@ pub(super) async fn retry_turn_with_server_failover(
         if attempts >= MAX_SERVER_FAILOVERS {
             break;
         }
+        if error.is::<crate::hooks::PromptBlocked>() {
+            break;
+        }
         let message = crate::util::format_error_chain(error);
         // Only retry a turn whose last persisted message is still the
         // request (user prompt or tool results). Never re-ask after the
@@ -285,6 +288,15 @@ pub(super) async fn retry_turn_with_server_failover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hook_block_keeps_its_own_error_type() {
+        // Retries test this type before looking at the message text, so a block
+        // reason like "rate limit" cannot start a failover.
+        let blocked: anyhow::Error = crate::hooks::PromptBlocked("rate limit policy".into()).into();
+        assert!(blocked.is::<crate::hooks::PromptBlocked>());
+        assert!(blocked.to_string().contains("rate limit policy"));
+    }
 
     #[test]
     fn usage_limits_and_router_prompts_want_failover() {

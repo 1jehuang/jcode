@@ -128,6 +128,19 @@ pub async fn run_user_prompt_submit(input: &PromptSubmit<'_>) -> Option<PromptSu
     Some(combine(&verdicts))
 }
 
+/// A hook rejected the prompt. Distinct from provider errors so a reason such
+/// as "rate limit" is never mistaken for one and retried on another account.
+#[derive(Debug)]
+pub struct PromptBlocked(pub String);
+
+impl std::fmt::Display for PromptBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Prompt blocked by user_prompt_submit hook: {}", self.0)
+    }
+}
+
+impl std::error::Error for PromptBlocked {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
