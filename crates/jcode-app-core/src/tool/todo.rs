@@ -16,6 +16,13 @@ use std::collections::HashMap;
 
 pub struct TodoTool;
 
+#[path = "todo_names.rs"]
+mod names;
+
+#[cfg(test)]
+#[path = "todo_name_tests.rs"]
+mod name_tests;
+
 #[cfg(test)]
 #[path = "todo_external_blocker_tests.rs"]
 mod external_blocker_tests;
@@ -255,6 +262,22 @@ fn record_todo_write_mode(input: &Value) {
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
 /// drops ids. Full replacements and incremental edits are mutually exclusive.
 fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    names::normalize_containers(&mut input);
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
+    let named_replacement = ["phases", "todos"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(names::uses_names));
+    let stored = if patching || named_replacement {
+        stored()
+    } else {
+        json!([])
+    };
+    names::normalize_public_input(
+        &mut input,
+        stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
+    )?;
     flatten_phases(&mut input)?;
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
@@ -292,7 +315,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         })
         .collect::<Result<_>>()?;
 
-    let Value::Array(mut todos) = stored() else {
+    let Value::Array(mut todos) = stored else {
         bail!("stored todos are not a list");
     };
     let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
@@ -422,6 +445,7 @@ struct TodoInput {
 
 fn parse_todo_input(input: Value) -> Result<TodoInput> {
     let mut input = input;
+    names::normalize_public_input(&mut input, &[])?;
     flatten_phases(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
     if let Some(todos) = &params.todos {
@@ -482,7 +506,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(obj) = input.as_object_mut() else {
         return Ok(());
     };
-    let Some(phases) = obj.get("phases") else {
+    let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };
     if ["todos", "update", "add", "remove"]
@@ -1068,7 +1092,7 @@ fn build_todo_output(
         .iter()
         .filter(|todo| todo.status != "completed")
         .count();
-    let mut text = serde_json::to_string_pretty(&todos)?;
+    let mut text = serde_json::to_string_pretty(&names::public_todos(&todos)?)?;
     if plan != TodoPlan::default() {
         text.push_str("\n\nPlan:\n");
         text.push_str(&serde_json::to_string_pretty(&plan)?);
@@ -1221,12 +1245,12 @@ impl Tool for TodoTool {
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
         "Read or update todos and goal assessments. For multi-step work, write the plan \
-         once with `phases` containing lanes containing items. Then use `update` by id for status/field changes and `add` \
+         once with `phases` containing lanes containing items. Then use `update` by unique name for status/field changes and `add` \
          for new work. Reserve full replacement for restructuring; remove rarely. \
          Mark work in_progress before starting and completed as soon as it is done. \
-         Keep the live list current after meaningful steps. Use short titles, with \
-         longer context in details. Organize parallel lanes within sequential phases. \
-         A lane may set `after` to prerequisite todo IDs in earlier phases, replacing \
+         Keep the live list current after meaningful steps. Use unique short names, with \
+         longer context in description. IDs are internal. Use rename_to for explicit renames. Organize parallel lanes within sequential phases. \
+         A lane may set `after` to prerequisite todo names in earlier phases, replacing \
          the whole-phase barrier so it can start once all those items are completed. \
          Omit `after` for normal phase ordering. Incremental `lane_after` edits on one \
          item update its entire lane; null restores normal ordering. \
@@ -1256,26 +1280,26 @@ impl Tool for TodoTool {
                 "intent": super::intent_schema_property(),
                 "update": {
                     "type": "array",
-                    "description": "Patch todos by id and changed fields only. Unmentioned data stays untouched. Prefer for status updates.",
+                    "description": "Patch todos by unique name and changed fields only. Use rename_to to rename. Unmentioned data stays untouched.",
                     "items": {
                         "type": "object",
-                        "required": ["id"],
-                        "properties": {"id": {"type": "string"}},
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string", "minLength": 1}},
                         "additionalProperties": true
                     }
                 },
                 "add": {
                     "type": "array",
-                    "description": "Append new todos (same fields as todos). Optional `after`: id to insert after.",
+                    "description": "Append new todos (same fields as todos). Optional `after`: existing task name to insert after.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "required": ["name", "status", "priority", "confidence"],
                         "additionalProperties": true
                     }
                 },
                 "remove": {
                     "type": "array",
-                    "description": "Ids of todos to delete. Prefer marking status cancelled.",
+                    "description": "Names of todos to delete. Prefer marking status cancelled.",
                     "items": {"type": "string"}
                 },
                 "todos": {
@@ -1283,13 +1307,14 @@ impl Tool for TodoTool {
                     "description": "Full todo list; replaces the whole list. Use for the initial plan or a real restructure, otherwise prefer update/add/remove.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "required": ["name", "status", "priority", "confidence"],
                         "properties": {
-                            "content": {
+                            "name": {
                                 "type": "string",
-                                "description": "Short title, ideally under 40 characters; todos render side by side. Put longer context in details."
+                                "minLength": 1,
+                                "description": "Unique task name within the plan, ideally under 40 characters. Used to reference this item. Put longer context in description."
                             },
-                            "details": {
+                            "description": {
                                 "type": "string",
                                 "description": "Longer brief for the assigned worker: files, acceptance criteria, context. Hidden from the card."
                             },
@@ -1325,10 +1350,6 @@ impl Tool for TodoTool {
                             "priority": {
                                 "type": "string",
                                 "description": "Priority."
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "ID."
                             },
                             "lane": {
                                 "type": "string",
@@ -1438,15 +1459,19 @@ impl Tool for TodoTool {
         schema["properties"]["todos"]["items"]["properties"]["lane_after"] = json!({
             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
             "items": {"type": "string", "minLength": 1},
-            "description": "Lane-wide prerequisite todo IDs in strictly earlier phases by first appearance. Editing one member updates the entire lane. Null restores the default phase barrier."
+            "description": "Lane-wide prerequisite todo names in strictly earlier phases by first appearance. Editing one member updates the entire lane. Null restores the default phase barrier."
         });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
-            "description": "Existing todo id to insert after."
+            "description": "Existing todo name to insert after."
         });
         schema["properties"]["update"]["items"]["properties"] =
             schema["properties"]["todos"]["items"]["properties"].clone();
+        schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
+            "type": "string", "minLength": 1,
+            "description": "Explicit new unique name. The name field selects the existing task. Internal identity and dependencies are preserved."
+        });
         schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
@@ -1470,20 +1495,20 @@ impl Tool for TodoTool {
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional after todo IDs replace its phase barrier for early start. [] clears.",
+            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional after todo names replace its phase barrier for early start. [] clears.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
                         "properties": {"lane": {"type": "string", "minLength": 1}, "after": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
-                            "description": "Prerequisite todo IDs from strictly earlier phases. Omit or null for the default phase barrier."
+                            "description": "Prerequisite todo names from strictly earlier phases. Omit or null for the default phase barrier."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
         schema["properties"]["add"]["description"] = json!(
-            "Add items with explicit phase and lane, or inherit missing membership from an existing after id."
+            "Add items with explicit phase and lane, or inherit missing membership from an existing after name."
         );
         schema
     }
