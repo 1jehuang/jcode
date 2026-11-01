@@ -633,19 +633,20 @@ impl SkillRegistry {
             count += self.load_plugin_skills_from_root(&plugins_root);
         }
 
+        // Later loads win, matching `load_global`: ~/.agents/skills/ first (shared
+        // cross-tool `.agents` convention), ~/.jcode/skills/ last.
+        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
+            && agents_skills.exists()
+        {
+            count += self.load_from_dir_count(&agents_skills)?;
+        }
+
         // Load from ~/.jcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
                 count += self.load_from_dir_count(&jcode_skills)?;
             }
-        }
-
-        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
-        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
-            && agents_skills.exists()
-        {
-            count += self.load_from_dir_count(&agents_skills)?;
         }
 
         Ok(count)

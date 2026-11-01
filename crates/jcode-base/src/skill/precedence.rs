@@ -90,14 +90,16 @@ mod tests {
     }
 
     #[test]
-    fn global_jcode_skill_wins_over_global_agents() {
+    fn global_jcode_skill_wins_over_global_agents_including_after_reload() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let previous = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_HOME", temp.path());
         write_skill(temp.path(), "", "dup", "jcode");
         write_skill(&temp.path().join("external"), ".agents", "dup", "agents");
-        let registry = SkillRegistry::load_global().expect("global");
+        let mut registry = SkillRegistry::load_global().expect("global");
+        assert_eq!(registry.get("dup").expect("present").description, "jcode");
+        registry.reload_global().expect("reload");
         match previous {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
