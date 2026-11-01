@@ -1552,7 +1552,7 @@ use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai
 
 use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
-use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
+use self::stream::handle_openai_output_item;
 
 mod chatgpt_web;
 mod native_web_search;

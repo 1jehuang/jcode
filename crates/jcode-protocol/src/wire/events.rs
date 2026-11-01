@@ -147,9 +147,8 @@ pub enum ServerEvent {
         duration_secs: Option<f64>,
     },
 
-    /// Replace the current turn's streamed text content
-    /// Used when text-wrapped tool calls are recovered: the garbled text
-    /// shown during streaming is replaced with the clean prefix text.
+    /// Replace the current turn's streamed text content, for example when a
+    /// provider retry rolls back a partial response.
     #[serde(rename = "text_replace")]
     TextReplace { text: String },
 
