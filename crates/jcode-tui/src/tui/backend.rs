@@ -328,6 +328,43 @@ mod auth;
 mod cloud;
 
 impl RemoteConnection {
+    async fn verify_ssh_ready(&mut self, deadline: Duration) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        tokio::time::timeout(deadline, async {
+            self.send_request(Request::Ping { id }).await?;
+            // Before Subscribe, only our Pong is valid. Bound the frame and
+            // preserve bytes buffered after its newline for the event reader.
+            let mut frame = Vec::new();
+            loop {
+                let available = self.reader.fill_buf().await?;
+                if available.is_empty() {
+                    anyhow::bail!("SSH transport closed before the remote daemon was ready");
+                }
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let count = newline.map_or(available.len(), |index| index + 1);
+                if frame.len() + count > 8192 {
+                    anyhow::bail!("SSH readiness reply exceeds 8192 bytes");
+                }
+                frame.extend_from_slice(&available[..count]);
+                self.reader.consume(count);
+                if newline.is_some() {
+                    break;
+                }
+            }
+            match serde_json::from_slice::<ServerEvent>(&frame)? {
+                ServerEvent::Pong {
+                    id: reply_id,
+                    native_ssh_protocol: Some(1),
+                    ..
+                } if reply_id == id => Ok(()),
+                _ => anyhow::bail!("invalid SSH daemon readiness reply"),
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH daemon readiness timed out"))?
+    }
+
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
         Self::connect_with_session(None, None, false, None, false, None).await
@@ -380,6 +417,12 @@ impl RemoteConnection {
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
+
+        // The local SSH adapter accepts before OpenSSH authenticates. A Unix
+        // connect/write alone must not reset reconnect backoff or show success.
+        if super::is_ssh_remote() {
+            conn.verify_ssh_ready(Duration::from_secs(35)).await?;
+        }
 
         // Subscribe to events
         let subscribe_start = Instant::now();
