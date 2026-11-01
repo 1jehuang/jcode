@@ -44,8 +44,28 @@ fn message(role: &str, content: &str) -> PreviewMessage {
         content: content.into(),
         tool_calls: vec![],
         tool_data: None,
+        duration_secs: None,
+        title: None,
         timestamp: None,
     }
+}
+
+#[test]
+fn refresh_equality_includes_duration_and_title() {
+    let mut old = fixture();
+    let mut row = message("tool", "completed");
+    row.duration_secs = Some(1.25);
+    row.title = Some("Build".into());
+    old.messages_preview.push(row);
+    assert!(same_transcript(&old, &old));
+    let mut changed = old.clone();
+    changed.messages_preview[0].duration_secs = Some(2.5);
+    assert!(!same_transcript(&old, &changed));
+    changed = old.clone();
+    changed.messages_preview[0].title = Some("Test".into());
+    assert!(!same_transcript(&old, &changed));
+    changed.messages_preview.clear();
+    assert!(same_transcript(&old, &changed));
 }
 
 fn deliver(picker: &mut SessionPicker, messages: Vec<PreviewMessage>) {

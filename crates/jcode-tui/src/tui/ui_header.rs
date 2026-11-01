@@ -63,6 +63,64 @@ fn model_header_span(model: String) -> Span<'static> {
     Span::styled(model, Style::default().fg(rgb(255, 150, 200)).bold())
 }
 
+fn model_is_placeholder(model: &str) -> bool {
+    let trimmed = model.trim();
+    trimmed.is_empty()
+        || trimmed == "connected"
+        || trimmed.ends_with('…')
+        || trimmed.starts_with("connecting")
+}
+
+/// Shared live/preview model chrome. Measure terminal cells, not scalar values.
+fn model_header_line(
+    nice_model: &str,
+    provider_label: &str,
+    upstream: Option<&str>,
+    width: usize,
+    placeholder: bool,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut spans = Vec::new();
+    let mut used = nice_model.width();
+    let budget = width.saturating_sub(4);
+    if !placeholder && !nice_model.is_empty() {
+        let hint = "/model to switch · ";
+        if used + hint.width() <= budget {
+            used += hint.width();
+            spans.push(Span::styled(hint, Style::default().fg(dim_color())));
+        }
+    }
+    if !provider_label.is_empty() && !placeholder {
+        let prefix = format!("{provider_label} · ");
+        if used + prefix.width() <= budget {
+            used += prefix.width();
+            spans.push(Span::styled(prefix, Style::default().fg(dim_color())));
+        }
+    }
+    spans.push(model_header_span(nice_model.to_owned()));
+    if let Some(upstream) = upstream.filter(|_| !placeholder) {
+        let suffix = format!(" via {upstream}");
+        if used + suffix.width() <= budget {
+            spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
+        }
+    }
+    Line::from(spans).alignment(Alignment::Left)
+}
+
+fn standalone_version_line() -> Line<'static> {
+    let text = if is_running_stable_release() {
+        let tag = jcode_build_meta::git_tag();
+        if tag.is_empty() || tag.contains('-') {
+            format!("{} · release", semver())
+        } else {
+            format!("{} · release {}", semver(), tag)
+        }
+    } else {
+        semver().to_string()
+    };
+    Line::from(Span::styled(text, Style::default().fg(dim_color()))).alignment(Alignment::Left)
+}
+
 /// The persisted subset of the real header. Credentials, transport and binary
 /// versions are deliberately omitted when the selected session does not own them.
 pub(crate) fn build_preview_header(
@@ -72,7 +130,15 @@ pub(crate) fn build_preview_header(
     let mut lines = vec![product_header_line(session.is_canary, &[])];
     if let Some(server) = session.server_name.as_deref() {
         lines.push(Line::from(Span::styled(
-            format!("server: {server}"),
+            format!(
+                "server: {}{}",
+                capitalize(server),
+                session
+                    .server_icon
+                    .as_deref()
+                    .map(|icon| format!(" {icon}"))
+                    .unwrap_or_default()
+            ),
             Style::default().fg(dim_color()),
         )));
     }
@@ -86,7 +152,18 @@ pub(crate) fn build_preview_header(
     if let Some(model) = session.model.as_deref().filter(|model| !model.is_empty()) {
         let nice_model =
             header_model_display_name(model, session.provider_key.as_deref().unwrap_or_default());
-        lines.push(Line::from(model_header_span(nice_model)));
+        lines.push(model_header_line(
+            &nice_model,
+            session.provider_key.as_deref().unwrap_or_default(),
+            None,
+            width as usize,
+            model_is_placeholder(model),
+        ));
+    }
+    // Resuming a local transcript runs in this client, so its version belongs
+    // to the preview too. Historical daemon versions are not persisted.
+    if session.server_name.is_none() {
+        lines.push(standalone_version_line());
     }
     fit_header_lines(lines, width)
 }
@@ -749,13 +826,7 @@ fn build_persistent_header_with_auth(
     // Single model line: dim active-route method on the left, styled model
     // name in the middle, dim upstream/hint detail after. This used to be a
     // second, unstyled line in the secondary header duplicating the model name.
-    let model_is_placeholder = {
-        let trimmed = model.trim();
-        trimmed.is_empty()
-            || trimmed == "connected"
-            || trimmed.ends_with('…')
-            || trimmed.starts_with("connecting")
-    };
+    let model_is_placeholder = model_is_placeholder(&model);
     let provider_label = if model_is_placeholder {
         String::new()
     } else {
@@ -766,56 +837,20 @@ fn build_persistent_header_with_auth(
     } else {
         app.upstream_provider()
     };
-    let mut model_spans: Vec<Span> = Vec::new();
-    let mut model_line_len = nice_model.chars().count();
-    // Keep a little headroom below the full width so the line never
-    // wraps when the render area subtracts side margins.
-    let fit_width = w.saturating_sub(4);
-    if !model_is_placeholder && !nice_model.is_empty() {
-        let hint = "/model to switch · ";
-        if model_line_len + hint.chars().count() <= fit_width {
-            model_line_len += hint.chars().count();
-            model_spans.push(Span::styled(
-                hint.to_string(),
-                Style::default().fg(dim_color()),
-            ));
-        }
-    }
-    if !provider_label.is_empty() {
-        let prefix = format!("{} · ", provider_label);
-        if model_line_len + prefix.chars().count() <= fit_width {
-            model_line_len += prefix.chars().count();
-            model_spans.push(Span::styled(prefix, Style::default().fg(dim_color())));
-        }
-    }
-    model_spans.push(model_header_span(nice_model.clone()));
-    if let Some(upstream) = upstream.as_deref() {
-        let suffix = format!(" via {}", upstream);
-        if model_line_len + suffix.chars().count() <= fit_width {
-            model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
-        }
-    }
     if !nice_model.is_empty() {
-        lines.push(Line::from(model_spans).alignment(align));
+        lines.push(model_header_line(
+            &nice_model,
+            &provider_label,
+            upstream.as_deref(),
+            w,
+            model_is_placeholder,
+        ));
     }
 
     // When there is no server/client version labeling (standalone mode),
     // still surface the running version on the jcode line's own row.
     if client_version_label.is_none() {
-        let version_text = if is_running_stable_release() {
-            let tag = jcode_build_meta::git_tag();
-            if tag.is_empty() || tag.contains('-') {
-                format!("{} · release", semver())
-            } else {
-                format!("{} · release {}", semver(), tag)
-            }
-        } else {
-            semver().to_string()
-        };
-        lines.push(
-            Line::from(Span::styled(version_text, Style::default().fg(dim_color())))
-                .alignment(align),
-        );
+        lines.push(standalone_version_line());
     }
 
     lines

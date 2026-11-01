@@ -34,17 +34,18 @@ impl Drop for IsolatedConcurrencyEnv {
 
 async fn restore_for_concurrency_test(
     target_id: &str,
+    source_id: &str,
     source: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
     registry: &Registry,
     sessions: &crate::server::SessionAgents,
 ) -> Result<Arc<Mutex<Agent>>> {
     let mut client_selfdev = false;
-    let mut client_session_id = source.lock().await.session_id().to_owned();
+    let mut client_session_id = source_id.to_owned();
     let (stream, _peer) = crate::transport::stream_pair()?;
     let (_, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
-    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(8);
     let now = Instant::now();
     let connections = Arc::new(RwLock::new(HashMap::from([(
@@ -62,7 +63,7 @@ async fn restore_for_concurrency_test(
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
-    handle_resume_session(
+    let result = handle_resume_session(
         1,
         target_id.to_owned(),
         None,
@@ -99,7 +100,16 @@ async fn restore_for_concurrency_test(
         &swarm_event_tx,
         false,
     )
-    .await
+    .await;
+    while let Ok(event) = client_event_rx.try_recv() {
+        if let ServerEvent::Error { message, .. } = event {
+            assert_eq!(
+                target_id, "missing-concurrency-target",
+                "resume failed: {message}"
+            );
+        }
+    }
+    result
 }
 
 #[tokio::test]
@@ -116,6 +126,7 @@ async fn failed_server_resume_keeps_original_concurrency_owner() -> Result<()> {
     )])));
     let restored = restore_for_concurrency_test(
         "missing-concurrency-target",
+        &source_id,
         &source,
         &provider,
         &registry,
@@ -148,12 +159,18 @@ async fn viewer_attach_reuses_live_owner_without_tracking_placeholder() -> Resul
     let placeholder_id = placeholder.lock().await.session_id().to_owned();
     let sessions = Arc::new(RwLock::new(HashMap::from([
         (live_id.clone(), live.clone()),
-        (placeholder_id, placeholder.clone()),
+        (placeholder_id.clone(), placeholder.clone()),
     ])));
     assert!(!placeholder.lock().await.has_concurrency_tracking());
-    let attached =
-        restore_for_concurrency_test(&live_id, &placeholder, &provider, &registry, &sessions)
-            .await?;
+    let attached = restore_for_concurrency_test(
+        &live_id,
+        &placeholder_id,
+        &placeholder,
+        &provider,
+        &registry,
+        &sessions,
+    )
+    .await?;
     assert!(Arc::ptr_eq(&attached, &live));
     assert!(live.lock().await.has_concurrency_tracking());
     assert!(
@@ -161,6 +178,100 @@ async fn viewer_attach_reuses_live_owner_without_tracking_placeholder() -> Resul
         "a viewer placeholder must never publish a join"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedConcurrencyEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut persisted = crate::session::Session::create(None, Some("Cold resume race".into()));
+    persisted.save()?;
+    let target_id = persisted.id.clone();
+    let first = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
+        provider.clone(),
+        registry.clone(),
+        None,
+    )));
+    let second = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
+        provider.clone(),
+        registry.clone(),
+        None,
+    )));
+    let first_id = first.lock().await.session_id().to_owned();
+    let second_id = second.lock().await.session_id().to_owned();
+    let sessions = Arc::new(RwLock::new(HashMap::from([
+        (first_id.clone(), first.clone()),
+        (second_id.clone(), second.clone()),
+    ])));
+    // Force both requests to enter before either can restore. Without the
+    // target gate each passes live lookup and waits on its own source mutex.
+    let first_guard = first.lock().await;
+    let second_guard = second.lock().await;
+    let first_resume = restore_for_concurrency_test(
+        &target_id, &first_id, &first, &provider, &registry, &sessions,
+    );
+    let second_resume = restore_for_concurrency_test(
+        &target_id, &second_id, &second, &provider, &registry, &sessions,
+    );
+    tokio::pin!(first_resume, second_resume);
+    assert!(futures::poll!(&mut first_resume).is_pending());
+    assert!(futures::poll!(&mut second_resume).is_pending());
+    drop(first_guard);
+    drop(second_guard);
+    let (first_result, second_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(first_resume, second_resume)
+        })
+        .await
+        .expect("concurrent resumes must not deadlock");
+    let (first_result, second_result) = (first_result?, second_result?);
+    assert!(Arc::ptr_eq(&first_result, &second_result));
+    assert!(Arc::ptr_eq(
+        &first_result,
+        sessions.read().await.get(&target_id).unwrap()
+    ));
+    let first = first.lock().await;
+    let second = second.lock().await;
+    assert_eq!(
+        usize::from(first.session_id() == target_id)
+            + usize::from(second.session_id() == target_id),
+        1,
+        "only one source may become a restored runtime"
+    );
+    assert_ne!(
+        first.has_concurrency_tracking(),
+        second.has_concurrency_tracking(),
+        "the viewer placeholder must not acquire runtime ownership"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_gates_are_scoped_and_weak() {
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let other_sessions = Arc::new(RwLock::new(HashMap::new()));
+    let gate = super::super::resume_target_lock(&sessions, "target");
+    let same = super::super::resume_target_lock(&sessions, "target");
+    assert!(Arc::ptr_eq(&gate, &same));
+    let held = gate.lock().await;
+    assert!(same.try_lock().is_err());
+    assert!(
+        super::super::resume_target_lock(&sessions, "other")
+            .try_lock()
+            .is_ok()
+    );
+    assert!(
+        super::super::resume_target_lock(&other_sessions, "target")
+            .try_lock()
+            .is_ok()
+    );
+    let weak = Arc::downgrade(&gate);
+    drop(held);
+    drop(gate);
+    drop(same);
+    assert!(weak.upgrade().is_none(), "idle gates must not be retained");
 }
 
 #[tokio::test]

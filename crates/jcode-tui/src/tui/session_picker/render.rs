@@ -443,7 +443,57 @@ impl SessionPicker {
     }
 
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        self.render_session_list_impl(frame, area, true);
+    }
+
+    fn list_session_at(&self, index: usize) -> Option<&SessionInfo> {
+        self.item_to_session
+            .get(index)
+            .copied()
+            .flatten()
+            .and_then(|index| self.visible_sessions.get(index).copied())
+            .and_then(|session_ref| self.session_by_ref(session_ref))
+    }
+
+    pub(super) fn render_session_list_impl(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        virtualize: bool,
+    ) {
         self.poll_transcript_search();
+        // List rows never wrap. Determine exact heights without formatting the
+        // offscreen titles, prompts, paths, timestamps, or highlighted spans.
+        let mut item_heights: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                if !matches!(item, PickerItem::Session) {
+                    return 1;
+                }
+                self.list_session_at(index).map_or(1, |session| {
+                    4 + usize::from(
+                        session
+                            .first_user_prompt
+                            .as_deref()
+                            .is_some_and(|text| !text.trim().is_empty()),
+                    ) + usize::from(matches!(session.status, SessionStatus::Crashed { .. }))
+                })
+            })
+            .collect();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let virtualize = virtualize && self.loading_message.is_none() && !self.items.is_empty();
+        let visible = if virtualize {
+            performance::visible_item_bounds(
+                &item_heights,
+                self.list_state.selected(),
+                self.list_state.offset(),
+                inner_height,
+            )
+        } else {
+            0..self.items.len()
+        };
         let server_color: Color = rgb(255, 200, 100);
         let dim: Color = rgb(100, 100, 100);
         let spinner_frame = Self::running_spinner_frame();
@@ -485,6 +535,8 @@ impl SessionPicker {
             self.items
                 .iter()
                 .enumerate()
+                .skip(visible.start)
+                .take(visible.len())
                 .map(|(idx, item)| {
                     let is_selected = self.list_state.selected() == Some(idx);
 
@@ -549,13 +601,7 @@ impl SessionPicker {
                             ListItem::new(vec![line1])
                         }
                         PickerItem::Session => self
-                            .item_to_session
-                            .get(idx)
-                            .and_then(|session_idx| {
-                                session_idx
-                                    .and_then(|i| self.visible_sessions.get(i).copied())
-                                    .and_then(|session_ref| self.session_by_ref(session_ref))
-                            })
+                            .list_session_at(idx)
                             .map(|session| {
                                 self.render_session_item(session, is_selected, spinner_frame)
                             })
@@ -690,9 +736,10 @@ impl SessionPicker {
         // its own line count (no wrapping), so summing item heights gives the
         // exact content height, and a prefix sum maps the scroll offset (first
         // visible item index) to a rendered-row offset for the scrollbar thumb.
-        let item_heights: Vec<usize> = items.iter().map(|item| item.height().max(1)).collect();
+        if !virtualize {
+            item_heights = items.iter().map(|item| item.height().max(1)).collect();
+        }
         let total_item_rows: usize = item_heights.iter().sum();
-        let inner_height = area.height.saturating_sub(2) as usize;
         let show_scrollbar =
             super::super::ui::native_scrollbar_visible(true, total_item_rows, inner_height);
 
@@ -718,7 +765,20 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD)
             });
 
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        if virtualize {
+            let mut visible_state = ListState::default().with_selected(
+                self.list_state
+                    .selected()
+                    .filter(|index| visible.contains(index))
+                    .map(|index| index - visible.start),
+            );
+            frame.render_stateful_widget(list, area, &mut visible_state);
+            if inner_height > 0 && area.width > 2 {
+                *self.list_state.offset_mut() = visible.start + visible_state.offset();
+            }
+        } else {
+            frame.render_stateful_widget(list, area, &mut self.list_state);
+        }
 
         // Draw the scrollbar inside the right border, after the list has updated
         // its scroll offset for this frame. Translate the first-visible item index

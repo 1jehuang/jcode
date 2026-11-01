@@ -10,6 +10,21 @@ fn same_transcript(a: &SessionInfo, b: &SessionInfo) -> bool {
         && a.source == b.source
         && a.resume_target == b.resume_target
         && a.external_path == b.external_path
+        && (b.messages_preview.is_empty()
+            || (a.messages_preview.len() == b.messages_preview.len()
+                && a.messages_preview
+                    .iter()
+                    .zip(&b.messages_preview)
+                    .all(|(a, b)| {
+                        a.role == b.role
+                            && a.content == b.content
+                            && a.tool_calls == b.tool_calls
+                            && a.tool_data == b.tool_data
+                            && a.timestamp == b.timestamp
+                            && a.duration_secs.map(f32::to_bits)
+                                == b.duration_secs.map(f32::to_bits)
+                            && a.title == b.title
+                    })))
 }
 
 impl SessionPicker {

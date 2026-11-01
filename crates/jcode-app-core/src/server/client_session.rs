@@ -28,6 +28,29 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type ResumeLockKey = (usize, String);
+
+fn resume_target_lock(sessions: &SessionAgents, session_id: &str) -> Arc<Mutex<()>> {
+    // The map identity isolates independent server/test instances. Every caller
+    // holds its sessions Arc while using the lock, so its address cannot be
+    // reused while a matching lock is alive. Weak values let idle gates expire.
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<ResumeLockKey, std::sync::Weak<Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let key = (Arc::as_ptr(sessions) as usize, session_id.to_owned());
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
@@ -1456,6 +1479,11 @@ pub(super) async fn handle_resume_session(
             ("allow_takeover", allow_session_takeover.to_string()),
         ],
     );
+    // Serialize the check as well as restoration: a waiter must re-check the
+    // published target instead of restoring a second runtime into its source.
+    // Never hold a sessions/connections/agent guard while acquiring this gate.
+    let resume_lock = resume_target_lock(sessions, &session_id);
+    let resume_guard = resume_lock.lock().await;
     let live_target_agent = claim_live_target_agent(
         &session_id,
         client_connection_id,
@@ -1467,6 +1495,7 @@ pub(super) async fn handle_resume_session(
     .await;
 
     if let Some(live_target_agent) = live_target_agent.as_ref() {
+        drop(resume_guard);
         let old_session_id = client_session_id.clone();
 
         let conflicting_live_client = {
@@ -1996,6 +2025,10 @@ pub(super) async fn handle_resume_session(
             )
             .await;
             lap("event_sender");
+
+            // The runtime and attachment bookkeeping are now published. Do not
+            // serialize history I/O, MCP discovery, or a recovery provider turn.
+            drop(resume_guard);
 
             // Route metadata was captured before the restored agent became
             // available to recovery workers.

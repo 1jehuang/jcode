@@ -1,7 +1,232 @@
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
+use ratatui::layout::Position;
 use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
+
+#[test]
+fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_regions() {
+    for width in [20, 80, 120] {
+        let session = make_session("right-sidebar", "sidebar", false, SessionStatus::Closed);
+        let mut picker = SessionPicker::new(vec![session]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|frame| picker.render(frame)).unwrap();
+        let preview = picker.last_preview_area.unwrap();
+        let sidebar = picker.last_list_area.unwrap();
+        assert_eq!(preview, Rect::new(0, 0, width, 30));
+        assert!(sidebar.x > preview.x);
+        assert!(sidebar.right() < preview.right());
+        assert_eq!(
+            sidebar.right(),
+            preview.right() - 2,
+            "one blank column must separate the card and native scrollbar"
+        );
+        assert!(sidebar.height < preview.height);
+        assert!(sidebar.bottom() < preview.bottom());
+        assert!(picker.mouse_over_preview(sidebar.x + 1, sidebar.bottom() + 1));
+        assert!(picker.mouse_over_preview(preview.x + 1, preview.y + 1));
+        assert!(!picker.mouse_over_preview(sidebar.x + 1, sidebar.y + 1));
+        for key in [KeyCode::Left, KeyCode::Char('h')] {
+            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
+            assert_eq!(picker.focus, PaneFocus::Preview);
+        }
+        for key in [KeyCode::Right, KeyCode::Char('l')] {
+            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
+            assert_eq!(picker.focus, PaneFocus::Sessions);
+        }
+    }
+}
+
+#[test]
+fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    for width in [40, 80, 120] {
+        let mut session = make_session("overlay-parity", "fox", false, SessionStatus::Closed);
+        session.messages_preview.push(PreviewMessage {
+            role: "assistant".into(),
+            content: (0..70)
+                .map(|n| format!("row {n}: {}", "Unicode 界 text ".repeat(12)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+            timestamp: None,
+        });
+        let mut actual = SessionPicker::new(vec![session.clone()]);
+        let mut baseline = SessionPicker::new(vec![session]);
+        let area = Rect::new(0, 0, width, 45);
+        // Unbordered conversation canvas, without painting the control card.
+        baseline.reserved_panel_area = Some(Rect::default());
+        let mut expected =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
+        let mut rendered =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
+        expected
+            .draw(|frame| baseline.render_preview(frame, area))
+            .unwrap();
+        rendered.draw(|frame| actual.render(frame)).unwrap();
+        let card = actual.reserved_panel_area.unwrap();
+        assert_eq!(actual.scroll_offset, baseline.scroll_offset);
+        assert_eq!(
+            actual.preview_cache.as_ref().unwrap().wrapped_lines,
+            baseline.preview_cache.as_ref().unwrap().wrapped_lines
+        );
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if !card.contains(Position::new(x, y)) {
+                    assert_eq!(
+                        rendered.backend().buffer()[(x, y)],
+                        expected.backend().buffer()[(x, y)],
+                        "session pixel outside overlay changed at ({x},{y}), width={width}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resume_card_starts_below_full_width_pinned_todos() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let session = make_session("pinned-placement", "fox", false, SessionStatus::Closed);
+    let id = session.id.clone();
+    let mut picker = SessionPicker::new(vec![session]);
+    let payload = serde_json::json!({"todos": (0..20).map(|n| serde_json::json!({
+        "id": format!("item-{n}"), "content": format!("Pinned work item {n}"),
+        "status": "pending", "priority": "high", "phase": 1, "lane": format!("lane-{n}")
+    })).collect::<Vec<_>>()})
+    .to_string();
+    picker.preview_extras.insert(
+        id,
+        PreviewExtras {
+            todos_payload: Some(payload.clone()),
+            ..Default::default()
+        },
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let (lines, _) = super::super::ui::viewport::pinned_todo_band_lines_for_payload(
+        Some(&payload),
+        false,
+        crate::config::config().display.diff_mode,
+        119,
+        47,
+    );
+    assert!(
+        !lines.is_empty(),
+        "fixture must exercise the pinned todo band"
+    );
+    let card = picker.reserved_panel_area.unwrap();
+    assert!(
+        card.y >= lines.len() as u16,
+        "resume card must not cover pinned todos: {card:?}"
+    );
+    assert_eq!(card.right(), 118);
+}
+
+#[test]
+fn resume_canvas_uses_right_columns_below_search_card() {
+    let mut session = make_session("canvas-flow", "canvas", false, SessionStatus::Closed);
+    session.messages_preview = vec![PreviewMessage {
+        role: "assistant".into(),
+        content: (0..80)
+            .map(|_| "W".repeat(115))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+        timestamp: None,
+    }];
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.auto_scroll_preview = false;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let panel = picker.reserved_panel_area.unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (panel.bottom()..38).any(|y| (panel.x..115).any(|x| buffer[(x, y)].symbol() == "W")),
+        "Transcript must reclaim the right-side columns below the bounded card"
+    );
+    let search: String = (panel.x..panel.right())
+        .map(|x| buffer[(x, panel.y)].symbol())
+        .collect();
+    assert!(search.contains("Search sessions"));
+}
+
+#[test]
+fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
+    let mut session = make_session(
+        "render-parity",
+        "render-parity",
+        false,
+        SessionStatus::Closed,
+    );
+    session.messages_preview.push(PreviewMessage {
+        role: "tool".into(),
+        content: "Build succeeded".into(),
+        tool_calls: Vec::new(),
+        duration_secs: Some(2.3),
+        title: Some("Saved tool title".into()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "timed-preview".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "echo hello"}),
+            intent: Some("Check saved timing".into()),
+            thought_signature: None,
+        }),
+        timestamp: None,
+    });
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let mode = crate::config::DiffDisplayMode::Off;
+    let hash = picker.preview_content_hash(&session, mode);
+    for width in [8, 30, 80] {
+        let inner = Rect::new(0, 0, width, 20);
+        let key = PreviewCacheKey {
+            content_hash: hash,
+            inner_width: width,
+            inner_height: 20,
+            diff_mode: mode,
+            search_query: String::new(),
+        };
+        let cache = picker.build_preview_cache(&session, inner, inner, key, Alignment::Left, mode);
+        let messages: Vec<_> = session
+            .messages_preview
+            .iter()
+            .map(|msg| DisplayMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                duration_secs: msg.duration_secs,
+                title: msg.title.clone(),
+                tool_data: msg.tool_data.clone(),
+            })
+            .collect();
+        let text_width = width - u16::from(cache.show_scrollbar);
+        let text_width = text_width.saturating_sub(super::super::ui::left_aligned_content_inset(
+            text_width, false,
+        ));
+        let live =
+            super::super::ui::prepare::prepare_history_preview(&messages, 0, text_width, mode);
+        let header = super::super::ui::header::build_preview_header(&session, text_width);
+        let offset = header.len()
+            + super::super::ui::prepare::initial_header_pad_top(inner.height, header.len());
+        assert_eq!(
+            cache.wrapped_lines[offset..],
+            live.wrapped_lines,
+            "width={width}"
+        );
+    }
+    session.messages_preview.last_mut().unwrap().duration_secs = Some(4.5);
+    let changed_timing = picker.preview_content_hash(&session, mode);
+    assert_ne!(hash, changed_timing);
+    session.messages_preview.last_mut().unwrap().title = Some("Updated title".into());
+    assert_ne!(changed_timing, picker.preview_content_hash(&session, mode));
+}
 
 #[test]
 fn completed_empty_preview_is_not_loaded_again() {
@@ -89,6 +314,8 @@ fn make_session_with_flags(
             content: "hello".to_string(),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         },
         PreviewMessage {
@@ -96,6 +323,8 @@ fn make_session_with_flags(
             content: "world".to_string(),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         },
     ];
@@ -269,7 +498,7 @@ fn cloud_session_picker_renders_host_and_preserves_resume_target() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("cloud: dev-cloud"));
+    assert!(text.to_lowercase().contains("cloud: dev-cloud"));
     assert_eq!(picker.selection_or_current_targets(), vec![target]);
 }
 
@@ -1155,6 +1384,47 @@ fn resume_search_ranks_literal_matches_before_newer_typo_matches() {
 }
 
 #[test]
+fn resume_search_battery_prompt_outranks_incidental_tool_mentions() {
+    let mut whale = make_session("whale", "power-triage", false, SessionStatus::Closed);
+    whale.first_user_prompt = Some("Can you help me optimize my BATTERY life?".into());
+    whale.search_index = "power-triage can you help me optimize my battery life?".into();
+    let mut sessions = vec![whale.clone()];
+    for i in 0..97 {
+        let mut incidental = make_session(
+            &format!("unrelated-{i}"),
+            "Health check",
+            false,
+            SessionStatus::Closed,
+        );
+        incidental.first_user_prompt = Some("check my niri".into());
+        incidental.search_index =
+            "health check check my niri tool output battery-notify.desktop".into();
+        incidental.last_message_time = whale.last_message_time + chrono::Duration::seconds(i + 1);
+        sessions.push(incidental);
+    }
+    let mut picker = SessionPicker::new(sessions);
+    picker.search_query = "battery".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 98);
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "whale"
+    );
+    picker.search_query.clear();
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "unrelated-96"
+    );
+}
+
+#[test]
 fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
@@ -1216,6 +1486,8 @@ fn benchmark_resume_search_reports_incremental_timings() {
                 content: format!("benchmark transcript content alpha beta zebra-token-{idx:03}"),
                 tool_calls: Vec::new(),
                 tool_data: None,
+                duration_secs: None,
+                title: None,
                 timestamp: None,
             }];
             session.search_index = build_search_index(
@@ -1706,6 +1978,8 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
             content: format!("user prompt number {i}"),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
         preview.push(PreviewMessage {
@@ -1713,6 +1987,8 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
             content: format!("assistant reply number {i}"),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
     }
@@ -1757,6 +2033,8 @@ fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) -> Vec<Prev
             ),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
 
@@ -1778,6 +2056,8 @@ fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) -> Vec<Prev
             content: body,
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
     }
@@ -2087,9 +2367,12 @@ fn test_preview_transcript_omits_picker_metadata() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.starts_with("1› hello"), "{text}");
+    assert!(text.contains("1› hello"), "{text}");
+    assert!(
+        text.contains("client: Metadata-monkey"),
+        "the real startup header belongs to the scrolling transcript"
+    );
     for metadata in [
-        "metadata-monkey",
         "metadata-video-title",
         "/metadata-only-directory",
         "▶ Active",
@@ -2145,7 +2428,10 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                         .collect();
                     for text in ["1› hello", "world"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
-                        assert!(row.starts_with(text), "preview must be flush left: {row:?}");
+                        assert!(
+                            row.starts_with(&format!(" {text}")),
+                            "preview must use the live one-cell gutter: {row:?}"
+                        );
                     }
                     assert!(
                         rows.iter().all(|row| !row.contains("tool:")),
@@ -2203,7 +2489,7 @@ fn test_preview_structured_messages_stay_left_aligned() {
         ("background_task", "**Background task** `alignment-task` · `selfdev test` (`selfdev-test`) · ✓ completed · 18.5s · exit 0\n\n```text\nAll alignment checks passed\n```".to_string(), None),
     ] {
         session.messages_preview.push(PreviewMessage {
-            role: role.to_string(), content, tool_calls: Vec::new(), timestamp: None,
+            role: role.to_string(), content, tool_calls: Vec::new(), duration_secs: None, title: None, timestamp: None,
             tool_data: tool.map(|name| crate::message::ToolCall {
                 id: format!("alignment-{name}"), name: name.to_string(),
                 input: serde_json::json!({"command": "echo alignment"}),
@@ -2311,16 +2597,11 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
         .expect("render picker");
     let buffer = terminal.backend().buffer().clone();
 
-    // The preview pane occupies the right 60% of the width; its inner content
-    // starts just inside the rounded border. Read the first inner content row and
-    // confirm it carries the "N›" sticky-header marker.
-    let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
-    let header_y = 1 + crate::tui::ui::header::build_preview_header(
-        picker.selected_session().expect("selected session"),
-        w.saturating_sub(preview_inner_x + 1),
-    )
-    .len() as u16;
-    let header_row: String = (preview_inner_x..w.saturating_sub(1))
+    // Startup chrome scrolls away. The sticky previous prompt is the first row.
+    let preview = picker.last_preview_area.expect("preview pane");
+    let preview_inner_x = preview.x;
+    let header_y = preview.y;
+    let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(
@@ -2331,6 +2612,7 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // The header marker is a prompt number followed by the chevron.
     assert!(
         header_row
+            .trim_start()
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_digit()),
@@ -2421,13 +2703,10 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     assert_eq!(picker.scroll_offset, user_offset);
     assert!(!picker.auto_scroll_preview);
 
-    let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
-    let header_y = 1 + crate::tui::ui::header::build_preview_header(
-        picker.selected_session().expect("selected session"),
-        w.saturating_sub(preview_inner_x + 1),
-    )
-    .len() as u16;
-    let header_row: String = (preview_inner_x..w.saturating_sub(1))
+    let preview = picker.last_preview_area.expect("preview pane");
+    let preview_inner_x = preview.x;
+    let header_y = preview.y;
+    let header_row: String = (preview_inner_x..preview.right().saturating_sub(1))
         .map(|x| buffer[(x, header_y)].symbol())
         .collect();
     assert!(

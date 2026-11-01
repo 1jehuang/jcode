@@ -741,6 +741,8 @@ fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: 
         content: content.to_string(),
         tool_calls: Vec::new(),
         tool_data: None,
+        duration_secs: None,
+        title: None,
         timestamp: None,
     });
     if preview.len() > PREVIEW_MESSAGE_LIMIT {
@@ -1582,11 +1584,14 @@ pub(super) fn build_messages_preview_with_offset(
     let preview = rendered
         .into_iter()
         .skip(skip)
+        .map(crate::tui::DisplayMessage::from_rendered_message)
         .map(|msg| PreviewMessage {
             role: msg.role,
             content: msg.content,
             tool_calls: msg.tool_calls,
             tool_data: msg.tool_data,
+            duration_secs: msg.duration_secs,
+            title: msg.title,
             timestamp: None,
         })
         .collect();

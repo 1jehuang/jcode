@@ -515,9 +515,9 @@ mod status_support;
 #[path = "ui_theme.rs"]
 mod theme_support;
 use super::color_support::rgb;
-pub(crate) use layout_support::align_if_unset;
+pub(crate) use layout_support::{align_if_unset, left_aligned_content_inset};
 use layout_support::{
-    centered_content_block_width, clear_area, draw_right_rail_chrome, left_aligned_content_inset,
+    centered_content_block_width, clear_area, draw_right_rail_chrome,
     left_pad_lines_to_block_width, right_rail_border_style,
 };
 #[cfg(test)]
