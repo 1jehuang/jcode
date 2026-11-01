@@ -52,13 +52,7 @@ pub mod linux {
         // the child shares the parent's stdin pipe before calling strict mode.
         if let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
             let wchan = wchan.trim();
-            if (wchan == "n_tty_read"
-                || wchan == "wait_woken"
-                || wchan == "pipe_read"
-                || wchan == "pipe_wait_readable"
-                || wchan == "unix_stream_read_generic")
-                && stdin_is_pipe_or_pty(pid)
-            {
+            if (is_stdin_read_wchan(wchan)) && stdin_is_pipe_or_pty(pid) {
                 return StdinState::Reading;
             }
             return StdinState::NotReading;
@@ -69,6 +63,26 @@ pub mod linux {
         } else {
             StdinState::Unknown
         }
+    }
+
+    /// Wait-channel names a process blocked reading stdin can report.
+    ///
+    /// `pipe_read` covers kernels before 6.1. Since 6.1 the anonymous-pipe
+    /// reader waits in `anon_pipe_read` and FIFO readers wait in `fifo_read`,
+    /// so the split names must be accepted alongside the old one. On kernel
+    /// 7.0 runners `/proc/PID/syscall` is EPERM even for children, which
+    /// makes this wait-channel fallback the only detection path.
+    pub(crate) fn is_stdin_read_wchan(wchan: &str) -> bool {
+        matches!(
+            wchan,
+            "n_tty_read"
+                | "wait_woken"
+                | "pipe_read"
+                | "pipe_wait_readable"
+                | "anon_pipe_read"
+                | "fifo_read"
+                | "unix_stream_read_generic"
+        )
     }
 
     fn stdin_is_pipe_or_pty(pid: u32) -> bool {

@@ -66,6 +66,19 @@ fn test_running_process_not_reading() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_kernel_6_1_pipe_wchan_names_accepted() {
+    // Kernel 6.1 split the pipe wait channel: anonymous pipes report
+    // `anon_pipe_read` and FIFOs report `fifo_read`, while pre-6.1 kernels
+    // report `pipe_read`. On kernel 7.0 runners `/proc/PID/syscall` is
+    // EPERM even for children, so this fallback list is the only detector.
+    assert!(linux::is_stdin_read_wchan("anon_pipe_read"));
+    assert!(linux::is_stdin_read_wchan("fifo_read"));
+    assert!(linux::is_stdin_read_wchan("pipe_read"));
+    assert!(!linux::is_stdin_read_wchan("hrtimer_nanosleep"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_child_process_tree_detection() {
     // bash -c "cat" spawns bash which spawns cat - cat is the one reading stdin
     let mut child = Command::new("bash")
