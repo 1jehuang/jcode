@@ -393,7 +393,7 @@ async fn definition_comes_from_the_coordinator_dir_not_the_worker_dir() {
 
     let sessions: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<crate::agent::Agent>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    let provider: Arc<dyn Provider> = Arc::new(QuietProvider);
+    let provider: Arc<dyn Provider> = Arc::new(QuietProvider::default());
     let state = crate::server::SwarmState::new(
         HashMap::new(),
         HashMap::new(),
