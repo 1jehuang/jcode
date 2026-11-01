@@ -1595,12 +1595,40 @@ fn sponsors_optout_survives_config_save_and_reload() {
             );
             let saved = std::fs::read_to_string(&path).expect("read saved config");
             let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
-            assert_eq!(saved["sponsors"]["enabled"].as_bool(), Some(false));
+            assert_eq!(
+                saved
+                    .get("sponsors")
+                    .and_then(|s| s.get("enabled"))
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false),
+                false
+            );
         }
     }
 
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
+}
+
+#[test]
+fn integration_discovery_is_opt_in() {
+    assert!(!Config::default().sponsors.enabled);
+    for raw in [
+        "",
+        "[sponsors]\n",
+        "[sponsors]\nendpoint = 'https://example.com'\n",
+    ] {
+        let config: Config = toml::from_str(raw).expect("parse config");
+        assert!(!config.sponsors.enabled, "must be disabled for {raw:?}");
+    }
+    let config: Config = toml::from_str("[sponsors]\nenabled = true\n").expect("parse opt-in");
+    assert!(config.sponsors.enabled);
+    let rendered = toml::to_string_pretty(&config).expect("serialize opt-in");
+    let reloaded: Config = toml::from_str(&rendered).expect("reload opt-in");
+    assert!(
+        reloaded.sponsors.enabled,
+        "explicit opt-in must survive saving"
+    );
 }
 
 #[test]
