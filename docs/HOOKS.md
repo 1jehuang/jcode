@@ -149,9 +149,15 @@ swarm_member_end   = "~/bin/on-worker-end"     # hook_event_name "SubagentStop"
 
 `swarm_member_end` fires once when a worker leaves the running state for
 `ready`, `completed`, `failed`, `stopped` or `crashed`. Its payload carries
-`agent_id`, `agent_type`, `last_assistant_message` (completion report tail,
-capped at 4000 chars) and `jcode.status`, `jcode.duration_ms`, `jcode.swarm`.
-Repeated updates of the same status do not refire. Env overrides:
+`agent_id`, `agent_type`, `last_assistant_message` (the completion report,
+truncated to 4000 chars with a marker) and `jcode.status`, `jcode.duration_ms`, `jcode.swarm`.
+Repeated updates of the same status do not refire.
+
+Known limits of worker identity: the swarm fields are registered when the
+worker is spawned, so a headless worker's own `session_start` hook (which runs
+while the agent is being constructed) carries no swarm fields, and identities
+are in memory only, so a worker revived after a daemon restart runs its hooks
+without them. Env overrides:
 `JCODE_HOOK_SWARM_MEMBER_START`, `JCODE_HOOK_SWARM_MEMBER_END`.
 
 ## Feedback hook: `post_tool_feedback`
