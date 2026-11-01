@@ -88,6 +88,7 @@ struct SidePanelMarkdownKey {
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
+    show_link_urls: bool,
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
 }
@@ -106,6 +107,7 @@ struct SidePanelRenderKey {
     inner_height: u16,
     has_protocol: bool,
     centered: bool,
+    show_link_urls: bool,
     image_zoom_percent: u8,
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
@@ -115,6 +117,43 @@ struct SidePanelRenderKey {
 struct SidePanelRenderCacheState {
     entries: HashMap<SidePanelRenderKey, RenderedSidePanelCache>,
     order: VecDeque<SidePanelRenderKey>,
+}
+
+#[test]
+fn side_panel_cache_keys_include_link_url_visibility() {
+    let markdown_key = SidePanelMarkdownKey {
+        page_id: "links".into(),
+        content_signature: 1,
+        inner_width: 40,
+        has_protocol: false,
+        centered: false,
+        show_link_urls: false,
+        mermaid_epoch: 0,
+        mermaid_aspect_bucket: None,
+    };
+    let expanded_markdown_key = SidePanelMarkdownKey {
+        show_link_urls: true,
+        ..markdown_key.clone()
+    };
+    assert_ne!(markdown_key, expanded_markdown_key);
+
+    let render_key = SidePanelRenderKey {
+        page_id: markdown_key.page_id,
+        content_signature: markdown_key.content_signature,
+        inner_width: markdown_key.inner_width,
+        inner_height: 20,
+        has_protocol: markdown_key.has_protocol,
+        centered: markdown_key.centered,
+        show_link_urls: false,
+        image_zoom_percent: 100,
+        mermaid_epoch: markdown_key.mermaid_epoch,
+        mermaid_aspect_bucket: markdown_key.mermaid_aspect_bucket,
+    };
+    let expanded_render_key = SidePanelRenderKey {
+        show_link_urls: true,
+        ..render_key.clone()
+    };
+    assert_ne!(render_key, expanded_render_key);
 }
 
 #[path = "ui_pinned_mermaid_debug.rs"]
@@ -951,6 +990,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
         inner_height: inner.height,
         has_protocol,
         centered,
+        show_link_urls: crate::config::config().display.show_link_urls,
         image_zoom_percent,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
         mermaid_aspect_bucket,
@@ -1094,6 +1134,7 @@ fn render_side_panel_markdown_lines_cached(
         inner_width,
         has_protocol,
         centered,
+        show_link_urls: crate::config::config().display.show_link_urls,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
         mermaid_aspect_bucket,
     };

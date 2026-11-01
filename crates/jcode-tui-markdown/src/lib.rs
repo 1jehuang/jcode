@@ -136,6 +136,9 @@ mod render_lazy;
 #[path = "markdown_render_support.rs"]
 mod render_support;
 
+mod markdown_links;
+pub use markdown_links::markdown_link_target;
+
 mod render_core_adapter;
 pub use render_core_adapter::{
     document_to_lines, render_markdown_via_core, render_markdown_via_core_wrapped,
