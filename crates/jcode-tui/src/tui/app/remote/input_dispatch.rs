@@ -251,7 +251,18 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
-    app.pending_skill_arguments = Some(trailing_prompt.to_string());
+    // Arguments keep the quoting the user typed so `"two words"` stays one
+    // argument; only the prompt sent to the model has its quotes stripped.
+    app.pending_skill_arguments = Some(
+        raw_input
+            .trim()
+            .strip_prefix('/')
+            .and_then(|rest| rest.get(skill_name.len()..))
+            .map(str::trim)
+            .filter(|args| !args.is_empty())
+            .unwrap_or(trailing_prompt)
+            .to_string(),
+    );
     let expanded_prompt = app
         .current_skills_snapshot()
         .resolve_invocation(&prepared.expanded)

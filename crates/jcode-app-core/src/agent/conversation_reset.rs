@@ -75,6 +75,8 @@ impl Agent {
             visible_message_count: message_count,
         });
         self.session.truncate_messages(stored_len);
+        // The truncated history may no longer contain the last announcement.
+        self.active_skill_render = None;
         self.session.updated_at = chrono::Utc::now();
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -94,6 +96,7 @@ impl Agent {
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         self.session.replace_messages(snapshot.messages);
+        self.active_skill_render = None;
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();

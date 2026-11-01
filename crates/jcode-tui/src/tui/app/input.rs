@@ -4030,6 +4030,11 @@ impl App {
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
                 } else {
+                    // A bare invocation sends explicitly empty arguments so
+                    // the previous invocation's values are not kept.
+                    if self.is_remote {
+                        self.pending_skill_arguments = Some(String::new());
+                    }
                     return;
                 }
             } else {
