@@ -424,6 +424,12 @@ where
 
     if let Some(message) = startup_message {
         persist_headed_startup_message(&new_session_id, message);
+        // The visible worker's TUI submits this saved text as its first turn
+        // without an origin; it is generated work, not a person's prompt.
+        crate::hooks::set_pending_prompt_origin(
+            &new_session_id,
+            crate::hooks::PromptOrigin::SwarmSpawn,
+        );
     }
 
     match launch_visible(

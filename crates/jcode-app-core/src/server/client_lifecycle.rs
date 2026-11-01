@@ -3435,7 +3435,7 @@ async fn append_context_message(
         );
         return;
     };
-    let result = agent.append_user_context_message(content, images);
+    let result = agent.append_user_context_message(content, images).await;
     let event = match result {
         Ok(()) => ServerEvent::ContextMessageAdded { id },
         Err(error) => ServerEvent::Error {

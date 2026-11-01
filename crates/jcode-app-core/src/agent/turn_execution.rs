@@ -259,12 +259,22 @@ impl Agent {
     }
 
     /// Append and persist a user message without starting a model turn.
-    pub(crate) fn append_user_context_message(
+    ///
+    /// The `user_prompt_submit` hook still runs, so a message the hook would
+    /// reject is never saved and later sent to the model with another turn.
+    pub(crate) async fn append_user_context_message(
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None, false)
+        let prompt_hook = self
+            .run_user_prompt_submit_hook(user_message, PromptOrigin::User, "context")
+            .await?;
+        self.append_user_context_message_with_display_role(user_message, images, None, false)?;
+        if let Some(context) = prompt_hook.context {
+            self.append_turn_system_reminder(&context)?;
+        }
+        Ok(())
     }
 
     fn append_user_context_message_with_display_role(
