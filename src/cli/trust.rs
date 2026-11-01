@@ -25,8 +25,14 @@ fn scopes_for(arg: TrustScopeArg) -> Vec<Scope> {
 /// approve are omitted. Each feature that adds a scope adds its review here.
 fn scope_reviews(path: &Path) -> Result<Vec<ScopeReview>> {
     let mut reviews = Vec::new();
-    if let Some(review) = crate::hooks::hooks_scope_review(path)? {
-        reviews.push(review);
+    // A malformed project config must not block startup or approving another
+    // scope: project hooks are simply off for it, as when they load.
+    match crate::hooks::hooks_scope_review(path) {
+        Ok(Some(review)) => reviews.push(review),
+        Ok(None) => {}
+        Err(error) => {
+            crate::logging::warn(&format!("Project hooks cannot be reviewed: {error}"));
+        }
     }
     if let Some(review) = crate::mcp::mcp_scope_review(path)? {
         reviews.push(review);

@@ -35,6 +35,7 @@ fn fixture(project_toml: &str) -> Fixture {
     std::fs::create_dir(project.path().join(".git")).unwrap();
     std::fs::create_dir(project.path().join(".jcode")).unwrap();
     std::fs::write(project.path().join(".jcode/config.toml"), project_toml).unwrap();
+    clear_cache();
     Fixture {
         _home: home,
         _env: env,
@@ -101,6 +102,7 @@ fn editing_any_key_including_a_timeout_invalidates_trust() {
         BASIC.replace("999999", "888888"),
     )
     .unwrap();
+    clear_cache();
     assert!(
         f.commands("post_tool_feedback").is_empty(),
         "timeout edit must re-require trust"
@@ -110,6 +112,7 @@ fn editing_any_key_including_a_timeout_invalidates_trust() {
         BASIC.replace("echo feedback", "echo changed"),
     )
     .unwrap();
+    clear_cache();
     assert!(f.commands("post_tool_feedback").is_empty());
 }
 
@@ -164,6 +167,27 @@ fn revoke_stops_project_hooks() {
 }
 
 #[test]
+fn revoking_or_disabling_takes_effect_while_the_parse_is_cached() {
+    let _lock = crate::storage::lock_test_env();
+    let f = fixture(BASIC);
+    f.grant();
+    assert!(!f.commands("pre_tool").is_empty(), "warms the cache");
+    project_trust::revoke(f.project.path(), Some(Scope::Hooks)).unwrap();
+    assert!(
+        f.commands("pre_tool").is_empty(),
+        "a revoke must not wait for the cache to expire"
+    );
+
+    f.grant();
+    assert!(!f.commands("pre_tool").is_empty());
+    let _off = Env::set("JCODE_PROJECT_HOOKS", "0");
+    assert!(
+        f.commands("pre_tool").is_empty(),
+        "disabling project hooks must not wait for the cache to expire"
+    );
+}
+
+#[test]
 fn two_projects_never_see_each_others_hooks() {
     let _lock = crate::storage::lock_test_env();
     let a = fixture("[hooks]\npre_tool = \"only-a\"\n");
@@ -202,6 +226,11 @@ fn worktree_with_identical_table_runs_and_edited_table_does_not() {
         format!("gitdir: {}\n", admin.display()),
     )
     .unwrap();
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", wt.path().join(".git").display()),
+    )
+    .unwrap();
     std::fs::create_dir(wt.path().join(".jcode")).unwrap();
     std::fs::write(wt.path().join(".jcode/config.toml"), BASIC).unwrap();
     let cwd = wt.path().display().to_string();
@@ -211,6 +240,7 @@ fn worktree_with_identical_table_runs_and_edited_table_does_not() {
         BASIC.replace("guard.sh", "evil.sh"),
     )
     .unwrap();
+    clear_cache();
     assert!(hook_commands_for("pre_tool", Some(&cwd)).is_empty());
 }
 

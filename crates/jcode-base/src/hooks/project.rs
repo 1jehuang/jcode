@@ -18,11 +18,7 @@ use std::time::{Duration, Instant};
 /// How long a resolved project is reused before its file and trust are read
 /// again. Edits are never trusted without a new grant, because the digest
 /// changes with the file.
-const CACHE_TTL: Duration = if cfg!(test) {
-    Duration::ZERO
-} else {
-    Duration::from_secs(2)
-};
+const CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Where a command came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +63,8 @@ impl ScopedCommand {
 #[derive(Debug)]
 pub(super) struct ActiveProject {
     pub dir: PathBuf,
+    /// Digest of the `[hooks]` table that was approved when this was loaded.
+    digest: String,
     hooks: HooksConfig,
     timeouts: HashMap<String, u64>,
 }
@@ -247,9 +245,17 @@ fn load(cwd: &Path) -> Option<Arc<ActiveProject>> {
         .collect();
     Some(Arc::new(ActiveProject {
         dir,
+        digest,
         hooks,
         timeouts,
     }))
+}
+
+/// Forget every cached parse. Tests call this when they rewrite a project
+/// file; approval and the enable switch are re-checked on every lookup anyway.
+#[cfg(test)]
+pub(super) fn clear_cache() {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// The trusted project hooks for sessions running in `cwd`, if any.
@@ -261,7 +267,12 @@ pub(super) fn active_project(cwd: Option<&str>) -> Option<Arc<ActiveProject>> {
         if let Some((at, value)) = cache.get(cwd)
             && now.duration_since(*at) < CACHE_TTL
         {
-            return value.clone();
+            // The parse is cached, the approval and the enable switch are not:
+            // a revoke or `project_hooks = false` takes effect immediately.
+            return value.clone().filter(|project| {
+                project_hooks_enabled()
+                    && project_trust::is_trusted(&project.dir, Scope::Hooks, &project.digest)
+            });
         }
     }
     let loaded = load(Path::new(cwd));
