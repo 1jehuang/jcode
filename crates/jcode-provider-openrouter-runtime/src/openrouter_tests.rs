@@ -23,7 +23,7 @@ impl SharedEnvLock {
     /// process env state, so a panic in one test must not cascade into a
     /// flood of unrelated `PoisonError` failures across every other test
     /// that takes this lock.
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock(&self) -> jcode_base::storage::TestEnvGuard {
         jcode_base::storage::lock_test_env()
     }
 }
@@ -80,7 +80,18 @@ fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str
 }
 
 fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
-    let mut guards = vec![
+    let mut guards = vec![];
+    // The autodetect tests scope config discovery through
+    // XDG_CONFIG_HOME/HOME pointing at a tempdir, so the shared test home
+    // installed by `lock_test_env` must not redirect the env-file lookup at
+    // `$JCODE_HOME/config/jcode` instead. Only the process-shared home gets
+    // scoped away; a test that pinned its own JCODE_HOME keeps it.
+    if std::env::var("JCODE_HOME").ok().is_some_and(|home| {
+        home == std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()))
+    }) {
+        guards.push(EnvVarGuard::remove("JCODE_HOME"));
+    }
+    guards.extend([
         EnvVarGuard::remove("JCODE_OPENROUTER_API_BASE"),
         EnvVarGuard::remove("JCODE_OPENROUTER_API_KEY_NAME"),
         EnvVarGuard::remove("JCODE_OPENROUTER_ENV_FILE"),
@@ -105,7 +116,7 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_SETUP_URL"),
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_DEFAULT_MODEL"),
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_LOCAL_ENABLED"),
-    ];
+    ]);
     guards.extend(
         jcode_base::provider_catalog::openai_compatible_profiles()
             .iter()
@@ -2290,6 +2301,10 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    // The shared test home installed by `lock_test_env` would redirect the
+    // env-file lookup to `$JCODE_HOME/config/jcode` instead of the tempdir
+    // this test seeds through XDG_CONFIG_HOME; scope it away for the body.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
     write_test_api_key(&temp, "custom.env", "CUSTOM_API_KEY", "from-env-file");
