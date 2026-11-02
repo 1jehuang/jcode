@@ -1753,7 +1753,7 @@ fn live_claude_takeover_requires_explicit_key_and_confirmation() {
 }
 
 #[test]
-fn live_claude_row_is_labeled_and_closed_claude_cannot_take_over() {
+fn live_claude_row_has_age_only_and_closed_claude_cannot_take_over() {
     let mut live = make_claude_session("live-row");
     let mut closed = make_claude_session("closed-row");
     live.last_message_time = Utc::now();
@@ -1767,7 +1767,8 @@ fn live_claude_row_is_labeled_and_closed_claude_cannot_take_over() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("live Claude"), "rendered row: {rendered}");
+    assert!(!rendered.contains("live Claude"), "rendered row: {rendered}");
+    assert!(rendered.contains("ago"), "rendered row: {rendered}");
 
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())

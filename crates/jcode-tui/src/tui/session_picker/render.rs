@@ -187,12 +187,10 @@ impl SessionPicker {
         &self,
         session: &SessionInfo,
         is_selected: bool,
-        spinner_frame: usize,
+        _spinner_frame: usize,
     ) -> Vec<Line<'static>> {
         let dim: Color = rgb(100, 100, 100);
         let dimmer: Color = rgb(70, 70, 70);
-        let user_clr: Color = rgb(138, 180, 248);
-        let accent: Color = rgb(186, 139, 255);
         let batch_restore: Color = rgb(255, 140, 140);
 
         // The list is ordered by last activity, so show that instead of the
@@ -230,54 +228,7 @@ impl SessionPicker {
             Style::default().fg(rgb(90, 90, 90))
         };
 
-        let time_ago = active_ago.clone();
-        // Live presence (a running process owns this session) takes precedence
-        // over the persisted snapshot status: it distinguishes sessions still
-        // working on a response from ones ready for input, which the stored
-        // `SessionStatus::Active` alone cannot.
         let is_current = self.session_is_current(session);
-        let live_badge = if recently_closed {
-            // A detached agent can still have a PID/streaming marker. The
-            // actual last-client EOF is more useful for recovering its window.
-            Some(("↩", rgb(255, 193, 7), "just closed".to_string()))
-        } else if self.session_is_live(session) {
-            if session.source == SessionSource::ClaudeCode {
-                Some(("●", rgb(120, 210, 255), "live Claude".to_string()))
-            } else if self.session_is_streaming(session) {
-                let label = match self.session_streaming_duration(session) {
-                    Some(elapsed) => format!("working {}", format_short_duration(elapsed)),
-                    None => "working".to_string(),
-                };
-                Some((
-                    jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES[spinner_frame
-                        % jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES.len()],
-                    rgb(255, 193, 7),
-                    label,
-                ))
-            } else {
-                Some(("●", rgb(100, 220, 130), "ready".to_string()))
-            }
-        } else {
-            None
-        };
-        let (status_icon, status_color, time_label) = match live_badge {
-            Some(badge) => badge,
-            None => match &session.status {
-                SessionStatus::Active => ("▶", rgb(100, 200, 100), "active".to_string()),
-                SessionStatus::Closed => ("✓", dim, format!("closed {}", time_ago)),
-                SessionStatus::Crashed { .. } => {
-                    ("💥", rgb(220, 100, 100), format!("crashed {}", time_ago))
-                }
-                SessionStatus::Reloaded => ("🔄", user_clr, format!("reloaded {}", time_ago)),
-                SessionStatus::Compacted => {
-                    ("📦", rgb(255, 193, 7), format!("compacted {}", time_ago))
-                }
-                SessionStatus::RateLimited => ("⏳", accent, format!("rate-limited {}", time_ago)),
-                SessionStatus::Error { .. } => {
-                    ("❌", rgb(220, 100, 100), format!("errored {}", time_ago))
-                }
-            },
-        };
 
         let primary_title = Self::primary_title_display(session);
         let mut line1_spans = vec![
@@ -354,10 +305,7 @@ impl SessionPicker {
 
         // Identity and tokens above, directory and last activity below.
         // The final span of each row is reserved before truncating its left side.
-        let mut detail_spans = vec![Span::styled(
-            format!("  {} ", status_icon),
-            Style::default().fg(status_color),
-        )];
+        let mut detail_spans = vec![Span::raw("  ")];
         if let Some(dir) = session.working_dir.as_deref() {
             detail_spans.extend(Self::highlight_spans(
                 &format!("📁 {}", compact_dir(dir)),
@@ -367,12 +315,7 @@ impl SessionPicker {
         } else {
             detail_spans.push(Span::styled("No directory", Style::default().fg(dimmer)));
         }
-        // Preserve live/recovery labels without losing the actual activity age.
-        let activity = if self.session_is_live(session) || recently_closed {
-            format!("  {time_label} · active {active_ago}")
-        } else {
-            format!("  active {active_ago}")
-        };
+        let activity = format!("  {active_ago}");
         detail_spans.push(Span::styled(activity, Style::default().fg(dim)));
         let mut rows = vec![line1, Line::from(detail_spans)];
         if let Some(reason_line) = Self::crash_reason_line(session) {

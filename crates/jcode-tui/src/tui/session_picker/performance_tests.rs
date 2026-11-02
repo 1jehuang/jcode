@@ -309,7 +309,8 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     assert_eq!(rows.len(), 2);
     assert!(rows[0].to_string().contains("tok"));
     assert!(rows[1].to_string().contains("resume-layout"));
-    assert!(rows[1].to_string().contains("active "));
+    assert!(rows[1].to_string().contains("ago"));
+    assert!(!rows[1].to_string().contains("active"));
     assert!(
         !rows[1]
             .to_string()
@@ -385,7 +386,7 @@ fn session_entry_reserves_tokens_and_activity_for_long_names_and_directories() {
         .collect();
     assert_eq!(rows.len(), 2);
     assert!(rows[0].trim_end().ends_with("~12k tok"), "{}", rows[0]);
-    assert!(rows[1].contains("active "), "{}", rows[1]);
+    assert!(rows[1].contains("ago"), "{}", rows[1]);
     assert!(rows.iter().all(|row| row.contains('…')));
 }
 
