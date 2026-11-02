@@ -98,6 +98,17 @@ pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
         return None;
     }
 
+    // A pinned spec (base@provider) means the base is what the catalog lists.
+    // Map the base to its catalog id and keep the pin verbatim, otherwise a
+    // '@'-containing name falls into the openrouter arm below and callers
+    // like default_model_selection_from_route re-append the same pin.
+    if let Some((base, pin)) = trimmed.rsplit_once('@')
+        && !pin.trim().is_empty()
+    {
+        let base_id = openrouter_catalog_model_id(base)?;
+        return Some(format!("{}@{}", base_id, pin));
+    }
+
     match provider_for_model(trimmed) {
         Some("claude") => Some(format!("anthropic/{}", trimmed)),
         Some("openai") => Some(format!("openai/{}", trimmed)),
