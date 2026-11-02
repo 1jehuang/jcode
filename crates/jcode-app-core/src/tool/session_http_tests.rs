@@ -128,6 +128,71 @@ fn context(session: &str) -> crate::tool::ToolContext {
 }
 
 #[tokio::test]
+async fn concurrent_https_fetches_keep_session_proxy_credentials_across_rounds() {
+    use crate::tool::Tool;
+    use base64::Engine;
+
+    // A CONNECT capture proxy needs no DNS, TLS certificate, or external service.
+    // Refusing the tunnel also checks that transport errors redact credentials.
+    let a = "session-http-concurrent-a";
+    let b = "session-http-concurrent-b";
+    for _ in 0..3 {
+        let (proxy_a, request_a, task_a) = server("").await;
+        let (proxy_b, request_b, task_b) = server("").await;
+        for (session, proxy, user) in [(a, proxy_a, "alice"), (b, proxy_b, "bob")] {
+            set_session_env(
+                session,
+                env(&[
+                    (
+                        "HTTPS_PROXY",
+                        &proxy.replacen("http://", &format!("http://{user}:secret@"), 1),
+                    ),
+                    ("NO_PROXY", ""),
+                ]),
+            )
+            .unwrap();
+        }
+        let tool = crate::tool::webfetch::WebFetchTool::new();
+        let (result_a, result_b) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                tool.execute(
+                    serde_json::json!({"url":"https://alice.example.test/"}),
+                    context(a),
+                ),
+                tool.execute(
+                    serde_json::json!({"url":"https://bob.example.test/"}),
+                    context(b),
+                ),
+            )
+        })
+        .await
+        .expect("both session proxy requests must finish");
+        for (result, request, user, other) in [
+            (result_a, request_a, "alice", "bob"),
+            (result_b, request_b, "bob", "alice"),
+        ] {
+            let error = format!("{:#?}", result.unwrap_err());
+            assert!(!error.contains("secret"));
+            let request = request.await.unwrap().to_lowercase();
+            assert!(request.starts_with(&format!("connect {user}.example.test:443")));
+            let authorization = |user| {
+                format!(
+                    "proxy-authorization: basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:secret"))
+                )
+                .to_lowercase()
+            };
+            assert!(request.contains(&authorization(user)));
+            assert!(!request.contains(&authorization(other)));
+        }
+        task_a.await.unwrap();
+        task_b.await.unwrap();
+    }
+    remove_session_env(a);
+    remove_session_env(b);
+}
+
+#[tokio::test]
 async fn no_proxy_only_retains_daemon_proxy_for_other_hosts() {
     let (proxy, proxy_rx, proxy_task) = server("proxied").await;
     let (origin, origin_rx, origin_task) = server("direct").await;
