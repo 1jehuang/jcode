@@ -844,7 +844,6 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
-    let _held = agent.lock().await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::new(),
     ));
@@ -853,6 +852,7 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
         .await
         .unwrap();
 
+    let _held = agent.lock().await;
     let identity = resolve_coordinator_spawn_identity("coord_busy", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(identity.provider_key.as_deref(), Some("claude-api"));

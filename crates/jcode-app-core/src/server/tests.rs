@@ -24,6 +24,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio::time::timeout;
 
+fn unwrap_test_turn_event(mut event: ServerEvent) -> ServerEvent {
+    while let ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = *inner;
+    }
+    event
+}
+
 struct EnvGuard {
     prev_home: Option<OsString>,
     prev_runtime_dir: Option<OsString>,
@@ -409,7 +416,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
 
     let notification = timeout(Duration::from_secs(2), async {
         loop {
-            match member_event_rx.recv().await {
+            match member_event_rx.recv().await.map(unwrap_test_turn_event) {
                 Some(ServerEvent::Notification {
                     notification_type,
                     message,
@@ -434,7 +441,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
 
     let streamed = timeout(Duration::from_secs(2), async {
         loop {
-            match member_event_rx.recv().await {
+            match member_event_rx.recv().await.map(unwrap_test_turn_event) {
                 Some(ServerEvent::TextDelta { text })
                     if text.contains("Build result processed.") =>
                 {
@@ -645,7 +652,7 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     // Wait for the terminal Done fanout.
     timeout(Duration::from_secs(2), async {
         loop {
-            match member_event_rx.recv().await {
+            match member_event_rx.recv().await.map(unwrap_test_turn_event) {
                 Some(ServerEvent::Done { .. }) => return,
                 Some(_) => continue,
                 None => panic!("member stream closed"),
@@ -741,7 +748,7 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
     // Attached clients must see a terminal Done event so the UI can settle.
     let saw_done = timeout(Duration::from_secs(2), async {
         loop {
-            match member_event_rx.recv().await {
+            match member_event_rx.recv().await.map(unwrap_test_turn_event) {
                 Some(ServerEvent::Done { .. }) => return true,
                 Some(_) => continue,
                 None => return false,

@@ -133,6 +133,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         &event_counter,
         &swarm_event_tx,
         false,
+        false,
     )
     .await?;
 

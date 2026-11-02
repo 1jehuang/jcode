@@ -369,6 +369,7 @@ impl WsTestClient {
             supports_pdf_panels: false,
             supports_user_response: false,
             supports_server_failover: false,
+            supports_turn_identity: false,
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             id,

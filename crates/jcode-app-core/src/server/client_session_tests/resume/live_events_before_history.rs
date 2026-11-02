@@ -163,6 +163,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
                 &event_counter,
                 &swarm_event_tx,
                 false,
+                false,
             )
             .await
         }

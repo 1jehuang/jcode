@@ -4,6 +4,17 @@
 // and 16 seconds later an explicit `assign_task task_id=<same node>` silently
 // re-assigned it to a fresh worker; both edited the same files for ~7 minutes.
 
+async fn named_assignment_test_agent(id: &str) -> Arc<Mutex<Agent>> {
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let registry = Registry::new(provider.clone()).await;
+    Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        registry,
+        crate::session::Session::create_with_id(id.to_string(), None, None),
+        None,
+    )))
+}
+
 /// Pure guard predicate: assigned+fresh -> conflict, assigned+stale -> allow,
 /// unassigned -> allow, stale/terminal statuses -> allow.
 #[test]
@@ -220,7 +231,10 @@ async fn assign_task_rejects_double_assignment_of_actively_worked_task() {
             },
         );
     sessions
-        .register_new(intruder.to_string(), test_agent().await)
+        .register_new(
+            intruder.to_string(),
+            named_assignment_test_agent(intruder).await,
+        )
         .await
         .unwrap();
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
@@ -304,7 +318,10 @@ async fn assign_task_allows_taking_over_stale_assignment() {
             },
         );
     sessions
-        .register_new(intruder.to_string(), test_agent().await)
+        .register_new(
+            intruder.to_string(),
+            named_assignment_test_agent(intruder).await,
+        )
         .await
         .unwrap();
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
@@ -389,11 +406,17 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
         .expect("holder member")
         .event_tx = holder_tx;
     sessions
-        .register_new(holder.to_string(), test_agent().await)
+        .register_new(
+            holder.to_string(),
+            named_assignment_test_agent(holder).await,
+        )
         .await
         .unwrap();
     sessions
-        .register_new(intruder.to_string(), test_agent().await)
+        .register_new(
+            intruder.to_string(),
+            named_assignment_test_agent(intruder).await,
+        )
         .await
         .unwrap();
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();

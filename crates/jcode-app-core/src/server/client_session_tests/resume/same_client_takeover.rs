@@ -135,6 +135,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         &event_counter,
         &swarm_event_tx,
         false,
+        false,
     )
     .await?;
 

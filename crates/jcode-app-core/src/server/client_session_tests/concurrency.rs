@@ -99,6 +99,7 @@ async fn restore_for_concurrency_test(
         &Arc::new(std::sync::atomic::AtomicU64::new(0)),
         &swarm_event_tx,
         false,
+        false,
     )
     .await;
     while let Ok(event) = client_event_rx.try_recv() {
@@ -235,19 +236,15 @@ async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
         &first_result,
         sessions.read().await.get(&target_id).unwrap()
     ));
+    assert!(!Arc::ptr_eq(&first_result, &first));
+    assert!(!Arc::ptr_eq(&first_result, &second));
+    assert!(first_result.lock().await.has_concurrency_tracking());
     let first = first.lock().await;
     let second = second.lock().await;
-    assert_eq!(
-        usize::from(first.session_id() == target_id)
-            + usize::from(second.session_id() == target_id),
-        1,
-        "only one source may become a restored runtime"
-    );
-    assert_ne!(
-        first.has_concurrency_tracking(),
-        second.has_concurrency_tracking(),
-        "the viewer placeholder must not acquire runtime ownership"
-    );
+    assert_eq!(first.session_id(), first_id);
+    assert_eq!(second.session_id(), second_id);
+    assert!(!first.has_concurrency_tracking());
+    assert!(!second.has_concurrency_tracking());
     Ok(())
 }
 
