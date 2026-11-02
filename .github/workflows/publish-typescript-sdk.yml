@@ -97,7 +97,21 @@ jobs:
               echo "$name@$version already published, skipping"
               continue
             fi
-            npm publish "$package" --access public --provenance --tag "${{ steps.channel.outputs.tag }}"
+            log=$(mktemp)
+            if npm publish "$package" --access public --provenance --tag "${{ steps.channel.outputs.tag }}" >"$log" 2>&1; then
+              cat "$log"
+            else
+              status=$?
+              cat "$log"
+              # A retry can race the registry's visibility of an accepted upload.
+              # Only this exact duplicate conflict may defer to the mandatory
+              # visibility gate below. Authentication and other errors stay fatal.
+              if ! grep -Fq 'npm error code E409' "$log" || ! grep -Fq "Cannot publish over previously staged version \"$version\"" "$log"; then
+                exit "$status"
+              fi
+              echo "Upload already accepted, waiting for registry visibility: $name@$version"
+            fi
+            rm -f "$log"
           done
 
       # npm can acknowledge a publish before registry metadata exposes it.

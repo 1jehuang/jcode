@@ -11,6 +11,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_npm_duplicate_upload_defers_only_exact_conflict_to_visibility_gate(self):
+        workflow = (ROOT / '.github/workflows/publish-typescript-sdk.yml').read_text()
+        block = workflow.split('      - name: Publish platform runtime packages\n', 1)[1]
+        block = block.split('      - name: Wait for platform runtime registry visibility\n', 1)[0]
+        script = textwrap.dedent(block.split('        run: |\n', 1)[1])
+        script = script.replace('${{ steps.channel.outputs.tag }}', 'preview')
+        for code, message, expected in (
+                ('E409', 'Cannot publish over previously staged version "1.2.0-preview.49".', 0),
+                ('E409', 'Unrelated conflict', 1),
+                ('E404', 'Not authorized', 1)):
+            with self.subTest(code=code, message=message), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                package = root / 'sdk/npm/runtime'
+                package.mkdir(parents=True)
+                (package / 'package.json').write_text(
+                    '{"name":"@test/runtime","version":"1.2.0-preview.49"}')
+                npm = root / 'npm'
+                npm.write_text('#!/bin/sh\nif [ "$1" = view ]; then exit 1; fi\n'
+                               'echo "npm error code $ERROR_CODE" >&2\n'
+                               'echo "$ERROR_MESSAGE" >&2\nexit 1\n')
+                npm.chmod(0o755)
+                env = {**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}',
+                       'ERROR_CODE': code, 'ERROR_MESSAGE': message}
+                result = subprocess.run(['/bin/bash', '-eu', '-c', script],
+                                        cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_sdk_waits_for_runtime_visibility_and_fails_closed(self):
         workflow = (ROOT / '.github/workflows/publish-typescript-sdk.yml').read_text()
         guard = workflow.split('      - name: Wait for platform runtime registry visibility\n', 1)[1]
