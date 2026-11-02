@@ -1544,7 +1544,17 @@ pub(crate) fn preview_overscroll_line(
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
     };
-    Line::from(overscroll_fit_facts(&facts, width as usize).0).alignment(Alignment::Right)
+    let label = if data.historical_context {
+        "saved · "
+    } else {
+        ""
+    };
+    let label_width = unicode_width::UnicodeWidthStr::width(label);
+    let mut spans = overscroll_fit_facts(&facts, (width as usize).saturating_sub(label_width)).0;
+    if !label.is_empty() && width as usize > label_width {
+        spans.insert(0, Span::styled(label, Style::default().fg(dim_color())));
+    }
+    Line::from(spans).alignment(Alignment::Right)
 }
 
 /// Model name color on the overscroll status line.

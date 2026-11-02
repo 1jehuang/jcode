@@ -90,6 +90,7 @@ pub mod scratch_maintenance;
 pub mod session;
 pub mod session_list_cache;
 pub mod session_metrics;
+pub mod session_telemetry;
 pub mod side_panel;
 pub mod sidecar;
 pub mod skill;

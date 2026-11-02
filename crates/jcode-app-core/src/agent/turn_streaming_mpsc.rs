@@ -1138,6 +1138,16 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                if usage_input.is_some() {
+                    crate::session_telemetry::save_context(
+                        &self.session,
+                        total.saturating_sub(output),
+                        Some(self.effective_context_budget().await),
+                        self.provider.name(),
+                        self.provider.active_resolved_credential(),
+                        self.provider.serving_oauth_account_label(),
+                    );
+                }
             }
 
             if usage_input.is_some()

@@ -1848,6 +1848,7 @@ impl crate::tui::TuiState for App {
             ),
             context_info,
             context_info_stale: !context_snapshot.fresh,
+            historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
             model,
