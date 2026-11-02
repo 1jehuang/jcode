@@ -255,6 +255,8 @@ fn completed_empty_preview_is_not_loaded_again() {
     tx.send(Some(LoadedSessionPreview {
         messages: vec![],
         extras: PreviewExtras::default(),
+        model: None,
+        provider_key: None,
     }))
     .unwrap();
     assert!(picker.poll_preview_load());

@@ -15,6 +15,23 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
         "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
+        // Ambient named-profile / OpenRouter runtime env leaks across tests
+        // and flips `openai_compatible_profile_is_configured` into the
+        // named-profile path; clear it so each test starts hermetic.
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_API_BASE",
+        "JCODE_API_KEY",
     ]
     .map(|key| (key, std::env::var_os(key)));
 

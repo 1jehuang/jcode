@@ -272,7 +272,15 @@ fn memoized_transcript_hash_invalidates_on_load_mutation_and_reseed() {
     );
     let mut preview = picker.selected_session().unwrap().messages_preview.clone();
     preview[1].content = "a loaded transcript replacement".into();
-    picker.apply_session_preview("performance-0", preview);
+    picker.apply_session_preview(
+        "performance-0",
+        LoadedSessionPreview {
+            messages: preview,
+            extras: PreviewExtras::default(),
+            model: None,
+            provider_key: None,
+        },
+    );
     assert_eq!(
         picker.selected_preview_content_hash(selected, mode),
         Some(picker.preview_content_hash(picker.selected_session().unwrap(), mode))
@@ -643,7 +651,7 @@ fn virtualized_session_list_matches_full_ratatui_list() {
                     actual.list_state = ListState::default()
                         .with_offset(offset)
                         .with_selected(selected);
-                    expected.list_state = actual.list_state.clone();
+                    expected.list_state = actual.list_state;
                     a.draw(|f| actual.render_session_list_impl(f, f.area(), true))
                         .unwrap();
                     b.draw(|f| expected.render_session_list_impl(f, f.area(), false))

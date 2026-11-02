@@ -325,16 +325,20 @@ mod tests {
             let preview_count = messages.len();
             let first_frame = std::time::Instant::now();
             let mut picker = SessionPicker::new(vec![template.clone()]);
-            picker.apply_session_preview(&id, messages);
-            picker.preview_extras.insert(
-                id.clone(),
-                PreviewExtras {
-                    hidden_prompts: hidden,
-                    info_data: Some(preview_chrome::persisted_info_from_snapshot(
-                        &session, snapshot,
-                    )),
-                    loaded_at: Some(std::time::Instant::now()),
-                    ..Default::default()
+            picker.apply_session_preview(
+                &id,
+                LoadedSessionPreview {
+                    messages,
+                    extras: PreviewExtras {
+                        hidden_prompts: hidden,
+                        info_data: Some(preview_chrome::persisted_info_from_snapshot(
+                            &session, snapshot,
+                        )),
+                        loaded_at: Some(std::time::Instant::now()),
+                        ..Default::default()
+                    },
+                    model: None,
+                    provider_key: None,
                 },
             );
             let mut terminal =

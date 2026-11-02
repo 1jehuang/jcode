@@ -2,11 +2,16 @@ use super::*;
 
 pub(in crate::tui::session_picker) fn load_pi_preview_from_path(
     path: &Path,
-) -> Option<Vec<PreviewMessage>> {
+) -> Option<PreviewLoadResult> {
     load_pi_session_info(path)
         .ok()
         .flatten()
-        .map(|session| session.messages_preview)
+        .map(|session| PreviewLoadResult {
+            model: session.model,
+            provider_key: session.provider_key,
+            preview: session.messages_preview,
+            extras: super::super::PreviewExtras::default(),
+        })
 }
 
 pub(super) fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
@@ -22,6 +27,61 @@ pub(super) fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Lines of a Pi transcript the stub pass reads while extracting the
+/// model/provider. Model switches are usually near the start, so the prefix
+/// covers the common cases without reading every line of a large transcript.
+pub(crate) const PI_STUB_SCAN_LINES: usize = 200;
+
+/// Bounded scan of Pi transcript lines for the model/provider behind the
+/// `model:`/`provider:` qualifiers. Mirrors `load_pi_session_info`'s rules
+/// (`model_change` entries, message-level `model` field) but stops after
+/// [`PI_STUB_SCAN_LINES`] lines so the stub pass stays cheap; both values can
+/// evolve mid-session, and the last one seen in the prefix wins.
+fn scan_pi_model_provider(
+    lines: impl Iterator<Item = std::io::Result<String>>,
+) -> (Option<String>, Option<String>) {
+    let mut model: Option<String> = None;
+    let mut provider_key: Option<String> = Some("pi".to_string());
+    for line in lines.take(PI_STUB_SCAN_LINES) {
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("model_change") => {
+                provider_key = value
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or(provider_key);
+                model = value
+                    .get("modelId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or(model);
+            }
+            Some("message") => {
+                if model.is_none()
+                    && let Some(message) = value.get("message")
+                {
+                    model = message
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    (model, provider_key)
 }
 
 pub(super) fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
@@ -58,6 +118,14 @@ pub(super) fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // `model:`/`provider:` qualifiers must filter external sessions too, so
+    // pull the model and provider out of the transcript instead of leaving
+    // them None. Scan only a bounded prefix: sessions can switch models
+    // mid-run, and a recent value is better than reading every line of a
+    // multi-MB transcript during the stub pass.
+    let (model, provider_key) = scan_pi_model_provider(lines.by_ref());
+
     let short_name = format!("pi {}", jcode_core::util::truncate_str(&session_id, 8));
     let title = format!(
         "Pi session {}",
@@ -85,8 +153,8 @@ pub(super) fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         last_message_time,
         last_active_at: Some(last_message_time),
         working_dir,
-        model: None,
-        provider_key: Some("pi".to_string()),
+        model,
+        provider_key,
         is_canary: false,
         is_debug: false,
         saved: false,
