@@ -101,6 +101,8 @@ Interpretation and next targets:
 
 Hosted run IDs: matrix `20261102-153718864-2120330`, disk/search `20261102-153739520-2121950`. An earlier full `--tests` selfdev check passed as `20261102-153504539-2099845`; its following benchmark process was interrupted by an unrelated shared-daemon reload and was not used as the completed baseline.
 
+Validation: 221 normal picker tests passed, including five live-stage regressions, and four Python runner tests passed. A separate five-sample hosted run completed all 28 rows with exactly five observations/attempts, verifying nondefault sample forwarding. An isolated real-PTY smoke on binary `b7c71bd15-dirty-c2ceed1e5065` verified selection/transcript/workspace stages, two superseded selections during three rapid inputs, and the 256-sample bound. Its tester was cleaned up without resuming a session. Live smoke timings are not treated as a statistical baseline.
+
 ## Still missing, deliberately
 
 - Real SSH latency, connection reuse, remote failures/timeouts, and slow workspace/Git commands under controlled conditions.
