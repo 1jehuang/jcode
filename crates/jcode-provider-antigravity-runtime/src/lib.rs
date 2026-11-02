@@ -468,7 +468,7 @@ impl AntigravityProvider {
                 reasoning.forward(turn.push_chunk(chunk)).await;
             }
         }
-        Ok(turn.finish())
+        turn.finish().map_err(anyhow::Error::msg)
     }
 }
 
@@ -477,6 +477,8 @@ impl AntigravityProvider {
 struct ReasoningSink {
     tx: mpsc::Sender<Result<StreamEvent>>,
     started: std::sync::atomic::AtomicBool,
+    /// Reasoning was shown for an attempt that may still be discarded.
+    unsettled: std::sync::atomic::AtomicBool,
 }
 
 impl ReasoningSink {
@@ -484,6 +486,22 @@ impl ReasoningSink {
         Self {
             tx,
             started: std::sync::atomic::AtomicBool::new(false),
+            unsettled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Before a transparent retry, drop the abandoned attempt's reasoning from
+    /// the live view and the saved trace, so only the retried attempt's
+    /// reasoning stays with the turn.
+    async fn discard_attempt(&self, attempt: u32, max: u32) {
+        if self
+            .unsettled
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = self
+                .tx
+                .send(Ok(StreamEvent::RetryRollback { attempt, max }))
+                .await;
         }
     }
 
@@ -500,6 +518,8 @@ impl ReasoningSink {
                     }))
                     .await;
             }
+            self.unsettled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = self.tx.send(Ok(StreamEvent::ThinkingDelta(text))).await;
         }
     }
@@ -645,6 +665,12 @@ impl Provider for AntigravityProvider {
             const MAX_MALFORMED_RETRIES: u8 = 2;
             while is_retryable_empty_turn(&response) && malformed_retries < MAX_MALFORMED_RETRIES {
                 malformed_retries += 1;
+                reasoning
+                    .discard_attempt(
+                        u32::from(malformed_retries),
+                        u32::from(MAX_MALFORMED_RETRIES),
+                    )
+                    .await;
                 match provider
                     .generate_content(
                         &model,
@@ -672,6 +698,7 @@ impl Provider for AntigravityProvider {
             // (#845). Never execute or render that pseudo-call. Retry exactly
             // once with native function calling forced, then fail clearly.
             if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
+                reasoning.discard_attempt(1, 1).await;
                 response = match provider
                     .generate_content(
                         &model,

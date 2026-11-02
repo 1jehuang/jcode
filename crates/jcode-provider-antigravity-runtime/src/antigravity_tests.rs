@@ -920,3 +920,27 @@ fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
     );
     assert!(provider.set_model("   ").is_err());
 }
+
+#[tokio::test]
+async fn discarded_attempt_rolls_back_only_reasoning_that_was_shown() {
+    let (tx, mut rx) = mpsc::channel(16);
+    let sink = ReasoningSink::new(tx);
+    // Nothing shown yet: a retry needs no rollback.
+    sink.discard_attempt(1, 2).await;
+    sink.forward(vec!["abandoned".to_string()]).await;
+    sink.discard_attempt(1, 2).await;
+    // Already rolled back: a second retry with no new reasoning stays quiet.
+    sink.discard_attempt(2, 2).await;
+    drop(sink);
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event.unwrap());
+    }
+    assert!(matches!(events[0], StreamEvent::ConnectionPhase { .. }));
+    assert!(matches!(&events[1], StreamEvent::ThinkingDelta(text) if text == "abandoned"));
+    assert!(matches!(
+        events[2],
+        StreamEvent::RetryRollback { attempt: 1, max: 2 }
+    ));
+    assert_eq!(events.len(), 3);
+}

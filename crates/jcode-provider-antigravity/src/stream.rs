@@ -161,7 +161,14 @@ impl StreamedTurn {
         self.parts.push(part);
     }
 
-    pub fn finish(self) -> CodeAssistGenerateResponse {
+    /// The assembled response. A stream that produced a candidate but closed
+    /// before any chunk carried its `finishReason` was cut off (proxy or
+    /// server ended the body early); accepting it would present a truncated
+    /// answer as a completed turn.
+    pub fn finish(self) -> Result<CodeAssistGenerateResponse, String> {
+        if self.saw_candidate && self.finish_reason.is_none() {
+            return Err("Antigravity stream ended before the model finished the turn".to_string());
+        }
         let candidates = self.saw_candidate.then(|| {
             vec![GeminiCandidate {
                 content: Some(GeminiContent {
@@ -172,14 +179,14 @@ impl StreamedTurn {
                 finish_message: self.finish_message,
             }]
         });
-        CodeAssistGenerateResponse {
+        Ok(CodeAssistGenerateResponse {
             trace_id: self.trace_id,
             response: Some(VertexGenerateContentResponse {
                 candidates,
                 prompt_feedback: self.prompt_feedback,
                 usage_metadata: self.usage,
             }),
-        }
+        })
     }
 }
 
@@ -218,7 +225,7 @@ mod tests {
         ));
         assert!(third.is_empty());
 
-        let response = turn.finish();
+        let response = turn.finish().unwrap();
         let inner = response.response.unwrap();
         assert_eq!(
             inner.usage_metadata.unwrap().candidates_token_count,
@@ -239,9 +246,19 @@ mod tests {
     fn stream_without_candidates_assembles_no_candidates() {
         let mut turn = StreamedTurn::default();
         turn.push_chunk(chunk(r#"{"traceId":"t1","response":{}}"#));
-        let response = turn.finish();
+        let response = turn.finish().unwrap();
         assert_eq!(response.trace_id.as_deref(), Some("t1"));
         assert!(response.response.unwrap().candidates.is_none());
+    }
+
+    #[test]
+    fn stream_closed_before_finish_reason_is_an_error() {
+        let mut turn = StreamedTurn::default();
+        turn.push_chunk(chunk(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"The answer is"}]}}]}}"#,
+        ));
+        let err = turn.finish().unwrap_err();
+        assert!(err.contains("ended before"), "{err}");
     }
 
     #[test]
