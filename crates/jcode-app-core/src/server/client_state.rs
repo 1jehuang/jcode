@@ -261,6 +261,24 @@ pub(super) async fn handle_get_model_catalog(
 ) -> Result<()> {
     let started = Instant::now();
     let build_started = Instant::now();
+    let live = super::available_models_cache::try_for_agent(agent, |agent_guard| {
+        let provider = agent_guard.provider_handle();
+        (
+            agent_guard.active_resolved_credential(),
+            provider.service_tier(),
+            Some(
+                provider
+                    .available_service_tiers()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            provider.reasoning_effort(),
+            provider_oauth_email(provider.as_ref()),
+            provider.serving_oauth_account_label(),
+        )
+    })
+    .await?;
     let (
         provider_name,
         provider_model,
@@ -274,65 +292,64 @@ pub(super) async fn handle_get_model_catalog(
         provider_oauth_email,
         provider_oauth_account_label,
     ) = {
-        match agent.try_lock() {
-            Ok(agent_guard) => {
-                let catalog = super::available_models_cache::for_agent(&agent_guard).snapshot();
+        match live {
+            Some((catalog, (credential, tier, tiers, effort, email, account_label))) => {
+                let catalog = catalog.snapshot();
                 (
-                    Some(agent_guard.provider_name()),
-                    Some(agent_guard.provider_model()),
+                    catalog.provider_name,
+                    catalog.provider_model,
                     catalog.available_models,
                     catalog.model_routes,
-                    agent_guard.active_resolved_credential(),
-                    agent_guard.provider_handle().service_tier(),
-                    Some(
-                        agent_guard
-                            .provider_handle()
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    agent_guard.provider_handle().reasoning_effort(),
+                    credential,
+                    tier,
+                    tiers,
+                    effort,
                     "live",
-                    provider_oauth_email(agent_guard.provider_handle().as_ref()),
-                    agent_guard.provider_handle().serving_oauth_account_label(),
+                    email,
+                    account_label,
                 )
             }
-            Err(_) => {
+            None => {
                 crate::logging::warn(&format!(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
                     session_id
                 ));
-                let persisted = Session::load_for_remote_startup(session_id)
-                    .or_else(|_| Session::load_startup_stub(session_id))
-                    .ok();
-                let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
-                let mut model_routes = provider.model_routes();
-                crate::model_usage::enrich_routes(&mut model_routes);
-                (
-                    // Same field the non-busy path builds: it must name the
-                    // profile, not the multiplexing slot (#1286). This fallback
-                    // is exactly the lock-contention case a client cannot
-                    // correct, so `provider.name()` here reached the header and
-                    // the spend ledger as `OpenRouter`.
-                    Some(provider.display_name()),
-                    persisted_model.or_else(|| Some(provider.model())),
-                    provider.available_models_display(),
-                    model_routes,
-                    provider.active_resolved_credential(),
-                    provider.service_tier(),
-                    Some(
-                        provider
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    provider.reasoning_effort(),
-                    "fallback",
-                    provider_oauth_email(provider.as_ref()),
-                    provider.serving_oauth_account_label(),
-                )
+                let session_id = session_id.to_string();
+                let provider = Arc::clone(provider);
+                tokio::task::spawn_blocking(move || {
+                    let persisted = Session::load_for_remote_startup(&session_id)
+                        .or_else(|_| Session::load_startup_stub(&session_id))
+                        .ok();
+                    let persisted_model =
+                        persisted.as_ref().and_then(|session| session.model.clone());
+                    let mut model_routes = provider.model_routes();
+                    crate::model_usage::enrich_routes(&mut model_routes);
+                    (
+                        // Same field the non-busy path builds: it must name the
+                        // profile, not the multiplexing slot (#1286). This fallback
+                        // is exactly the lock-contention case a client cannot
+                        // correct, so `provider.name()` here reached the header and
+                        // the spend ledger as `OpenRouter`.
+                        Some(provider.display_name()),
+                        persisted_model.or_else(|| Some(provider.model())),
+                        provider.available_models_display(),
+                        model_routes,
+                        provider.active_resolved_credential(),
+                        provider.service_tier(),
+                        Some(
+                            provider
+                                .available_service_tiers()
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                        ),
+                        provider.reasoning_effort(),
+                        "fallback",
+                        provider_oauth_email(provider.as_ref()),
+                        provider.serving_oauth_account_label(),
+                    )
+                })
+                .await?
             }
         }
     };

@@ -192,21 +192,29 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
     };
     if !claude.is_empty() {
         routes.retain(|route| route.api_method != "claude-oauth");
+        // Auth and disk-catalog reads are account facts, not model facts.
+        let active_label = crate::auth::claude::active_account_label();
+        let now = chrono::Utc::now().timestamp_millis();
         for account in claude {
             let scope = format!("oauth::{}", account.label);
-            for model in super::known_anthropic_model_ids_for_scope(&scope) {
-                let cached = super::cached_anthropic_model_ids_for_scope(&scope).is_some();
-                let pro_plan = account
-                    .subscription_type
-                    .as_deref()
-                    .is_some_and(|plan| plan.eq_ignore_ascii_case("pro"));
-                let is_active = crate::auth::claude::active_account_label().as_deref()
-                    == Some(account.label.as_str());
-                let extra_usage_allowed = if is_active {
-                    crate::usage::has_extra_usage()
-                } else {
-                    cached
-                };
+            let cached_models = super::cached_anthropic_model_ids_for_scope(&scope);
+            let cached = cached_models.is_some();
+            let pro_plan = account
+                .subscription_type
+                .as_deref()
+                .is_some_and(|plan| plan.eq_ignore_ascii_case("pro"));
+            let is_active = active_label.as_deref() == Some(account.label.as_str());
+            let extra_usage_allowed = if is_active {
+                crate::usage::has_extra_usage()
+            } else {
+                cached
+            };
+            let has_access = !account.access.is_empty();
+            let has_refresh = !account.refresh.is_empty();
+            let expired = account.expires <= now;
+            let models =
+                cached_models.unwrap_or_else(|| super::known_anthropic_model_ids_for_scope(&scope));
+            for model in models {
                 let (available, detail) = if model.ends_with("[1m]") && !extra_usage_allowed {
                     (false, "requires extra usage".to_string())
                 } else if !cached && model.contains("opus") && pro_plan {
@@ -219,9 +227,9 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                     &mut route,
                     "claude",
                     &account.label,
-                    !account.access.is_empty(),
-                    !account.refresh.is_empty(),
-                    account.expires <= chrono::Utc::now().timestamp_millis(),
+                    has_access,
+                    has_refresh,
+                    expired,
                 );
                 qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
                 routes.push(route);

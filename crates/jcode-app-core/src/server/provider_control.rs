@@ -76,11 +76,16 @@ pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) ->
         .clone()
 }
 
-pub(super) fn try_available_models_catalog(
+pub(super) async fn try_available_models_catalog_offloaded(
     agent: &Arc<Mutex<Agent>>,
 ) -> Option<Arc<super::available_models_cache::Catalog>> {
-    let agent_guard = agent.try_lock().ok()?;
-    Some(super::available_models_cache::for_agent(&agent_guard))
+    match super::available_models_cache::try_for_agent(agent, |_| ()).await {
+        Ok(catalog) => catalog.map(|(catalog, ())| catalog),
+        Err(error) => {
+            crate::logging::warn(&format!("Model catalog build task failed: {error}"));
+            None
+        }
+    }
 }
 
 #[path = "provider_control/catalog_activity.rs"]

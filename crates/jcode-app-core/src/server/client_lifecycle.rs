@@ -43,7 +43,8 @@ use super::provider_control::{
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
     handle_set_route, handle_set_service_tier, handle_set_transport,
-    handle_switch_anthropic_account, handle_switch_openai_account, try_available_models_catalog,
+    handle_switch_anthropic_account, handle_switch_openai_account,
+    try_available_models_catalog_offloaded,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -712,7 +713,7 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(catalog) = try_available_models_catalog(&agent) else {
+                        let Some(catalog) = try_available_models_catalog_offloaded(&agent).await else {
                             continue;
                         };
                         // Equivalent clients share the snapshot, normalized key,
@@ -1661,7 +1662,7 @@ pub(super) async fn handle_client(
                                 &soft_interrupt_queues,
                             )
                             .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent) {
+                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                                 last_available_models_snapshot = Some(snapshot);
                             }
                         } else {
@@ -1779,7 +1780,7 @@ pub(super) async fn handle_client(
                 // instead of leaving the graph blank until the next plan
                 // mutation broadcast.
                 send_swarm_plan_to_session(&client_session_id, &swarm_members, &swarm_plans).await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
+                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
             }
@@ -1792,7 +1793,7 @@ pub(super) async fn handle_client(
                 {
                     break;
                 }
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
+                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
             }
@@ -1915,7 +1916,7 @@ pub(super) async fn handle_client(
                     &soft_interrupt_queues,
                 )
                 .await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent) {
+                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
             }
@@ -3970,8 +3971,12 @@ async fn cancel_processing_message(
     }
 }
 
-fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<Arc<str>> {
-    Some(Arc::clone(&try_available_models_catalog(agent)?.dedup_key))
+async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<Arc<str>> {
+    Some(Arc::clone(
+        &try_available_models_catalog_offloaded(agent)
+            .await?
+            .dedup_key,
+    ))
 }
 
 fn queue_soft_interrupt(

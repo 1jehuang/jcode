@@ -227,33 +227,94 @@ fn method_usage_counts_at(path: &Path) -> Result<HashMap<String, u64>> {
 /// never fabricated zero. No transcript loading or historical inference occurs.
 type RouteUsageRow = (RouteKey, u64, Option<u64>);
 
+type UsageAggregate = (u64, HashMap<RouteKey, ModelUsage>);
+
+#[derive(Default)]
+struct UsageAggregateMemo {
+    entry: Option<(CatalogUsageRevision, std::sync::Arc<UsageAggregate>)>,
+}
+
+impl UsageAggregateMemo {
+    fn get(
+        &mut self,
+        revision: CatalogUsageRevision,
+        read: impl FnOnce() -> Result<UsageAggregate>,
+        current_revision: impl FnOnce() -> CatalogUsageRevision,
+    ) -> Result<std::sync::Arc<UsageAggregate>> {
+        if let Some((cached_revision, aggregate)) = &self.entry
+            && *cached_revision == revision
+        {
+            return Ok(std::sync::Arc::clone(aggregate));
+        }
+        // Do not memoize transient SQLite errors as an authoritative unknown
+        // aggregate. A later build must retry even if no file stamp changed.
+        let aggregate = std::sync::Arc::new(read()?);
+        if current_revision() == revision {
+            self.entry = Some((revision, std::sync::Arc::clone(&aggregate)));
+        }
+        Ok(aggregate)
+    }
+}
+
+static USAGE_AGGREGATE_MEMO: std::sync::Mutex<UsageAggregateMemo> =
+    std::sync::Mutex::new(UsageAggregateMemo { entry: None });
+
+fn usage_aggregate() -> Result<std::sync::Arc<UsageAggregate>> {
+    // Single-flight the aggregate read and publication. Read the revision only
+    // after acquiring the mutex so an older waiter cannot replace a newer memo.
+    USAGE_AGGREGATE_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(
+            catalog_usage_revision(),
+            read_usage_aggregate,
+            catalog_usage_revision,
+        )
+}
+
+fn read_usage_aggregate() -> Result<UsageAggregate> {
+    let db = Connection::open_with_flags(path()?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(Duration::from_secs(2))?;
+    let started = db.query_row("SELECT started FROM tracking WHERE id=1", [], |row| {
+        row.get(0)
+    })?;
+    let mut query = db.prepare("SELECT model, provider, api_method, COUNT(*), MAX(last_used) FROM turns GROUP BY model, provider, api_method")?;
+    let rows: Vec<RouteUsageRow> = query
+        .query_map([], |row| {
+            Ok((
+                (row.get(0)?, row.get(1)?, row.get(2)?),
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let usage = rows
+        .into_iter()
+        .map(|(key, count, last_used)| {
+            (
+                key,
+                ModelUsage {
+                    count,
+                    last_used_unix_secs: last_used,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    Ok((started, usage))
+}
+
 pub fn enrich_routes(routes: &mut [ModelRoute]) {
+    // Legacy selections remain independently retried on every read. A failed
+    // legacy file read must not become sticky behind the SQLite memo either.
     let mut usage = legacy();
-    let mut started: Option<u64> = None;
-    let read = || -> Result<(u64, Vec<RouteUsageRow>)> {
-        let db = Connection::open_with_flags(path()?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.busy_timeout(Duration::from_secs(2))?;
-        let started = db.query_row("SELECT started FROM tracking WHERE id=1", [], |row| {
-            row.get(0)
-        })?;
-        let mut query = db.prepare("SELECT model, provider, api_method, COUNT(*), MAX(last_used) FROM turns GROUP BY model, provider, api_method")?;
-        let rows = query
-            .query_map([], |row| {
-                Ok((
-                    (row.get(0)?, row.get(1)?, row.get(2)?),
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((started, rows))
-    };
-    if let Ok((start, rows)) = read() {
-        started = Some(start);
-        for (key, count, last_used) in rows {
-            let entry = usage.entry(key).or_default();
-            entry.count = count;
-            entry.last_used_unix_secs = last_used;
+    let aggregate = usage_aggregate().ok();
+    let started = aggregate.as_ref().map(|aggregate| aggregate.0);
+    if let Some(aggregate) = aggregate.as_ref() {
+        for (key, recorded) in &aggregate.1 {
+            let entry = usage.entry(key.clone()).or_default();
+            entry.count = recorded.count;
+            entry.last_used_unix_secs = recorded.last_used_unix_secs;
         }
     }
     for route in routes {
@@ -333,6 +394,98 @@ pub fn record_turn(turn_id: &str, route: &ModelRoute) -> Result<ModelUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_aggregate_memo_reuses_until_revision_changes_and_retries_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite3");
+        let db = open(&db_path, 1).unwrap();
+        let revision = || {
+            usage_revision_for_paths(vec![db_path.clone(), dir.path().join("usage.sqlite3-wal")])
+        };
+        let mut memo = UsageAggregateMemo::default();
+        let first_revision = revision();
+        let first = memo
+            .get(first_revision.clone(), || Ok((1, HashMap::new())), revision)
+            .unwrap();
+        let again = memo
+            .get(
+                first_revision.clone(),
+                || panic!("unchanged revision must hit"),
+                revision,
+            )
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+        record_at(&db, "external-write", &route("openai-oauth"), 2).unwrap();
+        let changed = revision();
+        assert_ne!(first_revision, changed);
+        assert!(
+            memo.get(
+                changed.clone(),
+                || anyhow::bail!("temporarily locked"),
+                revision
+            )
+            .is_err()
+        );
+        let recovered = memo
+            .get(changed.clone(), || Ok((2, HashMap::new())), revision)
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &recovered));
+        assert_eq!(recovered.0, 2);
+
+        // A write during the aggregate read must not publish that old result
+        // under the pre-write revision, even if it was a successful SQL read.
+        let mut racing = UsageAggregateMemo::default();
+        racing
+            .get(
+                changed,
+                || {
+                    record_at(&db, "racing-write", &route("openai-oauth"), 3)?;
+                    Ok((2, HashMap::new()))
+                },
+                revision,
+            )
+            .unwrap();
+        assert!(racing.entry.is_none());
+        assert_eq!(
+            racing
+                .get(revision(), || Ok((3, HashMap::new())), revision)
+                .unwrap()
+                .0,
+            3
+        );
+    }
+
+    #[test]
+    fn usage_aggregate_enrichment_tracks_external_writes_and_unknown_failures() {
+        let _guard = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        assert!(
+            usage_aggregate().is_err(),
+            "missing database is not a measured zero"
+        );
+        let db = open(&path().unwrap(), 1).unwrap();
+        record_at(&db, "turn-1", &route("openai-oauth"), 2).unwrap();
+        let first = usage_aggregate().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &usage_aggregate().unwrap()));
+        let mut routes = vec![route("openai-oauth")];
+        enrich_routes(&mut routes);
+        assert_eq!(routes[0].usage.as_ref().unwrap().count, 1);
+        // record_at deliberately does not bump our process generation: this
+        // exercises the same WAL-stamp invalidation as another process writing.
+        record_at(&db, "turn-2", &route("openai-oauth"), 3).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &usage_aggregate().unwrap()));
+        enrich_routes(&mut routes);
+        assert_eq!(routes[0].usage.as_ref().unwrap().count, 2);
+        drop(db);
+        match prev_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
 
     #[test]
     fn catalog_usage_revision_detects_wal_legacy_and_scope_changes() {
