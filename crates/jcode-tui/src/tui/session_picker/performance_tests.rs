@@ -51,6 +51,82 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 }
 
 #[test]
+fn cold_preview_viewport_matches_full_wide_then_narrow_layout() {
+    let mode = crate::config::DiffDisplayMode::Inline;
+    for turns in [0, 1, 8] {
+        let item = session(0, turns);
+        let picker = SessionPicker::new(vec![item.clone()]);
+        let messages: Vec<DisplayMessage> = item
+            .messages_preview
+            .iter()
+            .map(|msg| DisplayMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_data: msg.tool_data.clone(),
+                title: msg.title.clone(),
+                duration_secs: msg.duration_secs,
+            })
+            .collect();
+        for width in [1, 2, 3, 20, 80, 120] {
+            for height in [0, 1, 2, 5, 30, 200] {
+                let area = Rect::new(0, 0, width, height);
+                let wide = width
+                    .saturating_sub(super::super::ui::left_aligned_content_inset(width, false));
+                let mut prepared =
+                    super::super::ui::prepare::prepare_history_preview(&messages, 0, wide, mode);
+                let mut header = super::super::ui::header::build_preview_header(&item, wide);
+                let mut padding =
+                    super::super::ui::prepare::initial_header_pad_top(height, header.len());
+                let scrollbar = super::super::ui::native_scrollbar_visible(
+                    width > 1,
+                    padding + header.len() + prepared.wrapped_lines.len(),
+                    height as usize,
+                );
+                if scrollbar {
+                    let render_width = width.saturating_sub(1);
+                    let narrow = render_width.saturating_sub(
+                        super::super::ui::left_aligned_content_inset(render_width, false),
+                    );
+                    prepared = super::super::ui::prepare::prepare_history_preview(
+                        &messages, 0, narrow, mode,
+                    );
+                    header = super::super::ui::header::build_preview_header(&item, narrow);
+                    padding =
+                        super::super::ui::prepare::initial_header_pad_top(height, header.len());
+                }
+                let body_empty = prepared.wrapped_lines.is_empty();
+                let mut expected = vec![Line::default(); padding];
+                expected.extend(header);
+                expected.extend(prepared.wrapped_lines);
+                if body_empty {
+                    expected.push(Line::styled(
+                        "(empty session)",
+                        Style::default().fg(rgb(80, 80, 80)),
+                    ));
+                }
+                let actual = picker.build_preview_cache(
+                    &item,
+                    area,
+                    area,
+                    tiny_cache(0, 0).key,
+                    Alignment::Left,
+                    mode,
+                );
+                assert_eq!(
+                    actual.show_scrollbar, scrollbar,
+                    "turns={turns} width={width} height={height}"
+                );
+                assert_eq!(
+                    actual.wrapped_lines, expected,
+                    "turns={turns} width={width} height={height}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "developer benchmark: stable viewport idle, loaded revisit, clone/hash attribution"]
 fn benchmark_resume_stable_frames() {
     let mut picker = SessionPicker::new((0..6).map(|id| session(id, 80)).collect());
