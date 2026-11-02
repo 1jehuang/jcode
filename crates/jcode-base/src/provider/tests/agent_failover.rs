@@ -28,14 +28,23 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
     }
     .save()
     .unwrap();
+    agent_failover_reseed(&provider, models);
+    provider
+}
+
+/// Re-seed the synthetic catalog after a config save. Saving the config bumps
+/// `config_reload_generation`, which the routes-memo scope key embeds, so a
+/// memo seeded before the save misses and the real static catalog leaks in.
+/// Mirrors the product flow (config change -> catalog rebuild) with the test's
+/// own synthetic catalog.
+fn agent_failover_reseed(provider: &MultiProvider, models: &[&str]) {
     agent_failover_catalog(
-        &provider,
+        provider,
         models
             .iter()
             .map(|model| build_openai_api_key_route(model, true, ""))
             .collect(),
     );
-    provider
 }
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
@@ -210,6 +219,7 @@ fn agent_failover_media_only_catalog_and_countdown_targets_are_rejected() {
         let provider = agent_failover_fixture(&models);
         for model in models {
             agent_failover_set_default_model(&format!("openai-api:{model}")).unwrap();
+            agent_failover_reseed(&provider, &models);
             assert!(!MultiProvider::is_failover_route_pool_approved(&format!(
                 "openai-api:{model}"
             )));
@@ -239,6 +249,7 @@ fn agent_failover_unranked_models_have_no_catalog_or_context_tiebreak_fallback()
                 None
             );
             agent_failover_set_default_model("openai-api:gpt-6.1-terra").unwrap();
+            agent_failover_reseed(&provider, &models);
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
                 Some("openai-api:gpt-6.1-terra".into()),

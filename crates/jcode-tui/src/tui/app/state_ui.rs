@@ -2074,7 +2074,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 (
                     app.provider.name().to_string(),
                     app.provider.model(),
-                    app.provider.reasoning_effort(),
+                    app.provider.effective_reasoning_effort(),
                     app.provider.service_tier(),
                     app.provider.transport(),
                     Some((

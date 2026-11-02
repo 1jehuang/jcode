@@ -83,10 +83,11 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn save(keys: &[&str]) -> Self {
-        let vars = keys
+        let vars: Vec<_> = keys
             .iter()
-            .map(|key| (key.to_string(), std::env::var(key).ok()))
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
             .collect();
+        vars.iter().for_each(|(k, _)| crate::env::remove_var(k));
         Self { vars }
     }
 }
@@ -1020,6 +1021,8 @@ fn matrix_openai_compatible_localhost_override_allows_no_auth() {
         "JCODE_OPENAI_COMPAT_API_KEY_NAME",
         "JCODE_OPENAI_COMPAT_ENV_FILE",
         "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
     ]);
 
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", "http://localhost:11434/v1");

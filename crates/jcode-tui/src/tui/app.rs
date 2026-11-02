@@ -332,6 +332,10 @@ struct PendingModelPickerLoad {
     signature: ModelPickerCacheSignature,
     #[allow(dead_code)] // kept for picker load timing diagnostics
     picker_started: Instant,
+    /// When this load feeds an agent-model sub-picker (Alt+S / Alt+M in
+    /// /model), the completion path must re-tag the rebuilt picker with this
+    /// target instead of leaving the ordinary model picker behind.
+    agent_target: Option<crate::tui::AgentModelTarget>,
     receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
     /// Write the normalized routes back into `remote_model_options` when the
     /// background build lands (remote hot path).

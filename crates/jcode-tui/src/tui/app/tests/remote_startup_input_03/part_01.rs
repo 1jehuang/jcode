@@ -484,47 +484,51 @@ fn test_multiple_pastes() {
 fn test_restore_session_adds_reload_message() {
     use crate::session::Session;
 
-    let mut app = create_test_app();
+    // The session file is written under whatever JCODE_HOME is current when
+    // `Session::save` resolves the path, but `restore_session` re-resolves it
+    // on read. A concurrent with_temp_jcode_home test can rotate the home
+    // between the two, so the reload then finds an empty session and the
+    // display ends up with zero messages.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
 
-    // Create and save a session with a fake provider_session_id
-    let mut session = Session::create(None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "test message".to_string(),
-            cache_control: None,
-        }],
-    );
-    session.provider_session_id = Some("fake-uuid".to_string());
-    let session_id = session.id.clone();
-    session.save().unwrap();
+        // Create and save a session with a fake provider_session_id
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "test message".to_string(),
+                cache_control: None,
+            }],
+        );
+        session.provider_session_id = Some("fake-uuid".to_string());
+        let session_id = session.id.clone();
+        session.save().unwrap();
 
-    // Restore the session
-    app.restore_session(&session_id);
+        // Restore the session
+        app.restore_session(&session_id);
 
-    // Should have the original message + reload success message in display
-    assert_eq!(app.display_messages().len(), 2);
-    assert_eq!(app.display_messages()[0].role, "user");
-    assert_eq!(app.display_messages()[0].content, "test message");
-    assert_eq!(app.display_messages()[1].role, "system");
-    assert!(
-        app.display_messages()[1]
-            .content
-            .contains("Reload complete - continuing.")
-    );
+        // Should have the original message + reload success message in display
+        assert_eq!(app.display_messages().len(), 2);
+        assert_eq!(app.display_messages()[0].role, "user");
+        assert_eq!(app.display_messages()[0].content, "test message");
+        assert_eq!(app.display_messages()[1].role, "system");
+        assert!(
+            app.display_messages()[1]
+                .content
+                .contains("Reload complete - continuing.")
+        );
 
-    // Local restore keeps provider messages lazy until the next active turn.
-    assert_eq!(app.messages.len(), 0);
-    assert_eq!(
-        app.session.debug_memory_profile()["provider_messages_cache"]["count"],
-        0
-    );
+        // Local restore keeps provider messages lazy until the next active turn.
+        assert_eq!(app.messages.len(), 0);
+        assert_eq!(
+            app.session.debug_memory_profile()["provider_messages_cache"]["count"],
+            0
+        );
 
-    // Provider session ID should be cleared (Claude sessions don't persist across restarts)
-    assert!(app.provider_session_id.is_none());
-
-    // Clean up
-    let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+        // Provider session ID should be cleared (Claude sessions don't persist across restarts)
+        assert!(app.provider_session_id.is_none());
+    });
 }
 
 #[test]
@@ -1264,6 +1268,10 @@ fn test_new_for_remote_restores_split_view_from_reload_state() {
 
 #[test]
 fn test_restore_reload_state_supports_legacy_input_format() {
+    // Reads and writes jcode_dir(), which follows JCODE_HOME: without the
+    // env lock a concurrent with_temp_jcode_home test can rotate the home
+    // between this test's write and read, failing the restore.
+    let _env_guard = crate::storage::lock_test_env();
     let session_id = format!("test-reload-legacy-{}", std::process::id());
     let jcode_dir = crate::storage::jcode_dir().unwrap();
     let path = jcode_dir.join(format!("client-input-{}", session_id));

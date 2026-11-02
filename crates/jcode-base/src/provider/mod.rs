@@ -51,10 +51,11 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
-    append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
-    remote_model_is_server_copilot_only, remote_model_routes_fallback,
-    remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
-    remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
+    append_simplified_anthropic_model_routes, configured_reasoning_efforts,
+    remote_current_openai_compatible_route_for_model, remote_model_is_server_copilot_only,
+    remote_model_routes_fallback, remote_model_routes_lightweight_fallback,
+    remote_model_should_offer_copilot_route, remote_openai_compatible_route_for_model,
+    simplified_model_routes_for_picker,
 };
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
@@ -945,6 +946,38 @@ impl MultiProvider {
             .then(|| (prefix.to_string(), rest.to_string()))
     }
 
+    /// Resolve a picker-emitted model string for a named provider profile
+    /// back to the raw model id. `named_provider_profile_routes` puts the
+    /// model's `display_name` in the route when one is configured, so the
+    /// picker hands us the label. The anthropic runtime only accepts raw ids
+    /// (its profile model list is built from `id` + `default_model`), and the
+    /// OpenRouter-compatible runtime resolves labels internally; this gives
+    /// the anthropic path the same reverse lookup.
+    fn resolve_named_profile_display_model(
+        config: &crate::config::NamedProviderConfig,
+        model: &str,
+    ) -> String {
+        let wanted = model.trim().to_ascii_lowercase();
+        if config
+            .models
+            .iter()
+            .any(|entry| entry.id.eq_ignore_ascii_case(&wanted))
+        {
+            return model.trim().to_string();
+        }
+        config
+            .models
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .display_name
+                    .as_ref()
+                    .filter(|name| name.trim().eq_ignore_ascii_case(&wanted))
+                    .map(|_| entry.id.clone())
+            })
+            .unwrap_or_else(|| model.trim().to_string())
+    }
+
     /// Bind (or reuse) the runtime for a named config provider profile and
     /// select `model` on it (issue #444).
     fn set_model_on_named_provider_profile(&self, profile_name: &str, model: &str) -> Result<()> {
@@ -967,7 +1000,13 @@ impl MultiProvider {
                 external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
                     .ok_or_else(|| anyhow::anyhow!("Anthropic runtime is not registered"))?;
             crate::provider_catalog::clear_anthropic_profile_env();
-            provider.set_model(model)?;
+            // Picker routes carry the model's display name when one is
+            // configured, but the anthropic runtime only accepts raw ids
+            // (profile models come from `id` + `default_model`). Resolve
+            // the display name back to its raw id, mirroring the
+            // OpenRouter-compatible path's resolve_display_name_to_id.
+            let raw_model = Self::resolve_named_profile_display_model(&config, model);
+            provider.set_model(&raw_model)?;
             *self
                 .anthropic
                 .write()
@@ -2408,6 +2447,24 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .and_then(|o| o.reasoning_effort()),
+            _ => None,
+        }
+    }
+
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|provider| provider.effective_reasoning_effort()),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|o| o.effective_reasoning_effort()),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .and_then(|o| o.effective_reasoning_effort()),
+            ActiveProvider::OpenRouter => self
+                .active_openrouter_execution_provider()
+                .and_then(|o| o.effective_reasoning_effort()),
             _ => None,
         }
     }
