@@ -39,62 +39,9 @@ pub struct KeyBinding {
 
 impl KeyBinding {
     pub fn matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        self.matches_for_platform(code, modifiers, cfg!(target_os = "macos"))
-    }
-
-    pub fn matches_for_platform(
-        &self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-        is_macos: bool,
-    ) -> bool {
         let (code, modifiers) = normalize_key(code, modifiers);
         let (bind_code, bind_mods) = normalize_key(self.code, self.modifiers);
-        if code == bind_code && modifiers == bind_mods {
-            return true;
-        }
-
-        is_macos
-            && modifiers.is_empty()
-            && bind_mods == KeyModifiers::ALT
-            && macos_option_char_to_ascii_key(code)
-                .is_some_and(|ascii| bind_code == KeyCode::Char(ascii))
-    }
-}
-
-pub fn macos_option_char_to_ascii_key(code: KeyCode) -> Option<char> {
-    let KeyCode::Char(ch) = code else {
-        return None;
-    };
-
-    match ch {
-        'å' => Some('a'),
-        '∫' => Some('b'),
-        'ç' => Some('c'),
-        '∂' => Some('d'),
-        '´' => Some('e'),
-        'ƒ' => Some('f'),
-        '©' => Some('g'),
-        '˙' => Some('h'),
-        'ˆ' => Some('i'),
-        '∆' => Some('j'),
-        '˚' => Some('k'),
-        '¬' => Some('l'),
-        'µ' => Some('m'),
-        '˜' => Some('n'),
-        'ø' => Some('o'),
-        'π' => Some('p'),
-        'œ' => Some('q'),
-        '®' => Some('r'),
-        'ß' => Some('s'),
-        '†' => Some('t'),
-        '¨' => Some('u'),
-        '√' => Some('v'),
-        '∑' => Some('w'),
-        '≈' => Some('x'),
-        '¥' => Some('y'),
-        'Ω' => Some('z'),
-        _ => None,
+        code == bind_code && modifiers == bind_mods
     }
 }
 
@@ -621,7 +568,7 @@ mod tests {
         let mods = kitty_mods(9);
         let binding = parse_keybinding("cmd+b").expect("cmd+b parses");
         assert!(
-            binding.matches_for_platform(code, mods, true),
+            binding.matches(code, mods),
             "Cmd+B kitty sequence must trigger the open_resume binding"
         );
     }
@@ -633,7 +580,7 @@ mod tests {
         let mods = kitty_mods(10);
         let binding = parse_keybinding("cmd+shift+;").expect("cmd+shift+; parses");
         assert!(
-            binding.matches_for_platform(code, mods, true),
+            binding.matches(code, mods),
             "Cmd+Shift+; kitty sequence must trigger the new_terminal binding"
         );
     }
@@ -976,49 +923,24 @@ mod tests {
     }
 
     #[test]
-    fn key_binding_matches_macos_option_translated_characters() {
-        let binding = parse_keybinding("alt+s").expect("alt+s should parse");
-
-        assert!(binding.matches_for_platform(KeyCode::Char('s'), KeyModifiers::ALT, false,));
-        assert!(binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), true,));
-        assert!(!binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), false,));
+    fn native_text_does_not_trigger_alt_chords() {
+        for (chord, text) in [("alt+c", 'ç'), ("alt+s", 'ß'), ("alt+o", 'ø')] {
+            let binding = parse_keybinding(chord).expect("shortcut should parse");
+            assert!(
+                !binding.matches(KeyCode::Char(text), KeyModifiers::empty()),
+                "unmodified {text} must remain text instead of matching {chord}"
+            );
+        }
     }
 
     #[test]
-    fn macos_option_character_map_covers_default_alt_shortcuts() {
-        for (option_char, ascii) in [
-            ('å', 'a'),
-            ('∫', 'b'),
-            ('ç', 'c'),
-            ('∂', 'd'),
-            ('´', 'e'),
-            ('ƒ', 'f'),
-            ('©', 'g'),
-            ('˙', 'h'),
-            ('ˆ', 'i'),
-            ('∆', 'j'),
-            ('˚', 'k'),
-            ('¬', 'l'),
-            ('µ', 'm'),
-            ('˜', 'n'),
-            ('ø', 'o'),
-            ('π', 'p'),
-            ('œ', 'q'),
-            ('®', 'r'),
-            ('ß', 's'),
-            ('†', 't'),
-            ('¨', 'u'),
-            ('√', 'v'),
-            ('∑', 'w'),
-            ('≈', 'x'),
-            ('¥', 'y'),
-            ('Ω', 'z'),
-        ] {
-            assert_eq!(
-                macos_option_char_to_ascii_key(KeyCode::Char(option_char)),
-                Some(ascii)
-            );
-        }
+    fn native_text_preserves_explicit_modifiers_and_literal_bindings() {
+        let shortcut = parse_keybinding("alt+c").expect("shortcut should parse");
+        let literal = parse_keybinding("c").expect("literal binding should parse");
+        assert!(shortcut.matches(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert!(!shortcut.matches(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert!(literal.matches(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert!(!literal.matches(KeyCode::Char('c'), KeyModifiers::ALT));
     }
 
     #[test]
