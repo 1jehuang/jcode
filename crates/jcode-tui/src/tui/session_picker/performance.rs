@@ -89,11 +89,9 @@ impl SessionPicker {
         else {
             return false;
         };
-        let (cached, bytes) = self
-            .preview_reuse
-            .parked
-            .remove(index)
-            .expect("matching entry");
+        let Some((cached, bytes)) = self.preview_reuse.parked.remove(index) else {
+            return false;
+        };
         self.preview_reuse.bytes -= bytes;
         self.install_sized_preview(cached, bytes);
         true
@@ -119,11 +117,14 @@ impl SessionPicker {
         &self,
         session_ref: SessionRef,
         diff_mode: crate::config::DiffDisplayMode,
-    ) -> u64 {
-        let session = self.session_by_ref(session_ref).expect("selected session");
+    ) -> Option<u64> {
+        let session = self.session_by_ref(session_ref)?;
         let mut reuse = self.preview_fingerprints.borrow_mut();
-        let digest = if let Some(index) = reuse.iter().position(|(key, _)| *key == session_ref) {
-            let entry = reuse.remove(index).expect("matching fingerprint");
+        let cached = reuse
+            .iter()
+            .position(|(key, _)| *key == session_ref)
+            .and_then(|index| reuse.remove(index));
+        let digest = if let Some(entry) = cached {
             reuse.push_back(entry);
             entry.1
         } else {
@@ -134,7 +135,7 @@ impl SessionPicker {
             reuse.push_back((session_ref, digest));
             digest
         };
-        self.preview_content_hash_with_transcript(session, diff_mode, digest)
+        Some(self.preview_content_hash_with_transcript(session, diff_mode, digest))
     }
 }
 

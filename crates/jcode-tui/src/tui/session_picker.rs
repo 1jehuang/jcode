@@ -1447,7 +1447,11 @@ impl SessionPicker {
         let _ = self.poll_preview_load();
         self.ensure_selected_preview_loading();
 
-        let Some(session_ref) = self.selected_session_ref() else {
+        let selected = self.selected_session_ref().and_then(|session_ref| {
+            self.session_by_ref(session_ref)
+                .map(|session| (session_ref, session))
+        });
+        let Some((session_ref, session)) = selected else {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1489,52 +1493,50 @@ impl SessionPicker {
             return;
         }
 
-        let inner = preview_chrome::draw(
-            frame,
-            inner,
-            self.session_by_ref(session_ref).expect("selected session"),
-            self.preview_extras.get(
-                &self
-                    .session_by_ref(session_ref)
-                    .expect("selected session")
-                    .id,
-            ),
-        );
+        let inner =
+            preview_chrome::draw(frame, inner, session, self.preview_extras.get(&session.id));
+        let todos_payload = self
+            .preview_extras
+            .get(&session.id)
+            .and_then(|extras| extras.todos_payload.clone());
+        let preview_still_loading = session.messages_preview.is_empty()
+            && self
+                .pending_preview_load
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session.id);
+        let Some(content_hash) = self.selected_preview_content_hash(session_ref, diff_mode) else {
+            return;
+        };
 
         // Build (or reuse) the fully-wrapped preview content. The expensive
         // markdown render + wrap only runs on a cache miss; scrolling, focus
         // changes, and idle redraws reuse the cached wrapped lines. This mirrors
         // the main chat viewport, whose prepared frame is cached the same way.
         let key = PreviewCacheKey {
-            content_hash: self.selected_preview_content_hash(session_ref, diff_mode),
+            content_hash,
             inner_width: inner.width,
             inner_height: inner.height,
             diff_mode,
             search_query: self.search_query.trim().to_lowercase(),
         };
         if !self.reuse_preview(&key) {
+            let Some(session) = self.session_by_ref(session_ref) else {
+                return;
+            };
             // Shared markdown renderers also center structured blocks via a
             // thread-local setting. Scope it so lists/code/tools stay flush
             // left here without changing the chat rendered behind the picker.
             let rebuilt = markdown::with_center_code_blocks(false, || {
-                self.build_preview_cache(
-                    self.session_by_ref(session_ref).expect("selected session"),
-                    area,
-                    inner,
-                    key,
-                    align,
-                    diff_mode,
-                )
+                self.build_preview_cache(session, area, inner, key, align, diff_mode)
             });
             self.install_preview(rebuilt);
         }
         // Read cache geometry through a short-lived borrow so the scroll-offset
         // clamp below can take `&mut self` without conflict.
         let (show_scrollbar, total_lines, first_match_line) = {
-            let cache = self
-                .preview_cache
-                .as_ref()
-                .expect("preview cache populated above");
+            let Some(cache) = self.preview_cache.as_ref() else {
+                return;
+            };
             (
                 cache.show_scrollbar,
                 cache.wrapped_lines.len(),
@@ -1556,15 +1558,6 @@ impl SessionPicker {
 
         // Pinned todo band, rendered beneath the sticky previous-prompt header
         // exactly like the live chat viewport (`display.pin_todos`).
-        let todos_payload = self
-            .preview_extras
-            .get(
-                &self
-                    .session_by_ref(session_ref)
-                    .expect("selected session")
-                    .id,
-            )
-            .and_then(|extras| extras.todos_payload.clone());
         let (todo_band, _) = super::ui::viewport::pinned_todo_band_lines_for_payload(
             todos_payload.as_deref(),
             false,
@@ -1603,12 +1596,6 @@ impl SessionPicker {
         // frame and the populated transcript stays pinned at the top, hiding the
         // sticky "previous prompt" header that should appear once we snap to the
         // bottom.
-        let session = self.session_by_ref(session_ref).expect("selected session");
-        let preview_still_loading = session.messages_preview.is_empty()
-            && self
-                .pending_preview_load
-                .as_ref()
-                .is_some_and(|pending| pending.session_id == session.id);
         if self.auto_scroll_preview {
             // When a search is active and the selected session has a match in the
             // preview body, scroll the first hit into view (a few lines of lead-in
@@ -1644,10 +1631,9 @@ impl SessionPicker {
         // tick O(viewport height) rather than O(total wrapped lines).
         let visible_end = (scroll + visible_height).min(total_lines);
         let (visible_lines, source_rows): (Vec<Line<'static>>, Vec<usize>) = {
-            let cache = self
-                .preview_cache
-                .as_ref()
-                .expect("preview cache populated above");
+            let Some(cache) = self.preview_cache.as_ref() else {
+                return;
+            };
             if scroll < visible_end {
                 (
                     cache.wrapped_lines[scroll..visible_end].to_vec(),
@@ -1667,24 +1653,20 @@ impl SessionPicker {
                 None,
             );
         }
-        preview_chrome::draw_widgets(
-            frame,
-            content_area,
-            &visible_lines,
-            self.session_by_ref(session_ref).expect("selected session"),
-            self.preview_extras.get(
-                &self
-                    .session_by_ref(session_ref)
-                    .expect("selected session")
-                    .id,
-            ),
-            &self
-                .preview_cache
-                .as_ref()
-                .expect("preview cache populated above")
-                .image_regions,
-            scroll,
-        );
+        if let (Some(session), Some(cache)) = (
+            self.session_by_ref(session_ref),
+            self.preview_cache.as_ref(),
+        ) {
+            preview_chrome::draw_widgets(
+                frame,
+                content_area,
+                &visible_lines,
+                session,
+                self.preview_extras.get(&session.id),
+                &cache.image_regions,
+                scroll,
+            );
+        }
 
         if todo_lines > 0 && header_height < text_area.height {
             let band_area = Rect {

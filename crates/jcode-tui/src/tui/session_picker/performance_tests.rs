@@ -167,7 +167,7 @@ fn memoized_transcript_hash_invalidates_on_load_mutation_and_reseed() {
     let original = picker.selected_preview_content_hash(selected, mode);
     assert_eq!(
         original,
-        picker.preview_content_hash(picker.selected_session().unwrap(), mode)
+        Some(picker.preview_content_hash(picker.selected_session().unwrap(), mode))
     );
     picker
         .session_by_ref_mut(selected)
@@ -179,7 +179,7 @@ fn memoized_transcript_hash_invalidates_on_load_mutation_and_reseed() {
     assert_ne!(changed, original);
     assert_eq!(
         changed,
-        picker.preview_content_hash(picker.selected_session().unwrap(), mode)
+        Some(picker.preview_content_hash(picker.selected_session().unwrap(), mode))
     );
     picker.preview_extras.insert(
         "performance-0".into(),
@@ -198,18 +198,52 @@ fn memoized_transcript_hash_invalidates_on_load_mutation_and_reseed() {
     picker.apply_session_preview("performance-0", preview);
     assert_eq!(
         picker.selected_preview_content_hash(selected, mode),
-        picker.preview_content_hash(picker.selected_session().unwrap(), mode)
+        Some(picker.preview_content_hash(picker.selected_session().unwrap(), mode))
     );
     picker.reseed_grouped(Vec::new(), vec![session(1, 2)]);
     let selected = picker.selected_session_ref().unwrap();
     assert_eq!(
         picker.selected_preview_content_hash(selected, mode),
-        picker.preview_content_hash(picker.selected_session().unwrap(), mode)
+        Some(picker.preview_content_hash(picker.selected_session().unwrap(), mode))
     );
     assert_ne!(
         picker.selected_preview_content_hash(selected, mode),
         original
     );
+}
+
+#[test]
+fn stale_preview_selection_renders_empty_and_does_not_fingerprint() {
+    let mut picker = SessionPicker::new(vec![session(0, 2)]);
+    let selected = picker.selected_session_ref().unwrap();
+    picker.all_sessions.clear();
+    let mode = crate::config::config().display.diff_mode;
+    assert_eq!(picker.selected_preview_content_hash(selected, mode), None);
+    assert!(picker.preview_fingerprints.borrow().is_empty());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    draw_preview(&mut picker, &mut terminal);
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("No session selected"));
+    assert!(picker.preview_cache.is_none());
+}
+
+#[test]
+fn missing_preview_is_a_cache_miss_and_rebuilds_on_render() {
+    let mut picker = SessionPicker::new(vec![session(0, 2)]);
+    assert!(!picker.reuse_preview(&tiny_cache(42, 0).key));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    draw_preview(&mut picker, &mut terminal);
+    let key = picker.preview_cache.as_ref().unwrap().key.clone();
+    assert!(picker.reuse_preview(&key));
+    picker.preview_cache = None;
+    draw_preview(&mut picker, &mut terminal);
+    assert!(picker.preview_cache.as_ref().unwrap().key == key);
 }
 
 fn tiny_cache(id: u64, bytes: usize) -> PreviewRenderCache {
