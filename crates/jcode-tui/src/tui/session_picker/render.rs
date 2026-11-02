@@ -220,7 +220,7 @@ impl SessionPicker {
             Style::default().fg(rgb(90, 90, 90))
         };
 
-        let time_ago = format_time_ago(session.last_message_time);
+        let time_ago = active_ago;
         // Live presence (a running process owns this session) takes precedence
         // over the persisted snapshot status: it distinguishes sessions still
         // working on a response from ones ready for input, which the stored
@@ -286,11 +286,6 @@ impl SessionPicker {
             Span::styled(canary_marker, Style::default().fg(rgb(255, 193, 7))),
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
             Span::styled(saved_marker, Style::default().fg(rgb(255, 180, 100))),
-            Span::styled(
-                format!(" {}", status_icon),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(format!("  {}", time_label), Style::default().fg(dim)),
         ]);
         if let Some(ref label) = session.save_label {
             let label_style = Style::default().fg(rgb(255, 200, 140));
@@ -340,63 +335,16 @@ impl SessionPicker {
         }
         let line1 = Line::from(line1_spans);
 
-        let tokens_display = Self::format_estimated_tokens(session.estimated_tokens);
-        let line2 = if session.message_count > 0
-            && session.user_message_count == 0
-            && session.assistant_message_count == 0
-        {
-            Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(
-                    format!("{}", session.message_count),
-                    Style::default().fg(user_clr),
-                ),
-                Span::styled(" messages", Style::default().fg(dimmer)),
-                Span::styled(" · ", Style::default().fg(dimmer)),
-                Span::styled(tokens_display, Style::default().fg(dimmer)),
-            ])
-        } else {
-            Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(
-                    format!("{}", session.user_message_count),
-                    Style::default().fg(user_clr),
-                ),
-                Span::styled(" user", Style::default().fg(dimmer)),
-                Span::styled(" · ", Style::default().fg(dimmer)),
-                Span::styled(
-                    format!("{}", session.assistant_message_count),
-                    Style::default().fg(rgb(129, 199, 132)),
-                ),
-                Span::styled(" assistant", Style::default().fg(dimmer)),
-                Span::styled(" · ", Style::default().fg(dimmer)),
-                Span::styled(tokens_display, Style::default().fg(dimmer)),
-            ])
-        };
-
-        let dir_part = if let Some(ref dir) = session.working_dir {
-            format!("  📁 {}", compact_dir(dir))
-        } else {
-            String::new()
-        };
-        let dir_style = Style::default().fg(if same_dir { same_dir_clr } else { dimmer });
-        let mut line3_spans = vec![
-            Span::styled("     ", Style::default()),
+        // Two consistent rows per session: identity above, useful context below.
+        // The zebra backgrounds supply separation without a blank spacer. Prefer
+        // the prompt over counts so similar generated titles remain distinguishable.
+        let mut detail_spans = vec![
             Span::styled(
-                format!("active {}", active_ago),
-                Style::default().fg(dimmer),
+                format!("  {} ", status_icon),
+                Style::default().fg(status_color),
             ),
+            Span::styled(format!("{} · ", time_label), Style::default().fg(dim)),
         ];
-        if !dir_part.is_empty() {
-            line3_spans.extend(Self::highlight_spans(
-                &dir_part,
-                &highlight_tokens,
-                dir_style,
-            ));
-        }
-        let line3 = Line::from(line3_spans);
-
-        let mut rows = vec![line1, line2];
         if let Some(prompt) = session.first_user_prompt.as_deref().map(str::trim)
             && !prompt.is_empty()
         {
@@ -406,22 +354,31 @@ impl SessionPicker {
             } else {
                 prompt
             };
-            let mut prompt_spans = vec![
-                Span::styled("     ", Style::default()),
-                Span::styled("prompt: ", Style::default().fg(dimmer)),
-            ];
-            prompt_spans.extend(Self::highlight_spans(
+            detail_spans.extend(Self::highlight_spans(
                 &prompt_display,
                 &highlight_tokens,
                 Style::default().fg(rgb(180, 180, 220)),
             ));
-            rows.push(Line::from(prompt_spans));
+        } else if let Some(dir) = session.working_dir.as_deref() {
+            detail_spans.extend(Self::highlight_spans(
+                &format!("📁 {}", compact_dir(dir)),
+                &highlight_tokens,
+                Style::default().fg(if same_dir { same_dir_clr } else { dim }),
+            ));
+        } else {
+            detail_spans.push(Span::styled(
+                format!(
+                    "{} messages · {}",
+                    session.message_count,
+                    Self::format_estimated_tokens(session.estimated_tokens)
+                ),
+                Style::default().fg(dimmer),
+            ));
         }
-        rows.push(line3);
+        let mut rows = vec![line1, Line::from(detail_spans)];
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
         }
-        rows.push(Line::from(""));
 
         rows
     }
@@ -432,10 +389,15 @@ impl SessionPicker {
         is_selected: bool,
         spinner_frame: usize,
         striped: bool,
+        width: usize,
     ) -> ListItem<'static> {
         let batch_row_bg: Color = rgb(36, 18, 18);
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
-        let rows = self.render_session_item_lines_at_frame(session, is_selected, spinner_frame);
+        let rows: Vec<_> = self
+            .render_session_item_lines_at_frame(session, is_selected, spinner_frame)
+            .iter()
+            .map(|line| jcode_tui_render::truncate_line_with_ellipsis_to_width(line, width))
+            .collect();
         let mut item = ListItem::new(rows);
         if in_batch_restore && !is_selected {
             item = item.style(Style::default().bg(batch_row_bg));
@@ -476,12 +438,7 @@ impl SessionPicker {
                     return 1;
                 }
                 self.list_session_at(index).map_or(1, |session| {
-                    4 + usize::from(
-                        session
-                            .first_user_prompt
-                            .as_deref()
-                            .is_some_and(|text| !text.trim().is_empty()),
-                    ) + usize::from(matches!(session.status, SessionStatus::Crashed { .. }))
+                    2 + usize::from(matches!(session.status, SessionStatus::Crashed { .. }))
                 })
             })
             .collect();
@@ -615,6 +572,7 @@ impl SessionPicker {
                                     is_selected,
                                     spinner_frame,
                                     striped,
+                                    area.width.saturating_sub(3) as usize,
                                 )
                             })
                             .unwrap_or_else(|| ListItem::new(Line::from(""))),

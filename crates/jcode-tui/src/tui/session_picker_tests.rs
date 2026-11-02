@@ -970,7 +970,7 @@ fn test_session_item_uses_single_primary_title_line() {
     let text_rows: Vec<String> = rows.iter().map(line_text).collect();
 
     // The title must appear on exactly one row (the primary line); other rows
-    // (stats, prompt preview, created/dir) must not repeat it.
+    // (compact activity/prompt context) must not repeat it.
     assert_eq!(
         text_rows
             .iter()
@@ -990,7 +990,11 @@ fn test_session_item_uses_single_primary_title_line() {
         text_rows.iter().all(|row| !row.contains("rhino")),
         "memorable short name should remain searchable but not take display space: {text_rows:?}"
     );
-    assert!(text_rows[1].contains("~1.2M tok"));
+    assert_eq!(
+        text_rows.len(),
+        2,
+        "normal entries should use only two rows"
+    );
 }
 
 #[test]

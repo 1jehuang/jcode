@@ -267,6 +267,95 @@ fn retained_previews_have_byte_and_entry_bounds_and_evict_lru() {
 }
 
 #[test]
+fn compact_session_entries_keep_context_without_spacer_rows() {
+    let mut item = session(0, 1);
+    item.working_dir = Some("/project/resume-layout".into());
+    let picker = SessionPicker::new(vec![item.clone()]);
+    let rows = picker.render_session_item_lines(&item, false);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[1]
+            .to_string()
+            .contains("improve resume responsiveness")
+    );
+    assert!(!rows[1].to_string().contains("messages"));
+
+    item.first_user_prompt = Some("  \n ".into());
+    let rows = picker.render_session_item_lines(&item, false);
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].to_string().contains("resume-layout"));
+
+    item.working_dir = None;
+    let rows = picker.render_session_item_lines(&item, false);
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].to_string().contains("2 messages"));
+    assert!(rows[1].to_string().contains("tok"));
+
+    item.status = SessionStatus::Crashed {
+        message: Some("connection failed".into()),
+    };
+    let rows = picker.render_session_item_lines(&item, false);
+    assert_eq!(
+        rows.len(),
+        3,
+        "crash reasons remain visible, not hidden for density"
+    );
+    assert!(rows[2].to_string().contains("connection failed"));
+    assert!(rows.iter().all(|row| !row.to_string().trim().is_empty()));
+}
+
+#[test]
+fn compact_session_list_fits_ten_sessions_in_twenty_two_rows() {
+    let mut picker = SessionPicker::new((0..20).map(|id| session(id, 1)).collect());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 24)).unwrap();
+    terminal
+        .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let count = (1..23)
+        .filter(|&y| {
+            let text: String = (1..47).map(|x| buffer[(x, y)].symbol()).collect();
+            text.contains("Performance session")
+        })
+        .count();
+    assert!(
+        count >= 10,
+        "expected at least ten compact sessions, got {count}"
+    );
+}
+
+#[test]
+fn compact_rows_truncate_wide_text_without_wrapping() {
+    for width in [8, 20, 42] {
+        let mut item = session(0, 1);
+        item.title = "界".repeat(60);
+        item.first_user_prompt = Some("界".repeat(80));
+        let mut picker = SessionPicker::new(vec![item]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let selected_rows: Vec<_> = (1..11)
+            .filter(|&y| buffer[(1, y)].symbol() == "▌")
+            .collect();
+        assert_eq!(
+            selected_rows.len(),
+            2,
+            "entries never wrap at width {width}"
+        );
+        for y in selected_rows {
+            // A double-width glyph may leave one spare cell before the border.
+            assert!(
+                (width - 3..=width - 2).any(|x| buffer[(x, y)].symbol() == "…"),
+                "missing truncation marker: width={width}, row={y}"
+            );
+        }
+    }
+}
+
+#[test]
 fn session_list_stripes_cover_whole_entries() {
     let mut picker = SessionPicker::new((0..3).map(|id| session(id, 1)).collect());
     picker.list_state.select(None);
@@ -280,8 +369,8 @@ fn session_list_stripes_cover_whole_entries() {
         let text: String = (1..99).map(|x| buffer[(x, y)].symbol()).collect();
         if text.contains("Performance session") {
             let bg = buffer[(98, y)].bg;
-            // All five lines, including the trailing spacer, belong to the stripe.
-            for row in y..y + 5 {
+            // Both compact lines share one full-width session stripe.
+            for row in y..y + 2 {
                 assert_eq!(buffer[(1, row)].bg, bg);
                 assert_eq!(buffer[(98, row)].bg, bg);
             }
@@ -325,7 +414,7 @@ fn session_selection_has_stable_rail_and_blended_background() {
                 titles.push((x, y));
             }
         }
-        assert_eq!(rail_rows, 5);
+        assert_eq!(rail_rows, 2);
         assert_eq!(titles.len(), 3);
         positions.push(titles);
     }
