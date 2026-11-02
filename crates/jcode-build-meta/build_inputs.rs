@@ -4,20 +4,35 @@ use std::path::Path;
 /// Accept release identities without accepting arbitrary environment text.
 pub fn release_semver(value: &str) -> Option<String> {
     let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
-    let (core, preview) = match value.split_once('-') {
-        Some((core, suffix)) => (core, Some(suffix.strip_prefix("preview.")?)),
+    let (core, prerelease) = match value.split_once('-') {
+        Some((core, suffix)) => (core, Some(suffix)),
         None => (value, None),
     };
     let components: Vec<_> = core.split('.').collect();
     if components.len() != 3 || components.iter().any(|part| !numeric_component(part)) {
         return None;
     }
-    if let Some(number) = preview
-        && (core != "1.0.0" || !numeric_component(number) || number == "0")
+    // Tolerate any dot-separated prerelease identifiers (preview.1, rc.2,
+    // distro.7), not only 1.0.0 previews. Numeric identifiers keep rejecting
+    // zero and leading zeros.
+    if let Some(suffix) = prerelease
+        && !suffix.split('.').all(valid_prerelease_identifier)
     {
         return None;
     }
     Some(value.to_string())
+}
+
+fn valid_prerelease_identifier(ident: &str) -> bool {
+    let ascii = !ident.is_empty()
+        && ident
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    ascii
+        && (ident
+            .bytes()
+            .any(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+            || (ident != "0" && !ident.starts_with('0')))
 }
 
 fn numeric_component(value: &str) -> bool {
@@ -49,8 +64,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_identity_accepts_stable_and_v1_previews() {
-        for value in ["1.2.3", "1.0.0-preview.1", "1.0.0-preview.123"] {
+    fn release_identity_accepts_stable_and_prereleases() {
+        for value in [
+            "1.2.3",
+            "1.0.0-preview.1",
+            "1.0.0-preview.123",
+            "1.1.0-preview.1",
+            "1.2.3-rc.1",
+            "0.99.2-distro.7",
+        ] {
             assert_eq!(release_semver(value).as_deref(), Some(value));
         }
         assert_eq!(
@@ -62,8 +84,9 @@ mod tests {
             "1.2.3.4",
             "1.0.0-preview.0",
             "1.0.0-preview.01",
-            "1.0.0-preview.1-dev",
-            "1.1.0-preview.1",
+            "1.0.0-preview..1",
+            "1.0.0-preview.!",
+            "1.0.0-",
             "01.0.0",
             "1.0.0\nINJECT=1",
         ] {

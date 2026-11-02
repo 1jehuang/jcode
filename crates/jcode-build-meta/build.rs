@@ -24,7 +24,6 @@ fn main() {
         eprintln!("cargo:warning=failed to resolve auto build semver: {err}");
         pkg_version.clone()
     });
-    let (major, minor, patch) = parse_semver(&build_semver).unwrap_or(base_version);
     let base_semver = format!("{}.{}.{}", base_version.0, base_version.1, base_version.2);
     let update_semver = if explicit_build_semver_override().is_some() {
         build_semver.clone()
@@ -118,11 +117,11 @@ fn main() {
     //   Dirty:   v0.2.17-dev (abc1234, dirty)
     let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
     let version = if is_release {
-        format!("v{} ({})", build_semver, git_hash)
+        format!("v{build_semver} ({git_hash})")
     } else if dirty {
-        format!("v{}.{}.{}-dev ({}, dirty)", major, minor, patch, git_hash)
+        format!("v{build_semver}-dev ({git_hash}, dirty)")
     } else {
-        format!("v{}.{}.{}-dev ({})", major, minor, patch, git_hash)
+        format!("v{build_semver}-dev ({git_hash})")
     };
 
     // Set environment variables for compilation
@@ -221,7 +220,10 @@ fn root_package_version(repo_root: &Path) -> Option<String> {
 
 fn parse_semver(value: &str) -> Option<(u32, u32, u32)> {
     let trimmed = value.trim().trim_start_matches('v');
-    let mut parts = trimmed.split('.');
+    // Ignore any prerelease or build-metadata suffix: only the x.y.z core is
+    // needed here, and versions like 1.2.3-rc.1 must not parse as garbage.
+    let core = trimmed.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
@@ -321,4 +323,17 @@ fn metadata_value(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_semver;
+
+    #[test]
+    fn parses_release_and_prerelease_cores() {
+        assert_eq!(parse_semver("v0.95.1"), Some((0, 95, 1)));
+        assert_eq!(parse_semver("0.95.1-rc.7"), Some((0, 95, 1)));
+        assert_eq!(parse_semver("0.95.1+build.42"), Some((0, 95, 1)));
+        assert_eq!(parse_semver("0.95.1-rc"), None);
+    }
 }
