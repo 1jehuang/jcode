@@ -1373,6 +1373,9 @@ fn test_openai_transport_failure_keeps_recent_last_good_only() {
     assert!(recent_good_openai_usage(&key).is_none());
 }
 
+/// A time before every reset in the Muse fixtures below.
+const BEFORE_RESETS: i64 = 1_793_000_000;
+
 #[test]
 fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
     let usage = crate::auth::muse::SubsUsage {
@@ -1383,7 +1386,7 @@ fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
         weekly_resets_at: Some(1793577600),
         tier: Some("pro".to_string()),
     };
-    let limits = api_keys::parse_muse_subs_usage_limits(&usage);
+    let limits = api_keys::parse_muse_subs_usage_limits(&usage, BEFORE_RESETS);
     assert_eq!(limits.len(), 2);
     assert_eq!(limits[0].name, "5-hour window");
     assert!((limits[0].usage_percent - 81.0).abs() < f32::EPSILON);
@@ -1407,7 +1410,7 @@ fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
         weekly_resets_at: Some(1793577600),
         tier: None,
     };
-    let limits = api_keys::parse_muse_subs_usage_limits(&invalid);
+    let limits = api_keys::parse_muse_subs_usage_limits(&invalid, BEFORE_RESETS);
     assert!(limits.is_empty());
 
     // Boundary percentages (0.0 and 100.0), millisecond timestamps and negative epochs
@@ -1419,7 +1422,7 @@ fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
         weekly_resets_at: Some(-10), // invalid epoch ignored
         tier: None,
     };
-    let limits = api_keys::parse_muse_subs_usage_limits(&boundary);
+    let limits = api_keys::parse_muse_subs_usage_limits(&boundary, BEFORE_RESETS);
     assert_eq!(limits.len(), 2);
     assert_eq!(limits[0].name, "120-minute window");
     assert!((limits[0].usage_percent - 0.0).abs() < f32::EPSILON);
@@ -1430,4 +1433,39 @@ fn parse_muse_subs_usage_limits_handles_windows_and_rejects_invalid() {
     assert_eq!(limits[1].name, "Weekly window");
     assert!((limits[1].usage_percent - 100.0).abs() < f32::EPSILON);
     assert_eq!(limits[1].resets_at, None);
+}
+
+#[test]
+fn muse_snapshot_windows_that_have_reset_are_dropped() {
+    let usage = crate::auth::muse::SubsUsage {
+        window_used_percent: Some(99.0),
+        window_duration_mins: Some(300),
+        window_resets_at: Some(1793094549),
+        weekly_used_percent: Some(27.0),
+        weekly_resets_at: Some(1793577600),
+        tier: None,
+    };
+    // One hour after the 5-hour window reset: only the weekly window remains.
+    let limits = api_keys::parse_muse_subs_usage_limits(&usage, 1793094549 + 3600);
+    assert_eq!(limits.len(), 1);
+    assert_eq!(limits[0].name, "Weekly window");
+    // Exactly at a reset counts as reset.
+    assert!(api_keys::parse_muse_subs_usage_limits(&usage, 1793577600).is_empty());
+}
+
+#[test]
+fn muse_snapshot_age_says_it_is_not_live() {
+    let minted = 1_000_000_000_000;
+    assert_eq!(
+        api_keys::muse_snapshot_age(minted, minted + 6 * 3_600_000 + 5 * 60_000),
+        "saved at sign-in 6h 5m ago, not live"
+    );
+    assert_eq!(
+        api_keys::muse_snapshot_age(minted, minted + 12 * 60_000),
+        "saved at sign-in 12m ago, not live"
+    );
+    assert_eq!(
+        api_keys::muse_snapshot_age(minted, minted + 26 * 3_600_000),
+        "saved at sign-in 1d 2h ago, not live"
+    );
 }

@@ -285,13 +285,28 @@ async fn fetch_compatible_profile_report(
                     extra_info.push(("Plan".to_string(), tier));
                 }
                 if let Some(usage) = credentials.subs_usage.as_ref() {
-                    let parsed_limits = parse_muse_subs_usage_limits(usage);
+                    // The windows are a snapshot taken when the key was
+                    // minted, which can be reused for about a day; say so,
+                    // and never let a window that has since reset drive
+                    // current quota warnings.
+                    let now = chrono::Utc::now();
+                    let parsed_limits = parse_muse_subs_usage_limits(usage, now.timestamp());
                     if parsed_limits.is_empty() {
+                        let reported_windows = usage.window_used_percent.is_some()
+                            || usage.weekly_used_percent.is_some();
                         extra_info.push((
                             "Quota".to_string(),
-                            "unknown (the account mint reports no usage windows)".to_string(),
+                            if reported_windows {
+                                "unknown (the saved snapshot's windows have reset; it refreshes at the next sign-in)".to_string()
+                            } else {
+                                "unknown (the account mint reports no usage windows)".to_string()
+                            },
                         ));
                     } else {
+                        extra_info.push((
+                            "Quota snapshot".to_string(),
+                            muse_snapshot_age(credentials.minted_at_ms, now.timestamp_millis()),
+                        ));
                         limits.extend(parsed_limits);
                     }
                 } else {
@@ -775,23 +790,44 @@ async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
     saw_any.then_some(total)
 }
 
+/// How old the saved Muse quota snapshot is, for the usage view.
+pub(super) fn muse_snapshot_age(minted_at_ms: i64, now_ms: i64) -> String {
+    let mins = (now_ms - minted_at_ms).max(0) / 60_000;
+    let age = match mins {
+        0 => return "saved at sign-in just now".to_string(),
+        1..=59 => format!("{mins}m"),
+        60..=1439 => format!("{}h {}m", mins / 60, mins % 60),
+        _ => format!("{}d {}h", mins / 1440, (mins % 1440) / 60),
+    };
+    format!("saved at sign-in {age} ago, not live")
+}
+
+/// Quota windows from the saved Muse snapshot. A window whose reset time is
+/// at or before `now_secs` has rolled over since the snapshot, so its
+/// percentage no longer describes the account and is dropped.
 pub(super) fn parse_muse_subs_usage_limits(
     usage: &crate::auth::muse::SubsUsage,
+    now_secs: i64,
 ) -> Vec<UsageLimit> {
     let mut limits = Vec::new();
-    let format_reset = |epoch_opt: Option<i64>| -> Option<String> {
+    let reset_secs = |epoch_opt: Option<i64>| -> Option<i64> {
         let epoch = epoch_opt.filter(|&e| e > 0)?;
-        let secs = if epoch > 1_000_000_000_000 {
+        Some(if epoch > 1_000_000_000_000 {
             epoch / 1000
         } else {
             epoch
-        };
-        chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+        })
+    };
+    let expired =
+        |epoch_opt: Option<i64>| reset_secs(epoch_opt).is_some_and(|secs| secs <= now_secs);
+    let format_reset = |epoch_opt: Option<i64>| -> Option<String> {
+        chrono::DateTime::from_timestamp(reset_secs(epoch_opt)?, 0).map(|dt| dt.to_rfc3339())
     };
 
     if let Some(pct) = usage
         .window_used_percent
         .filter(|p| p.is_finite() && (0.0..=100.0).contains(p))
+        .filter(|_| !expired(usage.window_resets_at))
     {
         let window_label = match usage.window_duration_mins {
             Some(300) => "5-hour window".to_string(),
@@ -808,6 +844,7 @@ pub(super) fn parse_muse_subs_usage_limits(
     if let Some(pct) = usage
         .weekly_used_percent
         .filter(|p| p.is_finite() && (0.0..=100.0).contains(p))
+        .filter(|_| !expired(usage.weekly_resets_at))
     {
         limits.push(UsageLimit {
             name: "Weekly window".to_string(),
