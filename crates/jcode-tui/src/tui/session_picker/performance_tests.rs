@@ -1,7 +1,7 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-fn session(id: usize, turns: usize) -> SessionInfo {
+pub(super) fn session(id: usize, turns: usize) -> SessionInfo {
     let now = chrono::Utc::now();
     let messages_preview = (0..turns * 2).map(|i| PreviewMessage {
         role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
