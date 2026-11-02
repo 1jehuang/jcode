@@ -10,6 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_exact_source_ci_can_be_manually_retried_after_bot_push(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]
+        self.assertIn('\n  workflow_dispatch:\n', triggers)
+        self.assertIn('\n  push:\n    branches: [main, master]', triggers)
+        self.assertNotIn('inputs:', triggers)
+
     def test_ci_builds_and_tests_cannot_silently_refresh_the_lockfile(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         command = re.compile(r'(?:cargo|"\$CARGO_BIN"|"\$\(rustup which cargo\)") '

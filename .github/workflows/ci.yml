@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Allows exact-source validation after bot-authored commits, whose pushes
+  # do not trigger workflows when made with GITHUB_TOKEN.
+  workflow_dispatch:
   push:
     branches: [main, master]
   pull_request:
