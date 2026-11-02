@@ -186,6 +186,9 @@ pub(super) fn normalize_public_input(input: &mut Value, previous: &[Value]) -> R
             }
         }
     }
+    // All references use names at the beginning of the call, plus additions.
+    // Renaming a prerequisite never changes its stored dependency identity.
+    let reference_catalog = catalog.clone();
     if let Some(updates) = input.get_mut("update").and_then(Value::as_array_mut) {
         for update in updates {
             let Some(fields) = update.as_object_mut() else {
@@ -224,7 +227,7 @@ pub(super) fn normalize_public_input(input: &mut Value, previous: &[Value]) -> R
                     fields.insert("content".into(), json!(rename));
                 }
                 if let Some(after) = fields.get_mut("lane_after") {
-                    resolve_dependencies(after, previous)?;
+                    resolve_dependencies(after, &reference_catalog)?;
                 }
             }
         }

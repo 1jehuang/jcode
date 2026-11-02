@@ -97,11 +97,16 @@ fn hierarchy_flattens_and_clears() {
 
 #[test]
 fn hierarchy_rejects_malformed_structures() {
+    assert!(
+        parse_todo_input(json!({"phases": null}))
+            .unwrap()
+            .todos
+            .is_none()
+    );
     let item = json!({"id":"a","content":"A","status":"pending","priority":"high"});
     let lane = json!({"lane":"x","items":[item]});
     let phase = json!({"phase":1,"lanes":[lane]});
     for bad in [
-        json!(null),
         json!({}),
         json!([null]),
         json!([{"phase":0,"lanes":[lane]}]),

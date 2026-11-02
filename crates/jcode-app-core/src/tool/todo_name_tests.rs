@@ -232,3 +232,98 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
     }
     assert!(update_item["properties"]["rename_to"].is_object());
 }
+
+#[test]
+fn named_edits_accept_null_phases_singletons_and_stringified_arguments() {
+    let initial = create(hierarchy(vec![named("Implement")]));
+    let updated = patch(
+        json!({"phases": null, "update": {"name": "Implement", "status": "in_progress"}}),
+        &initial,
+    );
+    assert_eq!(parsed(updated.clone())[0].status, "in_progress");
+    let added = patch(
+        json!({"add": json!({"name": "Test", "description": "Verify", "after": "Implement", "status": "pending", "priority": "high"}).to_string()}),
+        &updated,
+    );
+    assert_eq!(parsed(added.clone())[1].content, "Test");
+    let removed = patch(json!({"remove": json!(["Test"]).to_string()}), &added);
+    assert_eq!(parsed(removed).len(), 1);
+    assert!(apply_todo_patch(json!({"remove": ["Typo"]}), || initial["todos"].clone()).is_err());
+}
+
+#[test]
+fn incremental_dependencies_can_reference_tasks_added_in_the_same_call() {
+    let initial = create(json!({"phases": [
+        {"phase": 1, "lanes": [{"lane": "base", "items": [named("Anchor")]}]},
+        {"phase": 2, "lanes": [{"lane": "checks", "items": [named("Test")]}]}
+    ]}));
+    let todos = parsed(patch(
+        json!({
+            "add": [{"name": "Build", "after": "Anchor", "status": "pending", "priority": "high"}],
+            "update": [{"name": "Test", "lane_after": ["Build"]}]
+        }),
+        &initial,
+    ));
+    assert_eq!(todos[2].lane_after, Some(vec![todos[1].id.clone()]));
+    crate::todo::stages::validate_lane_dependencies(&todos).unwrap();
+}
+
+#[tokio::test]
+async fn named_tool_execution_persists_ids_but_returns_public_names() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let context = || ToolContext {
+        session_id: "named-tool-execution".into(),
+        message_id: "test".into(),
+        tool_call_id: "call".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+    let tool = TodoTool::new();
+    tool.execute(hierarchy(vec![named("Implement")]), context())
+        .await
+        .unwrap();
+    let original = load_todos("named-tool-execution").unwrap();
+    tool.execute(json!({"phases": null, "update": [{"name": "Implement", "status": "in_progress", "description": "Updated brief"}]}), context()).await.unwrap();
+    let output = tool.execute(json!({}), context()).await.unwrap();
+    let public: Value = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(public[0]["name"], "Implement");
+    assert_eq!(public[0]["description"], "Updated brief");
+    assert_eq!(public[0]["status"], "in_progress");
+    for field in ["id", "content", "details"] {
+        assert!(public[0].get(field).is_none());
+    }
+    let metadata = output.metadata.unwrap();
+    assert_eq!(metadata["todos"][0]["id"], original[0].id);
+    let before_error = load_todos("named-tool-execution").unwrap();
+    assert!(
+        tool.execute(
+            json!({"update": [{"name": "Implement", "rename_to": " "}]}),
+            context()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        load_todos("named-tool-execution").unwrap()[0].id,
+        before_error[0].id
+    );
+    assert_eq!(
+        load_todos("named-tool-execution").unwrap()[0].content,
+        "Implement"
+    );
+}
