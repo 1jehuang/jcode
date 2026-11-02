@@ -2064,7 +2064,15 @@ pub(crate) fn subscribe_metadata(
             jcode_selfdev_types::client_selfdev_requested().then_some(true),
         );
     }
-    let working_dir = std::env::current_dir().ok();
+    let working_dir = std::env::current_dir().map_or_else(
+        |error| {
+            crate::logging::debug(&format!(
+                "Could not read working directory for session subscription: {error}"
+            ));
+            None
+        },
+        Some,
+    );
     resolve_subscribe_metadata(
         working_dir.as_deref(),
         remote_working_dir,
