@@ -1023,7 +1023,10 @@ fn render_todos_message_with_cap(
     };
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    let centered = markdown::center_code_blocks();
+    // Pinned todos are viewport chrome, not a centered transcript card. Using
+    // the code-block preference here makes short plans float in the middle of
+    // wide terminals, detached from the conversation's left edge.
+    let centered = cap_width && markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
     let card_width = match (centered, cap_width) {
         (true, true) => (width.saturating_sub(4) as usize).min(120),
