@@ -372,6 +372,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
+    if app
+        .remote_queue_retry_not_before
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return needs_redraw;
+    }
+    app.remote_queue_retry_not_before = None;
+
     // Esc redirect hold. On timeout this arms pending_queued_dispatch, which
     // the next check hands to the normal follow-up path.
     let holding_for_interrupt = app.awaiting_remote_interrupt_ack();
@@ -1353,6 +1361,13 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app
+        .remote_queue_retry_not_before
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return;
+    }
+    app.remote_queue_retry_not_before = None;
     if app.prepare_cloud_environment(remote).await.is_err() {
         app.revoke_cloud_environment();
         return;

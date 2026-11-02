@@ -25,6 +25,147 @@ fn scoped(generation: &str, turn_id: u64, event: ServerEvent) -> ServerEvent {
 }
 
 #[test]
+fn completed_turn_busy_continuation_retries_from_idle_without_another_terminal() {
+    for auto_retry in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut remote = RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        start(&mut app, &mut remote, "runtime", 1);
+        handle_server_event(
+            &mut app,
+            scoped("runtime", 1, ServerEvent::Done { id: 1 }),
+            &mut remote,
+        );
+        assert!(!app.is_processing);
+        runtime
+            .block_on(crate::tui::app::remote::begin_remote_send(
+                &mut app,
+                &mut remote,
+                String::new(),
+                vec![],
+                true,
+                Some("Continue after finalization".into()),
+                auto_retry,
+                0,
+            ))
+            .unwrap();
+        let rejected = app.current_message_id.unwrap();
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                id: rejected,
+                message: "Already processing a message".into(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.is_processing,
+            "completed turn must not be resurrected awaiting another terminal"
+        );
+        assert!(app.current_message_id.is_none());
+        assert!(app.remote_resume_activity.is_none());
+        assert!(app.rate_limit_pending_message.is_none());
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Continue after finalization"]
+        );
+        assert!(app.remote_queue_retry_not_before.is_some());
+        app.remote_queue_retry_not_before = Some(Instant::now() + Duration::from_secs(3600));
+        runtime.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        runtime.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+        assert!(
+            !app.is_processing,
+            "cooldown prevents tight busy-rejection retries"
+        );
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Continue after finalization"]
+        );
+        app.remote_queue_retry_not_before = Some(Instant::now() - Duration::from_millis(1));
+        runtime.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(
+            app.is_processing,
+            "idle queue dispatch must retry without another old-turn event"
+        );
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert_eq!(
+            app.rate_limit_pending_message
+                .as_ref()
+                .unwrap()
+                .system_reminder
+                .as_deref(),
+            Some("Continue after finalization")
+        );
+    }
+}
+
+#[test]
+fn completed_turn_busy_user_send_restores_prompt_without_overwriting_new_draft() {
+    for draft in ["", "new unsent draft"] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut remote = RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        start(&mut app, &mut remote, "runtime", 1);
+        handle_server_event(
+            &mut app,
+            scoped("runtime", 1, ServerEvent::Done { id: 1 }),
+            &mut remote,
+        );
+        runtime
+            .block_on(crate::tui::app::remote::begin_remote_send(
+                &mut app,
+                &mut remote,
+                "rejected user prompt".into(),
+                vec![],
+                false,
+                None,
+                false,
+                0,
+            ))
+            .unwrap();
+        app.last_submitted_input = Some("rejected user prompt".into());
+        app.input = draft.into();
+        let rejected = app.current_message_id.unwrap();
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                id: rejected,
+                message: "Already processing a message".into(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(!app.is_processing);
+        assert!(app.current_message_id.is_none());
+        assert!(app.remote_resume_activity.is_none());
+        assert_eq!(
+            app.input,
+            if draft.is_empty() {
+                "rejected user prompt"
+            } else {
+                draft
+            }
+        );
+        assert!(app.hidden_queued_system_messages.is_empty());
+    }
+}
+
+#[test]
 fn idle_bootstrap_settles_observer_after_disconnected_completion() {
     let mut app = create_test_app();
     let runtime = tokio::runtime::Runtime::new().unwrap();

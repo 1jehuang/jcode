@@ -1508,9 +1508,23 @@ fn handle_server_event_inner(
                 && recover_rejected_queued_continuation(app)
             {
                 remote.clear_pending();
+                app.current_message_id = None;
+                if app.remote_turn_fence.scoped() && app.remote_turn_fence.active.is_none() {
+                    // Done was already observed. The owner can still hold its
+                    // finalization pin briefly, but no second terminal will
+                    // arrive to release this queue. Retry from idle instead.
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.processing_started = None;
+                    app.remote_resume_activity = None;
+                    app.pending_queued_dispatch = false;
+                    app.remote_queue_retry_not_before =
+                        Some(Instant::now() + Duration::from_millis(100));
+                    app.set_status_notice("Server finalizing; follow-up stays queued");
+                    return true;
+                }
                 app.is_processing = true;
                 app.status = ProcessingStatus::Thinking(Instant::now());
-                app.current_message_id = None;
                 app.processing_started.get_or_insert_with(Instant::now);
                 app.last_stream_activity = Some(Instant::now());
                 app.remote_resume_activity = Some(RemoteResumeActivity {
