@@ -7,6 +7,11 @@ env:
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 on:
+  workflow_call:
+    inputs:
+      jcode_release_tag:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       jcode_release_tag:
@@ -48,8 +53,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test release versioning
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/test_version_sdk_release.mjs
+
       - name: Validate SDK
         run: npm run check
+
+      - name: Select SDK release channel and version
+        id: channel
+        working-directory: ${{ github.workspace }}
+        env:
+          JCODE_RELEASE_TAG: ${{ inputs.jcode_release_tag }}
+        run: node scripts/version_sdk_release.mjs "$JCODE_RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download released jcode runtimes
         working-directory: ${{ github.workspace }}
@@ -81,8 +97,15 @@ jobs:
               echo "$name@$version already published, skipping"
               continue
             fi
-            npm publish "$package" --access public --provenance
+            npm publish "$package" --access public --provenance --tag "${{ steps.channel.outputs.tag }}"
           done
 
       - name: Publish with npm provenance
-        run: npm publish --access public --provenance
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already published, skipping"
+          else
+            npm publish --access public --provenance --tag "${{ steps.channel.outputs.tag }}"
+          fi

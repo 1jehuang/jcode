@@ -238,6 +238,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist
 
+  publish-sdk:
+    needs: publish
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-typescript-sdk.yml
+    with:
+      jcode_release_tag: v1.0.0-preview.${{ github.run_number }}
+
   announce:
     needs: publish
     runs-on: ubuntu-latest

@@ -666,6 +666,9 @@ jobs:
         run: npm run check
         working-directory: sdk/typescript
 
+      - name: SDK release versioning
+        run: node --test scripts/test_version_sdk_release.mjs
+
       # `npm run check` proves the source compiles; it says nothing about what
       # a consumer actually receives. The published tarball is a separate
       # artifact (`files`, `exports`, `prepack`), and getting it wrong ships a
