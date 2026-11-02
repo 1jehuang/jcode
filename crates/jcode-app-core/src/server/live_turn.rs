@@ -24,7 +24,7 @@ use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
 
 use super::SessionAgents;
 

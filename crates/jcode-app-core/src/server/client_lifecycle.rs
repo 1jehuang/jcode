@@ -4085,6 +4085,7 @@ fn move_tool_to_background(
 }
 
 /// Process a message and stream events (mpsc channel - per-client)
+#[cfg(test)]
 pub(super) async fn process_message_streaming_mpsc(
     agent: Arc<Mutex<Agent>>,
     content: &str,
@@ -4100,6 +4101,7 @@ pub(super) async fn process_message_streaming_mpsc(
 /// Same as [`process_message_streaming_mpsc`] for a caller that already holds
 /// the agent lock (e.g. a wake turn that reserved the idle agent up front, see
 /// #1152).
+#[cfg(test)]
 pub(super) async fn process_locked_message_streaming_mpsc(
     agent: &mut Agent,
     content: &str,

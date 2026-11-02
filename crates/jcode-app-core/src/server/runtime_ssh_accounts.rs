@@ -41,7 +41,8 @@ struct Review {
 }
 type Reviews = HashMap<String, (Instant, Arc<Mutex<Review>>)>;
 static REVIEWS: OnceLock<Mutex<Reviews>> = OnceLock::new();
-static REMOVALS: OnceLock<Mutex<HashMap<String, (Instant, String, String)>>> = OnceLock::new();
+type Removals = HashMap<String, (Instant, String, String)>;
+static REMOVALS: OnceLock<Mutex<Removals>> = OnceLock::new();
 
 async fn remove_account(
     session: &str,
@@ -147,13 +148,13 @@ async fn reset(agent: &Agent, args: &[String]) -> Result<String> {
     } else {
         provider
     };
-    if let Some(pending) = &review.pending {
-        if pending.provider() != provider {
-            bail!(
-                "A {} reset is pending. Cancel it before reviewing another provider.",
-                pending.provider()
-            )
-        }
+    if let Some(pending) = &review.pending
+        && pending.provider() != provider
+    {
+        bail!(
+            "A {} reset is pending. Cancel it before reviewing another provider.",
+            pending.provider()
+        )
     }
     match action {
         "cancel" => {
@@ -367,10 +368,10 @@ fn save_compat(setting: &str, raw: &str) -> Result<String> {
     let new = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::OPENAI_COMPAT_PROFILE,
     );
-    if let Some(key) = key {
-        if old.api_key_env != new.api_key_env || old.env_file != new.env_file {
-            crate::provider_catalog::save_named_api_key(&new.env_file, &new.api_key_env, &key)?;
-        }
+    if let Some(key) = key
+        && (old.api_key_env != new.api_key_env || old.env_file != new.env_file)
+    {
+        crate::provider_catalog::save_named_api_key(&new.env_file, &new.api_key_env, &key)?;
     }
     crate::auth::AuthStatus::invalidate_cache();
     Ok("Saved OpenAI-compatible preference on runtime host. Credentials were not returned.".into())
@@ -481,14 +482,13 @@ pub(super) async fn execute(
                         bail!("Invalid reasoning effort")
                     }
                     crate::config::Config::set_openai_reasoning_effort(value)?;
-                    if let Some(value) = value {
-                        if agent
+                    if let Some(value) = value
+                        && agent
                             .provider_name()
                             .to_ascii_lowercase()
                             .contains("openai")
-                        {
-                            provider.set_reasoning_effort(value)?;
-                        }
+                    {
+                        provider.set_reasoning_effort(value)?;
                     }
                 }
                 "fast" => {

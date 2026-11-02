@@ -11,9 +11,9 @@ use super::swarm_mutation_state::{
 use super::{
     ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
-    broadcast_swarm_plan_with_previous, broadcast_swarm_status, fanout_session_event,
-    persist_swarm_state_for, queue_soft_interrupt_for_session, record_swarm_event,
-    set_member_task_label, truncate_detail, update_member_status, update_member_status_with_report,
+    broadcast_swarm_plan_with_previous, broadcast_swarm_status, persist_swarm_state_for,
+    queue_soft_interrupt_for_session, record_swarm_event, set_member_task_label, truncate_detail,
+    update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::plan::{

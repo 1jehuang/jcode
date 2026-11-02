@@ -1636,23 +1636,22 @@ impl BridgeState {
                         })];
                     }
                 }
-                if event["type"] == "error" {
-                    if let Some(index) = self
+                if event["type"] == "error"
+                    && let Some(index) = self
                         .pending_simple
                         .iter()
                         .position(|(pending_id, _, _)| *pending_id == id)
-                    {
-                        let (_, api_id, _) = self.pending_simple.remove(index);
-                        self.pending_control_done_ids.remove(&id);
-                        self.pending_activity_snapshots.remove(&id);
-                        return vec![ServerFrame::reply(
-                            api_id,
-                            ApiEvent::Error {
-                                code: ErrorCode::Internal,
-                                message: event["message"].as_str().unwrap_or_default().to_string(),
-                            },
-                        )];
-                    }
+                {
+                    let (_, api_id, _) = self.pending_simple.remove(index);
+                    self.pending_control_done_ids.remove(&id);
+                    self.pending_activity_snapshots.remove(&id);
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                        },
+                    )];
                 }
                 if self.pending_control_done_ids.contains(&id)
                     || self.pending_attach_subscribe_id == Some(id)

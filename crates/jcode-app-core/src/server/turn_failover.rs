@@ -153,6 +153,7 @@ pub(super) fn apply_failover_target(
 
 /// Run a message turn, and when enabled, transparently fail over to the next
 /// pool-approved account and retry the same turn on a usage/rate-limit error.
+#[cfg(test)]
 pub(super) async fn process_message_with_server_failover(
     agent: Arc<Mutex<Agent>>,
     content: &str,
@@ -205,6 +206,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
 /// on an already locked agent. No client runs a countdown for these turns, so
 /// the server always applies the account router itself.
+#[cfg(test)]
 pub(super) async fn process_locked_message_with_server_failover(
     agent: &mut Agent,
     content: &str,
@@ -249,6 +251,7 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
 /// `Arc<Mutex<Agent>>`.
+#[cfg(test)]
 pub(super) async fn process_server_initiated_message(
     agent: Arc<Mutex<Agent>>,
     content: &str,

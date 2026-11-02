@@ -29,6 +29,7 @@ impl TurnObserver {
         (state.latest, state.active.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn active(&self) -> Option<TurnIdentity> {
         self.state
             .lock()
@@ -37,6 +38,7 @@ impl TurnObserver {
             .clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn latest_turn_id(&self) -> u64 {
         self.state
             .lock()

@@ -18,16 +18,14 @@ pub(super) fn normalize_containers(input: &mut Value) {
         if value.is_object() {
             *value = Value::Array(vec![std::mem::take(value)]);
         }
-        if key != "remove" {
-            if let Some(items) = value.as_array_mut() {
-                for item in items {
-                    if let Value::String(raw) = item {
-                        if let Ok(parsed @ Value::Object(_)) =
-                            serde_json::from_str::<Value>(raw.trim())
-                        {
-                            *item = parsed;
-                        }
-                    }
+        if key != "remove"
+            && let Some(items) = value.as_array_mut()
+        {
+            for item in items {
+                if let Value::String(raw) = item
+                    && let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw.trim())
+                {
+                    *item = parsed;
                 }
             }
         }
@@ -201,15 +199,15 @@ pub(super) fn normalize_public_input(input: &mut Value, previous: &[Value]) -> R
                 if let Some(after) = item.get_mut("lane_after") {
                     resolve_dependencies(after, &catalog)?;
                 }
-                if key == "add" {
-                    if let Some(after) = item.get_mut("after").filter(|value| !value.is_null()) {
-                        *after = json!(resolve_name(
-                            &catalog,
-                            after
-                                .as_str()
-                                .ok_or_else(|| anyhow::anyhow!("after must be a todo name"))?
-                        )?);
-                    }
+                if key == "add"
+                    && let Some(after) = item.get_mut("after").filter(|value| !value.is_null())
+                {
+                    *after = json!(resolve_name(
+                        &catalog,
+                        after
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("after must be a todo name"))?
+                    )?);
                 }
             }
         }

@@ -328,6 +328,7 @@ fn next_followup(
 /// Run inside the server turn task before releasing its processing guard. Never
 /// recursively invokes turn_failover, and rereads durable state each turn so
 /// stop/status work from another connection while a model/tool is busy.
+#[cfg(test)]
 pub(super) async fn run_followups(
     agent: &mut Agent,
     event_tx: mpsc::UnboundedSender<ServerEvent>,

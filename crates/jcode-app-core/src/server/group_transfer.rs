@@ -237,7 +237,7 @@ fn validate_bundle(bundle: &GroupTransferBundle) -> Result<()> {
 /// Operations fence the selected sessions and their complete swarm closure.
 /// Unknown-owner mutation remains globally exclusive with transfers. Snapshot
 /// expansion is verified again under admission and per-swarm operation locks.
-pub async fn handle(
+pub(super) async fn handle(
     cmd: &str,
     sessions: &SessionAgents,
     state: &SwarmState,
