@@ -4,12 +4,46 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_sdk_waits_for_runtime_visibility_and_fails_closed(self):
+        workflow = (ROOT / '.github/workflows/publish-typescript-sdk.yml').read_text()
+        guard = workflow.split('      - name: Wait for platform runtime registry visibility\n', 1)[1]
+        guard, publish = guard.split('      - name: Publish with npm provenance\n', 1)
+        script = textwrap.dedent(guard.split('        run: |\n', 1)[1])
+        self.assertIn('--prefer-online', script)
+        for mode in ('retry', 'missing'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                package = root / 'sdk/npm/runtime'
+                package.mkdir(parents=True)
+                (package / 'package.json').write_text(
+                    '{"name":"@test/runtime","version":"1.2.0-preview.49"}')
+                binaries = root / 'bin'
+                binaries.mkdir()
+                npm = binaries / 'npm'
+                npm.write_text('#!/bin/sh\n'
+                               'if [ "$VISIBILITY_MODE" = retry ] && [ -f "$MARKER" ]; then\n'
+                               '  echo 1.2.0-preview.49\n  exit 0\nfi\n'
+                               'touch "$MARKER"\nexit 1\n')
+                npm.chmod(0o755)
+                sleep = binaries / 'sleep'
+                sleep.write_text('#!/bin/sh\nexit 0\n')
+                sleep.chmod(0o755)
+                env = {**os.environ, 'PATH': f'{binaries}:{os.environ["PATH"]}',
+                       'VISIBILITY_MODE': mode, 'MARKER': str(root / 'attempted')}
+                result = subprocess.run(['/bin/bash', '-eu', '-c', script],
+                                        cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if mode == 'retry' else 1, result.stderr)
+                self.assertIn('Waiting for registry visibility', result.stdout)
+                if mode == 'missing':
+                    self.assertIn('refusing to publish SDK', result.stderr)
+
     def test_preview_dispatches_standalone_trusted_npm_publisher(self):
         workflow = (ROOT / '.github/workflows/preview.yml').read_text()
         publish = workflow.split('\n  publish-sdk:\n', 1)[1].split('\n  announce:', 1)[0]

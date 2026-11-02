@@ -100,6 +100,29 @@ jobs:
             npm publish "$package" --access public --provenance --tag "${{ steps.channel.outputs.tag }}"
           done
 
+      # npm can acknowledge a publish before registry metadata exposes it.
+      # Do not make the SDK visible while its optional runtime is still missing.
+      - name: Wait for platform runtime registry visibility
+        working-directory: ${{ github.workspace }}
+        run: |
+          for package in sdk/npm/*; do
+            name=$(node -p "require('./$package/package.json').name")
+            version=$(node -p "require('./$package/package.json').version")
+            visible=false
+            for attempt in $(seq 1 20); do
+              if actual=$(npm view "$name@$version" version --prefer-online) && [ "$actual" = "$version" ]; then
+                visible=true
+                break
+              fi
+              echo "Waiting for registry visibility: $name@$version ($attempt/20)"
+              sleep 30
+            done
+            if [ "$visible" != true ]; then
+              echo "Runtime package is not visible, refusing to publish SDK: $name@$version" >&2
+              exit 1
+            fi
+          done
+
       - name: Publish with npm provenance
         run: |
           name=$(node -p "require('./package.json').name")
