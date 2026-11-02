@@ -803,10 +803,21 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_ACTIVE_PROVIDER",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
     ]
     .iter()
     .map(|k| (k.to_string(), std::env::var(k).ok()))
     .collect();
+
+    for key in [
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+    ] {
+        crate::env::remove_var(key);
+    }
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::subscription_catalog::apply_runtime_env();
@@ -982,13 +993,44 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
     ]
     .iter()
     .map(|k| (k.to_string(), std::env::var(k).ok()))
     .collect();
+    // The dev shell can export real keys for OpenAI-compatible profiles
+    // (NVIDIA, Fireworks, Together, ...). Auto detection would treat any of
+    // them as direct credentials, so save and clear every catalog profile's
+    // key env for the duration of this test.
+    let compat_key_envs: Vec<String> = provider_catalog::openai_compatible_profiles()
+        .iter()
+        .map(|profile| profile.api_key_env.to_string())
+        .collect();
+    let saved_compat_keys: Vec<(String, Option<String>)> = compat_key_envs
+        .iter()
+        .map(|k| (k.clone(), std::env::var(k).ok()))
+        .collect();
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    // A previously cached config (from another test or the ambient shell)
+    // can carry a `default_provider` named profile with credentials, which
+    // would make auto init succeed instead of failing. The temp home has no
+    // config, so drop the cached one.
+    crate::config::invalidate_config_cache();
     for key in [
         "JCODE_DEFERRED_AUTH_BOOTSTRAP",
         "ANTHROPIC_API_KEY",
@@ -999,7 +1041,24 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "CURSOR_API_KEY",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
     ] {
+        crate::env::remove_var(key);
+    }
+    for key in &compat_key_envs {
         crate::env::remove_var(key);
     }
 
@@ -1056,6 +1115,13 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
 
     for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+    for (key, value) in saved_compat_keys {
         if let Some(value) = value {
             crate::env::set_var(&key, value);
         } else {
