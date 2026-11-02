@@ -876,7 +876,9 @@ impl OpenRouterProvider {
                 "xhigh" => "high",
                 other => other,
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -887,7 +889,9 @@ impl OpenRouterProvider {
             } else {
                 effort
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
