@@ -140,6 +140,7 @@ jobs:
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
           python3 scripts/test_safety_budgets.py
+          python3 tests/test_bash_platform_guards.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
           python3 tests/test_preview_linux_hosted.py

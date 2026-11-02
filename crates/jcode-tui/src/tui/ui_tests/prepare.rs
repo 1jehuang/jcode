@@ -406,6 +406,10 @@ fn test_prepare_messages_does_not_guess_when_spawn_label_is_ambiguous() {
 
 #[test]
 fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
+    // Embedded update subjects can contain "batch" or "bash" too. This test
+    // only measures the live batch rows, not the independently rendered box.
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let state = TestState {
         display_messages: vec![DisplayMessage::user("build it")],
         status: ProcessingStatus::RunningTool("batch".to_string()),
@@ -466,6 +470,8 @@ fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
 
 #[test]
 fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() {
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let state = TestState {
         centered_mode: true,
         display_messages: vec![DisplayMessage::user("build it")],
