@@ -2082,13 +2082,14 @@ fn handle_server_event_inner(
                 app.remote_available_service_tiers = None;
                 app.usage_reset.openai_quota_rejected = false;
             }
-            // The initial Subscribe snapshot predates an early startup Message
-            // sent on the same ordered connection. Adopting its session id must
-            // not make that in-flight request idle or discard its retry payload.
+            // The initial history snapshot predates an early Message sent on
+            // the same ordered connection, including hidden reload continuations
+            // which have no pending_startup_prompt_echo. Adopting its session id
+            // must not make that in-flight request idle or discard its retry payload.
             // An actual session switch must still reset the old session's state.
             let preserve_startup_send = prev_session_id.is_none()
                 && !remote.has_loaded_history()
-                && app.pending_startup_prompt_echo.is_some()
+                && app.is_processing
                 && app.current_message_id.is_some();
 
             if session_changed {
