@@ -123,6 +123,7 @@ impl MultiProvider {
             ("ag", self.antigravity_provider().is_some()),
             ("ge", self.gemini_provider().is_some()),
             ("cu", self.cursor_provider().is_some()),
+            ("cp", self.cursor_acp_provider().is_some()),
             ("be", self.bedrock_provider().is_some()),
             ("or", self.openrouter_provider().is_some()),
         ]

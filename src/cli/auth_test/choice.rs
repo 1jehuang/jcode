@@ -50,10 +50,14 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
 ) -> Option<String> {
-    if matches!(choice, super::provider_init::ProviderChoice::Cursor) {
+    if matches!(
+        choice,
+        super::provider_init::ProviderChoice::Cursor
+            | super::provider_init::ProviderChoice::CursorAcp
+    ) {
         return Some(
-            "Skipped: the Cursor native agent transport is text-only in jcode (it does not expose \
-             tool calls over agent.v1.AgentService/Run). Basic provider smoke still validates chat."
+            "Skipped: Cursor owns tool execution in its native agent transport, so jcode does not \
+             expose a tool-call round trip for this provider. Basic provider smoke still validates chat."
                 .to_string(),
         );
     }
@@ -255,6 +259,17 @@ mod nvidia_nim_tool_smoke_tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn skips_cursor_acp_tool_smoke() {
+        let detail = tool_smoke_skip_detail_for_choice(
+            &super::super::provider_init::ProviderChoice::CursorAcp,
+            Some("composer-2.5[fast=true]"),
+        )
+        .expect("Cursor ACP should skip jcode tool smoke");
+
+        assert!(detail.contains("Cursor owns tool execution"));
     }
 }
 

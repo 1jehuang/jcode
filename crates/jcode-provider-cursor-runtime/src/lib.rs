@@ -641,7 +641,12 @@ impl Provider for CursorCliProvider {
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
                 model,
-                provider: "Cursor".to_string(),
+                // Distinguish the direct Cursor HTTPS API transport from the
+                // Cursor CLI ACP provider, which advertises its own routes as
+                // "Cursor ACP". The picker catalog (append_cursor_routes) uses
+                // the same label so `/model` and `jcode model --provider cursor`
+                // agree on the route provider name.
+                provider: "Cursor (API)".to_string(),
                 api_method: "cursor".to_string(),
                 available: true,
                 detail: String::new(),
