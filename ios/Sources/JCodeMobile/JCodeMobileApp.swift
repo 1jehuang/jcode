@@ -16,7 +16,7 @@ struct JCodeMobileApp: App {
             // the user returns instead of waiting for a receive to fail and
             // back off. Connection.start resyncs history on resubscribe, so
             // this is safe even when the socket survived the suspension.
-            if phase == .active, model.activeServer != nil, !model.isConnected {
+            if phase == .active, model.activeServer != nil, model.needsReconnect {
                 model.retryConnection()
             }
         }

@@ -21,7 +21,14 @@ struct TranscriptView: View {
 
     var body: some View {
         if entries.isEmpty && !isReasoning {
-            EmptyTranscript(onSuggestion: onSuggestion)
+            GeometryReader { viewport in
+                ScrollView {
+                    EmptyTranscript(onSuggestion: onSuggestion)
+                        .frame(minHeight: viewport.size.height)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollDismissesKeyboard(.interactively)
+            }
         } else {
             GeometryReader { viewport in
                 scroller(viewportHeight: viewport.size.height)
