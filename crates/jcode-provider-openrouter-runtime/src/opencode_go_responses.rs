@@ -11,7 +11,7 @@ use jcode_message_types::{
     ContentBlock, Message, Role, StreamEvent, ToolDefinition, sanitize_tool_id,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -26,7 +26,7 @@ const RESPONSES_MODELS: &[&str] = &[
 ];
 
 /// Wire tool name mapped from Jcode tools for Meta/Muse subscription attestation.
-pub(crate) fn to_wire_tool_name(name: &str) -> &str {
+fn to_wire_tool_name(name: &str) -> &str {
     match name {
         "bash" => "execute_command",
         "apply_patch" => "multi_edit",
@@ -34,12 +34,54 @@ pub(crate) fn to_wire_tool_name(name: &str) -> &str {
     }
 }
 
-/// Jcode internal tool name mapped back from wire tool names emitted by Meta/Muse models.
-pub(crate) fn from_wire_tool_name(name: &str) -> &str {
+/// Other names Meta/Muse models use for a renamed Jcode tool.
+fn wire_aliases(name: &str) -> &'static [&'static str] {
     match name {
-        "execute_command" | "exec_command" | "shellexec_command" => "bash",
-        "multi_edit" | "MultiEdit" => "apply_patch",
-        other => other,
+        "bash" => &["exec_command", "shellexec_command"],
+        "apply_patch" => &["MultiEdit"],
+        _ => &[],
+    }
+}
+
+/// Tool names renamed on the wire for one request. Only renames this request
+/// actually made are reversed, so a caller's own tool whose name matches a
+/// wire name or alias (a custom `exec_command`, say) keeps its identity, and a
+/// rename that would collide with a declared tool is skipped.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WireToolNames {
+    to_wire: HashMap<String, String>,
+    from_wire: HashMap<String, String>,
+}
+
+impl WireToolNames {
+    pub(crate) fn for_tools(tools: &[ToolDefinition]) -> Self {
+        let declared: HashSet<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        let mut names = Self::default();
+        for tool in tools {
+            let wire = to_wire_tool_name(&tool.name);
+            if wire == tool.name || declared.contains(wire) {
+                continue;
+            }
+            names.to_wire.insert(tool.name.clone(), wire.to_string());
+            names.from_wire.insert(wire.to_string(), tool.name.clone());
+            for alias in wire_aliases(&tool.name) {
+                if !declared.contains(alias) {
+                    names
+                        .from_wire
+                        .entry((*alias).to_string())
+                        .or_insert_with(|| tool.name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    fn wire<'a>(&'a self, name: &'a str) -> &'a str {
+        self.to_wire.get(name).map_or(name, String::as_str)
+    }
+
+    fn internal<'a>(&'a self, name: &'a str) -> &'a str {
+        self.from_wire.get(name).map_or(name, String::as_str)
     }
 }
 
@@ -64,6 +106,10 @@ pub(crate) fn model_uses_responses_api(
             .any(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Responses request is built from explicit per-request settings, including the wire tool names the stream must reverse"
+)]
 pub(crate) fn build_request(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -71,9 +117,10 @@ pub(crate) fn build_request(
     model: &str,
     reasoning_effort: Option<&str>,
     max_output_tokens: Option<u32>,
+    tool_names: &WireToolNames,
     sanitize_schema: impl Fn(&Value) -> Value,
 ) -> Value {
-    let input = build_input(messages);
+    let input = build_input(messages, tool_names);
     let mut request = serde_json::json!({
         "model": model,
         "input": input,
@@ -96,7 +143,7 @@ pub(crate) fn build_request(
                 .map(|tool| {
                     serde_json::json!({
                         "type": "function",
-                        "name": to_wire_tool_name(&tool.name),
+                        "name": tool_names.wire(&tool.name),
                         "description": tool.description,
                         "parameters": sanitize_schema(&tool.input_schema),
                         "strict": false,
@@ -109,7 +156,7 @@ pub(crate) fn build_request(
     request
 }
 
-fn build_input(messages: &[Message]) -> Vec<Value> {
+fn build_input(messages: &[Message], tool_names: &WireToolNames) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         match message.role {
@@ -178,7 +225,7 @@ fn build_input(messages: &[Message]) -> Vec<Value> {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "call_id": sanitize_tool_id(id),
-                                "name": to_wire_tool_name(name),
+                                "name": tool_names.wire(name),
                                 "arguments": arguments,
                             }));
                         }
@@ -205,6 +252,7 @@ pub(crate) struct ResponsesStream {
     buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
     tools: HashMap<String, ToolState>,
+    tool_names: WireToolNames,
     thinking: bool,
     ended: bool,
 }
@@ -218,9 +266,16 @@ impl ResponsesStream {
             buffer: Vec::new(),
             pending: Vec::new(),
             tools: HashMap::new(),
+            tool_names: WireToolNames::default(),
             thinking: false,
             ended: false,
         }
+    }
+
+    /// Reverse the wire renames the request for this stream made.
+    pub(crate) fn with_tool_names(mut self, tool_names: WireToolNames) -> Self {
+        self.tool_names = tool_names;
+        self
     }
 
     fn parse_event(&mut self, data: &str) {
@@ -379,7 +434,7 @@ impl ResponsesStream {
         if state.name.is_empty() {
             return;
         }
-        let internal_name = from_wire_tool_name(&state.name).to_string();
+        let internal_name = self.tool_names.internal(&state.name).to_string();
         self.pending.push(StreamEvent::ToolUseStart {
             id: sanitize_tool_id(if state.call_id.is_empty() {
                 fallback_id
@@ -618,6 +673,7 @@ mod tests {
             "gpt-5.6-luna",
             Some("high"),
             Some(128),
+            &WireToolNames::default(),
             Value::clone,
         );
         assert_eq!(request["model"], "gpt-5.6-luna");
@@ -646,6 +702,7 @@ mod tests {
             "muse-wonder-1.0",
             Some("high"),
             None,
+            &WireToolNames::default(),
             Value::clone,
         );
         assert_eq!(request["input"].as_array().unwrap().len(), 3);
@@ -665,26 +722,29 @@ mod tests {
         assert_eq!(request["model"], "muse-wonder-1.0");
     }
 
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition::new(
+            name,
+            "test tool",
+            serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+        )
+    }
+
+    fn returned_tool_name(names: WireToolNames, wire_name: &str) -> String {
+        let mut stream = ResponsesStream::new(futures::stream::empty()).with_tool_names(names);
+        stream.parse_event(&format!(
+            r#"{{"type":"response.function_call_arguments.done","item_id":"fc_1","call_id":"call_1","name":"{wire_name}","arguments":"{{}}"}}"#
+        ));
+        match stream.next_event() {
+            Some(StreamEvent::ToolUseStart { name, .. }) => name,
+            other => panic!("expected ToolUseStart, got {other:?}"),
+        }
+    }
+
     #[test]
     fn native_muse_tool_names_are_bidirectionally_translated() {
-        assert_eq!(to_wire_tool_name("bash"), "execute_command");
-        assert_eq!(to_wire_tool_name("apply_patch"), "multi_edit");
-        assert_eq!(to_wire_tool_name("read"), "read");
-        assert_eq!(to_wire_tool_name("edit"), "edit");
-        assert_eq!(to_wire_tool_name("write"), "write");
-
-        assert_eq!(from_wire_tool_name("execute_command"), "bash");
-        assert_eq!(from_wire_tool_name("exec_command"), "bash");
-        assert_eq!(from_wire_tool_name("shellexec_command"), "bash");
-        assert_eq!(from_wire_tool_name("multi_edit"), "apply_patch");
-        assert_eq!(from_wire_tool_name("MultiEdit"), "apply_patch");
-        assert_eq!(from_wire_tool_name("read"), "read");
-
-        let bash_tool = ToolDefinition::new(
-            "bash",
-            "Run shell command",
-            serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
-        );
+        let tools = [tool("bash"), tool("apply_patch"), tool("read")];
+        let names = WireToolNames::for_tools(&tools);
         let mut assistant = Message::assistant_text("");
         assistant.content = vec![ContentBlock::ToolUse {
             id: "call_1".into(),
@@ -694,29 +754,78 @@ mod tests {
         }];
         let request = build_request(
             &[assistant],
-            &[bash_tool],
+            &tools,
             "",
             "muse-spark-1.3",
             None,
             None,
+            &names,
             Value::clone,
         );
         assert_eq!(request["tools"][0]["name"], "execute_command");
+        assert_eq!(request["tools"][1]["name"], "multi_edit");
+        assert_eq!(request["tools"][2]["name"], "read");
         assert_eq!(request["input"][0]["name"], "execute_command");
 
-        // Verify incoming stream translation
-        let mut stream = ResponsesStream::new(futures::stream::empty());
-        stream.parse_event(
-            r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","call_id":"call_1","name":"execute_command","arguments":"{\"command\":\"ls\"}"}"#,
-        );
-        let event = stream.next_event().unwrap();
-        match event {
-            StreamEvent::ToolUseStart { id, name } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(name, "bash");
-            }
-            other => panic!("expected ToolUseStart with bash, got {other:?}"),
+        for (wire, internal) in [
+            ("execute_command", "bash"),
+            ("exec_command", "bash"),
+            ("shellexec_command", "bash"),
+            ("multi_edit", "apply_patch"),
+            ("MultiEdit", "apply_patch"),
+            ("read", "read"),
+        ] {
+            assert_eq!(returned_tool_name(names.clone(), wire), internal, "{wire}");
         }
+    }
+
+    #[test]
+    fn custom_tools_sharing_wire_names_keep_their_identity() {
+        // Custom tools named like Muse's wire aliases are advertised and
+        // dispatched under their own names.
+        let tools = [
+            tool("bash"),
+            tool("execute_command"),
+            tool("exec_command"),
+            tool("MultiEdit"),
+        ];
+        let names = WireToolNames::for_tools(&tools);
+        let request = build_request(
+            &[Message::user("hi")],
+            &tools,
+            "",
+            "muse-spark-1.3",
+            None,
+            None,
+            &names,
+            Value::clone,
+        );
+        let advertised: Vec<&str> = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        // `bash` is not renamed onto the custom `execute_command`, so no two
+        // tools share a wire name.
+        assert_eq!(
+            advertised,
+            ["bash", "execute_command", "exec_command", "MultiEdit"]
+        );
+        for name in ["bash", "execute_command", "exec_command", "MultiEdit"] {
+            assert_eq!(returned_tool_name(names.clone(), name), name);
+        }
+    }
+
+    #[test]
+    fn unrenamed_requests_reverse_nothing() {
+        // Without `bash` in the request, a returned `execute_command` is a
+        // tool of that name, not the shell.
+        let names = WireToolNames::for_tools(&[tool("read")]);
+        assert_eq!(
+            returned_tool_name(names, "execute_command"),
+            "execute_command"
+        );
     }
 
     #[test]

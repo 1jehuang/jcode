@@ -67,7 +67,7 @@ pub(super) async fn run_stream_with_retries(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
-    responses_api: bool,
+    responses_api: Option<super::opencode_go_responses::WireToolNames>,
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -130,7 +130,7 @@ pub(super) async fn run_stream_with_retries(
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
-            responses_api,
+            responses_api.clone(),
         )
         .await
         {
@@ -200,7 +200,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
-    responses_api: bool,
+    responses_api: Option<super::opencode_go_responses::WireToolNames>,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let _ = tx
@@ -211,7 +211,7 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let route = if azure_responses || responses_api {
+    let route = if azure_responses || responses_api.is_some() {
         "responses"
     } else {
         "chat/completions"
@@ -311,10 +311,11 @@ async fn stream_response(
         Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
             response.bytes_stream(),
         ))
-    } else if responses_api {
-        Box::pin(super::opencode_go_responses::ResponsesStream::new(
-            response.bytes_stream(),
-        ))
+    } else if let Some(tool_names) = responses_api {
+        Box::pin(
+            super::opencode_go_responses::ResponsesStream::new(response.bytes_stream())
+                .with_tool_names(tool_names),
+        )
     } else {
         Box::pin(OpenRouterStream::new(
             response.bytes_stream(),

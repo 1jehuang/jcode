@@ -53,6 +53,8 @@ impl Provider for OpenRouterProvider {
         let model = self.model.read().await.clone();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
+        let wire_tool_names =
+            responses_api.then(|| super::opencode_go_responses::WireToolNames::for_tools(tools));
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -240,6 +242,7 @@ impl Provider for OpenRouterProvider {
                 &model,
                 reasoning_effort.as_deref(),
                 self.max_tokens,
+                wire_tool_names.as_ref().unwrap_or(&Default::default()),
                 jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
             );
             if let Some(extra) = self.extra_body.as_ref()
@@ -328,7 +331,7 @@ impl Provider for OpenRouterProvider {
                 tx,
                 provider_pin,
                 model_for_stream,
-                responses_api,
+                wire_tool_names,
             )
             .await;
         });
@@ -958,7 +961,7 @@ impl OpenRouterProvider {
                 tx,
                 provider_pin,
                 model,
-                false,
+                None,
             )
             .await;
         });
