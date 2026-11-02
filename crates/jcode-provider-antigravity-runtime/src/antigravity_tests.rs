@@ -27,10 +27,14 @@ async fn live_gemini_38_effort_presets_emit_answers_and_thinking() {
             .unwrap();
         let mut answer = String::new();
         let mut thinking = String::new();
+        let mut thinking_deltas = 0usize;
         while let Some(event) = stream.next().await {
             match event.unwrap() {
                 StreamEvent::TextDelta(text) => answer.push_str(&text),
-                StreamEvent::ThinkingDelta(text) => thinking.push_str(&text),
+                StreamEvent::ThinkingDelta(text) => {
+                    thinking_deltas += 1;
+                    thinking.push_str(&text);
+                }
                 _ => {}
             }
         }
@@ -47,7 +51,7 @@ async fn live_gemini_38_effort_presets_emit_answers_and_thinking() {
             );
         }
         println!(
-            "{model}: answer={} bytes, thinking={} bytes",
+            "{model}: answer={} bytes, thinking={} bytes in {thinking_deltas} deltas",
             answer.len(),
             thinking.len()
         );

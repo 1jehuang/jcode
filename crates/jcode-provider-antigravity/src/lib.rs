@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+mod stream;
+pub use stream::{SseDecoder, StreamedTurn, parse_stream_chunk, stream_chunks_from_json};
+
 /// Known-good model id used when the backend default is unknown. The literal
 /// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
 /// always resolve it to a real model id before issuing a request.
@@ -101,6 +104,15 @@ pub fn fetch_models_api_url() -> String {
 /// Full URL for the `generateContent` RPC against the resolved endpoint.
 pub fn generate_content_api_url() -> String {
     format!("{}/v1internal:generateContent", antigravity_endpoint())
+}
+
+/// Full URL for the SSE `streamGenerateContent` RPC, which delivers reasoning
+/// and answer parts as they are produced.
+pub fn stream_generate_content_api_url() -> String {
+    format!(
+        "{}/v1internal:streamGenerateContent?alt=sse",
+        antigravity_endpoint()
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -736,6 +748,10 @@ mod endpoint_tests {
         assert_eq!(
             generate_content_api_url(),
             format!("{DEFAULT_ENDPOINT}/v1internal:generateContent")
+        );
+        assert_eq!(
+            stream_generate_content_api_url(),
+            format!("{DEFAULT_ENDPOINT}/v1internal:streamGenerateContent?alt=sse")
         );
     }
 

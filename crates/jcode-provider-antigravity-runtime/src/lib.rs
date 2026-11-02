@@ -10,10 +10,11 @@ use jcode_base::auth::antigravity as antigravity_auth;
 use jcode_message_types::{ConnectionPhase, Message, StreamEvent, ToolDefinition};
 use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL, PersistedCatalog,
-    X_GOOG_API_CLIENT, antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale,
-    catalog_model_detail, client_metadata_header, expand_effort_presets, generate_content_api_url,
-    generation_config_for_model, is_retryable_empty_turn, merge_antigravity_model_ids,
-    remap_unsupported_model,
+    SseDecoder, StreamedTurn, X_GOOG_API_CLIENT, antigravity_compatible_schema,
+    antigravity_user_agent, catalog_is_stale, catalog_model_detail, client_metadata_header,
+    expand_effort_presets, generation_config_for_model, is_retryable_empty_turn,
+    merge_antigravity_model_ids, parse_stream_chunk, remap_unsupported_model,
+    stream_chunks_from_json, stream_generate_content_api_url,
 };
 #[cfg(test)]
 use jcode_provider_antigravity::{
@@ -28,6 +29,7 @@ use jcode_provider_gemini::{
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -261,6 +263,7 @@ impl AntigravityProvider {
         system: &str,
         resume_session_id: Option<&str>,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
+        reasoning: &ReasoningSink,
     ) -> Option<Result<CodeAssistGenerateResponse>> {
         let resolved = self.resolve_model_for_request(model);
         let dialect = jcode_provider_antigravity::antigravity_dialect(&resolved);
@@ -281,6 +284,7 @@ impl AntigravityProvider {
                         resume_session_id,
                         false,
                         signature_policy,
+                        reasoning,
                     )
                     .await,
                 )
@@ -301,6 +305,7 @@ impl AntigravityProvider {
         resume_session_id: Option<&str>,
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
+        reasoning: &ReasoningSink,
     ) -> Result<CodeAssistGenerateResponse> {
         let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
         let project = match tokens
@@ -408,7 +413,7 @@ impl AntigravityProvider {
 
         let response = self
             .client
-            .post(generate_content_api_url())
+            .post(stream_generate_content_api_url())
             .bearer_auth(&tokens.access_token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::USER_AGENT, antigravity_user_agent())
@@ -433,10 +438,70 @@ impl AntigravityProvider {
             );
         }
 
-        response
-            .json()
-            .await
-            .context("Failed to decode Antigravity generateContent response")
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream"));
+        let mut turn = StreamedTurn::default();
+        if is_sse {
+            let mut decoder = SseDecoder::default();
+            let mut bytes = response.bytes_stream();
+            while let Some(next) = bytes.next().await {
+                let next = next.context("Antigravity stream interrupted")?;
+                for data in decoder.push(&next) {
+                    let chunk = parse_stream_chunk(&data).map_err(anyhow::Error::msg)?;
+                    reasoning.forward(turn.push_chunk(chunk)).await;
+                }
+            }
+            if let Some(data) = decoder.finish() {
+                let chunk = parse_stream_chunk(&data).map_err(anyhow::Error::msg)?;
+                reasoning.forward(turn.push_chunk(chunk)).await;
+            }
+        } else {
+            // A backend that ignores `alt=sse` answers with one JSON body.
+            let body: Value = response
+                .json()
+                .await
+                .context("Failed to decode Antigravity streamGenerateContent response")?;
+            for chunk in stream_chunks_from_json(body).map_err(anyhow::Error::msg)? {
+                reasoning.forward(turn.push_chunk(chunk)).await;
+            }
+        }
+        Ok(turn.finish())
+    }
+}
+
+/// Forwards reasoning text to the turn's event stream as soon as it arrives,
+/// so thinking renders live instead of once the whole turn is complete.
+struct ReasoningSink {
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    started: std::sync::atomic::AtomicBool,
+}
+
+impl ReasoningSink {
+    fn new(tx: mpsc::Sender<Result<StreamEvent>>) -> Self {
+        Self {
+            tx,
+            started: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn forward(&self, thinking: Vec<String>) {
+        for text in thinking {
+            if !self
+                .started
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = self
+                    .tx
+                    .send(Ok(StreamEvent::ConnectionPhase {
+                        phase: ConnectionPhase::Streaming,
+                    }))
+                    .await;
+            }
+            let _ = self.tx.send(Ok(StreamEvent::ThinkingDelta(text))).await;
+        }
     }
 }
 
@@ -493,6 +558,7 @@ impl Provider for AntigravityProvider {
             // fields: on that specific error, retry once with tool calls
             // downgraded to plain text. Content is preserved, the turn completes,
             // and the model re-signs its new calls.
+            let reasoning = ReasoningSink::new(tx.clone());
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
             let response = match provider
                 .generate_content(
@@ -503,6 +569,7 @@ impl Provider for AntigravityProvider {
                     resume_session_id.as_deref(),
                     false,
                     signature_policy,
+                    &reasoning,
                 )
                 .await
             {
@@ -522,6 +589,7 @@ impl Provider for AntigravityProvider {
                             &system,
                             resume_session_id.as_deref(),
                             signature_policy,
+                            &reasoning,
                         )
                         .await
                     {
@@ -552,6 +620,7 @@ impl Provider for AntigravityProvider {
                                 resume_session_id.as_deref(),
                                 false,
                                 signature_policy,
+                                &reasoning,
                             )
                             .await
                         {
@@ -585,6 +654,7 @@ impl Provider for AntigravityProvider {
                         resume_session_id.as_deref(),
                         true,
                         signature_policy,
+                        &reasoning,
                     )
                     .await
                 {
@@ -611,6 +681,7 @@ impl Provider for AntigravityProvider {
                         resume_session_id.as_deref(),
                         true,
                         signature_policy,
+                        &reasoning,
                     )
                     .await
                 {
@@ -682,8 +753,11 @@ impl Provider for AntigravityProvider {
                         .as_ref()
                         .filter(|sig| !sig.is_empty())
                         .cloned();
-                    if let Some(event) = part.take_text_event() {
-                        produced_output |= matches!(event, StreamEvent::TextDelta(_));
+                    // Reasoning was already streamed live by `generate_content`.
+                    if let Some(event) = part.take_text_event()
+                        && matches!(event, StreamEvent::TextDelta(_))
+                    {
+                        produced_output = true;
                         let _ = tx.send(Ok(event)).await;
                     }
                     if let Some(function_call) = part.function_call {
