@@ -31,6 +31,9 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    if !is_system {
+        app.publish_user_image_previews(&images);
+    }
     if recovery.is_some() {
         app.cloud_recovery_context = None;
         app.cloud_recovery_auto_pending = false;
