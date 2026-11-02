@@ -1018,7 +1018,10 @@ async fn ensure_success(response: reqwest::Response, action: &str) -> Result<req
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.text().await.unwrap_or_else(|error| { crate::logging::debug(&format!("Jade response body unavailable: {error}")); String::new() });
+    let body = response.text().await.unwrap_or_else(|error| {
+        crate::logging::debug(&format!("Jade response body unavailable: {error}"));
+        String::new()
+    });
     anyhow::bail!("jade relay {action} failed ({status}): {body}")
 }
 

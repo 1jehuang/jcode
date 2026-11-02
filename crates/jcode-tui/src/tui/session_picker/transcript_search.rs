@@ -205,7 +205,9 @@ impl TranscriptSearch {
     }
 
     pub(super) fn rank(&self, id: &str) -> SearchRank {
-        self.ranks.get(id).map_or_else(SearchRank::default, |rank| *rank)
+        self.ranks
+            .get(id)
+            .map_or_else(SearchRank::default, |rank| *rank)
     }
 
     pub(super) fn defers_metadata(&self) -> bool {

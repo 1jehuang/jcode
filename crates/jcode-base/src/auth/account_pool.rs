@@ -103,7 +103,10 @@ pub struct OAuthLogin {
 pub fn oauth_logins() -> Vec<OAuthLogin> {
     let mut logins = Vec::new();
     let openai_active = crate::auth::codex::active_account_label();
-    for account in crate::auth::codex::list_accounts().unwrap_or_else(|_| { crate::logging::debug("Could not list OpenAI accounts for account pool"); Vec::new() }) {
+    for account in crate::auth::codex::list_accounts().unwrap_or_else(|_| {
+        crate::logging::debug("Could not list OpenAI accounts for account pool");
+        Vec::new()
+    }) {
         logins.push(OAuthLogin {
             provider: "openai",
             active: openai_active.as_deref() == Some(account.label.as_str()),
@@ -112,7 +115,10 @@ pub fn oauth_logins() -> Vec<OAuthLogin> {
         });
     }
     let claude_active = crate::auth::claude::active_account_label();
-    for account in crate::auth::claude::list_accounts().unwrap_or_else(|_| { crate::logging::debug("Could not list Claude accounts for account pool"); Vec::new() }) {
+    for account in crate::auth::claude::list_accounts().unwrap_or_else(|_| {
+        crate::logging::debug("Could not list Claude accounts for account pool");
+        Vec::new()
+    }) {
         logins.push(OAuthLogin {
             provider: "claude",
             active: claude_active.as_deref() == Some(account.label.as_str()),

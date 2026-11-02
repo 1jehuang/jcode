@@ -19,7 +19,15 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<Session> {
     {
         return None;
     }
-    let config = crate::storage::jcode_dir().map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)?.join("cloud/ssh_config");
+    let config = crate::storage::jcode_dir()
+        .map_or_else(
+            |error| {
+                crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+                None
+            },
+            Some,
+        )?
+        .join("cloud/ssh_config");
     let command = crate::tui::cloud_git::script_command(
         Some(host),
         config.is_file().then_some(config.as_path()),
@@ -29,7 +37,13 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<Session> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)?;
+        .map_or_else(
+            |error| {
+                crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+                None
+            },
+            Some,
+        )?;
     let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output(
         command,
         Duration::from_secs(15),
@@ -43,15 +57,39 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<Session> {
 
 fn parse_transcript(bytes: &[u8]) -> Option<Session> {
     let split = bytes.iter().position(|b| *b == 0)?;
-    let dir = tempfile::tempdir().map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)?;
+    let dir = tempfile::tempdir().map_or_else(
+        |error| {
+            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+            None
+        },
+        Some,
+    )?;
     let path = dir.path().join("preview.json");
-    std::fs::write(&path, &bytes[..split]).map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)?;
+    std::fs::write(&path, &bytes[..split]).map_or_else(
+        |error| {
+            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+            None
+        },
+        Some,
+    )?;
     std::fs::write(
         crate::session::session_journal_path_from_snapshot(&path),
         &bytes[split + 1..],
     )
-    .map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)?;
-    Session::load_from_path(&path).map_or_else(|error| { crate::logging::debug(&format!("Cloud preview unavailable: {error}")); None }, Some)
+    .map_or_else(
+        |error| {
+            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+            None
+        },
+        Some,
+    )?;
+    Session::load_from_path(&path).map_or_else(
+        |error| {
+            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
+            None
+        },
+        Some,
+    )
 }
 
 #[cfg(test)]
@@ -60,7 +98,12 @@ mod tests {
 
     #[test]
     fn invalid_targets_are_rejected_before_remote_io() {
-        for (session, host) in [("", "host"), ("../private", "host"), ("session", ""), ("session", "-oProxyCommand=bad")] {
+        for (session, host) in [
+            ("", "host"),
+            ("../private", "host"),
+            ("session", ""),
+            ("session", "-oProxyCommand=bad"),
+        ] {
             assert!(load(session, host).is_none());
         }
     }
