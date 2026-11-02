@@ -89,11 +89,22 @@ fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
 }
 
 #[test]
-fn resume_card_starts_below_full_width_pinned_todos() {
+fn resume_card_stays_anchored_when_preview_bands_change() {
     let _lock = crate::tui::ui::render_state_test_lock();
     let session = make_session("pinned-placement", "fox", false, SessionStatus::Closed);
     let id = session.id.clone();
-    let mut picker = SessionPicker::new(vec![session]);
+    let mut other = session.clone();
+    other.id = "other-placement".into();
+    other.short_name = "other".into();
+    other.server_name = Some("cloud".into());
+    other.model = Some("different-model".into());
+    let mut picker = SessionPicker::new(vec![session, other]);
+    let selected = picker.find_item_index_for_session_id(&id).unwrap();
+    picker.list_state.select(Some(selected));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let initial_card = picker.reserved_panel_area.unwrap();
+    let initial_list = picker.last_list_area.unwrap();
     let payload = serde_json::json!({"todos": (0..20).map(|n| serde_json::json!({
         "id": format!("item-{n}"), "content": format!("Pinned work item {n}"),
         "status": "pending", "priority": "high", "phase": 1, "lane": format!("lane-{n}")
@@ -106,7 +117,6 @@ fn resume_card_starts_below_full_width_pinned_todos() {
             ..Default::default()
         },
     );
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
     terminal.draw(|frame| picker.render(frame)).unwrap();
     let (lines, _) = super::super::ui::viewport::pinned_todo_band_lines_for_payload(
         Some(&payload),
@@ -120,11 +130,18 @@ fn resume_card_starts_below_full_width_pinned_todos() {
         "fixture must exercise the pinned todo band"
     );
     let card = picker.reserved_panel_area.unwrap();
-    assert!(
-        card.y >= lines.len() as u16,
-        "resume card must not cover pinned todos: {card:?}"
-    );
+    assert_eq!(card, initial_card, "loaded todos must not move the card");
     assert_eq!(card.right(), 118);
+    for _ in 0..3 {
+        picker.next();
+        terminal.draw(|frame| picker.render(frame)).unwrap();
+        assert_eq!(picker.reserved_panel_area, Some(initial_card));
+        assert_eq!(picker.last_list_area, Some(initial_list));
+        picker.previous();
+        terminal.draw(|frame| picker.render(frame)).unwrap();
+        assert_eq!(picker.reserved_panel_area, Some(initial_card));
+        assert_eq!(picker.last_list_area, Some(initial_list));
+    }
 }
 
 #[test]

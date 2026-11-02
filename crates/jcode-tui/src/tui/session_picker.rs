@@ -1636,14 +1636,6 @@ impl SessionPicker {
             width: text_area.width,
             height: text_area.height - top_band,
         };
-        // Move the card below the actual pinned bands, not an estimate based
-        // on a different wrapping width. Short terminals retain a usable card.
-        if self.reserved_panel_area.is_some() {
-            self.reserved_panel_area = Some(canvas::panel_area(
-                frame.area(),
-                content_area.y.saturating_sub(frame.area().y),
-            ));
-        }
         let visible_height = content_area.height as usize;
 
         // Materialize only the visible window of wrapped lines instead of cloning

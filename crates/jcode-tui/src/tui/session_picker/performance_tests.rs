@@ -295,6 +295,44 @@ fn session_list_stripes_cover_whole_entries() {
 }
 
 #[test]
+fn session_selection_has_stable_rail_and_blended_background() {
+    let mut picker = SessionPicker::new((0..3).map(|id| session(id, 1)).collect());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let indices: Vec<_> = picker
+        .item_to_session
+        .iter()
+        .enumerate()
+        .filter_map(|(i, session)| session.map(|_| i))
+        .collect();
+    let mut positions = Vec::new();
+    for selected in indices {
+        picker.list_state.select(Some(selected));
+        terminal
+            .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut titles = Vec::new();
+        let mut rail_rows = 0;
+        for y in 1..29 {
+            if buffer[(1, y)].symbol() == "▌" {
+                rail_rows += 1;
+                assert_eq!(buffer[(1, y)].bg, rgb(36, 43, 42));
+                assert_eq!(buffer[(98, y)].bg, rgb(36, 43, 42));
+            }
+            let text: String = (1..99).map(|x| buffer[(x, y)].symbol()).collect();
+            if text.contains("Performance session") {
+                let x = (1..99).find(|&x| buffer[(x, y)].symbol() == "P").unwrap();
+                titles.push((x, y));
+            }
+        }
+        assert_eq!(rail_rows, 5);
+        assert_eq!(titles.len(), 3);
+        positions.push(titles);
+    }
+    assert!(positions.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
 fn virtualized_session_list_matches_full_ratatui_list() {
     let sessions: Vec<_> = (0..18)
         .map(|id| {

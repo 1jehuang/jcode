@@ -1,16 +1,17 @@
 //! Full conversation canvas with a bounded, positive-space resume control card.
 use super::*;
 
-pub(super) fn panel_area(area: Rect, header_rows: u16) -> Rect {
+pub(super) fn panel_area(area: Rect) -> Rect {
     if area.width == 0 || area.height == 0 {
         return Rect::new(area.x, area.y, 0, 0);
     }
     let width = ((area.width as u32 * 36 / 100) as u16)
         .clamp(30, 52)
         .min(area.width.saturating_sub(12).max(1));
-    let top = header_rows
-        .saturating_add(1)
-        .min(area.height.saturating_sub(4));
+    // Leave room for the shared product/session header, but never follow the
+    // selected transcript's variable prompt and todo bands. This is a control
+    // overlay: its position and size must stay put while browsing sessions.
+    let top = 5.min(area.height.saturating_sub(4));
     let available = area.height.saturating_sub(top).saturating_sub(2).max(1);
     let height = ((area.height as u32 * 3 / 5) as u16)
         .clamp(6, 24)
@@ -28,17 +29,12 @@ impl SessionPicker {
     pub(super) fn render_resume_canvas(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
-        // Measure after polling so a completed load moves the card this frame.
         let _ = self.poll_preview_load();
         self.ensure_selected_preview_loading();
-        let header_rows = self.selected_session().map_or(3, |session| {
-            super::super::ui::header::build_preview_header(session, area.width).len() as u16
-        });
-        let panel = panel_area(area, header_rows);
+        let panel = panel_area(area);
         self.reserved_panel_area = Some(panel);
         self.last_preview_area = Some(area);
         self.render_preview(frame, area);
-        let panel = self.reserved_panel_area.unwrap_or(panel);
 
         // Search and session selection share one bounded overlay card. Painting
         // it last leaves the underlying session's wrapping and scroll unchanged.

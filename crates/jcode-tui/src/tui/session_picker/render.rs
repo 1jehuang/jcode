@@ -756,6 +756,11 @@ impl SessionPicker {
             super::super::ui::native_scrollbar_visible(true, total_item_rows, inner_height);
 
         let list = List::new(items)
+            // Reserve the rail even on unselected rows so moving focus never
+            // shifts text. A quiet green-gray fill blends with the zebra rows.
+            .highlight_symbol("▌")
+            .repeat_highlight_symbol(true)
+            .highlight_spacing(ratatui::widgets::HighlightSpacing::Always)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -773,7 +778,8 @@ impl SessionPicker {
                 Style::default().fg(rgb(150, 150, 160))
             } else {
                 Style::default()
-                    .bg(rgb(40, 44, 52))
+                    .fg(rgb(140, 220, 160))
+                    .bg(rgb(36, 43, 42))
                     .add_modifier(Modifier::BOLD)
             });
 
