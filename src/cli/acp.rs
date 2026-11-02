@@ -100,8 +100,8 @@ struct SessionUiState {
     provider_name: Option<String>,
     model: Option<String>,
     available_models: Vec<String>,
-    available_model_routes: Vec<jcode_provider_core::ModelRoute>,
-    selected_route: Option<jcode_provider_core::RouteSelection>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+    selected_route: Option<crate::provider::RouteSelection>,
     reasoning_effort: Option<String>,
 }
 
@@ -177,7 +177,7 @@ fn apply_model_catalog(
     provider_name: Option<String>,
     provider_model: Option<String>,
     available_models: Vec<String>,
-    available_model_routes: Vec<jcode_provider_core::ModelRoute>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
     reasoning_effort: Option<String>,
 ) {
     if provider_model
@@ -244,7 +244,7 @@ impl SessionUiState {
         provider_name: Option<String>,
         provider_model: Option<String>,
         available_models: Vec<String>,
-        available_model_routes: Vec<jcode_provider_core::ModelRoute>,
+        available_model_routes: Vec<crate::provider::ModelRoute>,
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
@@ -2149,7 +2149,7 @@ mod tests {
     #[test]
     fn route_catalog_distinguishes_duplicate_models_by_provider() {
         let routes = ["OpenAI", "Other Gateway"].map(|provider| {
-            serde_json::from_value::<jcode_provider_core::ModelRoute>(json!({
+            serde_json::from_value::<crate::provider::ModelRoute>(json!({
                 "model": "shared-model", "provider": provider,
                 "api_method": "openai-compatible", "available": true, "detail": ""
             }))
@@ -2193,7 +2193,7 @@ mod tests {
             assert!(!automatic_failover);
             assert_eq!(
                 selection,
-                jcode_provider_core::RouteSelection::from_model_route(route)
+                crate::provider::RouteSelection::from_model_route(route)
             );
         }
         let mut refreshed = state.clone();
@@ -2211,7 +2211,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_switch_preserves_selection_on_daemon_failure() {
-        let routes: Vec<jcode_provider_core::ModelRoute> = ["first", "second"]
+        let routes: Vec<crate::provider::ModelRoute> = ["first", "second"]
             .map(|provider| {
                 serde_json::from_value(json!({ "model": "shared", "provider": provider,
                 "api_method": "openai-compatible", "available": true, "detail": "" }))
@@ -2230,7 +2230,7 @@ mod tests {
         let (client, server) = crate::transport::stream_pair().unwrap();
         let (reader, writer) = client.into_split();
         let session = DaemonSession::new("test".into(), reader, writer, 1).with_ui_state(initial);
-        let expected = jcode_provider_core::RouteSelection::from_model_route(&routes[1]);
+        let expected = crate::provider::RouteSelection::from_model_route(&routes[1]);
         let daemon = tokio::spawn(async move {
             let (reader, mut writer) = server.into_split();
             let mut reader = BufReader::new(reader);
@@ -2275,7 +2275,7 @@ mod tests {
 
     #[test]
     fn route_catalog_restore_and_push_do_not_guess_ambiguous_runtime() {
-        let routes: Vec<jcode_provider_core::ModelRoute> = ["openai-oauth", "openai-api"]
+        let routes: Vec<crate::provider::ModelRoute> = ["openai-oauth", "openai-api"]
             .map(|method| {
                 serde_json::from_value(json!({ "model": "shared", "provider": "OpenAI",
                 "api_method": method, "available": true, "detail": "" }))
@@ -2293,7 +2293,7 @@ mod tests {
         assert_eq!(state.current_model_id().as_deref(), Some("shared"));
         assert_eq!(choices.len(), 3);
         assert_ne!(choices[1].0, choices[2].0);
-        let pinned = jcode_provider_core::RouteSelection::from_model_route(&routes[1]);
+        let pinned = crate::provider::RouteSelection::from_model_route(&routes[1]);
         state.model = Some(pinned.routed_model_spec());
         let pinned_id = state.current_model_id().unwrap();
         assert_eq!(pinned_id, choices[2].0);

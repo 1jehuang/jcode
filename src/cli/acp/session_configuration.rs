@@ -5,7 +5,7 @@ use super::*;
 pub(super) const CONFIG_ID_MODEL: &str = "model";
 pub(super) const CONFIG_ID_EFFORT: &str = "reasoning_effort";
 
-fn route_id(selection: &jcode_provider_core::RouteSelection) -> String {
+fn route_id(selection: &crate::provider::RouteSelection) -> String {
     use sha2::{Digest, Sha256};
     // Catalog detail/usage can change without changing the route identity.
     let identity = serde_json::to_vec(&(
@@ -25,7 +25,7 @@ impl SessionUiState {
             return Some(route_id(selection));
         }
         let mut candidates = self.available_model_routes.iter().filter(|route| {
-            let selection = jcode_provider_core::RouteSelection::from_model_route(route);
+            let selection = crate::provider::RouteSelection::from_model_route(route);
             let routed = selection.routed_model_spec();
             (routed != route.model && routed == *model)
                 || (route.model == *model
@@ -38,7 +38,7 @@ impl SessionUiState {
         if candidates.next().is_none() {
             if let Some(route) = first {
                 return Some(route_id(
-                    &jcode_provider_core::RouteSelection::from_model_route(route),
+                    &crate::provider::RouteSelection::from_model_route(route),
                 ));
             }
         }
@@ -52,7 +52,7 @@ impl SessionUiState {
             .iter()
             .filter(|route| route.available)
         {
-            let selection = jcode_provider_core::RouteSelection::from_model_route(route);
+            let selection = crate::provider::RouteSelection::from_model_route(route);
             let id = route_id(&selection);
             if !choices.iter().any(|(existing, _)| existing == &id) {
                 choices.push((
@@ -93,7 +93,7 @@ impl SessionUiState {
             .available_model_routes
             .iter()
             .filter(|route| route.available)
-            .map(jcode_provider_core::RouteSelection::from_model_route)
+            .map(crate::provider::RouteSelection::from_model_route)
             .chain(self.selected_route.clone())
             .find(|selection| route_id(selection) == value);
         if let Some(selection) = selection {
