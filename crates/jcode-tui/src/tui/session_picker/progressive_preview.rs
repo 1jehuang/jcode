@@ -34,6 +34,25 @@ pub(super) fn publish_then_hydrate(
 }
 
 impl SessionPicker {
+    /// Leave a completed/disconnected receiver for the normal render pass to
+    /// drain, without spawning filesystem or workspace probes in UI tests.
+    #[cfg(test)]
+    pub(crate) fn set_pending_preview_for_test(&mut self, workspace: bool) {
+        if workspace {
+            let (_, receiver) = std::sync::mpsc::channel();
+            self.pending_workspace_load = Some(PendingWorkspaceLoad {
+                session_id: "selected".into(),
+                receiver,
+            });
+        } else {
+            let (_, receiver) = std::sync::mpsc::channel();
+            self.pending_preview_load = Some(PendingSessionPreviewLoad {
+                session_id: "selected".into(),
+                receiver,
+            });
+        }
+    }
+
     pub(super) fn poll_workspace_load(&mut self) -> bool {
         let Some(pending) = self.pending_workspace_load.as_ref() else {
             return false;
