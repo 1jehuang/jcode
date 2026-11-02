@@ -1243,7 +1243,8 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read/update todos and goal assessments. Initialize with phases, then patch by unique task name. \
+        "Use the todo tool very frequently. Read/update todos and goal assessments. \
+         Initialize with phases, then patch by unique task name. \
          Keep status current. Phases are sequential, lanes parallel, items ordered. \
          Block only for an indispensable action by someone else with no safe workaround: \
          name who must do what and why you cannot proceed. Uncertainty, task size, and \
