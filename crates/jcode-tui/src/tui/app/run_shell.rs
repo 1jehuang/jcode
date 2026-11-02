@@ -43,6 +43,27 @@ pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     interval
 }
 
+pub(crate) fn refresh_preview_redraw_timer(
+    state: &dyn TuiState,
+    period: &mut Duration,
+    interval: &mut tokio::time::Interval,
+) {
+    let pending = state.client_focused()
+        && state.session_picker_overlay().is_some_and(|picker| {
+            picker
+                .try_borrow()
+                .ok()
+                .is_some_and(|picker| picker.has_pending_preview_work())
+        });
+    if pending {
+        let desired = crate::tui::redraw_interval(state);
+        if desired < *period {
+            *period = desired;
+            *interval = redraw_timer(desired);
+        }
+    }
+}
+
 pub(super) fn status_spinner_interval() -> tokio::time::Interval {
     status_spinner_interval_after(STATUS_SPINNER_ONLY_INTERVAL)
 }
@@ -700,6 +721,11 @@ impl App {
                 }
             }
 
+            // Rendering can start a cold preview load. The cadence above was
+            // computed before that receiver existed, so do not wait an entire
+            // idle/spinner tick before noticing the new asynchronous work.
+            refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
+
             if self.should_quit {
                 break;
             }
@@ -947,6 +973,8 @@ impl App {
                     // When unfocused and throttled, leave needs_redraw set so the
                     // pending update is coalesced into the next allowed frame.
                 }
+
+                refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
 
                 if self.should_quit {
                     break 'outer;
