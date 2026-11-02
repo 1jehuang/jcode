@@ -134,7 +134,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 
-pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+mod session_manager;
+pub(super) use session_manager::SessionManager;
+pub(super) type SessionAgents = Arc<SessionManager>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -187,11 +189,11 @@ async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmS
 /// lifecycle operation. Server-owned sessions all share the long-running
 /// server PID, so leaving the marker behind makes presence UIs count the
 /// removed session forever.
-pub(super) async fn remove_session_entry<T>(
-    sessions: &Arc<RwLock<HashMap<String, T>>>,
+pub(super) async fn remove_session_entry(
+    sessions: &SessionAgents,
     session_id: &str,
-) -> Option<T> {
-    let removed = sessions.write().await.remove(session_id);
+) -> Option<Arc<Mutex<Agent>>> {
+    let removed = sessions.remove(session_id).await;
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
         crate::session_env::remove_session_env(session_id);
@@ -201,8 +203,8 @@ pub(super) async fn remove_session_entry<T>(
 
 /// Keep session presence locked until the synchronous registry update finishes.
 /// Otherwise a stale attached client could recreate credentials after teardown.
-pub(super) async fn set_live_session_env<T>(
-    sessions: &Arc<RwLock<HashMap<String, T>>>,
+pub(super) async fn set_live_session_env(
+    sessions: &SessionAgents,
     session_id: &str,
     env: HashMap<String, String>,
 ) -> anyhow::Result<()> {
@@ -639,7 +641,7 @@ use self::state::{
     queue_soft_interrupt_for_session, register_background_tool_signal,
     register_session_event_sender, register_session_interrupt_queue, remove_background_tool_signal,
     remove_session_interrupt_queue, rename_background_tool_signal, rename_session_interrupt_queue,
-    session_event_fanout_sender, unregister_session_event_sender,
+    unregister_session_event_sender,
 };
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
@@ -729,7 +731,7 @@ pub struct Server {
     /// Broadcast channel for streaming events to all subscribers
     event_tx: broadcast::Sender<ServerEvent>,
     /// Active sessions (session_id -> Agent)
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: SessionAgents,
     /// Current processing state
     is_processing: Arc<RwLock<bool>>,
     /// Session ID for the default session
@@ -833,7 +835,7 @@ impl Server {
             gateway_config_override: None,
             identity,
             event_tx,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(SessionManager::new()),
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
@@ -957,6 +959,14 @@ impl Server {
         let mut swarms_to_persist = HashSet::new();
 
         for session_id in sessions_to_restore {
+            let runtime_slot = self.sessions.reserve(&session_id).await;
+            if runtime_slot.existing().await.is_some() {
+                continue;
+            }
+            if let Err(error) = runtime_slot.ensure_vacant() {
+                crate::logging::warn(&format!("Cannot recover session {session_id}: {error}"));
+                continue;
+            }
             stats.candidates += 1;
             let session = match crate::session::Session::load(&session_id) {
                 Ok(session) => session,
@@ -1008,13 +1018,13 @@ impl Server {
                 provider, registry, session, None,
             )));
 
-            {
-                let mut sessions = self.sessions.write().await;
-                if sessions.contains_key(&session_id) {
-                    continue;
-                }
-                sessions.insert(session_id.clone(), Arc::clone(&agent));
+            if let Err(error) = runtime_slot.publish(Arc::clone(&agent)).await {
+                crate::logging::warn(&format!(
+                    "Cannot publish recovered session {session_id}: {error}"
+                ));
+                continue;
             }
+            drop(runtime_slot);
 
             {
                 let agent_guard = agent.lock().await;
@@ -1124,6 +1134,15 @@ impl Server {
             let recovery_reload_id = stored_recovery_record.map(|record| record.reload_id);
 
             tokio::spawn(async move {
+                let lease = match agent.lock().await.claim_server_turn() {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        crate::logging::info(&format!(
+                            "Skipping duplicate startup recovery for {session_id}: {error}"
+                        ));
+                        return;
+                    }
+                };
                 if let Some(reload_id) = recovery_reload_id.as_deref() {
                     reload_trace::record_value(
                         reload_id,
@@ -1167,18 +1186,32 @@ impl Server {
                     )),
                 }
 
-                let event_tx = self::state::session_event_fanout_sender(
+                let (fallback, _) = mpsc::unbounded_channel();
+                let events = self::state::TurnEventChannel::new(
                     session_id.clone(),
                     Arc::clone(&recover_swarm_members),
+                    fallback,
+                    &lease,
                 );
-                let result = self::turn_failover::process_server_initiated_message(
+                let result = self::turn_failover::process_reserved_message_with_server_failover(
                     Arc::clone(&agent),
+                    &lease,
                     "",
                     vec![],
                     Some(reminder),
-                    event_tx,
+                    events.sender(),
+                    true,
                 )
                 .await;
+
+                let terminal = match &result {
+                    Ok(()) => ServerEvent::Done { id: 0 },
+                    Err(error) => ServerEvent::Error {
+                        id: 0,
+                        message: crate::util::format_error_chain(error),
+                        retry_after_secs: None,
+                    },
+                };
 
                 let (status, detail) = match result {
                     Ok(()) => {
@@ -1241,6 +1274,8 @@ impl Server {
                 } {
                     persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
                 }
+                let _ = events.sender().send(terminal);
+                events.finish().await;
             });
         }
 
@@ -2064,7 +2099,7 @@ impl Server {
         swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
         swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-        sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
         event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
         event_counter: Arc<std::sync::atomic::AtomicU64>,
