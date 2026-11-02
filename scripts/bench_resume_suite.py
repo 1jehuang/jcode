@@ -60,6 +60,7 @@ def execute(command, root, env, log_path):
                 sys.stdout.write(line)
                 sys.stdout.flush()
                 log.write(line)
+                log.flush()
                 output.append(line)
             code = process.wait()
     if code:
@@ -95,6 +96,9 @@ def main():
                                 ["JUSTRUST_REMOTE", "JCODE_PERF_TIER", "JCODE_CONFIG"]}}
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     rows = []
+    # An interrupted rerun must not leave an older completed result looking fresh.
+    (output_dir / "results.json").write_text(json.dumps(
+        {"metadata": metadata, "rows": rows, "status": "running"}, indent=2) + "\n")
     try:
         if not args.skip_check:
             execute(["justrust", "check", "-p", "jcode-tui", "--tests", "--profile", args.profile],

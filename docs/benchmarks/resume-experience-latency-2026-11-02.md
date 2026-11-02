@@ -59,7 +59,47 @@ python3 scripts/bench_resume_suite.py --samples 20 --binary /absolute/path/to/jc
 python3 -m unittest scripts/test_bench_resume_suite.py
 ```
 
-The runner uses hosted `justrust`, the `selfdev` profile, serial ignored tests, and retains unfiltered raw logs plus `metadata.json` and `results.json` under `target/resume-latency/`. It records revision, dirty state, profile, sample request, and measurement boundaries. Cargo `--config env.JCODE_RESUME_BENCH_SAMPLES` forwards sample configuration to hosted test execution rather than relying on arbitrary remote environment forwarding. Optional PTY measurements retain their separate raw logs. A failed command or absent benchmark rows fails the suite instead of reporting empty success.
+The runner uses hosted `justrust`, the `selfdev` profile (currently `opt-level = 0`, not an optimized distribution build), serial ignored tests, and retains unfiltered raw logs plus `metadata.json` and `results.json` under `target/resume-latency/`. It records revision, dirty state, profile, sample request, and measurement boundaries. Cargo `--config env.JCODE_RESUME_BENCH_SAMPLES` forwards sample configuration to hosted test execution rather than relying on arbitrary remote environment forwarding. Optional PTY measurements retain their separate raw logs. A failed command or absent benchmark rows fails the suite instead of reporting empty success.
+
+## Baseline from the expanded suite
+
+Recorded November 2, 2026 at 23:37 UTC, revision `b7c71bd15` with a dirty working tree, hosted Linux execution, `selfdev` (`opt-level = 0`), 20 observations per metric. This is an exploratory baseline, not an old/new optimization claim or reliable tail estimate. All 28 scenario rows completed and all 160 disk/search attempts succeeded with no timeouts. Raw structured output is at `target/resume-latency/2026-11-02-expanded-baseline-retry/results.json` in this checkout.
+
+Resident markdown navigation at 120x40, milliseconds, p50:
+
+| History | Cold handler to frame | Warm revisit | Width-change frame | Warm preview scroll |
+| --- | ---: | ---: | ---: | ---: |
+| 1 turn | 1.089 | 0.213 | 1.067 | 0.228 |
+| 20 turns | 8.793 | 0.227 | 8.767 | 0.244 |
+| 150 turns | 61.009 | 0.235 | 60.941 | 0.253 |
+
+Other surfaces, milliseconds:
+
+| Measurement | p50 | p95 |
+| --- | ---: | ---: |
+| Loading placeholder frame, 120x40 | 0.122 | 0.132 |
+| List frame, 100 sessions | 0.339 | 0.355 |
+| List frame, 1,000 sessions | 0.362 | 0.373 |
+| List frame, 5,000 sessions | 0.468 | 0.476 |
+| Picker construction, 5,000 sessions, fixture creation excluded | 7.483 | 7.648 |
+| Evicted 20-turn preview rebuild, renderer caches may be warm | 6.453 | 6.468 |
+| Ten navigation events, a frame each, total throughput | 63.465 | 63.633 |
+| Ten navigation events, one final frame, total throughput | 6.333 | 6.352 |
+| 800-line tool-output first frame, 120x40 | 8.287 | 8.490 |
+| Jcode snapshot to transcript data ready, modeled polling | 16.117 | 16.133 |
+| Codex JSONL to transcript data ready, modeled polling | 16.111 | 16.117 |
+| Jcode complete transcript search, including debounce | 193.732 | 193.745 |
+| Codex complete transcript search, including debounce | 176.876 | 176.893 |
+
+Interpretation and next targets:
+
+1. **Cold preparation and width invalidation still scale with transcript size.** A 150-turn cold preview is about 61ms at all three geometries, while cached revisits are below 0.5ms. This supports prioritizing viewport-bounded preparation, incremental work, or safely scheduled prefetch rather than further list-drawing micro-optimization. These are hypotheses to test, not changes delivered by this benchmark addition.
+2. **Avoid preparing intermediate selections unnecessarily.** The burst experiment exposes roughly ten times the total work when every intermediate selection is rendered. It does not establish live key-repeat latency or prove the production scheduler currently coalesces those events.
+3. **Search readiness is a different budget from input responsiveness.** The production debounce is 150ms. This fixture's 177–194ms search wall times include that debounce, worker work, and modeled 16ms polling. Active caller wall time was only about 0.11–0.90ms, which is not worker CPU time.
+4. **Disk data readiness is quantized by this harness's poll model.** Approximately 16ms does not mean the storage read itself takes 16ms. Use live selection/transcript stage diagnostics to measure the actual application wait.
+5. **Tail exploration needs more runs.** One narrow edit-diff cold frame reached 20.336ms despite a 5.654ms median. Keep max and threshold counts visible rather than relying only on smooth medians.
+
+Hosted run IDs: matrix `20261102-153718864-2120330`, disk/search `20261102-153739520-2121950`. An earlier full `--tests` selfdev check passed as `20261102-153504539-2099845`; its following benchmark process was interrupted by an unrelated shared-daemon reload and was not used as the completed baseline.
 
 ## Still missing, deliberately
 
