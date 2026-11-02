@@ -307,8 +307,13 @@ impl SessionPicker {
         // The final span of each row is reserved before truncating its left side.
         let mut detail_spans = vec![Span::raw("  ")];
         if let Some(dir) = session.working_dir.as_deref() {
+            let directory_icon = if session.server_icon.as_deref() == Some("☁") {
+                "☁"
+            } else {
+                "📁"
+            };
             detail_spans.extend(Self::highlight_spans(
-                &format!("📁 {}", compact_dir(dir)),
+                &format!("{directory_icon} {}", compact_dir(dir)),
                 &highlight_tokens,
                 Style::default().fg(if same_dir { same_dir_clr } else { dim }),
             ));

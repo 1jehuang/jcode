@@ -1767,7 +1767,10 @@ fn live_claude_row_has_age_only_and_closed_claude_cannot_take_over() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!rendered.contains("live Claude"), "rendered row: {rendered}");
+    assert!(
+        !rendered.contains("live Claude"),
+        "rendered row: {rendered}"
+    );
     assert!(rendered.contains("ago"), "rendered row: {rendered}");
 
     picker
@@ -3100,6 +3103,23 @@ fn test_search_mode_ctrl_u_clears_query() {
         picker.search_active,
         "Ctrl+U clears text but stays in search"
     );
+}
+
+#[test]
+fn cloud_session_directory_uses_cloud_icon() {
+    let mut session = make_session("cloud_repo", "cloud_repo", false, SessionStatus::Closed);
+    session.working_dir = Some("/home/jeremy/justrust-clean-room".into());
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let local_rows = picker.render_session_item_lines(&session, false);
+    assert!(line_text(&local_rows[1]).contains("📁"));
+
+    session.server_icon = Some("☁".into());
+    session.server_name = Some("cloud: jcode-cloud".into());
+    let cloud_rows = picker.render_session_item_lines(&session, false);
+    let directory = line_text(&cloud_rows[1]);
+    assert!(directory.contains("☁"));
+    assert!(!directory.contains("📁"));
+    assert!(directory.contains("justrust-clean-room"));
 }
 
 #[test]
