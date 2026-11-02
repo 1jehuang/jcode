@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 struct BrowserFixture {
-    _env_guard: std::sync::MutexGuard<'static, ()>,
+    _env_guard: jcode_base::storage::TestEnvGuard,
     temp: tempfile::TempDir,
     previous_home: Option<std::ffi::OsString>,
     previous_session: Option<std::ffi::OsString>,
