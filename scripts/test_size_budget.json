@@ -5,7 +5,7 @@
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1657,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1306,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1310,
-    "crates/jcode-app-core/src/tool/bash_tests.rs": 1245,
+    "crates/jcode-app-core/src/tool/bash_tests.rs": 1256,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1439,
     "crates/jcode-app-core/src/tool/tests.rs": 1976,
     "crates/jcode-base/src/compaction_tests.rs": 1269,
