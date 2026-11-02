@@ -43,10 +43,7 @@ mod debug_testers;
 mod durable_state;
 mod group_transfer;
 mod headless;
-pub use group_transfer::{
-    GroupTransferBundle, GroupTransferSelection, GroupTransferSession,
-    handle as handle_group_transfer_command,
-};
+pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTransferSession};
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
 mod jade_relay;
