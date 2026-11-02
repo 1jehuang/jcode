@@ -43,6 +43,7 @@ mod performance;
 #[cfg(test)]
 mod performance_tests;
 mod preview_chrome;
+mod preview_metadata;
 mod preview_refresh;
 mod render;
 mod saved_placement;
@@ -199,6 +200,8 @@ struct PreviewExtras {
     todos_payload: Option<String>,
     /// Durable selected-session widget facts, never the current App snapshot.
     info_data: Option<super::info_widget::InfoWidgetData>,
+    /// Freshness of the selected-session facts, not the transcript render cache.
+    loaded_at: Option<std::time::Instant>,
 }
 
 struct LoadedSessionPreview {
@@ -973,10 +976,15 @@ impl SessionPicker {
             let cloud_host = crate::storage::read_session_lease(session_id)
                 .and_then(|lease| lease.away_host)
                 .filter(|host| !host.trim().is_empty());
-            let session = if let Some(host) = cloud_host {
-                cloud_preview::load(session_id, &host)?
+            let (session, remote_snapshot) = if let Some(host) = cloud_host.as_deref() {
+                cloud_preview::load(session_id, host)?
             } else {
-                Session::load(session_id).ok()?
+                (Session::load(session_id).ok()?, None)
+            };
+            let info_data = if cloud_host.is_some() {
+                preview_chrome::persisted_info_from_snapshot(&session, remote_snapshot)
+            } else {
+                preview_chrome::persisted_info(&session)
             };
             let (messages, hidden_prompts) = build_messages_preview_with_offset(&session);
             return Some(LoadedSessionPreview {
@@ -984,7 +992,8 @@ impl SessionPicker {
                 extras: PreviewExtras {
                     hidden_prompts,
                     todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
-                    info_data: Some(preview_chrome::persisted_info(&session)),
+                    info_data: Some(info_data),
+                    loaded_at: None,
                 },
             });
         }
@@ -1088,27 +1097,23 @@ impl SessionPicker {
         let Some(session_ref) = self.selected_session_ref() else {
             return;
         };
-        let needs_preview = self
-            .session_by_ref(session_ref)
-            .map(|s| s.messages_preview.is_empty())
-            .unwrap_or(false);
-        if !needs_preview {
-            return;
-        }
-
-        let Some((cache_session_id, resume_target, external_path)) =
+        let Some((cache_session_id, resume_target, external_path, working_dir, is_cloud)) =
             self.session_by_ref(session_ref).map(|s| {
                 (
                     s.id.clone(),
                     s.resume_target.clone(),
                     s.external_path.clone(),
+                    s.working_dir.clone(),
+                    s.server_icon.as_deref() == Some("☁"),
                 )
             })
         else {
             return;
         };
 
-        if self.preview_extras.contains_key(&cache_session_id)
+        if self.preview_extras.get(&cache_session_id).is_some_and(|extras| {
+            extras.loaded_at.is_none_or(|at| at.elapsed() < Duration::from_secs(15))
+        })
             || self.preview_load_failures.contains(&cache_session_id)
             || self
                 .pending_preview_load
@@ -1123,7 +1128,19 @@ impl SessionPicker {
         let _ = std::thread::Builder::new()
             .name("jcode-session-preview-loader".to_string())
             .spawn(move || {
-                let preview = Self::load_preview_for_target(resume_target, external_path);
+                let session_id = match &resume_target {
+                    ResumeTarget::JcodeSession { session_id } => Some(session_id.as_str()),
+                    _ => None,
+                };
+                let target = preview_metadata::WorkspaceTarget::for_identity(
+                    session_id, working_dir, is_cloud,
+                );
+                let mut preview = Self::load_preview_for_target(resume_target, external_path);
+                if let Some(preview) = preview.as_mut() {
+                    let data = preview.extras.info_data.get_or_insert_with(Default::default);
+                    preview_metadata::hydrate_workspace(data, &target);
+                    preview.extras.loaded_at = Some(std::time::Instant::now());
+                }
                 let _ = tx.send(preview);
             });
         self.pending_preview_load = Some(PendingSessionPreviewLoad {
@@ -1738,8 +1755,7 @@ impl SessionPicker {
                 .pending_preview_load
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
-        self.preview_load_failures
-            .contains(&session.id)
+        (session.messages_preview.is_empty() && self.preview_load_failures.contains(&session.id))
             .hash(&mut h);
         is_loading.hash(&mut h);
         diff_mode.hash(&mut h);

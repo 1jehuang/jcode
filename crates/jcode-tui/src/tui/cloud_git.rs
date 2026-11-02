@@ -121,6 +121,19 @@ async fn probe(command: tokio::process::Command) -> RepoState {
     probe_with_timeout(command, Duration::from_secs(12)).await
 }
 
+/// Read a specific workspace without consulting the active TUI attachment.
+/// Used by selected-session previews on their background loader thread.
+pub(crate) async fn probe_workspace(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+) -> RepoState {
+    if dir.is_empty() || host.is_some_and(|host| host.is_empty() || host.starts_with('-')) {
+        return RepoState::Unavailable;
+    }
+    probe(command(host, config, dir)).await
+}
+
 async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration) -> RepoState {
     match bounded_output(command, deadline, 1024 * 1024).await {
         Some((status, _)) if status.code() == Some(42) => RepoState::NoRepository,

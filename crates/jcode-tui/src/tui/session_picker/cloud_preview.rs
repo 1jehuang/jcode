@@ -7,9 +7,17 @@ base="${JCODE_HOME:-$HOME/.jcode}/sessions/$1"
 cat -- "$base.json" || exit 1
 printf '\000'
 if [ -f "$base.journal.jsonl" ]; then cat -- "$base.journal.jsonl" || exit 1; fi
+printf '\000'
+state="${JCODE_HOME:-$HOME/.jcode}/state"
+if [ -n "$JCODE_RUNTIME_DIR" ]; then state="$JCODE_RUNTIME_DIR/durable-state"; fi
+telemetry="$state/session-telemetry/$1.json"
+if [ -f "$telemetry" ]; then cat -- "$telemetry" || :; fi
 "#;
 
-pub(super) fn load(session_id: &str, host: &str) -> Option<Session> {
+pub(super) fn load(
+    session_id: &str,
+    host: &str,
+) -> Option<(Session, Option<crate::session_telemetry::SessionTelemetry>)> {
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -52,7 +60,22 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<Session> {
     if !status.success() {
         return None;
     }
-    parse_transcript(&bytes)
+    parse_preview(&bytes)
+}
+
+fn parse_preview(
+    bytes: &[u8],
+) -> Option<(Session, Option<crate::session_telemetry::SessionTelemetry>)> {
+    let first = bytes.iter().position(|b| *b == 0)?;
+    // Old hosts and missing/malformed optional telemetry still yield a usable
+    // transcript. Neither case is permission to consult the local sidecar.
+    let second = bytes[first + 1..]
+        .iter()
+        .position(|b| *b == 0)
+        .map(|offset| first + 1 + offset);
+    let session = parse_transcript(&bytes[..second.unwrap_or(bytes.len())])?;
+    let telemetry = second.and_then(|split| serde_json::from_slice(&bytes[split + 1..]).ok());
+    Some((session, telemetry))
 }
 
 fn parse_transcript(bytes: &[u8]) -> Option<Session> {
@@ -95,6 +118,36 @@ fn parse_transcript(bytes: &[u8]) -> Option<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_preview_hydrates_only_its_remote_telemetry() {
+        let session = Session::create_with_id("remote_telemetry_preview".into(), None, None);
+        let mut bytes = serde_json::to_vec(&session).unwrap();
+        bytes.extend_from_slice(b"\0\0");
+        let telemetry = serde_json::json!({
+            "session_id": session.id,
+            "model": session.model,
+            "provider": session.provider_key,
+            "measured_at": chrono::Utc::now(),
+            "context_tokens": 12_345,
+            "context_limit": 100_000,
+            "compaction": null
+        });
+        bytes.extend_from_slice(&serde_json::to_vec(&telemetry).unwrap());
+        let (loaded, snapshot) = parse_preview(&bytes).unwrap();
+        let data = preview_chrome::persisted_info_from_snapshot(&loaded, snapshot);
+        assert_eq!(data.observed_context_tokens, Some(12_345));
+        assert_eq!(data.context_limit, Some(100_000));
+        assert!(data.historical_context);
+
+        let end = bytes.iter().rposition(|b| *b == 0).unwrap() + 1;
+        bytes.truncate(end);
+        bytes.extend_from_slice(b"malformed optional telemetry");
+        let (loaded, snapshot) = parse_preview(&bytes).unwrap();
+        assert!(snapshot.is_none());
+        let data = preview_chrome::persisted_info_from_snapshot(&loaded, snapshot);
+        assert!(data.observed_context_tokens.is_none());
+    }
 
     #[test]
     fn invalid_targets_are_rejected_before_remote_io() {
