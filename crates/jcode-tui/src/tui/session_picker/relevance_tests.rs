@@ -303,3 +303,60 @@ fn optimized_literal_rank_preserves_unicode_and_punctuation_boundaries() {
         std::borrow::Cow::Borrowed(_)
     ));
 }
+
+#[test]
+fn retyped_wake_prompt_beats_incidental_literal_transcript_hits() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("transcript.json");
+    // A huge unrelated session can contain every query word, but not together.
+    std::fs::write(&path, r#"{"text":"do unrelated we unrelated have unrelated logs unrelated of unrelated how unrelated long unrelated it unrelated takes unrelated to unrelated conenct unrelated internet unrelated after unrelated wake"}"#).unwrap();
+    let mut target = session(
+        "wake",
+        "Network resume timing",
+        100,
+        &temp.path().join("absent.json"),
+    );
+    target.first_user_prompt = Some("do we have logs of how long it takes to connect to internet after wake from msleep? happened just now and seemed fast".into());
+    let unrelated = session("cache", "Cache miss investigation", 0, &path);
+    let mut picker = SessionPicker::new(vec![unrelated, target]);
+    for query in [
+        "do we have logs of how long",
+        "do we have logs ofhow long",
+        "do we have logs of how long it takes to conenct to internet after wake",
+        "do we have logs of how long it takes to connect to internet after wake from msleep?",
+    ] {
+        picker.search_query = query.into();
+        picker.rebuild_items();
+        wait(&mut picker);
+        assert_eq!(
+            ids(&picker).first().map(String::as_str),
+            Some("wake"),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn opening_prompt_evidence_requires_a_local_multiword_match() {
+    assert_eq!(
+        opening_prompt_rank(
+            "do something we something have something logs",
+            "do we have logs"
+        ),
+        0
+    );
+    assert_eq!(opening_prompt_rank("logs about wake", "logs wake"), 0);
+    assert_eq!(
+        opening_prompt_rank(
+            "unrelated discussion about caches",
+            "do we have logs of how long"
+        ),
+        0
+    );
+    assert!(
+        opening_prompt_rank(
+            "DO we have logs of how long?",
+            "do we have logs of how long"
+        ) > 0
+    );
+}

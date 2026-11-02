@@ -16,10 +16,12 @@ use std::time::{Duration, Instant};
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
-/// Literal evidence always outranks typo-only evidence. Within that tier,
-/// reward metadata hits and whole words instead of unrelated session recency.
+/// A close contiguous opening request outranks incidental transcript evidence.
+/// Otherwise literal evidence outranks typo-only evidence, then metadata and
+/// whole words break ties instead of unrelated session recency.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct SearchRank {
+    opening_prompt: usize,
     literal: bool,
     intent_terms: usize,
     exact_field: bool,
@@ -56,6 +58,7 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
         }
     }
     SearchRank {
+        opening_prompt: 0,
         literal: metadata_terms == tokens.len(),
         intent_terms: 0,
         exact_field: false,
@@ -130,6 +133,55 @@ struct Candidate {
     search_index: String,
     missing_tokens: Vec<String>,
     exact_field: bool,
+    opening_prompt: String,
+}
+
+// A retyped request is stronger evidence than words scattered throughout a
+// huge transcript. Compare contiguous word windows, allowing a few misspelled
+// words without requiring every short function word to match literally.
+fn opening_prompt_rank(prompt: &str, query: &str) -> usize {
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .take(256)
+            .map(|word| {
+                word.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    };
+    let query = words(query);
+    if query.len() < 4 || query.len() > 64 {
+        return 0;
+    }
+    let prompt = words(prompt);
+    // Missing spaces ("ofhow") should not hide an otherwise exact request.
+    let compact_query = query.concat();
+    if compact_query.chars().count() >= 16 && prompt.concat().contains(&compact_query) {
+        return query.len();
+    }
+    let prepared: Vec<_> = query
+        .iter()
+        .map(|word| jcode_fuzzy::PreparedTokenQuery::new(word))
+        .collect();
+    prompt
+        .windows(query.len())
+        .filter_map(|window| {
+            let matched = query
+                .iter()
+                .zip(&prepared)
+                .zip(window)
+                .filter(|((word, prepared), candidate)| {
+                    word == candidate
+                        || (word.len() >= 4
+                            && candidate.len() <= 128
+                            && prepared.matches_search_text(candidate))
+                })
+                .count();
+            (matched * 5 >= query.len() * 4).then_some(matched)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Default)]
@@ -178,7 +230,9 @@ impl TranscriptSearch {
                 })
                 .cloned()
                 .collect();
-            if missing_tokens.is_empty() {
+            if missing_tokens.is_empty()
+                && (tokens.len() < 4 || session.first_user_prompt.is_none())
+            {
                 continue;
             }
             let paths = transcript_paths(session);
@@ -188,6 +242,7 @@ impl TranscriptSearch {
                 search_index: session.search_index.clone(),
                 missing_tokens,
                 exact_field: exact_metadata_field(session, query),
+                opening_prompt: session.first_user_prompt.clone().unwrap_or_default(),
             });
         }
         if !self.candidates.is_empty() {
@@ -228,6 +283,7 @@ impl TranscriptSearch {
             let candidates = std::mem::take(&mut self.candidates);
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
+            let query = self.query.clone();
             let (sender, receiver) = mpsc::channel();
             match std::thread::Builder::new()
                 .name("jcode-transcript-search".into())
@@ -239,6 +295,14 @@ impl TranscriptSearch {
                     for mut candidate in candidates {
                         if cancel.load(Ordering::Relaxed) {
                             return;
+                        }
+                        let opening_prompt = opening_prompt_rank(&candidate.opening_prompt, &query);
+                        if opening_prompt > 0 {
+                            let mut rank = fuzzy_metadata_rank(&candidate.search_index, &tokens);
+                            rank.opening_prompt = opening_prompt;
+                            if sender.send((candidate.id.clone(), rank)).is_err() {
+                                return;
+                            }
                         }
                         candidate
                             .missing_tokens
