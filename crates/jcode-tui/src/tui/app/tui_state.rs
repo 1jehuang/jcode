@@ -2257,6 +2257,12 @@ impl crate::tui::TuiState for App {
         self.normalized_copy_selection()
     }
 
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        self.copy_selection_dragging
+            .then_some(self.input_selection_scroll)
+            .flatten()
+    }
+
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
         if !self.copy_selection_mode {
             return None;

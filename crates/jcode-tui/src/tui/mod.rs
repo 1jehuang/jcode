@@ -1172,6 +1172,11 @@ pub trait TuiState {
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
     /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
+
+    /// The composer follows the selection endpoint only during a mouse drag.
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        None
+    }
     /// Whether the first-run onboarding empty state is being previewed in this session.
     // ---- Onboarding ----
     fn onboarding_preview_mode(&self) -> bool {

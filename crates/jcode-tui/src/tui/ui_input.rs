@@ -2180,7 +2180,11 @@ pub(super) fn draw_input(
     let total_input_lines = all_lines.len();
     let visible_height = area.height as usize;
 
-    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
+    let scroll_offset = if let Some(scroll) = app.input_drag_scroll_offset() {
+        // Selection scrolling is independent of the editing caret.
+        let available = visible_height.saturating_sub(suggestions_offset).max(1);
+        scroll.min(total_input_lines.saturating_sub(available))
+    } else if total_input_lines + suggestions_offset <= visible_height {
         0
     } else {
         let available_for_input = visible_height.saturating_sub(suggestions_offset);
@@ -2303,8 +2307,11 @@ pub(super) fn draw_input(
     };
 
     let cursor = Position::new(cursor_x, cursor_y);
-    frame.set_cursor_position(cursor);
     draw_send_mode_indicator(frame, app, area);
+    if app.input_drag_scroll_offset().is_some() {
+        return None;
+    }
+    frame.set_cursor_position(cursor);
     Some(cursor)
 }
 
