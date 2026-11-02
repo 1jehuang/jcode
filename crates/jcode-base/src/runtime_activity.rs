@@ -106,6 +106,9 @@ impl Drop for SessionIdleReservation {
     }
 }
 
+// Keep the expected absence case explicit rather than making task-local lookup
+// look like a discarded operational error to the swallowed-error guardrail.
+#[allow(clippy::manual_ok_err)]
 fn current_session() -> Option<String> {
     // No task-local owner is normal outside a scoped reservation. Such work
     // must be counted globally, never assigned an invented session identity.
