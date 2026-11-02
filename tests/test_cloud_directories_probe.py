@@ -90,10 +90,13 @@ class CloudDirectoriesTests(unittest.TestCase):
         self.assertEqual(rows[str(restored)], (0, 0))
         self.assertEqual(rows[str(sibling)], (0, 0))
 
-    def test_missing_or_corrupt_live_metadata_does_not_invent_zero(self):
+    def test_missing_metadata_is_pending_but_corruption_is_failure(self):
         (self.state / 'active_pids' / 'starting').write_text('123')
-        with self.assertRaises(ValueError):
-            self.collect()
+        self.assertEqual(self.rows(self.collect())['(directory pending)'], (1, 0))
+        snapshot = probe.collect(str(self.project), self.home, self.state,
+                                 alive=lambda pid: pid == 123, current_session_id='starting')
+        self.assertEqual(self.rows(snapshot)['~/project'], (1, 0))
+        self.assertNotIn('(directory pending)', self.rows(snapshot))
         (self.state / 'sessions' / 'starting.json').write_text('{')
         with self.assertRaises(ValueError):
             self.collect()

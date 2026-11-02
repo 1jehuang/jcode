@@ -1928,7 +1928,7 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
-            cloud_info: crate::tui::cloud_status::gather(),
+            cloud_info: crate::tui::cloud_status::gather(self.current_session_id()),
             cloud_connection: self.remote_startup_phase.as_ref().map(|phase| match phase {
                 super::RemoteStartupPhase::Reconnecting { .. } => "Reconnecting".to_string(),
                 _ => "Connecting".to_string(),

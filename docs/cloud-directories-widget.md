@@ -13,6 +13,8 @@ Cloud transfers preserve absolute repository paths, so there is no universal `/w
 
 The per-session active PID registry is shared across daemons using the same VM Jcode home. Live PID checks remove exited owners, migration leases exclude sessions moved elsewhere, and metadata excludes debug/canary sessions without excluding swarm workers. Custom daemons with separate `JCODE_HOME` registries are outside that registry's scope.
 
+Fresh idle sessions may not have persisted metadata yet. The attached session uses its authoritative current-directory hint. Other live sessions without metadata appear in a `(directory pending)` row until their directory is saved, rather than making the inventory unavailable or guessing their directory.
+
 The collector requires Python 3 on the remote host and uses only its standard library. Large session transcripts are not deserialized: current journal metadata is preferred, otherwise the snapshot is memory-mapped and top-level scalar metadata extracted. Nested tool/transcript fields cannot supply the working directory or debug flags.
 
 ## Refresh and failure behavior

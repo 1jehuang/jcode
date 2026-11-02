@@ -3275,12 +3275,40 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .0
             .len()
     };
+    // A fresh cloud transcript is short even on a tall terminal. Keep enough
+    // packed rows for the cloud card stack instead of hiding directory counts
+    // above an otherwise unused lower half of the screen.
+    let widget_data_start = Instant::now();
+    let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
+    let cloud_card_height = if app.info_widget_overlays_enabled()
+        && widget_data.cloud_info.is_some()
+        && chat_area.width >= 120
+        && !show_donut
+        && !swarm_page_active
+        && !side_panel_fullscreen
+    {
+        [
+            info_widget::WidgetKind::Overview,
+            info_widget::WidgetKind::CloudVm,
+            info_widget::WidgetKind::CloudDirectories,
+        ]
+        .into_iter()
+        .map(|kind| info_widget::calculate_widget_height(kind, &widget_data, 40, available_height))
+        .fold(0u16, u16::saturating_add)
+        // Placement reserves breathing room around the card stack.
+        .saturating_add(8)
+        .min(available_height.saturating_sub(fixed_height))
+    } else {
+        0
+    };
     let content_height = prepared
         .total_wrapped_lines()
         .saturating_sub(clear_start.unwrap_or(0))
         .saturating_add(pinned_band_height)
         .max(1)
         .min(u16::MAX as usize) as u16;
+    let content_height = content_height.max(cloud_card_height);
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
     // transcript row blank, so a normal bottom-anchored layout would park the
@@ -3595,9 +3623,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let chrome_elapsed = chrome_start.elapsed();
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
-    let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
-    let widget_data_elapsed = widget_data_start.elapsed();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;

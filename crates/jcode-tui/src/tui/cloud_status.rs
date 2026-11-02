@@ -40,9 +40,10 @@ pub struct CloudDirectoryEntry {
 
 const DIRECTORIES_PROBE: &str = include_str!("cloud_directories_probe.py");
 
-fn directories_script() -> String {
+fn directories_script(session_id: Option<&str>) -> String {
+    let hint = session_id.unwrap_or("").replace('\'', "'\\''");
     format!(
-        "python3 - \"$1\" <<'JCODE_DIRECTORIES_PY'\n{DIRECTORIES_PROBE}\nJCODE_DIRECTORIES_PY\n"
+        "python3 - \"$1\" '{hint}' <<'JCODE_DIRECTORIES_PY'\n{DIRECTORIES_PROBE}\nJCODE_DIRECTORIES_PY\n"
     )
 }
 
@@ -212,8 +213,11 @@ fn apply_result(
 }
 
 #[cfg(not(test))]
-pub(crate) fn gather() -> Option<CloudStatusInfo> {
+pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
     use std::sync::{Arc, Mutex, OnceLock};
+    static SESSION_HINT: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
+    let hint = SESSION_HINT.get_or_init(|| Arc::new(Mutex::new(None)));
+    *hint.lock().unwrap_or_else(|e| e.into_inner()) = session_id;
     let host = super::ssh_remote_host()?;
     if host.is_empty()
         || host.starts_with('-')
@@ -239,6 +243,7 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
             directories_stale: false,
         }));
         let output = cache.clone();
+        let current_session = hint.clone();
         let config = std::env::var_os("JCODE_SSH_CONFIG").map(std::path::PathBuf::from);
         std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -278,12 +283,16 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
                         start.elapsed(),
                         SystemTime::now(),
                     );
+                    let session_hint = current_session
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
                     let directory_response = super::cloud_git::bounded_output(
                         super::cloud_git::script_command(
                             Some(&host),
                             config.as_deref(),
                             &remote_dir,
-                            &directories_script(),
+                            &directories_script(session_hint.as_deref()),
                         ),
                         Duration::from_secs(8),
                         1024 * 1024,
@@ -307,7 +316,7 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
 }
 
 #[cfg(test)]
-pub(crate) fn gather() -> Option<CloudStatusInfo> {
+pub(crate) fn gather(_session_id: Option<String>) -> Option<CloudStatusInfo> {
     None
 }
 
@@ -380,7 +389,7 @@ mod tests {
         assert!(parse(b"bad", None).is_none());
         let (empty, _) = parse(b"jcode-machine-v1\0\0\0\0\0\0", None).unwrap();
         assert_eq!(empty, CloudMachineStats::default());
-        assert!(gather().is_none());
+        assert!(gather(None).is_none());
     }
     #[test]
     fn failure_retains_stale_success() {
@@ -472,7 +481,7 @@ mod tests {
             None,
             None,
             project.to_str().unwrap(),
-            &directories_script(),
+            &directories_script(None),
         );
         command.env("HOME", home.path());
         command.env("JCODE_HOME", home.path().join(".jcode"));

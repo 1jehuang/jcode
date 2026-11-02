@@ -97,7 +97,7 @@ def session_fields(path, check_time):
             return result
 
 
-def collect(current, home=None, state=None, alive=None):
+def collect(current, home=None, state=None, alive=None, current_session_id=None):
     home = pathlib.Path(home or pathlib.Path.home()).resolve()
     state = pathlib.Path(state or os.environ.get("JCODE_HOME", str(home / ".jcode")))
     deadline = time.monotonic() + 4
@@ -188,13 +188,15 @@ def collect(current, home=None, state=None, alive=None):
         roots.add(repo_root(current_path))
 
     live = []
+    pending = [0, 0]
     active_paths = children(state / 'active_pids')
     # Truncating the registry would produce incorrect counts, not just fewer rows.
     if truncated:
         raise ValueError('incomplete live-session inventory')
     for path in active_paths:
         check_time()
-        if marker_pid(path) is None:
+        owner_pid = marker_pid(path)
+        if owner_pid is None:
             continue
         lease, root = leases.get(path.name, ({}, None))
         if lease.get('away_host') is not None:
@@ -205,7 +207,14 @@ def collect(current, home=None, state=None, alive=None):
             # An agent may be registering its initial snapshot. Do not invent a zero.
             if marker_pid(path) is None:
                 continue
-            raise ValueError('live session metadata not yet available')
+            if path.name == current_session_id and current_path:
+                session = {'working_dir': str(current_path)}
+            else:
+                # Other fresh idle sessions have no disk metadata yet. Keep
+                # their count explicitly unassigned, never guess their cwd.
+                pending[0] += 1
+                pending[1] += int(marker_pid(state / 'streaming_pids' / path.name) is not None)
+                continue
         if session.get('is_debug') or session.get('is_canary'):
             continue
         workdir = directory(session.get('working_dir')) or root
@@ -246,15 +255,20 @@ def collect(current, home=None, state=None, alive=None):
     current_root = repo_root(current_path) if current_path else None
     ordered = sorted(counts, key=lambda root: (
         root != current_root, -counts[root][1], -counts[root][0], str(root)))
-    if len(ordered) > MAX_ITEMS:
+    limit = MAX_ITEMS - int(pending[0] > 0)
+    if len(ordered) > limit:
         truncated = True
+    entries = [dict(path=display(root), agents=counts[root][0], busy=counts[root][1])
+               for root in ordered[:limit]]
+    if pending[0]:
+        entries.append(dict(path='(directory pending)', agents=pending[0], busy=pending[1]))
     return {'current_path': display(current_root) if current_root else None,
-            'entries': [dict(path=display(root), agents=counts[root][0], busy=counts[root][1])
-                        for root in ordered[:MAX_ITEMS]], 'truncated': truncated}
+            'entries': entries, 'truncated': truncated}
 
 
 if __name__ == '__main__':
     try:
-        print(json.dumps(collect(sys.argv[1]), ensure_ascii=True, separators=(',', ':')))
+        print(json.dumps(collect(sys.argv[1], current_session_id=sys.argv[2] if len(sys.argv) > 2 else None),
+                         ensure_ascii=True, separators=(',', ':')))
     except (OSError, ValueError, TypeError, TimeoutError):
         sys.exit(1)

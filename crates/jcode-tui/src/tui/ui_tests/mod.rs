@@ -1,5 +1,6 @@
 use super::*;
 
+mod cloud_directories;
 mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
