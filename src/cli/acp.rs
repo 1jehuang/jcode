@@ -170,6 +170,25 @@ fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     response
 }
 
+fn apply_model_catalog(
+    state: &mut SessionUiState,
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    available_models: Vec<String>,
+    reasoning_effort: Option<String>,
+) {
+    if provider_name.is_some() {
+        state.provider_name = provider_name;
+    }
+    if provider_model.is_some() {
+        state.model = provider_model;
+    }
+    state.available_models = available_models;
+    if reasoning_effort.is_some() {
+        state.reasoning_effort = reasoning_effort;
+    }
+}
+
 impl SessionUiState {
     fn from_history_fields(
         provider_name: Option<String>,
@@ -785,7 +804,8 @@ impl AcpRuntime {
             .await?;
         wait_for_done(&session, subscribe_id).await?;
         let history = request_history(&session).await?;
-        let (session_id, ui_state) = match history {
+        let catalog = request_model_catalog(&session).await?;
+        let (session_id, mut ui_state) = match history {
             ServerEvent::History {
                 session_id,
                 provider_name,
@@ -804,6 +824,22 @@ impl AcpRuntime {
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                reasoning_effort,
+            );
+        }
         Ok(DaemonSession::new(
             session_id,
             session.reader.into_inner().into_inner(),
@@ -880,6 +916,24 @@ impl AcpRuntime {
                     }
                 }
             }
+        }
+
+        let catalog = request_model_catalog(&session).await?;
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                reasoning_effort,
+            );
         }
 
         Ok(DaemonSession::new(
@@ -2077,6 +2131,29 @@ mod tests {
             .map(|model| model["modelId"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["deepseek-v4-flash", "deepseek-v4-pro"]);
+    }
+
+    #[test]
+    fn model_catalog_refreshes_available_models_without_erasing_missing_state() {
+        let mut state = SessionUiState {
+            provider_name: Some("opencode-openference".to_string()),
+            model: Some("GLM-5.3".to_string()),
+            available_models: vec!["GLM-5.3".to_string()],
+            reasoning_effort: Some("high".to_string()),
+        };
+
+        apply_model_catalog(
+            &mut state,
+            None,
+            None,
+            vec!["GLM-5.3".to_string(), "GLM-5.2".to_string()],
+            None,
+        );
+
+        assert_eq!(state.provider_name.as_deref(), Some("opencode-openference"));
+        assert_eq!(state.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(state.available_models, ["GLM-5.3", "GLM-5.2"]);
+        assert_eq!(state.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]
