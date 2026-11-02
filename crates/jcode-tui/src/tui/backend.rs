@@ -437,6 +437,7 @@ impl RemoteConnection {
             supports_pdf_panels: false,
             supports_user_response: false,
             supports_server_failover: false,
+            supports_turn_identity: true,
             id: conn.next_request_id,
             working_dir,
             selfdev,

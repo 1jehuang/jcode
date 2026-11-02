@@ -2,6 +2,9 @@
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
 mod credentials;
+mod turn_identity;
+#[cfg(test)]
+mod turn_identity_tests;
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
@@ -118,6 +121,7 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    turn_fence: turn_identity::TurnFence,
     /// Refreshed from an authoritative source-daemon Ping before each list.
     pub user_connected_sessions: std::collections::HashSet<String>,
     pub runtime_commands_supported: bool,
@@ -338,6 +342,9 @@ enum SimpleKind {
 /// read persisted session records or side-panel files. Everything else is
 /// pure in-memory translation and must not pay for `block_in_place`.
 pub fn legacy_event_may_block(event: &Value) -> bool {
+    if event["type"] == "turn_event" {
+        return legacy_event_may_block(&event["event"]);
+    }
     matches!(
         event["type"].as_str(),
         Some("state" | "side_panel_state" | "split_response" | "history")
@@ -612,6 +619,7 @@ impl BridgeState {
                     // own, so the daemon switches pool accounts and retries
                     // usage-limited turns for them, like the TUI does.
                     "supports_server_failover": true,
+                    "supports_turn_identity": true,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
@@ -1578,6 +1586,120 @@ impl BridgeState {
 
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
+        match event["type"].as_str().unwrap_or("") {
+            "turn_state" => {
+                if self.turn_fence.state(event) {
+                    self.observed_turn_active = self.turn_fence.active();
+                    self.activity_version += 1;
+                }
+                vec![]
+            }
+            "turn_started" => {
+                if self.turn_fence.start(&event["identity"]) {
+                    self.observed_turn_active = true;
+                    self.activity_version += 1;
+                }
+                vec![]
+            }
+            "turn_event" => {
+                if !self.turn_fence.accepts(&event["identity"])
+                    && !(event["event"]["type"] == "interrupted"
+                        && self.turn_fence.is_latest(&event["identity"]))
+                {
+                    return vec![];
+                }
+                let payload = &event["event"];
+                if matches!(
+                    payload["type"].as_str(),
+                    Some("turn_event" | "turn_started" | "turn_state")
+                ) {
+                    return vec![];
+                }
+                let frames = self.legacy_event_to_api_inner(payload);
+                if matches!(payload["type"].as_str(), Some("done" | "error")) {
+                    self.turn_fence.complete();
+                }
+                frames
+            }
+            "done" | "error" if self.turn_fence.scoped() => {
+                // Control response handlers still need their legacy terminal.
+                let id = event["id"].as_u64().unwrap_or(0);
+                if self.pending_message_id == Some(id) {
+                    if !self.turn_fence.active() {
+                        return self.legacy_event_to_api_inner(event);
+                    }
+                    if event["type"] == "error" {
+                        self.pending_message_id = None;
+                        return vec![ServerFrame::event(ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                        })];
+                    }
+                }
+                if event["type"] == "error" {
+                    if let Some(index) = self
+                        .pending_simple
+                        .iter()
+                        .position(|(pending_id, _, _)| *pending_id == id)
+                    {
+                        let (_, api_id, _) = self.pending_simple.remove(index);
+                        self.pending_control_done_ids.remove(&id);
+                        self.pending_activity_snapshots.remove(&id);
+                        return vec![ServerFrame::reply(
+                            api_id,
+                            ApiEvent::Error {
+                                code: ErrorCode::Internal,
+                                message: event["message"].as_str().unwrap_or_default().to_string(),
+                            },
+                        )];
+                    }
+                }
+                if self.pending_control_done_ids.contains(&id)
+                    || self.pending_attach_subscribe_id == Some(id)
+                    || self
+                        .pending_attach_id
+                        .as_ref()
+                        .is_some_and(|(state_id, _, _)| *state_id == id)
+                {
+                    let active = self.observed_turn_active;
+                    let frames = self.legacy_event_to_api_inner(event);
+                    self.observed_turn_active = active;
+                    frames
+                } else {
+                    vec![]
+                }
+            }
+            "interrupted"
+            | "text_delta"
+            | "text_replace"
+            | "text_suffix_replace"
+            | "reasoning_delta"
+            | "reasoning_done"
+            | "tool_start"
+            | "tool_input"
+            | "tool_exec"
+            | "tool_done"
+            | "connection_phase"
+            | "status_detail"
+                if self.turn_fence.scoped() =>
+            {
+                vec![]
+            }
+            "state" if self.turn_fence.scoped() => {
+                let mut snapshot = event.clone();
+                snapshot["is_processing"] = Value::Bool(self.turn_fence.active());
+                self.legacy_event_to_api_inner(&snapshot)
+            }
+            _ => self.legacy_event_to_api_inner(event),
+        }
+    }
+
+    fn legacy_event_to_api_inner(&mut self, event: &Value) -> Vec<ServerFrame> {
+        let history_activity = if self.turn_fence.scoped() {
+            Some(self.turn_fence.active())
+        } else {
+            event["activity"]["is_processing"].as_bool()
+        };
         let kind = event["type"].as_str().unwrap_or("");
         if kind == "runtime_command_result" {
             let Some(api_id) = self.take_simple(
@@ -2199,7 +2321,7 @@ impl BridgeState {
                     .unwrap_or_default();
                 // A stored terminal-looking row can still belong to a running
                 // turn (e.g. an automatic continuation). Do not show a footer yet.
-                if event["activity"]["is_processing"].as_bool() == Some(true) {
+                if history_activity == Some(true) {
                     let start = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
                     for message in &mut messages[start..] {
                         message.response_stats = None;
@@ -2218,8 +2340,7 @@ impl BridgeState {
                 // not resurrect a completed turn or stop a newly started one.
                 let fresh_activity =
                     self.pending_activity_snapshots.remove(&id) == Some(self.activity_version);
-                if fresh_activity && let Some(active) = event["activity"]["is_processing"].as_bool()
-                {
+                if fresh_activity && let Some(active) = history_activity {
                     self.observed_turn_active = active;
                     frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                         session_id: session(self),

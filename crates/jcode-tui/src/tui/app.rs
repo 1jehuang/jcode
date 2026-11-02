@@ -1052,6 +1052,8 @@ pub struct App {
     // tick replays it after the backlog drains and one final live frame renders,
     // preventing Done from force-flushing a whole provider burst at once.
     deferred_stream_done_id: Option<u64>,
+    deferred_stream_done_identity: Option<crate::protocol::TurnIdentity>,
+    remote_turn_fence: remote::turn_identity::TurnFence,
     // Server-reported processing snapshot captured from resume/history before live events arrive.
     remote_resume_activity: Option<RemoteResumeActivity>,
     // First tick at which a queued follow-up was observed sitting undispatched

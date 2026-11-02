@@ -1,4 +1,9 @@
 use super::*;
+
+#[cfg(test)]
+#[path = "turn_identity_tests.rs"]
+mod turn_identity_tests;
+
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
@@ -422,6 +427,175 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    let (event, identity) = match event {
+        ServerEvent::TurnState {
+            session_id,
+            runtime_generation,
+            turn_id,
+            latest_turn_id,
+        } => {
+            if app.remote_turn_fence.bootstrap(
+                session_id,
+                runtime_generation,
+                latest_turn_id,
+                turn_id,
+            ) {
+                if !app
+                    .deferred_stream_done_identity
+                    .as_ref()
+                    .is_some_and(|identity| app.remote_turn_fence.is_latest(identity))
+                {
+                    app.deferred_stream_done_id = None;
+                    app.deferred_stream_done_identity = None;
+                }
+                if app.remote_turn_fence.active.is_none()
+                    && app.current_message_id.is_none()
+                    && app.deferred_stream_done_id.is_none()
+                {
+                    let changed = app.is_processing;
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.processing_started = None;
+                    app.remote_resume_activity = None;
+                    return changed;
+                }
+            }
+            return false;
+        }
+        ServerEvent::TurnStarted { identity } => {
+            let same_turn = app.remote_turn_fence.accepts(&identity);
+            if !app.remote_turn_fence.start(&identity) {
+                return false;
+            }
+            if !same_turn {
+                app.deferred_stream_done_id = None;
+                app.deferred_stream_done_identity = None;
+            }
+            app.is_processing = true;
+            app.processing_started.get_or_insert_with(Instant::now);
+            app.last_stream_activity = Some(Instant::now());
+            app.status = ProcessingStatus::Streaming;
+            return true;
+        }
+        ServerEvent::TurnEvent { identity, event } => {
+            let paced_replay = matches!(&*event, ServerEvent::Done { .. })
+                && app.deferred_stream_done_identity.as_ref() == Some(&identity)
+                && app.remote_turn_fence.is_latest(&identity);
+            if !app.remote_turn_fence.accepts(&identity)
+                && !paced_replay
+                && !(matches!(&*event, ServerEvent::Interrupted)
+                    && app.remote_turn_fence.is_latest(&identity))
+            {
+                return false;
+            }
+            // Nested scopes could otherwise bypass this one validation boundary.
+            if matches!(
+                &*event,
+                ServerEvent::TurnState { .. }
+                    | ServerEvent::TurnStarted { .. }
+                    | ServerEvent::TurnEvent { .. }
+            ) {
+                return false;
+            }
+            (*event, Some(identity))
+        }
+        event => (event, None),
+    };
+    if identity.is_none()
+        && app.remote_turn_fence.scoped()
+        && matches!(
+            &event,
+            ServerEvent::Interrupted
+                | ServerEvent::TextDelta { .. }
+                | ServerEvent::TextReplace { .. }
+                | ServerEvent::TextSuffixReplace { .. }
+                | ServerEvent::ReasoningDelta { .. }
+                | ServerEvent::ReasoningDone { .. }
+                | ServerEvent::ToolStart { .. }
+                | ServerEvent::ToolInput { .. }
+                | ServerEvent::ToolExec { .. }
+                | ServerEvent::ToolDone { .. }
+                | ServerEvent::BatchProgress { .. }
+                | ServerEvent::ConnectionPhase { .. }
+                | ServerEvent::StatusDetail { .. }
+        )
+    {
+        return false;
+    }
+    let terminal = matches!(&event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
+    // Legacy control errors still use Error. Let their request-owned handlers
+    // run, but never let an unscoped terminal settle an identity-aware turn.
+    if terminal && identity.is_none() && app.remote_turn_fence.scoped() {
+        if let ServerEvent::Error { id, message, .. } = &event {
+            if app.pending_agent_model_request_id == Some(*id) {
+                return handle_server_event_inner(app, event, remote);
+            }
+            if remote.finish_runtime_command(*id) {
+                app.push_display_message(DisplayMessage::error(message.clone()));
+                return true;
+            }
+        }
+        if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event {
+            if app.current_message_id == Some(*id) {
+                if app.remote_turn_fence.active.is_none() {
+                    // Validation/auth failures and synthetic control completions
+                    // occur before turn acceptance, so they have no turn scope.
+                    let rejected_id = *id;
+                    let redraw = handle_server_event_inner(app, event, remote);
+                    if !app.is_processing && app.current_message_id == Some(rejected_id) {
+                        app.current_message_id = None;
+                    }
+                    return redraw;
+                }
+                if let ServerEvent::Error { message, .. } = &event {
+                    let recovered = recover_rejected_queued_continuation(app);
+                    if !recovered {
+                        app.restore_failed_input_to_box();
+                    }
+                    app.clear_pending_remote_retry();
+                    app.current_message_id = None;
+                    remote.clear_pending();
+                    // The rejected request never acquired this running turn.
+                    // Preserve its stream, timing and identity-owned busy state.
+                    app.is_processing = true;
+                    if matches!(app.status, ProcessingStatus::Sending) {
+                        app.status = ProcessingStatus::Thinking(Instant::now());
+                    }
+                    app.remote_resume_activity = Some(RemoteResumeActivity {
+                        session_id: app.remote_session_id.clone().unwrap_or_default(),
+                        observed_at: Instant::now(),
+                        current_tool_name: None,
+                    });
+                    app.push_display_message(DisplayMessage::error(message.clone()));
+                    return true;
+                }
+            }
+            if app.usage_reset.invalidate_requests.remove(id).is_some() {
+                app.usage_reset.refresh_usage = true;
+                return true;
+            }
+        }
+        return false;
+    }
+    let redraw = handle_server_event_inner(app, event, remote);
+    if let Some(identity) = identity {
+        if terminal {
+            if app.deferred_stream_done_id.is_some() {
+                app.deferred_stream_done_identity = Some(identity);
+            } else {
+                app.remote_turn_fence.complete(&identity);
+                app.deferred_stream_done_identity = None;
+            }
+        }
+    }
+    redraw
+}
+
+fn handle_server_event_inner(
+    app: &mut App,
+    event: ServerEvent,
+    remote: &mut impl RemoteEventState,
+) -> bool {
     // Pure presence/catalog/telemetry traffic must not defeat a 30-minute idle
     // period. Every other event may mutate the transcript or start active work.
     if !matches!(
@@ -478,6 +652,19 @@ pub(in crate::tui::app) fn handle_server_event(
         remote.finish_runtime_command(id);
         app.push_display_message(DisplayMessage::system(message));
         return true;
+    }
+
+    // Request-scoped terminals cannot settle a different locally owned turn.
+    // Resumed observer turns have no request ID and retain legacy settlement.
+    if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event
+        && app.current_message_id.is_some_and(|current| current != *id)
+        && app.pending_agent_model_request_id != Some(*id)
+    {
+        crate::logging::debug(&format!(
+            "Ignoring unrelated terminal id={} while current_message_id={:?}",
+            id, app.current_message_id
+        ));
+        return false;
     }
 
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
@@ -1172,6 +1359,9 @@ pub(in crate::tui::app) fn handle_server_event(
             app.offer_guardrail_reroute();
             true
         }
+        ServerEvent::TurnState { .. }
+        | ServerEvent::TurnStarted { .. }
+        | ServerEvent::TurnEvent { .. } => false,
         ServerEvent::Done { id } => {
             let mut auto_poked = false;
             let mut completed_current_message = false;
@@ -2150,6 +2340,18 @@ pub(in crate::tui::app) fn handle_server_event(
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
+                let activity = if app.remote_turn_fence.scoped() {
+                    app.remote_turn_fence.active.as_ref().map(|_| {
+                        crate::protocol::SessionActivitySnapshot {
+                            is_processing: true,
+                            current_tool_name: activity
+                                .as_ref()
+                                .and_then(|activity| activity.current_tool_name.clone()),
+                        }
+                    })
+                } else {
+                    activity
+                };
                 if let Some(activity) = activity.filter(|activity| activity.is_processing) {
                     let current_tool_name = activity.current_tool_name.clone();
                     app.is_processing = true;
@@ -3427,6 +3629,41 @@ mod runtime_command_tests {
     use super::*;
     use crate::tui::app::tests::create_test_app;
     use crate::tui::backend::RemoteConnection;
+
+    #[test]
+    fn stale_terminals_cannot_settle_or_touch_newer_work() {
+        let mut app = create_test_app();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut remote = RemoteConnection::dummy();
+        app.is_processing = true;
+        app.current_message_id = Some(99);
+        app.status = ProcessingStatus::Sending;
+        app.input = "unsent draft".into();
+        app.replace_streaming_text("partial response".into());
+        let activity = app.last_stream_activity;
+        for event in [
+            ServerEvent::Done { id: 98 },
+            ServerEvent::Error {
+                id: 98,
+                message: "late failure".into(),
+                retry_after_secs: None,
+            },
+            ServerEvent::Done { id: 100 },
+        ] {
+            assert!(!handle_server_event(&mut app, event, &mut remote));
+            assert!(app.is_processing);
+            assert_eq!(app.current_message_id, Some(99));
+            assert!(matches!(app.status, ProcessingStatus::Sending));
+            assert_eq!(app.input, "unsent draft");
+            assert_eq!(app.streaming_text(), "partial response");
+            assert_eq!(app.last_stream_activity, activity);
+        }
+        // Positive control: current terminal still settles the active turn.
+        handle_server_event(&mut app, ServerEvent::Done { id: 99 }, &mut remote);
+        assert!(!app.is_processing);
+        assert_eq!(app.current_message_id, None);
+    }
 
     #[test]
     fn runtime_command_error_preserves_active_turn_and_clears_request_ownership() {

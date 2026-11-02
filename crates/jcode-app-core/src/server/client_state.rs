@@ -1,4 +1,5 @@
 use super::ClientConnectionInfo;
+use super::SessionAgents;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
@@ -13,7 +14,6 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HistoryPayloadMode {
@@ -180,6 +180,7 @@ pub(super) async fn handle_get_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
@@ -207,6 +208,7 @@ pub(super) async fn handle_get_history(
             was_interrupted,
             activity,
             supports_pdf_panels,
+            supports_turn_identity,
             history_base,
         )
         .await?;
@@ -232,6 +234,7 @@ pub(super) async fn handle_get_history(
         HistoryPayloadMode::Full,
         true,
         supports_pdf_panels,
+        supports_turn_identity,
         history_base,
     )
     .await?;
@@ -689,6 +692,7 @@ async fn send_history_from_persisted_session(
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let loaded = super::run_blocking_io(|| {
@@ -810,7 +814,15 @@ async fn send_history_from_persisted_session(
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
-    write_event(writer, &history_event).await
+    let json = encode_event(&history_event);
+    let mut writer_guard = writer.lock().await;
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await?;
+    }
+    writer_guard.write_all(json.as_bytes()).await?;
+    Ok(())
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -861,6 +873,7 @@ async fn send_history_with_guard(
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
@@ -1122,6 +1135,11 @@ async fn send_history_with_guard(
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
     let write_start = Instant::now();
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await?;
+    }
     let result = writer_guard.write_all(json.as_bytes()).await;
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
@@ -1184,6 +1202,17 @@ pub(super) async fn session_activity_snapshot(
                 current_tool_name: None,
             },
         )
+    })
+}
+
+fn history_turn_state(sessions: &SessionAgents, session_id: &str) -> Option<ServerEvent> {
+    let observer = sessions.turn_observer(session_id)?;
+    let (latest_turn_id, active) = observer.snapshot();
+    Some(ServerEvent::TurnState {
+        session_id: session_id.to_string(),
+        runtime_generation: observer.runtime_generation().to_string(),
+        turn_id: active.map(|identity| identity.turn_id),
+        latest_turn_id,
     })
 }
 
