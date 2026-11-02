@@ -1248,11 +1248,9 @@ fn markdown_image_line_to_placeholder(
         return Err(line);
     };
     let path = resolve_side_panel_image_path(page, path_text);
-    let Ok((width, height)) = ::image::image_dimensions(&path) else {
+    let Some(hash) = mermaid::register_markdown_image(&path) else {
         return Err(line);
     };
-
-    let hash = mermaid::register_external_image(&path, width, height);
     let marker = mermaid::image_widget_placeholder_markdown(hash)
         .trim_end()
         .to_string();
@@ -1283,7 +1281,7 @@ fn parse_rendered_markdown_image_path(text: &str) -> Option<&str> {
         std::path::Path::new(&lower)
             .extension()
             .and_then(|extension| extension.to_str()),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico")
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg")
     ) {
         Some(path)
     } else {

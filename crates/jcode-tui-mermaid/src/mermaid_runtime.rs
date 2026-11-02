@@ -599,6 +599,51 @@ pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
     Some((diagram.path, diagram.width, diagram.height))
 }
 
+/// Register a local markdown image, rasterizing SVGs for terminal protocols.
+/// SVG cache keys include the source bytes so edited graphs never reuse old pixels.
+pub fn register_markdown_image(path: &Path) -> Option<u64> {
+    if !path.extension()?.eq_ignore_ascii_case("svg") {
+        let (width, height) = image::image_dimensions(path).ok()?;
+        return Some(register_external_image(path, width, height));
+    }
+
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let content_hash = hasher.finish();
+    let output = RENDER_CACHE
+        .lock()
+        .ok()?
+        .cache_dir
+        .join(format!("{content_hash:016x}_external_svg.png"));
+    if !output.exists() {
+        // Do not resolve external resources in document-supplied SVGs.
+        let options = usvg::Options {
+            fontdb: SVG_FONT_DB.clone(),
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_data(&bytes, &options).ok()?;
+        let size = tree.size().to_int_size();
+        // Bound allocations for malformed or unexpectedly large documents.
+        if u64::from(size.width()) * u64::from(size.height()) > 32_000_000 {
+            return None;
+        }
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.save_png(&output).ok()?;
+    }
+    let (width, height) = image::image_dimensions(&output).ok()?;
+    Some(register_external_image(&output, width, height))
+}
+
 /// Register an external image file (e.g. from file_read) in the render cache
 /// so it can be displayed with render_image_widget_fit/render_image_widget.
 /// Returns the hash used for rendering.
