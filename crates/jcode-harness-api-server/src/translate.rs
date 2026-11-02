@@ -315,7 +315,14 @@ enum SimpleKind {
     ToolControl,
     Ping,
     History,
+    /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
+    /// and the legacy background-tool fallback. Their handlers do not reject
+    /// the control after ack (an idle interrupt can separately fail its turn).
     Ok,
+    /// Fallible controls acknowledge receipt first, then finish with done/error.
+    OkOnDone,
+    /// Rewind controls finish with a replacement history rather than done.
+    OkOnHistory,
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
     ContextCap,
@@ -733,12 +740,13 @@ impl BridgeState {
             }
             "clear" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 vec![Outbound::Legacy(json!({"type": "clear", "id": id}))]
             }
             "rewind" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::OkOnHistory));
                 vec![Outbound::Legacy(json!({
                     "type": "rewind",
                     "id": id,
@@ -1237,7 +1245,7 @@ impl BridgeState {
             }
             "rename_session" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut rename = json!({"type": "rename_session", "id": id});
                 // An absent title clears it and restores the generated one, so
                 // null and "" must stay distinguishable on the wire.
@@ -1261,7 +1269,7 @@ impl BridgeState {
                     );
                 };
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut out = json!({
                     "type": req,
                     "id": id,
@@ -1298,14 +1306,14 @@ impl BridgeState {
                     );
                 }
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 vec![Outbound::Legacy(json!({
                     "type": "set_session_env", "id": id, "env": request["env"].clone()
                 }))]
             }
             "set_session_saved" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut save = json!({
                     "type": "set_session_saved",
                     "id": id,
@@ -1318,7 +1326,8 @@ impl BridgeState {
             }
             "rewind_undo" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::OkOnHistory));
                 vec![Outbound::Legacy(json!({"type": "rewind_undo", "id": id}))]
             }
             "cancel_soft_interrupts" => {
@@ -1654,6 +1663,9 @@ impl BridgeState {
                     )];
                 }
                 if self.pending_control_done_ids.contains(&id)
+                    || self.pending_simple.iter().any(|(pending_id, _, kind)| {
+                        *pending_id == id && *kind == SimpleKind::OkOnDone
+                    })
                     || self.pending_attach_subscribe_id == Some(id)
                     || self
                         .pending_attach_id
@@ -2084,6 +2096,10 @@ impl BridgeState {
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnDone) {
+                    self.pending_control_done_ids.remove(&id);
+                    return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
+                }
                 if let Some(api_id) = self.take_simple(id, SimpleKind::Detach) {
                     self.pending_control_done_ids.remove(&id);
                     self.session_id = None;
@@ -2251,6 +2267,9 @@ impl BridgeState {
                 // which is the only place it appears: remember it so
                 // `list_sessions` can answer with more than this connection.
                 self.note_sessions(event);
+                if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnHistory) {
+                    return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
+                }
                 if self
                     .pending_recovery_history
                     .as_ref()
@@ -2604,18 +2623,26 @@ impl BridgeState {
                 }
             }
             "error" => {
-                // A rejected tool configuration/result is not a failed model
-                // turn. Preserve streaming state and correlate only its request.
+                // A rejected control is not a failed model turn. Preserve
+                // streaming state and correlate only its request.
                 let id = event["id"].as_u64().unwrap_or(0);
                 if let Some(index) = self
                     .pending_simple
                     .iter()
                     .position(|(pending_id, _, kind)| {
                         *pending_id == id
-                            && matches!(kind, SimpleKind::Tools | SimpleKind::ToolControl)
+                            && matches!(
+                                kind,
+                                SimpleKind::Tools
+                                    | SimpleKind::ToolControl
+                                    | SimpleKind::OkOnDone
+                                    | SimpleKind::OkOnHistory
+                            )
                     })
                 {
                     let (_, api_id, _) = self.pending_simple.remove(index);
+                    self.pending_control_done_ids.remove(&id);
+                    self.pending_activity_snapshots.remove(&id);
                     return vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Error {

@@ -1,6 +1,137 @@
 use super::*;
 
 #[test]
+fn receipt_only_controls_keep_ack_compatibility() {
+    for mut request in [
+        json!({"req":"cancel"}),
+        json!({"req":"soft_interrupt","content":"next"}),
+        json!({"req":"notify_auth_changed","provider":"openai"}),
+        json!({"req":"invalidate_usage","provider":"openai"}),
+        json!({"req":"invalidate_usage","provider":"claude"}),
+        json!({"req":"cancel_soft_interrupts"}),
+        json!({"req":"background_tool"}),
+    ] {
+        let mut state = state_with_session();
+        request["id"] = json!(7);
+        let actions = state.api_request_to_legacy(&request);
+        let [Outbound::Legacy(legacy)] = actions.as_slice() else {
+            panic!("{request}: {actions:?}");
+        };
+        assert_eq!(
+            state.legacy_event_to_api(&json!({"type":"ack","id":legacy["id"]})),
+            vec![ServerFrame::reply(7, ApiEvent::Ok)],
+            "{request}"
+        );
+        assert!(state.pending_simple.is_empty());
+    }
+}
+
+#[test]
+fn fallible_controls_wait_for_terminal_reply_without_settling_concurrent_turn() {
+    for scoped in [false, true] {
+        for (request, terminal, error) in [
+            (
+                json!({"req":"set_session_env","env":{"BAD=KEY":"v"}}),
+                "done",
+                "Invalid session environment",
+            ),
+            (
+                json!({"req":"set_session_saved","saved":true}),
+                "done",
+                "Agent is busy",
+            ),
+            (
+                json!({"req":"rename_session","title":"name"}),
+                "done",
+                "Agent is busy",
+            ),
+            (json!({"req":"clear"}), "done", "Agent is busy"),
+            (
+                json!({"req":"applet_action","instance":"missing","action":{}}),
+                "done",
+                "Applet not found",
+            ),
+            (
+                json!({"req":"close_applet","instance":"missing"}),
+                "done",
+                "Applet not found",
+            ),
+            (
+                json!({"req":"rewind","message_index":1}),
+                "history",
+                "Cannot rewind while a turn is processing.",
+            ),
+            (
+                json!({"req":"rewind_undo"}),
+                "history",
+                "Cannot undo rewind while a turn is processing.",
+            ),
+        ] {
+            for succeeds in [false, true] {
+                let mut state = BridgeState {
+                    session_id: Some("s1".into()),
+                    observed_turn_active: true,
+                    pending_message_id: Some(999),
+                    ..Default::default()
+                };
+                if scoped {
+                    state.legacy_event_to_api(&json!({"type":"turn_started","identity":{"runtime_generation":"runtime","turn_id":99}}));
+                }
+                let mut request = request.clone();
+                request["id"] = json!(7);
+                request["session_id"] = json!("s1");
+                let actions = state.api_request_to_legacy(&request);
+                let [Outbound::Legacy(legacy)] = actions.as_slice() else {
+                    panic!("{request}: {actions:?}");
+                };
+                let id = legacy["id"].clone();
+                assert!(
+                    state
+                        .legacy_event_to_api(&json!({"type":"ack","id":id}))
+                        .is_empty(),
+                    "{request}"
+                );
+                assert_eq!(state.pending_simple.len(), 1);
+                // Unrelated acknowledgement must not consume this control.
+                assert!(
+                    state
+                        .legacy_event_to_api(&json!({"type":"ack","id":123456}))
+                        .is_empty()
+                );
+                assert_eq!(state.pending_simple.len(), 1);
+                let event = if succeeds {
+                    json!({"type":terminal,"id":id,"session_id":"s1","messages":[]})
+                } else {
+                    json!({"type":"error","id":id,"message":error})
+                };
+                assert_eq!(
+                    state.legacy_event_to_api(&event),
+                    vec![ServerFrame::reply(
+                        7,
+                        if succeeds {
+                            ApiEvent::Ok
+                        } else {
+                            ApiEvent::Error {
+                                code: ErrorCode::Internal,
+                                message: error.into(),
+                            }
+                        }
+                    )],
+                    "{request}, scoped={scoped}, succeeds={succeeds}"
+                );
+                assert!(state.pending_simple.is_empty());
+                assert!(state.pending_control_done_ids.is_empty());
+                assert!(state.observed_turn_active);
+                assert_eq!(state.pending_message_id, Some(999));
+                if scoped {
+                    assert!(state.turn_fence.active());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn runtime_commands_are_capability_gated_and_never_send_a_prompt() {
     let request = json!({"id": 501, "req": "runtime_command", "session_id": "s1", "command": "memory", "args": ["status"]});
     let mut state = BridgeState {
@@ -875,16 +1006,16 @@ fn context_only_message_error_is_correlated_to_the_request() {
     );
 }
 
-/// An ack for anything else (a ping, a clear) is still a plain request reply:
+/// An ack for an ack-terminal control is still a plain request reply:
 /// promoting those to acceptance would wiggle a message that nobody sent.
 #[test]
 fn acking_an_unrelated_request_stays_a_reply() {
     let mut state = state_with_session();
-    let out = state.api_request_to_legacy(&json!({"req": "clear", "id": 9, "session_id": "s1"}));
-    let Outbound::Legacy(clear) = &out[0] else {
+    let out = state.api_request_to_legacy(&json!({"req": "cancel", "id": 9, "session_id": "s1"}));
+    let Outbound::Legacy(cancel) = &out[0] else {
         panic!("expected legacy outbound");
     };
-    let legacy_id = clear["id"].as_u64().unwrap();
+    let legacy_id = cancel["id"].as_u64().unwrap();
     let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}));
     assert_eq!(frames[0].reply_to, Some(9));
     assert!(matches!(&frames[0].event, ApiEvent::Ok));
@@ -2807,7 +2938,9 @@ fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
 #[test]
 fn observer_turn_ignores_control_done_even_after_the_control_reply() {
     let mut state = state_with_session();
-    let actions = state.api_request_to_legacy(&json!({"req":"clear", "id":22, "session_id":"s1"}));
+    let actions = state.api_request_to_legacy(
+        &json!({"req":"notify_auth_changed", "provider":"openai", "id":22, "session_id":"s1"}),
+    );
     let Outbound::Legacy(control) = &actions[0] else {
         panic!()
     };
