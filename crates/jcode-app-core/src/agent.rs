@@ -19,7 +19,7 @@ mod status;
 mod streaming;
 #[cfg(test)]
 mod swarm_reminder_tests;
-mod tools;
+pub(crate) mod tools;
 mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
