@@ -5,11 +5,6 @@ pub(crate) fn copy_pane_vertical_edge_point(
     column: u16,
     row: u16,
 ) -> Option<(crate::tui::CopySelectionPoint, bool)> {
-    // The prompt composer cannot be wheel-scrolled, so it has no browser-style
-    // edge auto-scroll. Drags past its edge clamp via `copy_pane_drag_point`.
-    if pane == crate::tui::CopySelectionPane::Input {
-        return None;
-    }
     let snapshot = copy_snapshot_for_pane(pane)?;
     let area = snapshot.content_area;
     if area.width == 0 || area.height == 0 {

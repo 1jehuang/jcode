@@ -841,6 +841,10 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
+    // Text insertion (typing, paste, drops) edits the draft: the composer must
+    // follow the caret again so the edit is visible, even when this runs from a
+    // non-key path (bracketed paste) that skips `handle_key_core`.
+    app.reset_input_copy_scroll_override();
 
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
@@ -3118,6 +3122,13 @@ impl App {
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+        // Any key outside copy-selection mode hands control back to typing:
+        // drop a drag-armed composer scroll override so the caret is visible
+        // again (copy-mode keys drive the selection instead and keep it).
+        if !self.copy_selection_mode {
+            self.reset_input_copy_scroll_override();
+        }
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());

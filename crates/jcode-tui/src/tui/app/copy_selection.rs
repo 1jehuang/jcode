@@ -22,6 +22,8 @@ impl App {
         self.copy_selection_goal_column = None;
         // A re-entered drag at the same pane and edge must not skip its nudge.
         self.copy_selection_edge_autoscroll = None;
+        // The composer returns to caret-follow once copy mode ends.
+        self.input_copy_scroll_offset = None;
     }
 
     pub(super) fn toggle_copy_selection_mode(&mut self) {
@@ -491,6 +493,46 @@ impl App {
         }
     }
 
+    /// Drop a stale composer scroll override so the composer follows the caret
+    /// again. Called from every path that hands control back to typing (key
+    /// presses outside copy mode, text insertion, a fresh mouse press).
+    pub(super) fn reset_input_copy_scroll_override(&mut self) {
+        self.input_copy_scroll_offset = None;
+    }
+
+    /// Step the composer's drag-edge autoscroll by one wrapped row: adjust the
+    /// explicit composer scroll override instead of a wheel-scroll target,
+    /// because the composer has no wheel scrolling of its own. Returns false
+    /// when the composer is already at its scroll bound, so the tick loop
+    /// stops requesting redraws.
+    fn step_input_copy_scroll(&mut self, upward: bool) -> bool {
+        let Some((scroll, visible_end)) = crate::tui::ui::input_pane_visible_range() else {
+            return false;
+        };
+        let Some(line_count) = crate::tui::ui::input_pane_line_count() else {
+            return false;
+        };
+        let rows = visible_end.saturating_sub(scroll);
+        if rows == 0 || line_count == 0 {
+            return false;
+        }
+        let max_scroll = line_count.saturating_sub(rows);
+        let current = self.input_copy_scroll_offset.unwrap_or(scroll);
+        let next = if upward {
+            let Some(next) = current.checked_sub(1) else {
+                return false;
+            };
+            next
+        } else {
+            if current >= max_scroll {
+                return false;
+            }
+            current + 1
+        };
+        self.input_copy_scroll_offset = Some(next.min(max_scroll));
+        true
+    }
+
     /// Step the drag edge autoscroll by exactly one line. The drag's rate is the
     /// `REDRAW_COPY_AUTOSCROLL` tick, so this must not use the wheel's queue.
     fn step_copy_selection_scroll(
@@ -498,6 +540,11 @@ impl App {
         pane: crate::tui::CopySelectionPane,
         upward: bool,
     ) -> bool {
+        // The composer scrolls via an explicit view override (there is no wheel
+        // target for it); the render loop honors the override.
+        if pane == crate::tui::CopySelectionPane::Input {
+            return self.step_input_copy_scroll(upward);
+        }
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
             return false;
         };
@@ -531,6 +578,9 @@ impl App {
         let point = crate::tui::ui::copy_point_from_screen(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // A fresh press returns the composer to caret-follow: the click
+                // repositions the caret, and the view must show it again.
+                self.reset_input_copy_scroll_override();
                 let point = point?;
                 if self.copy_selection_mode {
                     self.copy_selection_dragging = true;

@@ -1316,6 +1316,12 @@ pub struct App {
     /// keep auto-scrolling on every tick (browser-style) until the drag leaves the
     /// edge or ends. Stores the pane and whether to scroll upward.
     copy_selection_edge_autoscroll: Option<(crate::tui::CopySelectionPane, bool)>,
+    /// Explicit composer scroll (first visible wrapped input row) armed while
+    /// drag-selecting in the composer so edge auto-scroll can reveal lines the
+    /// caret-follow view would not show. `None` means the composer follows the
+    /// caret (the default); cleared on the next key press, text insert, mouse
+    /// press, or when copy-selection mode exits.
+    input_copy_scroll_offset: Option<usize>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
