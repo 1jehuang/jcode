@@ -50,7 +50,8 @@ final class AppModel {
             port: gateway.port,
             token: response.token,
             serverName: response.serverName,
-            serverVersion: response.serverVersion
+            serverVersion: response.serverVersion,
+            secure: gateway.secure
         )
         store.save(credential)
         servers = store.loadAll()

@@ -10,6 +10,7 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
     public var serverName: String
     public var serverVersion: String
     public var pairedAt: Date
+    public var secure: Bool
 
     public init(
         host: String,
@@ -17,7 +18,8 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         token: String,
         serverName: String,
         serverVersion: String,
-        pairedAt: Date = Date()
+        pairedAt: Date = Date(),
+        secure: Bool = false
     ) {
         self.host = host
         self.port = port
@@ -25,10 +27,26 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         self.serverName = serverName
         self.serverVersion = serverVersion
         self.pairedAt = pairedAt
+        self.secure = secure
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case host, port, token, serverName, serverVersion, pairedAt, secure
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        host = try values.decode(String.self, forKey: .host)
+        port = try values.decode(UInt16.self, forKey: .port)
+        token = try values.decode(String.self, forKey: .token)
+        serverName = try values.decode(String.self, forKey: .serverName)
+        serverVersion = try values.decode(String.self, forKey: .serverVersion)
+        pairedAt = try values.decode(Date.self, forKey: .pairedAt)
+        secure = try values.decodeIfPresent(Bool.self, forKey: .secure) ?? false
     }
 
     public var gateway: Gateway {
-        Gateway(host: host, port: port)
+        Gateway(host: host, port: port, secure: secure)
     }
 }
 
