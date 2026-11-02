@@ -1328,6 +1328,39 @@ fn set_session_env_sends_replacement_and_clear() {
 }
 
 #[test]
+fn set_session_env_rejects_correlated_error_then_accepts_valid_map() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::SetSessionEnv { env, .. } = &frame.request {
+            let event = if env.keys().any(|key| key.contains('=')) {
+                ApiEvent::Error {
+                    code: jcode_harness_api::ErrorCode::Internal,
+                    message: "Invalid session environment".into(),
+                }
+            } else {
+                ApiEvent::Ok
+            };
+            reply(frame, event, writer);
+        }
+    });
+    let error = client
+        .set_session_env(
+            "session-1",
+            std::collections::HashMap::from([("A=B".into(), "v".into())]),
+        )
+        .expect_err("invalid env must reject");
+    assert!(matches!(
+        error.kind,
+        jcode_sdk::ErrorKind::Harness(jcode_harness_api::ErrorCode::Internal)
+    ));
+    client
+        .set_session_env(
+            "session-1",
+            std::collections::HashMap::from([("VALID".into(), "v".into())]),
+        )
+        .expect("valid map after rejection");
+}
+
+#[test]
 fn run_retains_abnormal_stop_and_filters_other_sessions() {
     use jcode_sdk::TurnStopReason;
     let client = fake_harness(|frame, writer| {
