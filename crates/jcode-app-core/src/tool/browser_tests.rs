@@ -300,6 +300,25 @@ fn interactables_maps_to_bridge_action() {
 }
 
 #[test]
+fn model_definition_size_budget() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _disabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "1");
+    let tool = BrowserTool::new();
+    let definition = json!({
+        "name": tool.name(),
+        "description": tool.description(),
+        "parameters": tool.parameters_schema(),
+    })
+    .to_string();
+    println!("BROWSER_DEFINITION={definition}");
+    assert!(
+        definition.len() < 1_400,
+        "browser definition: {} bytes",
+        definition.len()
+    );
+}
+
+#[test]
 fn schema_exposes_advanced_browser_fields() {
     let schema = BrowserTool::new().parameters_schema();
     let props = schema["properties"]
@@ -566,12 +585,7 @@ fn handoff_schema_keeps_eval_primary_and_bounds_inputs() {
             .contains("Use eval as the primary interaction method")
     );
     let schema = tool.parameters_schema();
-    assert!(
-        schema["properties"]["action"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Use eval for DOM inspection/interaction")
-    );
+    assert!(schema["properties"]["action"].get("description").is_none());
     assert_eq!(schema["properties"]["max_steps"]["default"], 40);
     assert_eq!(schema["properties"]["max_steps"]["maximum"], 100);
     assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
@@ -628,7 +642,7 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
         ] {
             assert_eq!(properties.get(key).is_some(), !disabled, "{key}");
         }
-        assert!(tool.description().contains("Use eval as the primary"));
+        assert!(tool.description().contains("Use eval"));
         assert_eq!(tool.description().contains("handoff"), !disabled);
         assert!(!schema.to_string().to_lowercase().contains("disabled"));
         for action in [
