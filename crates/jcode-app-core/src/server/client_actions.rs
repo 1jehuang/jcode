@@ -831,7 +831,7 @@ fn create_transfer_child_session(
     parent: &Session,
     compaction: Option<crate::session::StoredCompactionState>,
 ) -> anyhow::Result<(String, String)> {
-    let mut todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut todos = crate::todo::load_todos(parent_session_id)?;
     // Background tasks belong to the source session. A fresh session must
     // reassess those results, not inherit foreign task IDs or their wakes.
     for todo in &mut todos {

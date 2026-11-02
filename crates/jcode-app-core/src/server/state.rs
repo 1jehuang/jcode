@@ -563,8 +563,10 @@ impl TurnEventChannel {
 
     pub(super) async fn finish(mut self) {
         self.close.take();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Turn event drain failed: {error}"));
         }
     }
 }
@@ -653,7 +655,10 @@ impl SessionControlHandle {
     pub fn provider_handle(&self) -> Option<Arc<dyn Provider>> {
         SESSION_PROVIDERS
             .lock()
-            .ok()?
+            .unwrap_or_else(|poisoned| {
+                crate::logging::warn("Recovering poisoned session provider registry");
+                poisoned.into_inner()
+            })
             .get(&self.session_id)?
             .upgrade()
     }

@@ -1977,7 +1977,11 @@ impl Server {
         let registry_identity = self.identity.display_name();
         tokio::spawn(async move {
             let hash_path = format!("{}.hash", registry_info.socket.display());
-            let _ = std::fs::write(&hash_path, jcode_build_meta::git_hash());
+            if let Err(error) = std::fs::write(&hash_path, jcode_build_meta::git_hash()) {
+                crate::logging::warn(&format!(
+                    "Failed to publish server hash at {hash_path}: {error}"
+                ));
+            }
 
             let mut registry = crate::registry::ServerRegistry::load()
                 .await

@@ -698,8 +698,12 @@ fn spawn_assigned_task_run(
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // The lease preserves ownership without holding Agent across queue drains.
         drop(agent);
-        let _ = heartbeat_stop_tx.send(true);
-        let _ = heartbeat_task.await;
+        if let Err(error) = heartbeat_stop_tx.send(true) {
+            crate::logging::debug(&format!("Task heartbeat already stopped: {error}"));
+        }
+        if let Err(error) = heartbeat_task.await {
+            crate::logging::warn(&format!("Task heartbeat failed: {error}"));
+        }
         progress_events.finish().await;
 
         match result {
@@ -878,8 +882,10 @@ impl TaskProgressEvents {
 
     async fn finish(mut self) {
         self.close.take();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Task progress event drain failed: {error}"));
         }
     }
 }

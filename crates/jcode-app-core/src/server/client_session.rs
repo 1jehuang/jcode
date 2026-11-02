@@ -888,7 +888,10 @@ pub(super) async fn handle_subscribe(
                 .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
                 .or_else(|| {
                     crate::session::Session::load_startup_stub(client_session_id)
-                        .ok()
+                        .map(Some).unwrap_or_else(|error| {
+                            crate::logging::warn(&format!("Failed to load MCP session fallback for {client_session_id}: {error}"));
+                            None
+                        })
                         .and_then(|session| session.working_dir.map(PathBuf::from))
                 }),
         };
@@ -1625,8 +1628,12 @@ pub(super) async fn handle_resume_session(
                     debug_state.unregister(debug_client_id);
                 }
 
-                if let Some(disconnect_tx) = disconnect_tx {
-                    let _ = disconnect_tx.send(());
+                if let Some(disconnect_tx) = disconnect_tx
+                    && let Err(error) = disconnect_tx.send(())
+                {
+                    crate::logging::debug(&format!(
+                        "Previous session client already disconnected: {error}"
+                    ));
                 }
             }
         }
@@ -1645,7 +1652,13 @@ pub(super) async fn handle_resume_session(
             .map(|agent_guard| agent_guard.is_canary())
             .or_else(|| {
                 crate::session::Session::load_startup_stub(&session_id)
-                    .ok()
+                    .map(Some)
+                    .unwrap_or_else(|error| {
+                        crate::logging::warn(&format!(
+                            "Failed to load canary session fallback for {session_id}: {error}"
+                        ));
+                        None
+                    })
                     .map(|session| session.is_canary)
             })
             .unwrap_or(false);
@@ -1686,7 +1699,13 @@ pub(super) async fn handle_resume_session(
                 .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
                 .or_else(|| {
                     crate::session::Session::load_startup_stub(&session_id)
-                        .ok()
+                        .map(Some)
+                        .unwrap_or_else(|error| {
+                            crate::logging::warn(&format!(
+                                "Failed to load MCP session fallback for {session_id}: {error}"
+                            ));
+                            None
+                        })
                         .and_then(|session| session.working_dir.map(PathBuf::from))
                 })
         });
@@ -1788,8 +1807,12 @@ pub(super) async fn handle_resume_session(
                 debug_state.unregister(debug_client_id);
             }
 
-            if let Some(disconnect_tx) = disconnect_tx {
-                let _ = disconnect_tx.send(());
+            if let Some(disconnect_tx) = disconnect_tx
+                && let Err(error) = disconnect_tx.send(())
+            {
+                crate::logging::debug(&format!(
+                    "Previous session client already disconnected: {error}"
+                ));
             }
         } else {
             if allow_session_takeover && distinct_client_instances {

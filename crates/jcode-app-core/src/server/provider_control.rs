@@ -498,7 +498,11 @@ fn apply_set_premium_mode(
         mode,
         premium_mode_label(premium_mode)
     ));
-    let _ = client_event_tx.send(ServerEvent::Ack { id });
+    if let Err(error) = client_event_tx.send(ServerEvent::Ack { id }) {
+        crate::logging::debug(&format!(
+            "Model change acknowledgement client disconnected: {error}"
+        ));
+    }
 }
 
 pub(super) async fn handle_set_premium_mode(
@@ -587,12 +591,22 @@ pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
             };
             let exists = if name == "openai" {
                 crate::auth::codex::list_accounts()
-                    .unwrap_or_default()
+                    .unwrap_or_else(|error| {
+                        crate::logging::warn(&format!(
+                            "Failed to inspect OpenAI accounts for pool routing: {error}"
+                        ));
+                        Vec::new()
+                    })
                     .iter()
                     .any(|account| account.label == label)
             } else {
                 crate::auth::claude::list_accounts()
-                    .unwrap_or_default()
+                    .unwrap_or_else(|error| {
+                        crate::logging::warn(&format!(
+                            "Failed to inspect Claude accounts for pool routing: {error}"
+                        ));
+                        Vec::new()
+                    })
                     .iter()
                     .any(|account| account.label == label)
             };

@@ -1488,7 +1488,10 @@ pub(super) async fn handle_client(
 
             Request::GetTodos { .. } => {
                 let payload = serde_json::json!({
-                    "todos": crate::todo::load_todos(&client_session_id).unwrap_or_default(),
+                    "todos": crate::todo::load_todos(&client_session_id).unwrap_or_else(|error| {
+                        crate::logging::warn(&format!("Failed to load todos for {client_session_id}: {error}"));
+                        Vec::new()
+                    }),
                     "plan": crate::todo::load_plan(&client_session_id).unwrap_or_default(),
                     "goals": crate::todo::load_goals(&client_session_id).unwrap_or_default(),
                 });
@@ -3285,7 +3288,11 @@ pub(super) async fn handle_client(
         // Input prompts belong to this transport and cannot safely be replayed
         // to a new client. Close response channels instead of waiting forever.
         stdin_forwarder.abort();
-        let _ = stdin_forwarder.await;
+        if let Err(error) = stdin_forwarder.await
+            && !error.is_cancelled()
+        {
+            crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
+        }
         stdin_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
@@ -3293,7 +3300,9 @@ pub(super) async fn handle_client(
                 client_session_id
             ));
             let owner_id = handle.id();
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                crate::logging::warn(&format!("Disconnected turn task failed: {error}"));
+            }
             while let Ok((done_id, result, report, owner, _finalization)) =
                 processing_done_rx.try_recv()
             {
@@ -3383,8 +3392,10 @@ async fn reconcile_processing_completions(
             ));
             continue;
         }
-        if let Some(task) = state.task.take() {
-            let _ = task.await;
+        if let Some(task) = state.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Completed turn task failed: {error}"));
         }
         crate::logging::info(&format!(
             "Processing done for message id={}, result={}",
