@@ -148,23 +148,19 @@ fn completely_blocked_schema_is_shared_and_strict() {
             &properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]
                 ["properties"][field]
         );
-        let description = canonical["description"].as_str().unwrap();
-        assert!(description.contains("only by someone else"));
-        assert!(description.contains("no safe workaround exists after investigation"));
-        assert!(description.contains("who must do exactly what"));
-        assert_eq!(
-            canonical["properties"]["reason"]["description"],
-            "Who must do exactly what, and why the agent cannot do it or work around it."
+        assert!(canonical.get("description").is_none());
+        assert!(
+            canonical["properties"]["reason"]
+                .get("description")
+                .is_none()
         );
-        assert!(description.contains(
-            "Not for implementation decisions, uncertainty, task size, or agent coordination."
-        ));
     }
     let tool = TodoTool::new();
     let guidance = tool.description();
-    assert!(guidance.contains("Block only when progress requires an indispensable action"));
-    assert!(guidance.contains("agent coordination never qualify"));
-    assert!(guidance.contains("Continue independent items."));
+    assert!(guidance.contains("indispensable action by someone else with no safe workaround"));
+    assert!(guidance.contains("name who must do what and why you cannot proceed"));
+    assert!(guidance.contains("agent coordination are not blockers"));
+    assert!(guidance.contains("Continue independent work."));
     assert!(update["properties"].get("action").is_none());
     assert!(
         schema["properties"]["update"]["items"]["properties"]
@@ -174,7 +170,7 @@ fn completely_blocked_schema_is_shared_and_strict() {
     assert!(
         TodoTool::new()
             .description()
-            .contains("completely_blocked: No way forward.")
+            .contains("completely_blocked means no way forward.")
     );
 }
 

@@ -1243,33 +1243,13 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update todos and goal assessments. For multi-step work, write the plan \
-         once with `phases` containing lanes containing items. Then use `update` by unique name for status/field changes and `add` \
-         for new work. Reserve full replacement for restructuring; remove rarely. \
-         Mark work in_progress before starting and completed as soon as it is done. \
-         Keep the live list current after meaningful steps. Use unique short names, with \
-         longer context in description. IDs are internal. Use rename_to for explicit renames. Organize parallel lanes within sequential phases. \
-         A lane may set `dependencies` to prerequisite todo names in earlier phases, replacing \
-         the whole-phase barrier so it can start once all those items are completed. \
-         Omit `dependencies` for normal phase ordering. Incremental `lane_dependencies` edits on one \
-         item update its entire lane; null restores normal ordering. \
-         Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
-         must wait. They block only while running, never after completion. Saving \
-         enables completion notify/wake. Use [] or null to clear waiting_on. \
-         Block only when progress requires an indispensable action that only someone else can perform, \
-         and no safe workaround exists after investigation. The reason must name who must do exactly \
-         what to unblock this item, and why the agent cannot do it or work around it. Valid examples: \
-         a credential only its owner can provide, required data only its custodian can supply, or \
-         explicit approval genuinely required for an irreversible action. Implementation choices, \
-         uncertainty, task size, prioritization, and agent coordination never qualify. Decide, \
-         investigate, split the work, or coordinate directly instead. Do not invent approval \
-         requirements for already-authorized work. Continue independent items. \
-         For an external blocker without a dependency ID, set external_blocker to \
-         {reason, review_at}, with a concrete reason and future RFC3339 deadline. \
-         Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
-         scheduler wakes this session to reassess, not assume resolution or completion. \
-         Clear external_blocker with null when unblocked. Use this instead of a separate \
-         schedule call for todo blocker reviews. completely_blocked: No way forward."
+        "Read/update todos and goal assessments. Initialize with phases, then patch by unique task name. \
+         Keep status current. Phases are sequential, lanes parallel, items ordered. \
+         Block only for an indispensable action by someone else with no safe workaround: \
+         name who must do what and why you cannot proceed. Uncertainty, task size, and \
+         agent coordination are not blockers. Continue independent work. \
+         external_blocker keeps work pending/in_progress and schedules reassessment at review_at \
+         instead of a separate schedule call; null clears it. completely_blocked means no way forward."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1279,7 +1259,7 @@ impl Tool for TodoTool {
                 "intent": super::intent_schema_property(),
                 "update": {
                     "type": "array",
-                    "description": "Patch todos by unique name and changed fields only. Use rename_to to rename. Unmentioned data stays untouched.",
+                    "description": "Patch by name; omitted fields stay unchanged.",
                     "items": {
                         "type": "object",
                         "required": ["name"],
@@ -1289,7 +1269,6 @@ impl Tool for TodoTool {
                 },
                 "add": {
                     "type": "array",
-                    "description": "Append new todos (same fields as todos). Optional `after`: existing task name to insert after.",
                     "items": {
                         "type": "object",
                         "required": ["name", "status", "priority", "confidence"],
@@ -1298,12 +1277,11 @@ impl Tool for TodoTool {
                 },
                 "remove": {
                     "type": "array",
-                    "description": "Names of todos to delete. Prefer marking status cancelled.",
+                    "description": "Delete by name; prefer cancelling.",
                     "items": {"type": "string"}
                 },
                 "todos": {
                     "type": "array",
-                    "description": "Full todo list; replaces the whole list. Use for the initial plan or a real restructure, otherwise prefer update/add/remove.",
                     "items": {
                         "type": "object",
                         "required": ["name", "status", "priority", "confidence"],
@@ -1311,141 +1289,127 @@ impl Tool for TodoTool {
                             "name": {
                                 "type": "string",
                                 "minLength": 1,
-                                "description": "Unique task name within the plan, ideally under 40 characters. Used to reference this item. Put longer context in description."
+                                "description": "Unique task name, ideally under 40 characters."
                             },
                             "description": {
-                                "type": "string",
-                                "description": "Longer brief for the assigned worker: files, acceptance criteria, context. Hidden from the card."
+                                "type": "string"
                             },
                             "waiting_on": {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
-                                "description": "Session task/await_members IDs: pending blocks+notify/wake; done/timeout unblocks. []/null clears."
+                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
                             },
                             "completely_blocked": {
                                 "type": ["object", "null"],
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Who must do exactly what, and why the agent cannot do it or work around it."}
-                                },
-                                "description": "Only when an indispensable action can be performed only by someone else and no safe workaround exists after investigation. Name who must do exactly what, and why the agent cannot do it or work around it. Not for implementation decisions, uncertainty, task size, or agent coordination."
+                                    "reason": {"type": "string", "minLength": 1}
+                                }
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
                                 "required": ["reason", "review_at"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Who must do exactly what, and why the agent cannot do it or work around it."},
-                                    "review_at": {"type": "string", "format": "date-time", "description": "Future finite RFC3339 reassessment deadline. Does not mean the blocker resolves then."}
-                                },
-                                "description": "Only when an indispensable action can be performed only by someone else and no safe workaround exists after investigation. Name who must do exactly what, and why the agent cannot do it or work around it. Not for implementation decisions, uncertainty, task size, or agent coordination. No dependency ID: pause until durable review_at to reassess. null cancels."
+                                    "reason": {"type": "string", "minLength": 1},
+                                    "review_at": {"type": "string", "format": "date-time", "description": "Future RFC3339 reassessment time, not assumed resolution."}
+                                }
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"],
-                                "description": "Status. Use completed when the task is done."
+                                "enum": ["pending", "in_progress", "completed", "cancelled"]
                             },
                             "priority": {
-                                "type": "string",
-                                "description": "Priority."
+                                "type": "string"
                             },
                             "lane": {
-                                "type": "string",
-                                "description": "Lane name: coherent goal owned by one worker, tasks ordered within it. Omit for flat list."
+                                "type": "string"
                             },
                             "phase": {
                                 "type": "integer",
-                                "minimum": 1,
-                                "description": "Sequential phase (1, 2...). Lanes inside each phase run in parallel. Omit for list order."
+                                "minimum": 1
                             },
                             "confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
+                                "description": "Evidence that the task can be completed correctly."
                             },
                             "completion_confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state behind this todo's completion. Use only for completed items."
+                                "description": "Evidence of completion; completed items only."
                             },
                         }
                     }
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Plan-level understanding of the request. Send on first write and whenever understanding changes.",
+                    "description": "Send initially and when understanding changes.",
                     "required": ["user_intention", "understands_user_intent"],
                     "properties": {
                         "user_intention": {
-                            "type": "string",
-                            "description": "What the user actually wants: underlying reason and desired end state. Omit later to retain."
+                            "type": "string"
                         },
                         "understands_user_intent": {
                             "type": "string",
-                            "enum": ["uncertain", "partial", "clear", "complete"],
-                            "description": "How well you understand what the user wants. Report uncertain or partial when guessing."
+                            "enum": ["uncertain", "partial", "clear", "complete"]
                         }
                     }
                 },
                 "goals": {
                     "type": "array",
-                    "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
+                    "description": "Assess honestly by group; omitted groups are retained.",
                     "items": {
                         "type": "object",
                         "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
                         "properties": {
                             "group": {
                                 "type": "string",
-                                "description": "Group label this goal describes. Omit or null for the ungrouped list."
+                                "description": "Omit/null for ungrouped."
                             },
                             "closed_feedback_loop": {
                                 "type": "string",
                                 "enum": ["absent", "weak", "usable", "strong", "closed"],
-                                "description": "How much of this goal's correctness the feedback_loop can verify on its own."
+                                "description": "How much correctness the feedback loop can verify itself."
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Requirement-to-check process: an explicit observation or check for each requirement of this goal."
+                                "description": "Concrete check for each requirement."
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
+                                "description": "indirect: inspection/proxy; synthetic: mocks/custom harness; representative: real interfaces, partial workflow; acceptance_blocked: real workflow attempted but externally blocked; acceptance_aligned: real build/test/user workflow passed, never substitutes only."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
-                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"]
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
+                                "description": "Requirements/outputs mapped to checks and observed results."
                             },
                             "delivery_state": {
                                 "type": "string",
-                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"],
-                                "description": "Completion-time: how far the result actually traveled toward the user's outcome."
+                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
                             },
                             "difficulty": {
                                 "type": "string",
-                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"],
-                                "description": "Honest intrinsic difficulty of this goal. Descriptive only."
+                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"]
                             },
                             "autonomy": {
                                 "type": "string",
-                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"],
-                                "description": "How far beyond the literal request the work went. Assess from what was completed."
+                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"]
                             },
                             "iteration_maturity": {
                                 "type": "string",
-                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"],
-                                "description": "How far the feedback loop was actually exercised, and any evidence-based reason to stop iterating."
+                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"]
                             },
                             "stopping_evidence": {
                                 "type": "string",
-                                "description": "Evidence for the reported iteration_maturity: attempts, observations, or a real budget limit."
+                                "description": "Observed evidence supporting iteration_maturity."
                             }
                         }
                     }
@@ -1458,18 +1422,18 @@ impl Tool for TodoTool {
         schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
             "items": {"type": "string", "minLength": 1},
-            "description": "Lane-wide prerequisite todo names in strictly earlier phases by first appearance. Editing one member updates the entire lane. Null restores the default phase barrier."
+            "description": "Earlier-phase prerequisite task names. Updates whole lane; null restores phase barrier."
         });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
-            "description": "Existing todo name to insert after."
+            "description": "Insert after this task name."
         });
         schema["properties"]["update"]["items"]["properties"] =
             schema["properties"]["todos"]["items"]["properties"].clone();
         schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
             "type": "string", "minLength": 1,
-            "description": "Explicit new unique name. The name field selects the existing task. Internal identity and dependencies are preserved."
+            "description": "New unique name; preserves identity and dependencies."
         });
         schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["add"]["items"]["properties"] = add_properties;
@@ -1494,21 +1458,20 @@ impl Tool for TodoTool {
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional dependencies (todo names) replace its phase barrier for early start. [] clears.",
+            "description": "Replace entire plan; [] clears. Prefer patches after initialization.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
                         "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
-                            "description": "Prerequisite todo names from strictly earlier phases. Omit or null for the default phase barrier."
+                            "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
-        schema["properties"]["add"]["description"] = json!(
-            "Add items with explicit phase and lane, or inherit missing membership from an existing after name."
-        );
+        schema["properties"]["add"]["description"] =
+            json!("Specify phase/lane or inherit from after.");
         schema
     }
 
