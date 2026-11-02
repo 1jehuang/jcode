@@ -2027,3 +2027,143 @@ fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
         );
     }
 }
+
+#[tokio::test]
+async fn config_header_overrides_apply_on_the_wire_and_replace_built_in_headers() {
+    use std::io::{Read, Write};
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-anthropic-api-key");
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "auto");
+
+    // Capture server: records the raw request, then replies with a minimal SSE stream.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+    let addr = listener.local_addr().expect("capture server addr");
+    let (request_tx, request_rx) = std::sync::mpsc::channel::<String>();
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept capture request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = request_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        })
+        .await;
+    });
+
+    let _base = EnvVarGuard::set(
+        "JCODE_ANTHROPIC_API_BASE",
+        format!("http://127.0.0.1:{}/v1", addr.port()),
+    );
+    // The bridge serializes merged overrides into this env var; simulate it
+    // with values that collide with built-in headers (anthropic-beta) and with
+    // the client default User-Agent.
+    let _headers = EnvVarGuard::set(
+        "JCODE_ANTHROPIC_HEADERS",
+        r#"{"User-Agent":"corp-agent/9.9","anthropic-beta":"corp-beta","x-tenant-id":"tenant-42"}"#,
+    );
+
+    jcode_base::config::Config::invalidate_cache();
+    let provider = AnthropicProvider::new();
+    let messages = vec![jcode_message_types::Message {
+        role: jcode_message_types::Role::User,
+        content: vec![jcode_message_types::ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let mut stream = provider
+        .complete(&messages, &[], "", None)
+        .await
+        .expect("complete should start against the capture server");
+    use futures::StreamExt;
+    while let Some(event) = stream.next().await {
+        event.expect("stream event should parse");
+    }
+
+    let raw = request_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("capture server saw the request");
+    let lines: Vec<&str> = raw.lines().take_while(|line| !line.is_empty()).collect();
+    let user_agents: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
+        .map(|line| {
+            line.split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(
+        user_agents,
+        vec!["corp-agent/9.9"],
+        "exactly one User-Agent, the configured one:\n{raw}"
+    );
+    let betas: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.to_ascii_lowercase().starts_with("anthropic-beta:"))
+        .map(|line| {
+            line.split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(
+        betas,
+        vec!["corp-beta"],
+        "configured anthropic-beta must replace the built-in one, not duplicate:\n{raw}"
+    );
+    assert!(
+        lines.contains(&"x-tenant-id: tenant-42"),
+        "custom header missing:\n{raw}"
+    );
+
+    jcode_base::config::Config::invalidate_cache();
+}
+
+#[test]
+fn configured_direct_headers_fall_back_to_global_provider_config() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    jcode_base::env::remove_var("JCODE_ANTHROPIC_HEADERS");
+    jcode_base::config::Config::invalidate_cache();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"
+        [provider]
+        user_agent = "global-agent/1.0"
+
+        [provider.headers]
+        x-tenant-id = "global-tenant"
+        "#,
+    )
+    .expect("write scratch config");
+
+    let parsed = configured_direct_headers().expect("global config overrides");
+    assert_eq!(parsed.get("User-Agent").unwrap(), "global-agent/1.0");
+    assert_eq!(parsed.get("x-tenant-id").unwrap(), "global-tenant");
+
+    // The env var still wins when present (named-profile bridge).
+    let _env_headers = EnvVarGuard::set(
+        "JCODE_ANTHROPIC_HEADERS",
+        r#"{"User-Agent":"bridge-agent/3.0"}"#,
+    );
+    let parsed = configured_direct_headers().expect("bridge overrides");
+    assert_eq!(parsed.get("User-Agent").unwrap(), "bridge-agent/3.0");
+    assert!(parsed.get("x-tenant-id").is_none());
+
+    jcode_base::config::Config::invalidate_cache();
+}

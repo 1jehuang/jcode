@@ -61,6 +61,7 @@ pub(super) async fn run_stream_with_retries(
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
+    http_header_overrides: HeaderMap,
     conversation_id: String,
     request: Value,
     azure_responses: bool,
@@ -124,6 +125,7 @@ pub(super) async fn run_stream_with_retries(
             api_base.clone(),
             auth.clone(),
             send_openrouter_headers,
+            http_header_overrides.clone(),
             &conversation_id,
             request.clone(),
             azure_responses,
@@ -194,6 +196,7 @@ async fn stream_response(
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
+    http_header_overrides: HeaderMap,
     conversation_id: &str,
     request: Value,
     azure_responses: bool,
@@ -241,6 +244,12 @@ async fn stream_response(
     }
     req = apply_opencode_session_header(req, &api_base, conversation_id);
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
+    // Config-driven overrides apply last so they win over every built-in
+    // header, including the kimi coding-agent User-Agent and the client's
+    // default User-Agent.
+    if !http_header_overrides.is_empty() {
+        req = req.headers(http_header_overrides);
+    }
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
         req.json(&request),

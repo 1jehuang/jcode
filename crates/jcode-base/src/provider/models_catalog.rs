@@ -218,20 +218,47 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
 }
 
 pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicModelCatalog> {
+    fetch_anthropic_model_catalog_with_headers(api_key, None).await
+}
+
+/// Direct-API catalog fetch honoring `[provider.headers]` overrides. Chat
+/// requests already resolve the overrides, so without this the same config
+/// could chat with an overridden `x-api-key` while discovery still used the
+/// raw key (401s or an account-inconsistent model list). Override entries
+/// replace the defaults, matching how the chat transport merges them.
+pub async fn fetch_anthropic_model_catalog_with_headers(
+    api_key: &str,
+    header_overrides: Option<&reqwest::header::HeaderMap>,
+) -> Result<AnthropicModelCatalog> {
     fetch_anthropic_model_catalog_with_request(|client, after_id| {
-        let mut req = client
-            .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .query(&[("limit", "1000")]);
-
-        if let Some(after) = after_id {
-            req = req.query(&[("after_id", after)]);
-        }
-
-        req
+        build_direct_catalog_request(client, api_key, header_overrides, after_id)
     })
     .await
+}
+
+/// Build the direct-API catalog request. Split out so tests can inspect the
+/// exact headers the request carries without a live endpoint.
+fn build_direct_catalog_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    header_overrides: Option<&reqwest::header::HeaderMap>,
+    after_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut req = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .query(&[("limit", "1000")]);
+
+    if let Some(overrides) = header_overrides {
+        req = req.headers(overrides.clone());
+    }
+
+    if let Some(after) = after_id {
+        req = req.query(&[("after_id", after)]);
+    }
+
+    req
 }
 
 pub async fn fetch_anthropic_model_catalog_oauth(
@@ -376,6 +403,44 @@ pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_catalog_request_applies_header_overrides_over_raw_key() {
+        // The 401 repro from the review: chat resolved `[provider.headers]`
+        // and succeeded with the overridden key while discovery still sent
+        // the raw one. The built request must carry the override, replacing
+        // the default x-api-key the raw key was about to send.
+        let client = reqwest::Client::new();
+        let mut overrides = reqwest::header::HeaderMap::new();
+        overrides.insert(
+            "x-api-key",
+            reqwest::header::HeaderValue::from_str("override-key").unwrap(),
+        );
+        let builder =
+            build_direct_catalog_request(&client, "raw-key", Some(&overrides), Some("model-after"));
+        let request = builder.build().unwrap();
+        assert_eq!(
+            request.headers().get("x-api-key").unwrap(),
+            "override-key",
+            "overridden key must win over the raw key on discovery requests"
+        );
+        assert_eq!(
+            request.headers().get("anthropic-version").unwrap(),
+            "2023-06-01"
+        );
+        let url = request.url();
+        assert_eq!(url.path(), "/v1/models");
+        assert!(url.query().unwrap().contains("after_id=model-after"));
+    }
+
+    #[test]
+    fn direct_catalog_request_without_overrides_keeps_raw_key() {
+        let client = reqwest::Client::new();
+        let builder = build_direct_catalog_request(&client, "raw-key", None, None);
+        let request = builder.build().unwrap();
+        assert_eq!(request.headers().get("x-api-key").unwrap(), "raw-key");
+        assert!(request.url().query().unwrap().contains("limit=1000"));
+    }
 
     #[test]
     fn openai_catalog_service_tiers_preserve_known_and_unknown() {
