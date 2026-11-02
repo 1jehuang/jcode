@@ -6,6 +6,7 @@ struct ChatView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.compactEdgePads) private var edgePads
     @State private var showSettings = false
+    @State private var showWorkspacePicker = false
     @State private var sendCount = 0
 
     var body: some View {
@@ -62,6 +63,12 @@ struct ChatView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showWorkspacePicker) {
+            WorkspacePickerView(isRequired: false)
+        }
+        .sheet(isPresented: .constant(model.needsWorkspace)) {
+            WorkspacePickerView(isRequired: true)
+        }
         .sensoryFeedback(.impact(weight: .light), trigger: sendCount)
         .sensoryFeedback(.impact(flexibility: .soft), trigger: finishedToolCallCount) {
             $1 > $0
@@ -97,13 +104,24 @@ struct ChatView: View {
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let modelName = model.session.modelName {
-                    Text(shortModelName(modelName))
-                        .font(Theme.mono(10.5))
-                        .foregroundStyle(Theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                Button {
+                    showWorkspacePicker = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "folder")
+                            .font(Theme.icon(10))
+                            .accessibilityHidden(true)
+                        Text(subtitle)
+                            .font(Theme.mono(10.5))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .foregroundStyle(Theme.textTertiary)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(PressableButtonStyle())
+                .accessibilityLabel("Workspace \(model.activeWorkspace ?? "not set")")
+                .accessibilityHint("Changes the server folder for new sessions")
             }
             Spacer(minLength: 8)
             StatusPill(phase: model.session.phase)
@@ -144,5 +162,11 @@ struct ChatView: View {
             return String(name[name.index(after: idx)...])
         }
         return name
+    }
+
+    private var subtitle: String {
+        let workspace = model.activeWorkspace.map(Workspace.displayName) ?? "choose workspace"
+        guard let modelName = model.session.modelName else { return workspace }
+        return "\(workspace) · \(shortModelName(modelName))"
     }
 }

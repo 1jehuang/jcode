@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State var renameDraft = ""
     @State var showRename = false
     @State var showPairNew = false
+    @State var showWorkspacePicker = false
 
     /// Reasoning effort levels offered when the provider exposes the knob.
     static let reasoningEfforts = ["none", "low", "medium", "high", "xhigh"]
@@ -15,6 +16,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                workspaceSection
                 modelSection
                 if model.session.reasoningEffort != nil {
                     reasoningSection
@@ -58,6 +60,40 @@ struct SettingsView: View {
         }
         .onChange(of: model.activeServer?.id) {
             showPairNew = false
+        }
+        .sheet(isPresented: $showWorkspacePicker) {
+            WorkspacePickerView(isRequired: false)
+        }
+    }
+
+    private var workspaceSection: some View {
+        Section("Workspace") {
+            Button {
+                showWorkspacePicker = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.activeWorkspace.map(Workspace.displayName) ?? "Not set")
+                            .font(.body)
+                            .foregroundStyle(Theme.textPrimary)
+                        if let path = model.activeWorkspace {
+                            Text(path)
+                                .font(Theme.mono(11))
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .listRowBackground(Theme.surface)
+            .accessibilityLabel("Workspace \(model.activeWorkspace ?? "not set")")
+            .accessibilityHint("Changes the server folder for new sessions")
         }
     }
 

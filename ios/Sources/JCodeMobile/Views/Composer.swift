@@ -31,6 +31,8 @@ struct Composer: View {
                     .stroke(isFocused ? Theme.mint.opacity(0.45) : Theme.border, lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.15), value: isFocused)
+            .accessibilityLabel("Message")
+            .accessibilityIdentifier("composer-input")
 
             if isProcessing {
                 Button(action: onInterrupt) {
@@ -47,6 +49,7 @@ struct Composer: View {
                 .buttonStyle(PressableButtonStyle())
                 .accessibilityLabel("Stop")
                 .accessibilityHint("Interrupt the current response")
+                .accessibilityIdentifier("composer-stop")
                 .transition(.scale.combined(with: .opacity))
             }
 
@@ -72,6 +75,7 @@ struct Composer: View {
             .disabled(!canSend)
             .animation(.easeOut(duration: 0.15), value: canSend)
             .accessibilityLabel(isProcessing ? "Queue message" : "Send message")
+            .accessibilityIdentifier("composer-send")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
