@@ -2428,15 +2428,19 @@ impl App {
         if !active {
             return Ok(false);
         }
-        // Use Ctrl+O (set default) and Ctrl+N (toggle favorite) so the picker
-        // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
-        // prefix and readline word-navigation keys users rely on while editing
-        // the `/model` command line. Cycling favorites stays on Shift+Tab.
+        // Use Ctrl+O (set default), Ctrl+N (toggle favorite), and Alt+S (set sidecar)
+        // so the picker preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which
+        // are the tmux prefix and readline word-navigation keys users rely on
+        // while editing the `/model` command line. Cycling favorites stays on
+        // Shift+Tab. Ctrl+S is reserved for the swarm model sub-picker
+        // (fix/swarm-model-picker) so the two chords never collide.
         let is_default =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
         let is_favorite =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
-        if is_default || is_favorite {
+        let is_sidecar =
+            modifiers.contains(KeyModifiers::ALT) && key_char_eq_ignore_ascii_case(code, 's');
+        if is_default || is_favorite || is_sidecar {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
         }
@@ -3399,6 +3403,62 @@ impl App {
         self.set_status_notice(format!("{} {}", action, entry_name));
     }
 
+    /// Set the currently selected model as the memory sidecar model.
+    /// Persists to config so the sidecar uses it on next extraction.
+    pub(crate) fn set_selected_model_as_sidecar(&mut self) {
+        let Some((model_spec, provider_key)) = (|| {
+            let picker = self.inline_interactive_state.as_ref()?;
+            if !picker_is_runtime_model_picker(picker) || picker.filtered.is_empty() {
+                return None;
+            }
+            let idx = picker.filtered[picker.selected];
+            let entry = picker.entries.get(idx)?;
+            if !matches!(entry.action, PickerAction::Model) {
+                return None;
+            }
+            let bare_name = model_entry_base_name(entry);
+            let route = entry.options.get(entry.selected_option)?;
+            let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+                &bare_name,
+                &route.api_method,
+                &route.provider,
+            );
+            Some((selection.model_spec, selection.provider_key))
+        })() else {
+            return;
+        };
+
+        // An OpenAI-compatible route resolves to the bare model id in
+        // `model_spec` plus the profile in `provider_key`. Persisting only the
+        // bare id loses the profile, so the sidecar falls back to the
+        // currently active profile instead of the selected one (greptile:
+        // "Sidecar loses the selected provider"). Save a provider-qualified
+        // spec so the stored value round-trips like a session route.
+        let model_spec = match provider_key {
+            Some(provider_key)
+                if !provider_key.trim().is_empty()
+                    && !model_spec.contains(':')
+                    && !model_spec.contains('@') =>
+            {
+                format!("{}:{}", provider_key.trim(), model_spec)
+            }
+            _ => model_spec,
+        };
+
+        match crate::config::Config::set_memory_model(&model_spec) {
+            Ok(()) => {
+                self.set_status_notice(format!("Sidecar → {}", model_spec));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Set memory sidecar model to {}. Memory extractions will use this model.",
+                    model_spec
+                )));
+            }
+            Err(e) => {
+                self.set_status_notice(format!("Failed to set sidecar: {}", e));
+            }
+        }
+    }
+
     fn cycle_selected_model_favorite(&mut self) {
         let selected_name = (|| {
             let picker = self.inline_interactive_state.as_mut()?;
@@ -3737,6 +3797,11 @@ impl App {
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
             {
                 self.toggle_selected_model_favorite();
+            }
+            code if modifiers.contains(KeyModifiers::ALT)
+                && key_char_eq_ignore_ascii_case(code, 's') =>
+            {
+                self.set_selected_model_as_sidecar();
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {
