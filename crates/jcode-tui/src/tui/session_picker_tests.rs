@@ -315,6 +315,9 @@ fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatu
     make_session_with_flags(id, short_name, is_debug, false, status)
 }
 
+#[path = "session_picker_tests/identity_search.rs"]
+mod identity_search;
+
 fn make_session_with_flags(
     id: &str,
     short_name: &str,

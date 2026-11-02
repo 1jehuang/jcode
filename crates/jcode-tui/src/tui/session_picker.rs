@@ -40,6 +40,7 @@ mod benchmark_matrix;
 mod canvas;
 mod cloud_preview;
 mod filter;
+mod identity_search;
 mod latency;
 mod loading;
 mod memory;

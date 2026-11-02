@@ -54,10 +54,11 @@ impl SessionPicker {
             .into_iter()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (!self.transcript_search.defers_metadata()
-                        && tokens
-                            .iter()
-                            .all(|token| session.search_index.contains(token)))
+                    identity_search::rank(session, &tokens).0
+                        || (!self.transcript_search.defers_metadata()
+                            && tokens
+                                .iter()
+                                .all(|token| session.search_index.contains(token)))
                         || self.transcript_search.contains(&session.id)
                 })
             })
@@ -143,7 +144,10 @@ impl SessionPicker {
                         .iter()
                         .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
                         .count();
-                    rank.with_intent_terms(intent_terms)
+                    (
+                        identity_search::rank(session, &tokens),
+                        rank.with_intent_terms(intent_terms),
+                    )
                 }))
             });
         }
