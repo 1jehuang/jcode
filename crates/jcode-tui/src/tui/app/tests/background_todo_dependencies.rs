@@ -32,13 +32,13 @@ fn complete_blocker_pauses_auto_pokes_until_cleared_but_not_independent_work() {
         independent.waiting_on.clear();
         crate::todo::save_todos(&app.session.id, &[blocked.clone(), independent]).unwrap();
         assert!(app.schedule_turn_end_followups());
-        assert!(app.queued_messages[0].contains("- independent:"));
-        assert!(!app.queued_messages[0].contains("- licensed-sdk:"));
+        assert!(app.queued_messages[0].contains("- \"Finish independent\""));
+        assert!(!app.queued_messages[0].contains("- \"Finish licensed-sdk\""));
 
         blocked.completely_blocked = None;
         crate::todo::save_todos(&app.session.id, &[blocked]).unwrap();
         assert!(reloaded.schedule_turn_end_followups());
-        assert!(reloaded.queued_messages[0].contains("- licensed-sdk:"));
+        assert!(reloaded.queued_messages[0].contains("- \"Finish licensed-sdk\""));
     });
 }
 
@@ -65,8 +65,8 @@ fn external_blocker_pauses_pokes_survives_reload_and_expires_without_completion(
         independent.waiting_on.clear();
         crate::todo::save_todos(&app.session.id, &[todo.clone(), independent]).unwrap();
         assert!(app.schedule_auto_poke_followup_if_needed());
-        assert!(app.queued_messages[0].contains("- independent:"));
-        assert!(!app.queued_messages[0].contains("- acceptance:"));
+        assert!(app.queued_messages[0].contains("- \"Finish independent\""));
+        assert!(!app.queued_messages[0].contains("- \"Finish acceptance\""));
         todo.external_blocker.as_mut().unwrap().review_at =
             chrono::Utc::now() - chrono::Duration::seconds(1);
         assert!(!reloaded.todo_is_paused_for_auto_followup(&todo));
@@ -142,6 +142,7 @@ fn await_dependency_suppresses_pokes_and_survives_reload_until_terminal_or_timeo
 fn dependency_todo(id: &str, task_id: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         id: id.into(),
+        // Public names are stored in content and intentionally differ from internal IDs.
         content: format!("Finish {id}"),
         status: "pending".into(),
         priority: "high".into(),
@@ -212,7 +213,7 @@ fn background_dependency_waiting_only_suppresses_review_and_resets_budget() {
 }
 
 #[test]
-fn background_dependency_mixed_poke_targets_only_actionable_ids() {
+fn background_dependency_mixed_poke_targets_only_actionable_names() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let task = format!("tui-wait-{}", app.session.id);
@@ -228,7 +229,8 @@ fn background_dependency_mixed_poke_targets_only_actionable_ids() {
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert_eq!(app.queued_messages.len(), 1);
         assert!(super::commands::is_poke_message(&app.queued_messages[0]));
-        assert!(app.queued_messages[0].contains("- ready-id:"));
+        assert!(app.queued_messages[0].contains("- \"Finish ready-id\""));
+        assert!(!app.queued_messages[0].contains("- ready-id:"));
         assert!(!app.queued_messages[0].contains("waiting-id"));
         assert_eq!(app.auto_poke_attempts, 1);
     });
