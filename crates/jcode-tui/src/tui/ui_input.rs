@@ -1517,8 +1517,19 @@ pub(crate) fn preview_overscroll_line(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
 ) -> Line<'static> {
+    preview_overscroll_line_for_host(data, width, None)
+}
+
+/// The host belongs to the selected preview, never the attached live session.
+pub(crate) fn preview_overscroll_line_for_host(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+    host: Option<&str>,
+) -> Line<'static> {
     let facts = OverscrollFacts {
-        machine: None,
+        machine: host
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_owned),
         dir: overscroll_directory_transition(
             data.original_working_dir.as_deref(),
             data.working_dir.as_deref(),

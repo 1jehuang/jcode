@@ -240,10 +240,15 @@ pub(super) fn draw(
             height: 1,
             ..transcript
         };
+        let host = (session.server_icon.as_deref() == Some("☁"))
+            .then(|| session.server_name.as_deref()?.strip_prefix("cloud: "))
+            .flatten();
         frame.render_widget(
-            Paragraph::new(super::super::ui::input_ui::preview_overscroll_line(
-                &data, area.width,
-            )),
+            Paragraph::new(
+                super::super::ui::input_ui::preview_overscroll_line_for_host(
+                    &data, area.width, host,
+                ),
+            ),
             status_area,
         );
         transcript.height -= 1;
