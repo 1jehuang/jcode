@@ -48,7 +48,13 @@ fn directories_script(session_id: Option<&str>) -> String {
 }
 
 fn parse_directories(bytes: &[u8]) -> Option<CloudDirectorySnapshot> {
-    let snapshot: CloudDirectorySnapshot = serde_json::from_slice(bytes).ok()?;
+    let snapshot: CloudDirectorySnapshot = match serde_json::from_slice(bytes) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::logging::debug(&format!("Cloud directory response rejected: {error}"));
+            return None;
+        }
+    };
     if snapshot.entries.len() > 4096
         || snapshot.entries.iter().any(|entry| {
             entry.path.is_empty() || entry.path.len() > 16384 || entry.busy > entry.agents
