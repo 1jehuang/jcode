@@ -897,7 +897,10 @@ fn test_local_alt_m_cycles_side_panel_split_fullscreen_hidden() {
         .unwrap();
     assert!(!app.side_panel_fullscreen);
     assert_eq!(app.side_panel.focused_page_id, None);
-    assert_eq!(app.status_notice(), Some("Side panel: OFF".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT.to_string())
+    );
 
     app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
         .unwrap();
@@ -1006,7 +1009,10 @@ fn test_remote_alt_m_cycles_side_panel_split_fullscreen_hidden() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('m'), KeyModifiers::ALT, &mut remote))
         .unwrap();
     assert_eq!(app.side_panel.focused_page_id, None);
-    assert_eq!(app.status_notice(), Some("Side panel: OFF".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT.to_string())
+    );
 
     rt.block_on(app.handle_remote_key(KeyCode::Char('m'), KeyModifiers::ALT, &mut remote))
         .unwrap();

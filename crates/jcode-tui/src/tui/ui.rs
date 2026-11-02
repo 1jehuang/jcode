@@ -130,6 +130,7 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{draw_inline_ui, inline_ui_height};
+pub(crate) use layout_support::{SIDE_PANEL_DISMISSED_HINT, side_panel_restore_area};
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
@@ -2744,7 +2745,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
-        Ok(()) => {}
+        Ok(()) => layout_support::draw_side_panel_restore(frame, app),
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
     // Adapt the finished frame at buffer level so every widget and overlay
