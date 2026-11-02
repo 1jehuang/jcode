@@ -7,7 +7,8 @@
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
 pub use super::cloud_status::{
-    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState, CloudStatusInfo,
+    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState,
+    CloudStatusInfo,
 };
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]

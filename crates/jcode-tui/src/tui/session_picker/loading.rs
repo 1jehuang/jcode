@@ -1862,7 +1862,13 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
             sessions.extend(saved_sessions.into_iter().flatten());
         }
 
-        (sessions, external_handle.join().unwrap_or_else(|_| { crate::logging::debug("External session loader thread failed"); Vec::new() }))
+        (
+            sessions,
+            external_handle.join().unwrap_or_else(|_| {
+                crate::logging::debug("External session loader thread failed");
+                Vec::new()
+            }),
+        )
     });
     sessions.extend(external_sessions);
 
