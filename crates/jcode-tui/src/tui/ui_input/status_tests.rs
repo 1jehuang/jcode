@@ -150,7 +150,7 @@ fn malformed_image_tags_remain_plain_text() {
     assert!(
         lines[0].spans[2..]
             .iter()
-            .all(|span| span.style == Style::default())
+            .all(|span| span.style == jcode_tui_style::theme::input_text_style())
     );
 }
 

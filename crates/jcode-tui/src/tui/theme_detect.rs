@@ -3,7 +3,7 @@
 //! Resolves the theme mode once per process, before the TUI enters raw mode:
 //!
 //! 1. `JCODE_THEME=dark|light` env override (also accepts `auto`).
-//! 2. `display.theme` config: "dark", "light", or "auto"/empty.
+//! 2. `display.theme` config: "dark", "light", "system", custom name, or "auto"/empty.
 //! 3. Auto: query the terminal's background color (OSC 11 via
 //!    `terminal-colorsaurus`) and classify by perceived lightness. Terminals
 //!    known not to support OSC queries are rejected before the bounded query so
@@ -22,13 +22,8 @@ static DETECTED: OnceLock<ThemeMode> = OnceLock::new();
 /// [`prewarm_theme_mode`].
 static PREWARM: Mutex<Option<std::thread::JoinHandle<ThemeMode>>> = Mutex::new(None);
 
-/// Start resolving the theme mode on a background thread so the OSC 11 round
-/// trip overlaps other startup work (notably spawning/awaiting the server)
-/// instead of adding its full latency to the critical path.
-///
-/// Only safe before the terminal enters raw mode and while nothing else reads
-/// stdin, because the query writes an escape sequence and consumes the reply.
-/// Idempotent, and a no-op once the mode is already resolved.
+/// Start resolving the theme mode on a background thread so the OSC 11 query
+/// overlaps other startup work instead of extending the critical path.
 pub fn prewarm_theme_mode() {
     if DETECTED.get().is_some() {
         return;
@@ -57,12 +52,12 @@ fn take_prewarmed_theme_mode() -> Option<ThemeMode> {
 /// the (potentially blocking, sub-second) terminal query and later calls are
 /// free. Must be called before entering raw mode / the alternate screen.
 pub fn init_theme_mode() -> ThemeMode {
+    apply_configured_palette();
     let mode = match take_prewarmed_theme_mode() {
         Some(prewarmed) => *DETECTED.get_or_init(|| prewarmed),
         None => *DETECTED.get_or_init(resolve_theme_mode),
     };
     jcode_tui_style::set_theme_mode(mode);
-    init_palette();
     mode
 }
 
@@ -74,6 +69,7 @@ pub fn init_theme_mode() -> ThemeMode {
 /// input. Prefer the theme captured by the previous process and otherwise resolve
 /// configuration without querying the terminal.
 pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
+    apply_configured_palette();
     let inherited_theme = inherited_theme.and_then(|value| match value {
         "dark" => Some(ThemeMode::Dark),
         "light" => Some(ThemeMode::Light),
@@ -88,26 +84,7 @@ pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
             .unwrap_or_else(resolve_theme_mode_without_terminal_query)
     });
     jcode_tui_style::set_theme_mode(mode);
-    init_palette();
     mode
-}
-
-/// Install the user's configured color palette from `[display.colors]`.
-///
-/// Invalid entries are logged and skipped rather than failing the palette, so
-/// one typo can never leave the TUI unstyled. Safe to call repeatedly; the TUI
-/// calls it again after `/colors` edits so changes apply without a restart.
-pub fn init_palette() {
-    let configured = &crate::config::config().display.colors;
-    let (palette, errors) = jcode_tui_style::Palette::from_pairs(
-        configured
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
-    for error in errors {
-        crate::logging::warn(&format!("display.colors: {error}"));
-    }
-    jcode_tui_style::set_palette(palette);
 }
 
 pub fn current_theme_label() -> &'static str {
@@ -125,19 +102,123 @@ fn resolve_theme_mode_without_terminal_query() -> ThemeMode {
     resolve_configured_theme(false)
 }
 
-fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
-    let configured = std::env::var("JCODE_THEME")
+fn configured_theme_name() -> String {
+    std::env::var("JCODE_THEME")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| crate::config::config().display.theme.clone());
+        .unwrap_or_else(|| crate::config::config().display.theme.clone())
+}
+
+/// Custom-theme search directories, most preferred first.
+///
+/// `/theme` help, the config template, and TUI_COLOR_CONFIGURATION.md all
+/// advertise `~/.jcode/themes/<name>.toml`, so that directory is searched
+/// first. Themes written while the resolver still pointed at the platform
+/// config dir (`~/.config/jcode/themes` and friends) keep working as a
+/// fallback: a valid file there still loads instead of failing with
+/// "Unknown theme".
+pub(crate) fn configured_theme_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(base) = crate::storage::jcode_dir() {
+        dirs.push(base.join("themes"));
+    }
+    if let Ok(base) = crate::storage::app_config_dir() {
+        let fallback = base.join("themes");
+        if !dirs.contains(&fallback) {
+            dirs.push(fallback);
+        }
+    }
+    dirs
+}
+
+/// Try `attempt` against every configured theme directory in order.
+///
+/// Builtin names succeed on the first directory, so they never pay for the
+/// search. A custom name loads from whichever directory holds the file; if
+/// none does, the error from the advertised directory comes back, since that
+/// is where the user was told to put the file.
+fn search_theme_dirs<T>(
+    mut attempt: impl FnMut(Option<&std::path::Path>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut first_error = None;
+    for dir in configured_theme_dirs() {
+        match attempt(Some(&dir)) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => attempt(None),
+    }
+}
+
+/// Load a theme by name from the configured directories without installing
+/// it, so `/theme <name>` can reject unknown names with the real error.
+pub(crate) fn try_load_configured_theme(
+    name: &str,
+) -> anyhow::Result<jcode_tui_style::theme::Theme> {
+    search_theme_dirs(|dir| jcode_tui_style::theme::load_theme(name, dir))
+}
+
+/// Load and install a theme by name from the configured directories.
+pub(crate) fn set_configured_theme(name: &str) -> anyhow::Result<()> {
+    search_theme_dirs(|dir| jcode_tui_style::theme::set_theme(name, dir))
+}
+
+fn palette_name(configured: &str) -> &str {
+    match configured.trim() {
+        "" | "auto" => "system",
+        other => other,
+    }
+}
+
+pub(crate) fn apply_configured_palette() {
+    reinstall_palette();
+    let configured = configured_theme_name();
+    let name = palette_name(&configured);
+    if let Err(err) = set_configured_theme(name) {
+        crate::logging::info(&format!(
+            "Failed to load theme '{name}' ({err:#}); using system theme"
+        ));
+        if let Err(fallback_err) = jcode_tui_style::theme::set_theme("system", None) {
+            crate::logging::info(&format!(
+                "Failed to apply system theme fallback ({fallback_err:#})"
+            ));
+        }
+    }
+}
+
+/// Install the user's configured color palette from `[display.colors]`.
+///
+/// Invalid entries are logged and skipped rather than failing the palette, so
+/// one typo can never leave the TUI unstyled. Safe to call repeatedly; the TUI
+/// calls it again after `/colors` edits so changes apply without a restart.
+fn reinstall_palette() {
+    let configured = &crate::config::config().display.colors;
+    let (palette, errors) = jcode_tui_style::Palette::from_pairs(
+        configured
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    for error in errors {
+        crate::logging::warn(&format!("display.colors: {error}"));
+    }
+    jcode_tui_style::set_palette(palette);
+}
+
+fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
+    let configured = configured_theme_name();
 
     match configured.trim().to_ascii_lowercase().as_str() {
         "dark" => return ThemeMode::Dark,
         "light" => return ThemeMode::Light,
-        "" | "auto" => {}
+        "" | "auto" | "system" => {}
         other => {
             crate::logging::info(&format!(
-                "Unknown theme '{other}' (expected auto/dark/light); using auto detection"
+                "Custom theme '{other}' selected; using terminal background detection only when palette allows it"
             ));
         }
     }
@@ -314,9 +395,89 @@ fn terminal_background_query_supported(
 #[cfg(test)]
 mod tests {
     use super::{
-        SILENT_TERMINAL_CACHE_MAX, cache_silent_terminal_at, silent_terminal_is_cached_at,
-        terminal_background_query_supported,
+        SILENT_TERMINAL_CACHE_MAX, cache_silent_terminal_at, configured_theme_dirs,
+        silent_terminal_is_cached_at, terminal_background_query_supported,
+        try_load_configured_theme,
     };
+    use crate::storage::lock_test_env;
+
+    #[test]
+    fn theme_dirs_prefer_the_advertised_jcode_home_location() {
+        let _lock = lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let dirs = configured_theme_dirs();
+
+        assert_eq!(
+            dirs.first(),
+            Some(&temp.path().join("themes")),
+            "the advertised ~/.jcode/themes path must be searched first"
+        );
+        assert_eq!(
+            dirs.get(1),
+            Some(&temp.path().join("config").join("jcode").join("themes")),
+            "the platform config dir stays a fallback"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn custom_theme_loads_from_the_advertised_jcode_home_dir() {
+        let _lock = lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join("themes")).expect("themes dir");
+        std::fs::write(
+            temp.path().join("themes").join("solar.toml"),
+            "[colors]\nuser = \"#010203\"\n",
+        )
+        .expect("write theme");
+
+        let theme = try_load_configured_theme("solar").expect("advertised location must load");
+        assert_eq!(theme.name(), "solar");
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn custom_theme_still_loads_from_the_legacy_config_dir() {
+        let _lock = lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join("config").join("jcode").join("themes"))
+            .expect("legacy themes dir");
+        std::fs::write(
+            temp.path()
+                .join("config")
+                .join("jcode")
+                .join("themes")
+                .join("legacy.toml"),
+            "[colors]\nuser = \"#0A0B0C\"\n",
+        )
+        .expect("write theme");
+
+        let theme = try_load_configured_theme("legacy").expect("legacy location must still load");
+        assert_eq!(theme.name(), "legacy");
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 
     #[test]
     fn skips_terminals_without_osc_query_support() {

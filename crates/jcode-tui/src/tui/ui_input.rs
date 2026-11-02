@@ -17,6 +17,7 @@ use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
 use crate::tui::session_facts;
+use jcode_tui_style::theme::input_text_style;
 use ratatui::{prelude::*, style::Modifier, widgets::Paragraph};
 
 fn shell_mode_color() -> Color {
@@ -2699,7 +2700,7 @@ fn wrap_input_text_with_images<'a>(
                 };
                 Style::default().fg(color).bold()
             } else {
-                Style::default()
+                input_text_style()
             };
             if style != previous_style && !text.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut text), previous_style));

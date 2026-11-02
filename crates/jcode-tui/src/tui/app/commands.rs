@@ -3387,6 +3387,80 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn handle_theme_command(app: &mut App, trimmed: &str) -> bool {
+    if !trimmed.starts_with("/theme") {
+        return false;
+    }
+
+    let rest = trimmed.strip_prefix("/theme").unwrap_or("").trim();
+
+    if rest.is_empty() || matches!(rest, "show" | "status") {
+        let saved = crate::config::Config::load().display.theme;
+        let current = match jcode_tui_style::theme_mode() {
+            jcode_tui_style::ThemeMode::Dark => "dark",
+            jcode_tui_style::ThemeMode::Light => "light",
+        };
+        let configured = if saved.trim().is_empty() || saved == "auto" {
+            "auto (system detection)".to_string()
+        } else {
+            saved.clone()
+        };
+        app.push_display_message(DisplayMessage::system(format!(
+            "Theme is currently {current}.\nSaved config: {configured}.\n\nModes:\n  - light: force light theme\n  - dark: force dark theme\n  - system / auto: detect from terminal background\n  - <name>: load ~/.jcode/themes/<name>.toml\n\nUse /theme <light|dark|system|name> to change it. Changes apply immediately."
+        )));
+        return true;
+    }
+
+    let theme_value = match rest.to_ascii_lowercase().as_str() {
+        "light" => "light".to_string(),
+        "dark" => "dark".to_string(),
+        "system" | "auto" => "auto".to_string(),
+        _ => {
+            // Same resolver startup uses, so a theme that loads on boot also
+            // loads here, and the advertised ~/.jcode/themes path wins.
+            match crate::tui::theme_detect::try_load_configured_theme(rest) {
+                Ok(_) => rest.to_string(),
+                Err(error) => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Unknown theme '{rest}'. Use /theme light, /theme dark, /theme system, or a custom theme from ~/.jcode/themes/<name>.toml.\n{error}"
+                    )));
+                    return true;
+                }
+            }
+        }
+    };
+
+    // Save to config
+    match crate::config::Config::set_display_theme(&theme_value) {
+        Ok(()) => {
+            // Apply theme immediately at runtime
+            let mode = if theme_value == "light" {
+                jcode_tui_style::ThemeMode::Light
+            } else if theme_value == "dark" {
+                jcode_tui_style::ThemeMode::Dark
+            } else {
+                // system/auto: detect from terminal
+                crate::tui::theme_detect::init_theme_mode()
+            };
+            jcode_tui_style::set_theme_mode(mode);
+            // Re-apply palette in case a custom theme file is configured
+            crate::tui::theme_detect::apply_configured_palette();
+
+            app.push_display_message(DisplayMessage::system(format!(
+                "Theme set to {theme_value}. Applied immediately."
+            )));
+            app.set_status_notice(format!("Theme: {theme_value}"));
+        }
+        Err(error) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to save theme: {error}"
+            )));
+        }
+    }
+
+    true
+}
+
 fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/reasoning"
         && !trimmed.starts_with("/reasoning ")
@@ -3451,6 +3525,10 @@ pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> b
 }
 
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
+    if handle_theme_command(app, trimmed) {
+        return true;
+    }
+
     if handle_display_settings_command(app, trimmed) {
         return true;
     }
