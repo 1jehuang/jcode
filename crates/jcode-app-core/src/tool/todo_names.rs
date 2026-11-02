@@ -111,6 +111,34 @@ fn resolve_dependencies(value: &mut Value, catalog: &[Value]) -> Result<()> {
 /// Name-based references are resolved before the existing atomic patch pipeline.
 pub(super) fn normalize_public_input(input: &mut Value, previous: &[Value]) -> Result<()> {
     normalize_containers(input);
+    // Public dependency names differ from the persisted legacy representation.
+    fn rename_field(value: &mut Value, public: &str, internal: &str) -> Result<()> {
+        if let Some(fields) = value.as_object_mut() {
+            if fields.contains_key(public) && fields.contains_key(internal) {
+                bail!("use {public}, not both {public} and {internal}");
+            }
+            if let Some(dependencies) = fields.remove(public) {
+                fields.insert(internal.into(), dependencies);
+            }
+        }
+        Ok(())
+    }
+    if let Some(phases) = input.get_mut("phases").and_then(Value::as_array_mut) {
+        for phase in phases {
+            if let Some(lanes) = phase.get_mut("lanes").and_then(Value::as_array_mut) {
+                for lane in lanes {
+                    rename_field(lane, "dependencies", "after")?;
+                }
+            }
+        }
+    }
+    for key in ["todos", "add", "update"] {
+        if let Some(items) = input.get_mut(key).and_then(Value::as_array_mut) {
+            for item in items {
+                rename_field(item, "lane_dependencies", "lane_after")?;
+            }
+        }
+    }
     let mut catalog = previous.to_vec();
     let mut named = false;
     let mut replacement = Vec::new();
@@ -279,6 +307,9 @@ pub(super) fn public_todos(todos: &[TodoItem]) -> Result<Value> {
                         *id = json!(todo.content);
                     }
                 }
+            }
+            if let Some(dependencies) = fields.remove("lane_after") {
+                fields.insert("lane_dependencies".into(), dependencies);
             }
         }
     }

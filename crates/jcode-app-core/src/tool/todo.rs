@@ -1250,9 +1250,9 @@ impl Tool for TodoTool {
          Mark work in_progress before starting and completed as soon as it is done. \
          Keep the live list current after meaningful steps. Use unique short names, with \
          longer context in description. IDs are internal. Use rename_to for explicit renames. Organize parallel lanes within sequential phases. \
-         A lane may set `after` to prerequisite todo names in earlier phases, replacing \
+         A lane may set `dependencies` to prerequisite todo names in earlier phases, replacing \
          the whole-phase barrier so it can start once all those items are completed. \
-         Omit `after` for normal phase ordering. Incremental `lane_after` edits on one \
+         Omit `dependencies` for normal phase ordering. Incremental `lane_dependencies` edits on one \
          item update its entire lane; null restores normal ordering. \
          Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
          must wait. They block only while running, never after completion. Saving \
@@ -1456,7 +1456,7 @@ impl Tool for TodoTool {
         // Patch additions accept the same fields as full todos, plus an
         // insertion position. Keep their declarations in sync for providers
         // that require every `required` entry to appear in `properties`.
-        schema["properties"]["todos"]["items"]["properties"]["lane_after"] = json!({
+        schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
             "items": {"type": "string", "minLength": 1},
             "description": "Lane-wide prerequisite todo names in strictly earlier phases by first appearance. Editing one member updates the entire lane. Null restores the default phase barrier."
@@ -1490,16 +1490,16 @@ impl Tool for TodoTool {
         if let Some(properties) = item["properties"].as_object_mut() {
             properties.remove("phase");
             properties.remove("lane");
-            properties.remove("lane_after");
+            properties.remove("lane_dependencies");
         }
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional after todo names replace its phase barrier for early start. [] clears.",
+            "description": "Replace plan: sequential phases, parallel lanes, ordered items. A lane's optional dependencies (todo names) replace its phase barrier for early start. [] clears.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1}, "after": {
+                        "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
                             "description": "Prerequisite todo names from strictly earlier phases. Omit or null for the default phase barrier."
