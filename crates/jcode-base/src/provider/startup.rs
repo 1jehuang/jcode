@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::selection::ConfigProviderSelection;
 
 /// Shared fresh-session route choice; see `select_fresh_session_pool_route`.
 #[derive(Clone)]
@@ -322,6 +323,7 @@ impl MultiProvider {
         // An explicit CLI/environment provider selection owns startup routing.
         // Applying the configured default model here can reactivate its configured
         // provider/profile before the caller pins a dual-auth credential mode.
+        let mut config_default_applied = false;
         if result.initial_provider.is_none()
             && let Some(model) = provider_state.default_model()
         {
@@ -333,6 +335,11 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
+                config_default_applied = !Self::config_default_binds_oauth_account(
+                    &result,
+                    model,
+                    provider_state.default_provider_key(),
+                );
                 crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
@@ -342,7 +349,7 @@ impl MultiProvider {
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.select_fresh_session_pool_route();
+        result.select_fresh_session_pool_route(config_default_applied);
         let route_ms = route_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
@@ -394,13 +401,138 @@ impl MultiProvider {
         result
     }
 
+    /// Whether the configured default binds a login the account pool owns.
+    /// Mirrors `resolve_config_provider_selection` precedence for the
+    /// provider hint: compatible-profile aliases resolve first, then a named
+    /// config profile (`[providers.<name>]`) wins over built-in provider names,
+    /// then built-in hints and dual-auth routes. Explicitly prefixed model
+    /// specs (`openai-api:`, `openai-oauth:`, account-qualified,
+    /// compatible-profile) route through `set_model` and never consult the
+    /// provider hint, so classify those by the prefix alone. A bare model
+    /// carries no routing intent of its own: classify by the provider hint, or
+    /// by the provider the default actually applied to.
+    ///
+    /// Vendor hints that map to the OpenAI or Claude slots bind the pool's
+    /// OAuth logins, whose Auto credential mode prefers the active login;
+    /// spent or lower-tier logins must rotate for those.
+    ///
+    /// `openai-compatible` (in any accepted alias spelling) is the generic
+    /// saved-login bucket, not a static profile choice: when the pool owns
+    /// that member, its endpoint and key come from the saved login, so pool
+    /// selection must stay in charge of whether it serves the session. A hint
+    /// naming any other provider, profile, or API key is a deliberate routing
+    /// choice the pool must not override.
+    pub(super) fn config_default_binds_oauth_account(
+        result: &Self,
+        model: &str,
+        default_provider: Option<&str>,
+    ) -> bool {
+        let model = model.trim();
+        // A `<name>:<model>` spec whose prefix is a user-defined named config
+        // profile (`[providers.<name>]`) is a deliberate routing choice like
+        // any other explicit spec: without this arm a named `anthropic-compatible`
+        // gateway fell through to the active-provider fallback (Claude), got
+        // classified as pool-owned, and the pool replaced it with the OAuth
+        // head on both startup and `fork_for_new_session`.
+        let explicit_spec = explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
+            || Self::openai_compatible_model_prefix(model).is_some()
+            || Self::named_provider_profile_model_prefix(model).is_some();
+        let route_key = if explicit_spec {
+            model.split(':').next().unwrap_or(model)
+        } else {
+            default_provider
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .unwrap_or(match result.active_provider() {
+                    ActiveProvider::OpenAI => "openai",
+                    ActiveProvider::Claude => "claude",
+                    _ => "",
+                })
+        };
+        let route_key = route_key.split('@').next().unwrap_or(route_key);
+        let route_key_lower = route_key.trim().to_ascii_lowercase();
+        // `default_provider` accepts the same vocabulary config routing uses,
+        // so resolve the hint through `resolve_config_provider_selection`
+        // first: compatible-profile aliases and named config profiles
+        // (`[providers.openai]`, `[providers.claude]`) must keep the same
+        // precedence here as in routing. A named profile is a deliberate
+        // routing choice the pool must not replace (review finding: named
+        // gateway defaults were replaced). Built-in OpenAI/Claude slots bind
+        // the pool's OAuth logins only in their OAuth spellings; API-key
+        // modes (`openai-api`, `anthropic-api-key`, ...) are explicit
+        // credential pins the pool must not swap for a login.
+        if !explicit_spec
+            && let Some(selection) =
+                Self::resolve_config_provider_selection(route_key, crate::config::config())
+        {
+            return match selection {
+                ConfigProviderSelection::OpenAiCompatibleProfile(profile) => {
+                    Self::openai_compatible_profile_binds_pool_member(profile)
+                }
+                ConfigProviderSelection::NamedProfile(..) => false,
+                ConfigProviderSelection::BuiltIn(provider) => {
+                    matches!(provider, ActiveProvider::OpenAI | ActiveProvider::Claude)
+                        && matches!(
+                            jcode_provider_core::AuthRoute::parse(&route_key_lower),
+                            Some(route)
+                                if matches!(route.mode, jcode_provider_core::AuthMode::Oauth)
+                        )
+                }
+            };
+        }
+        // Dual-auth OAuth spellings outside the config vocabulary still bind
+        // the pool's OAuth logins.
+        if let Some(route) = jcode_provider_core::AuthRoute::parse(&route_key_lower)
+            && matches!(route.mode, jcode_provider_core::AuthMode::Oauth)
+            && matches!(
+                route.provider,
+                jcode_provider_core::DualAuthProvider::OpenAI
+                    | jcode_provider_core::DualAuthProvider::Anthropic
+            )
+        {
+            return true;
+        }
+        // The generic saved-login bucket, reached through any accepted alias
+        // spelling (`compat`, `custom`, `openai_compatible`, ...) when the
+        // config-selection resolver did not already handle it (review
+        // finding: aliases skipped account selection). Its "profile" is
+        // whatever login the user saved, so when the pool owns the member, the
+        // pool must keep deciding whether it serves.
+        if let Some(profile) =
+            crate::provider_catalog::resolve_openai_compatible_profile_selection(&route_key_lower)
+        {
+            return Self::openai_compatible_profile_binds_pool_member(profile.id);
+        }
+        false
+    }
+
+    /// Whether the account pool owns the compatible-profile member. The
+    /// profile's endpoint and key come from the saved login, so pool selection
+    /// stays in charge of whether it serves the session.
+    fn openai_compatible_profile_binds_pool_member(profile: &str) -> bool {
+        let pool = crate::auth::account_pool::AccountPool::load();
+        let is_api_key = crate::provider_catalog::login_providers()
+            .iter()
+            .find(|login| login.id == profile)
+            .is_some_and(|login| {
+                login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
+            });
+        let default_member = crate::auth::account_pool::default_member(profile, is_api_key);
+        pool.is_member(profile, default_member)
+    }
+
     /// Fresh sessions choose the first ready account in priority order. A saved
     /// default model remains a preference within the selected account, not a
     /// sticky billing identity. An explicit initial provider owns routing instead.
-    /// This is deliberately a local
+    /// A configured default that does not name an OAuth account (named profile,
+    /// API key, other provider) is not a billing identity, so pool re-selection
+    /// must not override it. This is deliberately a local
     /// model/account binding: never promote the fallback or change active logins.
-    fn select_fresh_session_pool_route(&self) {
-        if self.initial_provider.is_some() {
+    fn select_fresh_session_pool_route(&self, config_default_applied: bool) {
+        if self.initial_provider.is_some() || config_default_applied {
             return;
         }
         // A reconnect burst forks one provider per client. Each choice reads every
