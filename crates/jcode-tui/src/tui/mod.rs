@@ -36,6 +36,7 @@ mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
 mod info_widget_cloud;
+mod info_widget_cloud_directories;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.

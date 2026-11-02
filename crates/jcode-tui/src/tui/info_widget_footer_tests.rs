@@ -23,6 +23,8 @@ fn special_widgets_have_bottom_border_text() {
             state: CloudProbeState::Loading,
             machine: None,
             last_transfer_at: None,
+            directories: None,
+            directories_stale: false,
         }),
         ..Default::default()
     };
