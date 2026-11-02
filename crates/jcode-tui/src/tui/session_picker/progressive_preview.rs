@@ -64,6 +64,12 @@ impl SessionPicker {
                     && extras.loaded_at == Some(generation)
                 {
                     extras.info_data = Some(data);
+                    if self
+                        .selected_session()
+                        .is_some_and(|s| s.id == pending.session_id)
+                    {
+                        self.resume_latency.workspace(&pending.session_id);
+                    }
                     return true;
                 }
                 false

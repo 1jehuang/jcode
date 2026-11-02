@@ -247,12 +247,15 @@ impl SessionPicker {
 
     /// Handle mouse events when used as an overlay
     pub fn handle_overlay_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
             }
             _ => {}
         }
+        self.latency_input_complete(before, at);
     }
 
     /// Apply a single line of preview scroll in `direction` (-1 up, +1 down) and
@@ -280,11 +283,14 @@ impl SessionPicker {
 
     /// Step the session selection for a list-pane wheel event.
     pub fn step_list_selection(&mut self, direction: i16) {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
         if direction < 0 {
             self.previous();
         } else if direction > 0 {
             self.next();
         }
+        self.latency_input_complete(before, at);
     }
 
     /// Current preview scroll offset, exposed for tests that assert scroll

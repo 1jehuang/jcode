@@ -652,6 +652,17 @@ impl App {
         } else if cmd == "mermaid:memory" {
             let profile = crate::tui::mermaid::debug_memory_profile();
             serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "resume-latency" {
+            self.session_picker_overlay
+                .as_ref()
+                .map(|picker| picker.borrow().debug_resume_latency())
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "open": false,
+                        "note": "Open /resume to collect live picker latency"
+                    })
+                })
+                .to_string()
         } else if cmd == "memory" {
             serde_json::to_string_pretty(&self.debug_memory_profile())
                 .unwrap_or_else(|_| "{}".to_string())
@@ -988,6 +999,7 @@ impl App {
                  - mermaid:evict - clear mermaid cache\n\
                  - markdown:stats - dump markdown debug stats\n\
                  - markdown:memory - dump markdown cache memory estimate\n\
+                 - resume-latency - bounded live resume handler-to-ratatui readiness, not terminal paint\n\
                  - memory - dump aggregate client memory profile\n\
                  - memory-history - dump recent process memory samples\n\
                  - slow-frames [n] - dump recent slow-frame records\n\
