@@ -161,12 +161,12 @@ fn resume_canvas_uses_right_columns_below_search_card() {
     }];
     let mut picker = SessionPicker::new(vec![session]);
     picker.auto_scroll_preview = false;
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 60)).unwrap();
     terminal.draw(|frame| picker.render(frame)).unwrap();
     let panel = picker.reserved_panel_area.unwrap();
     let buffer = terminal.backend().buffer();
     assert!(
-        (panel.bottom()..38).any(|y| (panel.x..115).any(|x| buffer[(x, y)].symbol() == "W")),
+        (panel.bottom()..58).any(|y| (panel.x..115).any(|x| buffer[(x, y)].symbol() == "W")),
         "Transcript must reclaim the right-side columns below the bounded card"
     );
     let search: String = (panel.x..panel.right())

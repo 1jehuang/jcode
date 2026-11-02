@@ -220,7 +220,7 @@ impl SessionPicker {
             Style::default().fg(rgb(90, 90, 90))
         };
 
-        let time_ago = active_ago;
+        let time_ago = active_ago.clone();
         // Live presence (a running process owns this session) takes precedence
         // over the persisted snapshot status: it distinguishes sessions still
         // working on a response from ones ready for input, which the stored
@@ -333,48 +333,37 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        line1_spans.push(Span::styled(
+            format!(
+                "  {}",
+                Self::format_estimated_tokens(session.estimated_tokens)
+            ),
+            Style::default().fg(dimmer),
+        ));
         let line1 = Line::from(line1_spans);
 
-        // Two consistent rows per session: identity above, useful context below.
-        // The zebra backgrounds supply separation without a blank spacer. Prefer
-        // the prompt over counts so similar generated titles remain distinguishable.
-        let mut detail_spans = vec![
-            Span::styled(
-                format!("  {} ", status_icon),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(format!("{} · ", time_label), Style::default().fg(dim)),
-        ];
-        if let Some(prompt) = session.first_user_prompt.as_deref().map(str::trim)
-            && !prompt.is_empty()
-        {
-            let prompt = prompt.replace('\n', " ");
-            let prompt_display = if prompt.chars().count() > 72 {
-                format!("{}...", safe_truncate(&prompt, 69))
-            } else {
-                prompt
-            };
-            detail_spans.extend(Self::highlight_spans(
-                &prompt_display,
-                &highlight_tokens,
-                Style::default().fg(rgb(180, 180, 220)),
-            ));
-        } else if let Some(dir) = session.working_dir.as_deref() {
+        // Identity and tokens above, directory and last activity below.
+        // The final span of each row is reserved before truncating its left side.
+        let mut detail_spans = vec![Span::styled(
+            format!("  {} ", status_icon),
+            Style::default().fg(status_color),
+        )];
+        if let Some(dir) = session.working_dir.as_deref() {
             detail_spans.extend(Self::highlight_spans(
                 &format!("📁 {}", compact_dir(dir)),
                 &highlight_tokens,
                 Style::default().fg(if same_dir { same_dir_clr } else { dim }),
             ));
         } else {
-            detail_spans.push(Span::styled(
-                format!(
-                    "{} messages · {}",
-                    session.message_count,
-                    Self::format_estimated_tokens(session.estimated_tokens)
-                ),
-                Style::default().fg(dimmer),
-            ));
+            detail_spans.push(Span::styled("No directory", Style::default().fg(dimmer)));
         }
+        // Preserve live/recovery labels without losing the actual activity age.
+        let activity = if self.session_is_live(session) || recently_closed {
+            format!("  {time_label} · active {active_ago}")
+        } else {
+            format!("  active {active_ago}")
+        };
+        detail_spans.push(Span::styled(activity, Style::default().fg(dim)));
         let mut rows = vec![line1, Line::from(detail_spans)];
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
@@ -395,8 +384,28 @@ impl SessionPicker {
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
         let rows: Vec<_> = self
             .render_session_item_lines_at_frame(session, is_selected, spinner_frame)
-            .iter()
-            .map(|line| jcode_tui_render::truncate_line_with_ellipsis_to_width(line, width))
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut line)| {
+                if index < 2 {
+                    let Some(suffix) = line.spans.pop() else {
+                        return line;
+                    };
+                    // Tiny terminals prioritize a truncated identity/directory.
+                    if suffix.width() + 8 <= width {
+                        let left_width = width - suffix.width();
+                        let mut left = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                            &line, left_width,
+                        );
+                        left.spans
+                            .push(Span::raw(" ".repeat(left_width - left.width())));
+                        left.spans.push(suffix);
+                        return left;
+                    }
+                    line.spans.push(suffix);
+                }
+                jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, width)
+            })
             .collect();
         let mut item = ListItem::new(rows);
         if in_batch_restore && !is_selected {

@@ -307,8 +307,11 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     let picker = SessionPicker::new(vec![item.clone()]);
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
+    assert!(rows[0].to_string().contains("tok"));
+    assert!(rows[1].to_string().contains("resume-layout"));
+    assert!(rows[1].to_string().contains("active "));
     assert!(
-        rows[1]
+        !rows[1]
             .to_string()
             .contains("improve resume responsiveness")
     );
@@ -322,8 +325,8 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     item.working_dir = None;
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
-    assert!(rows[1].to_string().contains("2 messages"));
-    assert!(rows[1].to_string().contains("tok"));
+    assert!(rows[1].to_string().contains("No directory"));
+    assert!(rows[0].to_string().contains("tok"));
 
     item.status = SessionStatus::Crashed {
         message: Some("connection failed".into()),
@@ -336,6 +339,29 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     );
     assert!(rows[2].to_string().contains("connection failed"));
     assert!(rows.iter().all(|row| !row.to_string().trim().is_empty()));
+}
+
+#[test]
+fn session_entry_reserves_tokens_and_activity_for_long_names_and_directories() {
+    let mut item = session(0, 1);
+    item.title = "界".repeat(60);
+    item.working_dir = Some(format!("/{}", "界".repeat(80)));
+    item.estimated_tokens = 12_000;
+    item.last_active_at = Some(chrono::Utc::now());
+    let mut picker = SessionPicker::new(vec![item]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 12)).unwrap();
+    terminal
+        .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (1..11)
+        .filter(|&y| buffer[(1, y)].symbol() == "▌")
+        .map(|y| (2..47).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].trim_end().ends_with("~12k tok"), "{}", rows[0]);
+    assert!(rows[1].contains("active "), "{}", rows[1]);
+    assert!(rows.iter().all(|row| row.contains('…')));
 }
 
 #[test]
@@ -363,7 +389,7 @@ fn compact_rows_truncate_wide_text_without_wrapping() {
     for width in [8, 20, 42] {
         let mut item = session(0, 1);
         item.title = "界".repeat(60);
-        item.first_user_prompt = Some("界".repeat(80));
+        item.working_dir = Some(format!("/{}", "界".repeat(80)));
         let mut picker = SessionPicker::new(vec![item]);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
@@ -382,7 +408,7 @@ fn compact_rows_truncate_wide_text_without_wrapping() {
         for y in selected_rows {
             // A double-width glyph may leave one spare cell before the border.
             assert!(
-                (width - 3..=width - 2).any(|x| buffer[(x, y)].symbol() == "…"),
+                (1..width - 1).any(|x| buffer[(x, y)].symbol() == "…"),
                 "missing truncation marker: width={width}, row={y}"
             );
         }
