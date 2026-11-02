@@ -67,20 +67,20 @@ fn rediscovery_fails_when_the_external_image_file_is_gone() {
 #[test]
 fn infer_protocol_detects_kitty_family() {
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-kitty"), None, None, None),
+        infer_protocol_from_env(Some("xterm-kitty"), None, None, None, None),
         Some(ProtocolType::Kitty)
     );
     assert_eq!(
-        infer_protocol_from_env(None, Some("ghostty"), None, None),
+        infer_protocol_from_env(None, Some("ghostty"), None, None, None),
         Some(ProtocolType::Kitty)
     );
     assert_eq!(
-        infer_protocol_from_env(None, Some("HandTerm"), None, None),
+        infer_protocol_from_env(None, Some("HandTerm"), None, None, None),
         Some(ProtocolType::Kitty)
     );
     // KITTY_WINDOW_ID present is sufficient.
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3")),
+        infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3"), None),
         Some(ProtocolType::Kitty)
     );
 }
@@ -89,24 +89,24 @@ fn infer_protocol_detects_kitty_family() {
 fn infer_protocol_detects_iterm_and_sixel() {
     // Real iTerm2 breaks on inline images, so it reports no protocol.
     assert_eq!(
-        infer_protocol_from_env(None, Some("iTerm.app"), None, None),
+        infer_protocol_from_env(None, Some("iTerm.app"), None, None, None),
         None
     );
     assert_eq!(
-        infer_protocol_from_env(None, Some("WezTerm"), None, None),
+        infer_protocol_from_env(None, Some("WezTerm"), None, None, None),
         Some(ProtocolType::Iterm2)
     );
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
+        infer_protocol_from_env(Some("xterm-sixel"), None, None, None, None),
         Some(ProtocolType::Sixel)
     );
     assert_eq!(
-        infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+        infer_protocol_from_env(Some("foot"), Some("foot"), None, None, None),
         Some(ProtocolType::Sixel)
     );
     // foot sets TERM=foot but no TERM_PROGRAM.
     assert_eq!(
-        infer_protocol_from_env(Some("foot"), None, None, None),
+        infer_protocol_from_env(Some("foot"), None, None, None, None),
         Some(ProtocolType::Sixel)
     );
 }
@@ -118,12 +118,13 @@ fn explicit_wezterm_identity_avoids_incomplete_kitty_placeholders() {
             Some("xterm-kitty"),
             Some("WezTerm"),
             None,
-            Some("stale-kitty-window")
+            Some("stale-kitty-window"),
+            None
         ),
         Some(ProtocolType::Iterm2)
     );
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
+        infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None, None),
         None
     );
 }
@@ -132,7 +133,7 @@ fn explicit_wezterm_identity_avoids_incomplete_kitty_placeholders() {
 fn infer_protocol_misses_inside_masking_multiplexer() {
     // Herdr/tmux advertise a bland TERM with no graphics hints.
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-256color"), None, None, None),
+        infer_protocol_from_env(Some("xterm-256color"), None, None, None, None),
         None
     );
 }
@@ -401,4 +402,31 @@ fn native_image_capability_respects_scoped_test_override() {
     with_image_protocol_override(Some(true), || {
         assert!(native_image_protocol_available());
     });
+}
+
+#[test]
+fn herdr_webui_overrides_kitty_hints_to_keep_halfblocks() {
+    // herdr-webui advertises a Ghostty-capable pane so inline read-tool
+    // images keep Kitty, but its browser renderer cannot draw the
+    // Unicode-placeholder virtual placements the mermaid viewport emits,
+    // so diagram/math rendering must stay on Halfblocks there.
+    assert_eq!(
+        infer_protocol_from_env(None, Some("ghostty"), None, None, Some("1")),
+        None
+    );
+    assert_eq!(
+        infer_protocol_from_env(Some("xterm-kitty"), None, None, Some("3"), Some("1")),
+        None
+    );
+    // Only the builtin webui backend exports HERDR_WEBUI; standalone herdr
+    // panes (HERDR_ENV) keep pass-through behavior untouched.
+    assert_eq!(
+        infer_protocol_from_env(None, Some("ghostty"), None, None, None),
+        Some(ProtocolType::Kitty)
+    );
+    // Empty value must not trigger the gate.
+    assert_eq!(
+        infer_protocol_from_env(None, Some("ghostty"), None, None, Some("")),
+        Some(ProtocolType::Kitty)
+    );
 }
