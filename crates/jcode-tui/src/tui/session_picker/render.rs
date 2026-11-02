@@ -431,6 +431,7 @@ impl SessionPicker {
         session: &SessionInfo,
         is_selected: bool,
         spinner_frame: usize,
+        striped: bool,
     ) -> ListItem<'static> {
         let batch_row_bg: Color = rgb(36, 18, 18);
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
@@ -438,6 +439,8 @@ impl SessionPicker {
         let mut item = ListItem::new(rows);
         if in_batch_restore && !is_selected {
             item = item.style(Style::default().bg(batch_row_bg));
+        } else if striped {
+            item = item.style(Style::default().bg(rgb(28, 30, 34)));
         }
         item
     }
@@ -603,7 +606,16 @@ impl SessionPicker {
                         PickerItem::Session => self
                             .list_session_at(idx)
                             .map(|session| {
-                                self.render_session_item(session, is_selected, spinner_frame)
+                                // Use the filtered session ordinal, not the viewport row,
+                                // so headers and scrolling do not change stripe parity.
+                                let striped =
+                                    self.item_to_session[idx].is_some_and(|index| index % 2 == 1);
+                                self.render_session_item(
+                                    session,
+                                    is_selected,
+                                    spinner_frame,
+                                    striped,
+                                )
                             })
                             .unwrap_or_else(|| ListItem::new(Line::from(""))),
                     }

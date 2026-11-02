@@ -267,6 +267,34 @@ fn retained_previews_have_byte_and_entry_bounds_and_evict_lru() {
 }
 
 #[test]
+fn session_list_stripes_cover_whole_entries() {
+    let mut picker = SessionPicker::new((0..3).map(|id| session(id, 1)).collect());
+    picker.list_state.select(None);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut backgrounds = Vec::new();
+    for y in 1..29 {
+        let text: String = (1..99).map(|x| buffer[(x, y)].symbol()).collect();
+        if text.contains("Performance session") {
+            let bg = buffer[(98, y)].bg;
+            // All five lines, including the trailing spacer, belong to the stripe.
+            for row in y..y + 5 {
+                assert_eq!(buffer[(1, row)].bg, bg);
+                assert_eq!(buffer[(98, row)].bg, bg);
+            }
+            backgrounds.push(bg);
+        }
+    }
+    assert_eq!(backgrounds.len(), 3);
+    assert_eq!(backgrounds[0], backgrounds[2]);
+    assert_ne!(backgrounds[0], backgrounds[1]);
+    assert_eq!(backgrounds[1], rgb(28, 30, 34));
+}
+
+#[test]
 fn virtualized_session_list_matches_full_ratatui_list() {
     let sessions: Vec<_> = (0..18)
         .map(|id| {
