@@ -194,6 +194,21 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
     #expect(payload.displayTitle == "My chat")
 }
 
+@Test func historyToolInputAcceptsJSONObjects() throws {
+    let line = """
+        {"type":"history","id":2,"session_id":"s","messages":[\
+        {"role":"tool","content":"ok","tool_data":{"id":"t1","name":"bash","input":{"command":"ls","timeout":5}}},\
+        {"role":"tool","content":"ok","tool_data":{"id":"t2","name":"read","input":null}}\
+        ]}
+        """
+    guard case let .history(payload) = try ServerEvent.decode(line: line) else {
+        Issue.record("expected history event")
+        return
+    }
+    #expect(payload.messages[0].toolData?.input == #"{"command":"ls","timeout":5}"#)
+    #expect(payload.messages[1].toolData?.input == "")
+}
+
 @Test func unknownEventTypesAreTolerated() throws {
     let event = try ServerEvent.decode(
         line: #"{"type":"some_future_event","payload":{"x":1}}"#)

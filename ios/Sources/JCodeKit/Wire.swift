@@ -332,7 +332,7 @@ public enum ServerEvent: Equatable, Sendable {
                 toolData = ToolCallRecord(
                     id: td.string("id"),
                     name: td.string("name"),
-                    input: td.string("input"),
+                    input: td.jsonText("input"),
                     output: td.optionalString("output"),
                     error: td.optionalString("error")
                 )
@@ -388,6 +388,21 @@ struct JSONObject {
 
     func optionalString(_ key: String) -> String? {
         raw[key] as? String
+    }
+
+    func jsonText(_ key: String) -> String {
+        switch raw[key] {
+        case let text as String:
+            return text
+        case nil, is NSNull:
+            return ""
+        case let value?:
+            guard JSONSerialization.isValidJSONObject([value]),
+                let data = try? JSONSerialization.data(
+                    withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+            else { return "" }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
     }
 
     func bool(_ key: String) -> Bool {
