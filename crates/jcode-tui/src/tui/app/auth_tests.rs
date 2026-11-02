@@ -7,9 +7,31 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let saved_env = ["JCODE_HOME"].map(|key| (key, std::env::var_os(key)));
+    // The guard above clears the named-profile and openai-compat keys; these
+    // are the ambient runtime keys it does not own. Clear them so each test
+    // starts hermetic.
+    let saved_env = [
+        "JCODE_HOME",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_API_BASE",
+        "JCODE_API_KEY",
+    ]
+    .map(|key| (key, std::env::var_os(key)));
 
     crate::env::set_var("JCODE_HOME", temp.path());
+    for (key, _) in saved_env.iter().skip(1) {
+        crate::env::remove_var(key);
+    }
 
     let result = f();
 

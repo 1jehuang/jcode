@@ -27,6 +27,15 @@ pub fn native_image_protocol_available() -> bool {
     false
 }
 
+pub fn mermaid_text_render_available() -> bool {
+    false
+}
+
+#[cfg(test)]
+pub fn with_herdr_webui_override<T>(_inside_webui: Option<bool>, f: impl FnOnce() -> T) -> T {
+    f()
+}
+
 #[cfg(test)]
 pub fn with_image_protocol_override<T>(_enabled: Option<bool>, f: impl FnOnce() -> T) -> T {
     f()
