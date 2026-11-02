@@ -7,6 +7,60 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[test]
+fn identity_transport_negotiation_preserves_legacy_payload_shape() {
+    let identity = crate::protocol::TurnIdentity {
+        runtime_generation: "runtime".into(),
+        turn_id: 7,
+    };
+    let wrapped = ServerEvent::TurnEvent {
+        identity: identity.clone(),
+        event: Box::new(ServerEvent::Done { id: 99 }),
+    };
+    assert!(matches!(
+        event_for_transport(wrapped.clone(), false),
+        Some(ServerEvent::Done { id: 99 })
+    ));
+    assert!(matches!(
+        event_for_transport(wrapped, true),
+        Some(ServerEvent::TurnEvent { .. })
+    ));
+    let started = ServerEvent::TurnStarted { identity };
+    assert!(event_for_transport(started.clone(), false).is_none());
+    assert!(matches!(
+        event_for_transport(started, true),
+        Some(ServerEvent::TurnStarted { .. })
+    ));
+    assert!(
+        event_for_transport(
+            ServerEvent::TurnState {
+                session_id: "session".into(),
+                runtime_generation: "runtime".into(),
+                turn_id: None,
+                latest_turn_id: 7
+            },
+            false
+        )
+        .is_none()
+    );
+}
+
+fn turn_payload(event: ServerEvent) -> ServerEvent {
+    match event {
+        ServerEvent::TurnEvent { event, .. } => *event,
+        event => event,
+    }
+}
+
+async fn recv_turn_payload(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Option<ServerEvent> {
+    loop {
+        let event = rx.recv().await?;
+        if !matches!(event, ServerEvent::TurnStarted { .. }) {
+            return Some(turn_payload(event));
+        }
+    }
+}
+
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
@@ -852,6 +906,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         supports_pdf_panels: false,
         supports_user_response: false,
         supports_server_failover: false,
+        supports_turn_identity: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
@@ -1129,7 +1184,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     .await;
 
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), origin_rx.recv())
+        let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(&mut origin_rx))
             .await
             .expect("origin should receive the initial stream event promptly")
             .expect("origin event channel should remain open");
@@ -1151,7 +1206,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         let mut saw_message_end = false;
         let mut saw_done = false;
         while !saw_post_attach_delta || !saw_message_end || !saw_done {
-            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(rx))
                 .await
                 .expect("attachment should receive streamed event promptly")
                 .expect("attachment event channel should remain open");
@@ -1167,7 +1222,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         }
     }
 
-    let (done_id, result, _) =
+    let (done_id, result, _, _, _) =
         tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
             .await
             .expect("processing should complete promptly")
@@ -1177,6 +1232,105 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     if let Some(handle) = processing_task.take() {
         handle.await.expect("processing task join");
+    }
+}
+
+#[tokio::test]
+async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drains() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut agent = Agent::new(provider, registry);
+    let initial_messages = agent.message_count();
+    let reserved = agent.claim_server_turn().unwrap();
+    let (output, _) = mpsc::unbounded_channel();
+    assert!(agent.run_once("forbidden direct turn").await.is_err());
+    assert!(agent.run_once_capture("forbidden capture").await.is_err());
+    assert!(
+        agent
+            .run_once_streaming_mpsc("forbidden stream", Vec::new(), None, output)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent.message_count(),
+        initial_messages,
+        "rejected entries must not touch transcript"
+    );
+    drop(reserved);
+    for abort in [false, true] {
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        // Block delivery so the forbidden handoff is deterministic.
+        let blocked_delivery = members.write().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let lease = agent.claim_server_turn().unwrap();
+        let events = super::super::state::TurnEventChannel::new(
+            agent.session_id().into(),
+            Arc::clone(&members),
+            tx,
+            &lease,
+        );
+        let retained_sender = events.sender();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let producer = tokio::spawn(async move {
+            events
+                .sender()
+                .send(ServerEvent::TextDelta {
+                    text: "old output".into(),
+                })
+                .unwrap();
+            events.sender().send(ServerEvent::Done { id: 7 }).unwrap();
+            ready_tx.send(()).unwrap();
+            if abort {
+                std::future::pending::<()>().await;
+            }
+            events.finish().await;
+            drop(lease);
+        });
+        ready_rx.await.unwrap();
+        if abort {
+            producer.abort();
+            assert!(producer.await.unwrap_err().is_cancelled());
+        } else {
+            // Drop the handle, not the task. Normal finalization must also
+            // remain reserved while the publication queue is blocked.
+            drop(producer);
+        }
+        assert!(
+            agent.claim_server_turn().is_err(),
+            "queue still owns the old turn"
+        );
+        assert!(rx.try_recv().is_err());
+        drop(blocked_delivery);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::TurnStarted { .. })
+        ));
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
+            if matches!(&*event, ServerEvent::TextDelta { text } if text == "old output"))
+        );
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
+            if matches!(*event, ServerEvent::Done { id: 7 }))
+        );
+        let next = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(lease) = agent.claim_server_turn() {
+                    break lease;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drained queue releases the runtime");
+        assert!(
+            retained_sender.send(ServerEvent::Done { id: 7 }).is_err(),
+            "late producer clones cannot inject terminals into the new turn"
+        );
+        assert!(rx.try_recv().is_err());
+        drop(next);
     }
 }
 
@@ -1218,6 +1372,37 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
         session_id: &mut processing_session,
         task: &mut task,
     };
+
+    // Another connection has accepted a turn but has not spawned its provider
+    // task yet. Connection-local flags are idle and the Agent mutex is free.
+    // Only the runtime reservation can reject this competing acceptance.
+    let initial_messages = agent.lock().await.message_count();
+    let other_connection = agent.lock().await.claim_server_turn().unwrap();
+    start_processing_message(
+        ProcessingMessage {
+            id: 1,
+            content: "must not enter transcript".into(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+            server_failover: false,
+        },
+        session_id,
+        &mut state,
+        &agent,
+        &event_tx,
+        &done_tx,
+        Vec::new(),
+        &swarm,
+    )
+    .await;
+    assert!(matches!(event_rx.recv().await.unwrap(),
+        ServerEvent::Error { id: 1, message, .. } if message == "Already processing a message"));
+    assert!(!*state.client_is_processing);
+    assert!(state.task.is_none());
+    assert!(done_rx.try_recv().is_err());
+    assert_eq!(agent.lock().await.message_count(), initial_messages);
+    drop(other_connection);
 
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
@@ -1274,9 +1459,16 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
         if id == 2 {
             // Delayed duplicates, including errors, must not clear the new
             // turn's handle or session and must not emit duplicate terminals.
-            done_tx.send((1, Ok(()), None)).unwrap();
+            let stale_owner = tokio::spawn(async {}).id();
+            done_tx.send((2, Ok(()), None, stale_owner, None)).unwrap();
             done_tx
-                .send((1, Err(anyhow::anyhow!("late error")), None))
+                .send((
+                    2,
+                    Err(anyhow::anyhow!("late error")),
+                    None,
+                    stale_owner,
+                    None,
+                ))
                 .unwrap();
             reconcile_processing_completions(
                 None,
@@ -1294,7 +1486,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
         }
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                match event_rx.recv().await.unwrap() {
+                match recv_turn_payload(&mut event_rx).await.unwrap() {
                     ServerEvent::Done { id: done_id } => {
                         assert_eq!(done_id, id, "no duplicate terminal from the previous turn");
                         break;
@@ -1348,7 +1540,9 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
             } else {
                 Ok(())
             };
-            done_tx.send((7, result, None)).unwrap();
+            done_tx
+                .send((7, result, None, tokio::task::id(), None))
+                .unwrap();
             // Deterministically simulate preemption between the two sends.
             release_rx.await.unwrap();
             let terminal = if failed {
@@ -1527,7 +1721,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             "server acceptance of the exact hidden continuation should consume the durable intent"
         );
 
-        let (done_id, result, _report) =
+        let (done_id, result, _report, _, _) =
             tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                 .await
                 .expect("processing task should finish")
@@ -1641,7 +1835,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             .await;
             assert!(client_is_processing);
             assert_eq!(processing_message_id, Some(id));
-            let (done_id, result, _) =
+            let (done_id, result, _, _, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                     .await?
                     .expect("accepted turn completion");
@@ -1777,7 +1971,8 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         forked: Arc::clone(&forked),
     });
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));

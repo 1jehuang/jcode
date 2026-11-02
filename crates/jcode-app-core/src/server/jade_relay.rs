@@ -1,7 +1,7 @@
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::state::{
-    SessionControlHandle, SessionInterruptQueues, queue_soft_interrupt_for_session,
-    session_event_fanout_sender,
+    SessionControlHandle, SessionInterruptQueues, TurnEventChannel,
+    queue_soft_interrupt_for_session,
 };
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
@@ -1214,17 +1214,7 @@ async fn deliver_to_session(
         anyhow::bail!("session '{session_id}' is busy and could not accept a queued interrupt")
     }
 
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
-    };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
-    Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
+    run_relay_turn(agent, session_id, text, swarm_members).await
 }
 
 async fn deliver_to_launched_session(
@@ -1245,16 +1235,42 @@ async fn deliver_to_launched_session(
     // and restores history. For launch commands, wait for that startup work and
     // run the first prompt as a normal turn instead of falling back to a soft
     // interrupt queue that may not be processed until a later turn.
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
+    run_relay_turn(agent, session_id, text, swarm_members).await
+}
+
+async fn run_relay_turn(
+    agent: Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    session_id: &str,
+    text: &str,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String> {
+    let mut agent = agent.lock().await;
+    let lease = agent.claim_server_turn()?;
+    let start_message_index = agent.message_count();
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = TurnEventChannel::new(session_id.into(), swarm_members, fallback, &lease);
+    let result = process_reserved_message_streaming_mpsc(
+        &mut agent,
+        &lease,
+        text,
+        Vec::new(),
+        None,
+        events.sender(),
+    )
+    .await;
+    let reply = agent.latest_assistant_text_after(start_message_index);
+    let terminal = match &result {
+        Ok(()) => crate::protocol::ServerEvent::Done { id: 0 },
+        Err(error) => crate::protocol::ServerEvent::Error {
+            id: 0,
+            message: crate::util::format_error_chain(error),
+            retry_after_secs: None,
+        },
     };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
+    let _ = events.sender().send(terminal);
+    drop(agent);
+    events.finish().await;
+    result?;
     Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
 }
 

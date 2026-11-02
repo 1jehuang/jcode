@@ -3,7 +3,7 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_server_initiated_message;
+use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
@@ -824,6 +824,10 @@ pub(super) async fn spawn_swarm_agent(
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
             crate::runtime_activity::spawn_session(&new_session_id, async move {
+                let mut agent = agent_arc.lock().await;
+                let Ok(lease) = agent.claim_server_turn() else {
+                    return;
+                };
                 update_member_status(
                     &sid_clone,
                     "running",
@@ -835,29 +839,28 @@ pub(super) async fn spawn_swarm_agent(
                     Some(&swarm_event_tx2),
                 )
                 .await;
-                let event_tx = super::session_event_fanout_sender(
+                let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+                let events = super::state::TurnEventChannel::new(
                     sid_clone.clone(),
                     Arc::clone(&swarm_members2),
+                    fallback,
+                    &lease,
                 );
-                let start_message_index = {
-                    let agent = agent_arc.lock().await;
-                    agent.message_count()
-                };
-                let result = process_server_initiated_message(
-                    Arc::clone(&agent_arc),
+                let start_message_index = agent.message_count();
+                let result = process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &lease,
                     &initial_msg,
                     vec![],
                     None,
-                    event_tx,
+                    events.sender(),
                 )
                 .await;
-                let completion_report = {
-                    let agent = agent_arc.lock().await;
-                    agent.recent_assistant_output_tail_after(start_message_index)
-                };
-                let (new_status, new_detail) = match result {
+                let completion_report =
+                    agent.recent_assistant_output_tail_after(start_message_index);
+                let (new_status, new_detail) = match &result {
                     Ok(()) => ("ready", None),
-                    Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
+                    Err(error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
                 };
                 update_member_status_with_report(
                     &sid_clone,
@@ -871,6 +874,17 @@ pub(super) async fn spawn_swarm_agent(
                     Some(&swarm_event_tx2),
                 )
                 .await;
+                let terminal = match result {
+                    Ok(()) => ServerEvent::Done { id: 0 },
+                    Err(error) => ServerEvent::Error {
+                        id: 0,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs: None,
+                    },
+                };
+                let _ = events.sender().send(terminal);
+                drop(agent);
+                events.finish().await;
             });
         }
     }

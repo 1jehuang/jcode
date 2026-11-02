@@ -161,9 +161,34 @@ pub(super) async fn process_message_with_server_failover(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
 ) -> anyhow::Result<()> {
+    let lease = agent.lock().await.claim_server_turn()?;
+    process_reserved_message_with_server_failover(
+        agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_reserved_message_with_server_failover(
+    agent: Arc<Mutex<Agent>>,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    enabled: bool,
+) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
-    let result = super::client_lifecycle::process_message_streaming_mpsc(
-        Arc::clone(&agent),
+    let mut guard = agent.lock().await;
+    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+        &mut guard,
+        lease,
         content,
         images,
         system_reminder,
@@ -173,9 +198,8 @@ pub(super) async fn process_message_with_server_failover(
     if !enabled && result.is_err() {
         return result;
     }
-    let mut guard = agent.lock().await;
-    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx.clone()).await?;
-    super::runtime_ssh_loops::run_followups(&mut guard, event_tx).await
+    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
@@ -188,17 +212,39 @@ pub(super) async fn process_locked_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
-    let reminder = system_reminder.clone();
-    let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
+    let lease = agent.claim_server_turn()?;
+    process_reserved_locked_message_with_server_failover(
         agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+    )
+    .await
+}
+
+pub(super) async fn process_reserved_locked_message_with_server_failover(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    agent.validate_server_turn(lease)?;
+    let reminder = system_reminder.clone();
+    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+        agent,
+        lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, result, reminder, event_tx.clone()).await?;
-    super::runtime_ssh_loops::run_followups(agent, event_tx).await
+    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
@@ -226,10 +272,12 @@ pub(super) async fn process_server_initiated_message(
 /// usage/rate-limit error.
 pub(super) async fn retry_turn_with_server_failover(
     agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
     mut result: anyhow::Result<()>,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
+    agent.validate_server_turn(lease)?;
     let mut attempts = 0;
     while let Err(error) = &result {
         if attempts >= MAX_SERVER_FAILOVERS {
@@ -254,7 +302,7 @@ pub(super) async fn retry_turn_with_server_failover(
         }
         attempts += 1;
         result = agent
-            .continue_turn_after_failover(reminder.clone(), event_tx.clone())
+            .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;
     }
     result

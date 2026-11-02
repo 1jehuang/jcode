@@ -332,6 +332,16 @@ pub(super) async fn run_followups(
     agent: &mut Agent,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    let lease = agent.claim_server_turn()?;
+    run_reserved_followups(agent, &lease, event_tx).await
+}
+
+pub(super) async fn run_reserved_followups(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     if !state_path(&session_id)?.exists() {
         return Ok(());
@@ -358,8 +368,9 @@ pub(super) async fn run_followups(
         };
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
-        let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
+        let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
             agent,
+            lease,
             &followup.message,
             Vec::new(),
             None,
@@ -368,6 +379,7 @@ pub(super) async fn run_followups(
         .await;
         let result = super::turn_failover::retry_turn_with_server_failover(
             agent,
+            lease,
             result,
             None,
             event_tx.clone(),

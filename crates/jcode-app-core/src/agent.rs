@@ -22,6 +22,10 @@ mod swarm_reminder_tests;
 mod tools;
 mod turn_execution;
 mod turn_loops;
+mod turn_ownership;
+pub(crate) use turn_ownership::{
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+};
 mod turn_streaming_mpsc;
 mod utils;
 
@@ -315,6 +319,7 @@ struct RewindUndoSnapshot {
 }
 
 pub struct Agent {
+    turn_ownership: turn_ownership::TurnOwnership,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -427,6 +432,22 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub(crate) fn server_turn_observer(&self) -> TurnObserver {
+        self.turn_ownership.observer()
+    }
+
+    pub(crate) fn claim_runtime_mutation(&self) -> Result<RuntimeMutationLease> {
+        self.turn_ownership.claim_mutation()
+    }
+
+    pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
+        self.turn_ownership.claim()
+    }
+
+    pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
+        self.turn_ownership.validate(lease)
+    }
+
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self
             .session
@@ -493,6 +514,7 @@ impl Agent {
             disabled_tools.clone(),
         );
         let mut agent = Self {
+            turn_ownership: Default::default(),
             provider,
             registry,
             skills,

@@ -85,20 +85,25 @@ impl Provider for TerminalSocketProvider {
 
 #[tokio::test]
 async fn terminal_done_then_immediate_message_socket_dispatches_next_turn() {
-    sdk_socket_workflow(false, true).await;
+    sdk_socket_workflow(false, true, false).await;
 }
 
 #[tokio::test]
 async fn sdk_socket_configure_list_callback_and_busy_rejection() {
-    sdk_socket_workflow(false, false).await;
+    sdk_socket_workflow(false, false, false).await;
 }
 
 #[tokio::test]
 async fn user_response_socket_registration_follows_explicit_capability() {
-    sdk_socket_workflow(true, false).await;
+    sdk_socket_workflow(true, false, false).await;
 }
 
-async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
+#[tokio::test]
+async fn scoped_and_legacy_socket_subscribers_receive_compatible_turn_streams() {
+    sdk_socket_workflow(false, true, true).await;
+}
+
+async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let terminal_provider = TerminalSocketProvider::default();
@@ -108,7 +113,8 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
         Arc::new(SdkCallbackProvider::default())
     };
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -196,13 +202,132 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
     use serde_json::json;
     send(
         &mut client_writer,
-        json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability}),
     )
     .await;
     until(&mut client_reader, |e| {
         matches!(e, ServerEvent::Done { id: 1 })
     })
     .await;
+    send(&mut client_writer, json!({"type":"get_history","id":99})).await;
+    let saw_bootstrap = std::cell::Cell::new(false);
+    until(&mut client_reader, |e| {
+        if matches!(e, ServerEvent::TurnState { .. }) {
+            saw_bootstrap.set(true);
+        }
+        matches!(e, ServerEvent::History { id: 99, .. })
+    })
+    .await;
+    assert_eq!(
+        saw_bootstrap.get(),
+        identity_capability,
+        "bootstrap must be negotiated"
+    );
+    if identity_capability {
+        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let (legacy_task, legacy_stream) = connect();
+        let (legacy_reader, mut legacy_writer) = legacy_stream.into_split();
+        let mut legacy_reader = BufReader::new(legacy_reader);
+        send(
+            &mut legacy_writer,
+            json!({"type":"subscribe","id":1,"target_session_id":session_id}),
+        )
+        .await;
+        until(&mut legacy_reader, |event| {
+            assert!(
+                !matches!(
+                    event,
+                    ServerEvent::TurnState { .. }
+                        | ServerEvent::TurnStarted { .. }
+                        | ServerEvent::TurnEvent { .. }
+                ),
+                "legacy attach cannot receive identity protocol"
+            );
+            matches!(event, ServerEvent::Done { id: 1 })
+        })
+        .await;
+        send(
+            &mut client_writer,
+            json!({"type":"message","id":2,"content":"one shared turn"}),
+        )
+        .await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            terminal_provider.first_started.notified(),
+        )
+        .await
+        .unwrap();
+        terminal_provider.finish_first.notify_one();
+        let mut active = None;
+        let mut scoped_text = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                assert!(client_reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                match event {
+                    ServerEvent::TurnStarted { identity } => {
+                        assert!(active.replace(identity).is_none());
+                    }
+                    ServerEvent::TurnEvent { identity, event } => {
+                        assert_eq!(
+                            active.as_ref(),
+                            Some(&identity),
+                            "every emission belongs to accepted runtime turn"
+                        );
+                        match *event {
+                            ServerEvent::TextDelta { ref text } if text == "completed" => {
+                                scoped_text = true
+                            }
+                            ServerEvent::Done { id: 2 } => break,
+                            _ => {}
+                        }
+                    }
+                    ServerEvent::TextDelta { .. }
+                    | ServerEvent::Done { id: 2 }
+                    | ServerEvent::Error { id: 2, .. } => {
+                        panic!("identity client received unscoped turn output")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(scoped_text);
+        let legacy_text = std::cell::Cell::new(false);
+        until(&mut legacy_reader, |event| {
+            assert!(
+                !matches!(
+                    event,
+                    ServerEvent::TurnState { .. }
+                        | ServerEvent::TurnStarted { .. }
+                        | ServerEvent::TurnEvent { .. }
+                ),
+                "legacy observer receives flat events only"
+            );
+            if matches!(event, ServerEvent::TextDelta { text } if text == "completed") {
+                legacy_text.set(true);
+            }
+            matches!(event, ServerEvent::Done { id: 2 })
+        })
+        .await;
+        assert!(legacy_text.get());
+        assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 1);
+        sessions.clear_for_test().await;
+        drop(client_writer);
+        drop(client_reader);
+        drop(legacy_writer);
+        drop(legacy_reader);
+        for task in [server_task, legacy_task] {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        return;
+    }
     if terminal_race {
         send(
             &mut client_writer,
@@ -217,7 +342,7 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
         .unwrap();
         // Park the actor inside GetState, independently of the processing task
         // and event fanout. Its Ack proves it has already selected this request.
-        let sessions_guard = sessions.write().await;
+        let sessions_guard = sessions.write_for_test().await;
         send(&mut client_writer, json!({"type":"state","id":3})).await;
         until(&mut client_reader, |e| {
             matches!(e, ServerEvent::Ack { id: 3 })
@@ -248,7 +373,7 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
             "next prompt must reach model: {terminal:?}"
         );
         assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
-        sessions.write().await.clear();
+        sessions.clear_for_test().await;
         drop(client_writer);
         drop(client_reader);
         tokio::time::timeout(Duration::from_secs(5), server_task)
@@ -292,7 +417,7 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
         }
         // This test exercises catalog gating, not the 30-second retention of
         // idle unsaved sessions. Remove the isolated fixture before detaching.
-        sessions.write().await.clear();
+        sessions.clear_for_test().await;
         drop(client_writer);
         drop(client_reader);
         tokio::time::timeout(Duration::from_secs(5), server_task)
@@ -426,7 +551,7 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool) {
     other_session.save().unwrap();
     assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
-    sessions.write().await.insert(
+    sessions.write_for_test().await.insert(
         "sdk_other_session".into(),
         Arc::new(Mutex::new(Agent::new_with_session(
             provider_template.clone(),

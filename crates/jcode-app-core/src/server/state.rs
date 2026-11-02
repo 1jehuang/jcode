@@ -496,33 +496,85 @@ pub(super) async fn fanout_peer_client_event(
     delivered
 }
 
-pub(super) fn session_event_fanout_sender(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
-        }
-    });
-    tx
+/// Owns one turn's event queue. Closing or aborting the producer drains all
+/// accepted events before releasing the runtime's publication reservation.
+pub(super) struct TurnEventChannel {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
-pub(super) fn session_event_fanout_sender_with_fallback(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    fallback_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0 {
-                let _ = fallback_tx.send(event);
+impl TurnEventChannel {
+    pub(super) fn new(
+        session_id: String,
+        members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+        fallback: mpsc::UnboundedSender<ServerEvent>,
+        lease: &crate::agent::TurnLease,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (close, mut closed) = tokio::sync::oneshot::channel();
+        let publication = lease.publication_pin();
+        let identity = lease.identity().clone();
+        let task = tokio::spawn(async move {
+            let _publication = publication;
+            let started = ServerEvent::TurnStarted {
+                identity: identity.clone(),
+            };
+            if fanout_session_event(&members, &session_id, started.clone()).await == 0 {
+                let _ = fallback.send(started);
             }
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = &mut closed => { rx.close(); break; }
+                    event = rx.recv() => event,
+                };
+                let Some(event) = event else {
+                    return;
+                };
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                    let _ = fallback.send(event);
+                }
+            }
+            while let Some(event) = rx.recv().await {
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                    let _ = fallback.send(event);
+                }
+            }
+        });
+        Self {
+            tx,
+            close: Some(close),
+            task: Some(task),
         }
-    });
-    tx
+    }
+
+    pub(super) fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    pub(super) async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for TurnEventChannel {
+    fn drop(&mut self) {
+        // Dropping JoinHandle detaches the drain task. It must not be aborted:
+        // already queued events still own the runtime publication reservation.
+        self.close.take();
+    }
 }
 
 pub(super) fn enqueue_soft_interrupt(

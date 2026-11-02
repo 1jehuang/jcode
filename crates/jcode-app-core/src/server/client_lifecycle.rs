@@ -72,7 +72,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
@@ -80,6 +80,22 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
 use subscribe_context::*;
+
+fn event_for_transport(
+    mut event: ServerEvent,
+    supports_turn_identity: bool,
+) -> Option<ServerEvent> {
+    if supports_turn_identity {
+        return Some(event);
+    }
+    loop {
+        event = match event {
+            ServerEvent::TurnEvent { event, .. } => *event,
+            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
+            event => return Some(event),
+        };
+    }
+}
 
 struct ProcessingMessage {
     id: u64,
@@ -91,7 +107,14 @@ struct ProcessingMessage {
     server_failover: bool,
 }
 
-type ProcessingCompletion = (u64, Result<()>, Option<String>);
+// A client request ID is not a turn identity: clients can reuse it after cancel.
+type ProcessingCompletion = (
+    u64,
+    Result<()>,
+    Option<String>,
+    tokio::task::Id,
+    Option<crate::agent::TurnPublicationPin>,
+);
 
 struct ProcessingState<'a> {
     client_is_processing: &'a mut bool,
@@ -322,6 +345,13 @@ pub(super) async fn handle_client(
         }
     };
 
+    let supports_turn_identity = matches!(
+        &initial_request,
+        Request::Subscribe {
+            supports_turn_identity: true,
+            ..
+        }
+    );
     let mut initialization_activity = Some(crate::runtime_activity::global().try_enter()?);
     let initial_working_dir =
         match resolve_target_subscribe_working_dir(&mut initial_request, &sessions, &swarm_members)
@@ -481,10 +511,9 @@ pub(super) async fn handle_client(
     .await;
 
     let mut agent = Arc::new(Mutex::new(new_agent));
-    {
-        let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
-    }
+    sessions
+        .register_new(client_session_id.clone(), Arc::clone(&agent))
+        .await?;
     crate::runtime_memory_log::emit_event(
         crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
             "session_created",
@@ -508,7 +537,15 @@ pub(super) async fn handle_client(
             {
                 let mut connections = client_connections_for_events.write().await;
                 if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
-                    match &event {
+                    let observed = match &event {
+                        ServerEvent::TurnEvent { event, .. } => event.as_ref(),
+                        event => event,
+                    };
+                    match observed {
+                        ServerEvent::TurnStarted { .. } => {
+                            info.is_processing = true;
+                            info.current_tool_name = None;
+                        }
                         ServerEvent::ToolStart { name, .. } => {
                             info.is_processing = true;
                             info.current_tool_name = Some(name.clone());
@@ -526,6 +563,9 @@ pub(super) async fn handle_client(
                     }
                 }
             }
+            let Some(event) = event_for_transport(event, supports_turn_identity) else {
+                continue;
+            };
             let json = encode_event(&event);
             let mut w = writer_clone.lock().await;
             if let Err(error) = w.write_all(json.as_bytes()).await {
@@ -1267,7 +1307,7 @@ pub(super) async fn handle_client(
                 ) {
                     continue;
                 }
-                crate::hooks::with_client_terminal_env(
+                agent = crate::hooks::with_client_terminal_env(
                     active_terminal_env.clone(),
                     handle_clear_session(
                         id,
@@ -1338,6 +1378,7 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
+                            supports_turn_identity,
                             None,
                     )
                         .await
@@ -1400,6 +1441,7 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
+                            supports_turn_identity,
                             None,
                     )
                         .await
@@ -1478,6 +1520,7 @@ pub(super) async fn handle_client(
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
                 supports_server_failover: requested_server_failover,
+                supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
@@ -1576,6 +1619,7 @@ pub(super) async fn handle_client(
                                 &event_counter,
                                 &swarm_event_tx,
                                 supports_pdf_panels,
+                                supports_turn_identity,
                             ),
                         )
                         .await?;
@@ -1718,6 +1762,7 @@ pub(super) async fn handle_client(
                     &server_icon,
                     None,
                     supports_pdf_panels,
+                    supports_turn_identity,
                     None,
             )
                 .await
@@ -1848,6 +1893,7 @@ pub(super) async fn handle_client(
                         &event_counter,
                         &swarm_event_tx,
                         supports_pdf_panels,
+                        supports_turn_identity,
                     ),
                 )
                 .await?;
@@ -3246,9 +3292,12 @@ pub(super) async fn handle_client(
                 "Retaining disconnected turn for session {}",
                 client_session_id
             ));
+            let owner_id = handle.id();
             let _ = handle.await;
-            while let Ok((done_id, result, report)) = processing_done_rx.try_recv() {
-                if Some(done_id) == processing_message_id {
+            while let Ok((done_id, result, report, owner, _finalization)) =
+                processing_done_rx.try_recv()
+            {
+                if Some(done_id) == processing_message_id && owner == owner_id {
                     record_processing_completion(
                         processing_session_id.as_deref(),
                         result,
@@ -3322,10 +3371,12 @@ async fn reconcile_processing_completions(
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
-    while let Some((done_id, result, completion_report)) =
+    while let Some((done_id, result, completion_report, owner, _finalization)) =
         completion.take().or_else(|| receiver.try_recv().ok())
     {
-        if Some(done_id) != *state.message_id {
+        if Some(done_id) != *state.message_id
+            || state.task.as_ref().map(|task| task.id()) != Some(owner)
+        {
             crate::logging::warn(&format!(
                 "Done event id={} doesn't match processing_message_id={:?}, dropping",
                 done_id, state.message_id
@@ -3495,6 +3546,17 @@ async fn start_processing_message(
     // Serialize recovery acceptance with the agent lock across connections.
     // A stale History frame may submit the same reminder after its first turn.
     let mut agent_guard = agent.lock().await;
+    let turn_lease = match agent_guard.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     if let Some(reminder) = system_reminder.as_deref() {
         match super::reload_recovery::is_delivered_continuation(client_session_id, reminder) {
             Ok(true) => {
@@ -3570,11 +3632,13 @@ async fn start_processing_message(
     };
     let agent = Arc::clone(agent);
     let report_agent = Arc::clone(&agent);
-    let tx = super::state::session_event_fanout_sender_with_fallback(
+    let events = super::state::TurnEventChannel::new(
         client_session_id.to_string(),
         Arc::clone(swarm.members),
         client_event_tx.clone(),
+        &turn_lease,
     );
+    let tx = events.sender();
     let done_tx = processing_done_tx.clone();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
@@ -3582,8 +3646,9 @@ async fn start_processing_message(
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            super::turn_failover::process_message_with_server_failover(
+            super::turn_failover::process_reserved_message_with_server_failover(
                 agent,
+                &turn_lease,
                 &content,
                 images,
                 system_reminder,
@@ -3657,8 +3722,21 @@ async fn start_processing_message(
         // actor can reconcile this turn before dispatching the next request.
         // These sends do not await, and the terminal stays behind MessageEnd on
         // the same fanout channel (including for newly attached clients).
-        let _ = done_tx.send((id, result, completion_report));
+        // The actor owns final status publication after this task finishes.
+        // Retain the reservation in its completion queue, so another connection
+        // cannot start work before old ready/failed bookkeeping is settled.
+        let _ = done_tx.send((
+            id,
+            result,
+            completion_report,
+            tokio::task::id(),
+            Some(turn_lease.publication_pin()),
+        ));
         let _ = tx.send(terminal_event);
+        // Drain before releasing ownership: independently spawned fanout tasks
+        // must not deliver an old terminal after a newer turn starts.
+        events.finish().await;
+        drop(turn_lease);
     });
 }
 
@@ -4029,9 +4107,31 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    let lease = agent.claim_server_turn()?;
+    process_reserved_message_streaming_mpsc(
+        agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+    )
+    .await
+}
+
+/// Execute only with this runtime's non-cloneable turn reservation.
+pub(super) async fn process_reserved_message_streaming_mpsc(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_once_streaming_mpsc(content, images, system_reminder, event_tx)
+        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
