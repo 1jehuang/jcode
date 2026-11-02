@@ -100,6 +100,37 @@ class ReleaseCITests(unittest.TestCase):
         with self.assertRaises(gate.Rejected):
             self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
 
+    def test_preview_accepts_only_named_platform_and_cache_skips(self):
+        for name, optional in gate.PREVIEW_OPTIONAL_SKIPS.items():
+            with self.subTest(job=name):
+                items = jobs()
+                job = next(item for item in items if item["name"] == name)
+                advisory = sorted(gate.PREVIEW_ADVISORY_JOBS[name])[0]
+                job.update(conclusion="failure", steps=[
+                    dict(name=advisory, status="completed", conclusion="failure"),
+                    *[dict(name=step, status="completed", conclusion="skipped")
+                      for step in optional],
+                ])
+                self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+                with self.assertRaises(gate.Rejected):
+                    self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items))
+                for step in ("Run tests", "Run clippy with warnings denied", "unknown step"):
+                    job["steps"].append(dict(name=step, status="completed", conclusion="skipped"))
+                    with self.assertRaises(gate.Rejected):
+                        self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+                    job["steps"].pop()
+
+    def test_linux_security_cannot_be_skipped_after_advisory_failure(self):
+        items = jobs()
+        items[1].update(conclusion="failure", steps=[
+            dict(name="Enforce warning budget (Linux, macOS)", status="completed", conclusion="failure"),
+            dict(name="Security preflight (Linux)", status="completed", conclusion="skipped"),
+        ])
+        with self.assertRaises(gate.Rejected):
+            self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("name: Security preflight (Linux)\n        if: ${{ !cancelled() && runner.os == 'Linux' }}", workflow)
+
     def test_preview_rejects_incomplete_or_malformed_step_evidence(self):
         for evidence in (None, [], [None], [dict(name="Check formatting", status="completed",
                                                 conclusion="success")]):

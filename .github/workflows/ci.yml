@@ -431,7 +431,7 @@ jobs:
           scripts/check_warning_budget.sh
 
       - name: Security preflight (Linux)
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         shell: bash
         run: |
           cargo install cargo-audit --locked

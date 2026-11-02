@@ -44,6 +44,26 @@ PREVIEW_ADVISORY_JOBS = {
     "Build & Test (macos-latest)": frozenset({"Enforce warning budget (Linux, macOS)"}),
 }
 
+# A failed advisory job still contains platform-inapplicable steps and a cache
+# save that GitHub skips on failure. Neither is missing correctness evidence.
+# All other skipped steps, including tests and security checks, remain fatal.
+PREVIEW_OPTIONAL_SKIPS = {
+    "Quality Guardrails": frozenset({"Post Run Swatinem/rust-cache@v2"}),
+    "Build & Test (ubuntu-latest)": frozenset({
+        "Check PowerShell script syntax (Windows)",
+        "Post Run Swatinem/rust-cache@v2",
+    }),
+    "Build & Test (macos-latest)": frozenset({
+        "Install mold linker (Linux)",
+        "Run automatic model discovery regressions (Linux only)",
+        "Run embedding numeric-stability cohort (Linux only)",
+        "Run TUI library tests (Linux only)",
+        "Check PowerShell script syntax (Windows)",
+        "Security preflight (Linux)",
+        "Post Run Swatinem/rust-cache@v2",
+    }),
+}
+
 
 def preview_job_status(job, label):
     if (job.get("name") not in PREVIEW_ADVISORY_JOBS
@@ -56,11 +76,14 @@ def preview_job_status(job, label):
     for step in steps:
         if not isinstance(step, dict):
             raise Rejected(f"{label} has malformed step evidence")
+        if (step.get("status") == "completed" and step.get("conclusion") == "skipped"
+                and step.get("name") in PREVIEW_OPTIONAL_SKIPS.get(job["name"], ())):
+            continue
         if (step.get("status") == "completed" and step.get("conclusion") == "failure"
                 and step.get("name") in PREVIEW_ADVISORY_JOBS[job["name"]]):
             failures.append(step["name"])
         else:
-            # Skipped, cancelled, unknown and timed-out steps are not waivers.
+            # Correctness skips, cancellations and timeouts are not waivers.
             reason = status_reason(step, f"{label}: {step.get('name')}")
             if reason:
                 raise Rejected(f"{label} has incomplete step evidence")
