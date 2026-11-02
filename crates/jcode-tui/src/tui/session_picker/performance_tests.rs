@@ -342,6 +342,31 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
 }
 
 #[test]
+fn resume_token_colors_follow_usage_tiers() {
+    for (tokens, expected) in [
+        (0, rgb(100, 100, 100)),
+        (1, rgb(129, 199, 132)),
+        (9_999, rgb(129, 199, 132)),
+        (10_000, rgb(255, 213, 79)),
+        (49_999, rgb(255, 213, 79)),
+        (50_000, rgb(255, 167, 38)),
+        (99_999, rgb(255, 167, 38)),
+        (100_000, rgb(239, 115, 115)),
+        (usize::MAX, rgb(239, 115, 115)),
+    ] {
+        let mut item = session(0, 1);
+        item.estimated_tokens = tokens;
+        let picker = SessionPicker::new(vec![item.clone()]);
+        for selected in [false, true] {
+            let rows = picker.render_session_item_lines(&item, selected);
+            let count = rows[0].spans.last().unwrap();
+            assert!(count.content.contains("tok"));
+            assert_eq!(count.style.fg, Some(expected), "tokens={tokens}");
+        }
+    }
+}
+
+#[test]
 fn session_entry_reserves_tokens_and_activity_for_long_names_and_directories() {
     let mut item = session(0, 1);
     item.title = "界".repeat(60);

@@ -2,6 +2,16 @@ use super::*;
 use ratatui::widgets::Wrap;
 
 impl SessionPicker {
+    pub(super) fn estimated_tokens_color(tokens: usize) -> Color {
+        match tokens {
+            0 => rgb(100, 100, 100),
+            1..10_000 => rgb(129, 199, 132),
+            10_000..50_000 => rgb(255, 213, 79),
+            50_000..100_000 => rgb(255, 167, 38),
+            _ => rgb(239, 115, 115),
+        }
+    }
+
     fn running_spinner_frame() -> usize {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -338,7 +348,7 @@ impl SessionPicker {
                 "  {}",
                 Self::format_estimated_tokens(session.estimated_tokens)
             ),
-            Style::default().fg(dimmer),
+            Style::default().fg(Self::estimated_tokens_color(session.estimated_tokens)),
         ));
         let line1 = Line::from(line1_spans);
 
