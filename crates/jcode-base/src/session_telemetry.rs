@@ -55,7 +55,7 @@ pub fn save_context(
         credential,
         Some(jcode_provider_core::ResolvedCredential::Oauth)
     ) {
-        let provider = match serving_provider {
+        let provider = match serving_provider.to_ascii_lowercase().as_str() {
             "openai" => Some(crate::usage::MultiAccountProviderKind::OpenAI),
             "claude" | "anthropic" => Some(crate::usage::MultiAccountProviderKind::Anthropic),
             _ => None,
@@ -89,7 +89,7 @@ pub fn save_context(
         context_limit,
         compaction: session.compaction.clone(),
         route_api_method: session.route_api_method.clone(),
-        serving_provider: Some(serving_provider.to_owned()),
+        serving_provider: Some(serving_provider.to_ascii_lowercase()),
         credential,
         account_label,
         account_usage,
@@ -142,13 +142,14 @@ mod tests {
             &session,
             1234,
             Some(200_000),
-            "openai",
+            "OpenAI",
             Some(jcode_provider_core::ResolvedCredential::Oauth),
             Some("account-a".into()),
         );
         let saved = load_context(&session).unwrap();
         assert_eq!(saved.context_tokens, 1234);
         assert_eq!(saved.context_limit, Some(200_000));
+        assert_eq!(saved.serving_provider.as_deref(), Some("openai"));
         assert_eq!(saved.account_label.as_deref(), Some("account-a"));
         assert!(
             saved.account_usage.is_none(),

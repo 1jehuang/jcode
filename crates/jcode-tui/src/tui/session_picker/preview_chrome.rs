@@ -48,8 +48,11 @@ fn snapshot_account_info(
 ) -> (info_widget::AuthMethod, Option<info_widget::UsageInfo>) {
     use info_widget::{AuthMethod, UsageInfo, UsageProvider};
     use jcode_provider_core::ResolvedCredential;
-    let provider = snapshot.serving_provider.as_deref();
-    let auth = match (provider, snapshot.credential) {
+    let provider = snapshot
+        .serving_provider
+        .as_deref()
+        .map(str::to_ascii_lowercase);
+    let auth = match (provider.as_deref(), snapshot.credential) {
         (Some("openai"), Some(ResolvedCredential::Oauth)) => AuthMethod::OpenAIOAuth,
         (Some("claude" | "anthropic"), Some(ResolvedCredential::Oauth)) => {
             AuthMethod::AnthropicOAuth

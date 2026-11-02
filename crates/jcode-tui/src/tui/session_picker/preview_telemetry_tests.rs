@@ -53,6 +53,21 @@ fn selected_snapshot_hydrates_context_budget_auth_and_matched_quota() {
 }
 
 #[test]
+fn serving_provider_display_names_still_hydrate_the_actual_credential() {
+    let (_, mut snapshot) = fixture();
+    for (name, expected) in [
+        ("OpenAI", info_widget::AuthMethod::OpenAIOAuth),
+        ("Anthropic", info_widget::AuthMethod::AnthropicOAuth),
+        ("Claude", info_widget::AuthMethod::AnthropicOAuth),
+    ] {
+        snapshot.serving_provider = Some(name.into());
+        let (auth, usage) = snapshot_account_info(&snapshot);
+        assert_eq!(auth, expected, "{name}");
+        assert!(usage.is_some(), "{name}");
+    }
+}
+
+#[test]
 fn foreign_or_changed_route_snapshots_are_rejected() {
     let (session, snapshot) = fixture();
     for field in ["id", "model", "provider", "account", "compaction"] {
