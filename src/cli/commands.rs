@@ -1443,7 +1443,7 @@ pub async fn run_transcript_command(
     let request_id = client.send_transcript(&text, mode, session).await?;
 
     loop {
-        match client.read_event().await? {
+        match unwrap_turn_event(client.read_event().await?) {
             crate::protocol::ServerEvent::Ack { id } if id == request_id => {}
             crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
             crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
@@ -2378,7 +2378,7 @@ async fn run_server_reload_command_to(
     // exec's a new process, which drops this connection after it sends Done;
     // we treat a disconnect after observing Reloading as the expected handoff.
     loop {
-        match client.read_event().await {
+        match client.read_event().await.map(unwrap_turn_event) {
             Ok(ServerEvent::Ack { id }) if id == request_id => {}
             Ok(ServerEvent::Reloading { .. }) => {
                 reloading = true;
@@ -3334,6 +3334,17 @@ async fn run_single_message_command_ndjson(
     }
 }
 
+/// Legacy CLI adapters consume the payload even when an identity-aware peer
+/// sends an explicit envelope. Unwrap iteratively to tolerate nested envelopes.
+pub(super) fn unwrap_turn_event(
+    mut event: crate::protocol::ServerEvent,
+) -> crate::protocol::ServerEvent {
+    while let crate::protocol::ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = *inner;
+    }
+    event
+}
+
 fn emit_ndjson_event(
     stdout: &mut impl Write,
     state: &mut NdjsonRunState,
@@ -3341,7 +3352,7 @@ fn emit_ndjson_event(
 ) -> Result<()> {
     use crate::protocol::ServerEvent;
 
-    match event {
+    match unwrap_turn_event(event) {
         ServerEvent::TextDelta { text } => {
             state.text.push_str(&text);
             write_json_line(
@@ -3621,6 +3632,63 @@ pub async fn run_model_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod turn_envelope_tests {
+    use super::*;
+    use crate::protocol::{ServerEvent, TurnIdentity};
+
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn ndjson_preserves_wrapped_text_tool_and_error_payloads() {
+        for event in [
+            ServerEvent::TextDelta {
+                text: "hello".into(),
+            },
+            ServerEvent::ToolStart {
+                id: "tool-1".into(),
+                name: "read".into(),
+            },
+            ServerEvent::Interrupted,
+            ServerEvent::Error {
+                id: 9,
+                message: "failure".into(),
+                retry_after_secs: None,
+            },
+        ] {
+            let mut plain = Vec::new();
+            let mut wrapped = Vec::new();
+            let mut plain_state = NdjsonRunState::default();
+            let mut wrapped_state = NdjsonRunState::default();
+            emit_ndjson_event(&mut plain, &mut plain_state, event.clone()).unwrap();
+            emit_ndjson_event(&mut wrapped, &mut wrapped_state, envelope(envelope(event))).unwrap();
+            assert!(!plain.is_empty());
+            assert_eq!(wrapped, plain);
+            assert_eq!(wrapped_state.text, plain_state.text);
+        }
+    }
+
+    #[test]
+    fn unwrap_preserves_terminal_request_id_and_legacy_events() {
+        assert!(matches!(
+            unwrap_turn_event(envelope(envelope(ServerEvent::Done { id: 42 }))),
+            ServerEvent::Done { id: 42 }
+        ));
+        assert!(matches!(
+            unwrap_turn_event(ServerEvent::Done { id: 43 }),
+            ServerEvent::Done { id: 43 }
+        ));
+    }
 }
 
 mod model_routes;
