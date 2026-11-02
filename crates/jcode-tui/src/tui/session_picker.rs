@@ -1704,6 +1704,7 @@ impl SessionPicker {
     /// Fingerprint everything that affects the *content* of the preview pane so
     /// the wrapped-line cache can be reused across frames (notably while
     /// scrolling). Mirrors the main chat viewport's prepared-frame cache key.
+    #[cfg(test)]
     fn preview_content_hash(
         &self,
         session: &SessionInfo,

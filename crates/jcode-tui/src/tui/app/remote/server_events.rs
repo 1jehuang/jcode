@@ -578,14 +578,14 @@ pub(in crate::tui::app) fn handle_server_event(
         return false;
     }
     let redraw = handle_server_event_inner(app, event, remote);
-    if let Some(identity) = identity {
-        if terminal {
-            if app.deferred_stream_done_id.is_some() {
-                app.deferred_stream_done_identity = Some(identity);
-            } else {
-                app.remote_turn_fence.complete(&identity);
-                app.deferred_stream_done_identity = None;
-            }
+    if let Some(identity) = identity
+        && terminal
+    {
+        if app.deferred_stream_done_id.is_some() {
+            app.deferred_stream_done_identity = Some(identity);
+        } else {
+            app.remote_turn_fence.complete(&identity);
+            app.deferred_stream_done_identity = None;
         }
     }
     redraw

@@ -383,6 +383,7 @@ pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool 
 /// This intentionally avoids transcript file I/O. Transcript-backed content can
 /// still become searchable after preview load because the picker refreshes the
 /// session's cached `search_index` from the loaded preview.
+#[cfg(test)]
 pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -> bool {
     let tokens = search_query_tokens(query);
     tokens.is_empty()

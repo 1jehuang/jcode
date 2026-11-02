@@ -199,6 +199,7 @@ impl TranscriptSearch {
         self.ranks.contains_key(id)
     }
 
+    #[cfg(test)]
     pub(super) fn contains_literal(&self, id: &str) -> bool {
         self.ranks.get(id).is_some_and(|rank| rank.literal)
     }
