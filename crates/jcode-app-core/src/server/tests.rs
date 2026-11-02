@@ -80,8 +80,13 @@ fn file_activity_scope_label_classifies_overlap() {
 #[tokio::test]
 async fn session_env_live_updates_cannot_recreate_destroyed_sessions() {
     let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
     let sid = "session-env-live-update-cleanup";
-    let sessions = Arc::new(RwLock::new(HashMap::from([(sid.to_owned(), ())])));
+    let agent = test_agent(Arc::new(StreamingMockProvider::default())).await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(sid.to_owned(), agent.clone())]),
+    ));
     let env = HashMap::from([("SESSION_SECRET".into(), "original".into())]);
     super::set_live_session_env(&sessions, sid, env.clone())
         .await
@@ -92,7 +97,7 @@ async fn session_env_live_updates_cannot_recreate_destroyed_sessions() {
         remove_session_entry(&sessions, sid),
     );
     let _ = update;
-    assert_eq!(removed, Some(()));
+    assert!(Arc::ptr_eq(&removed.unwrap(), &agent));
     assert!(crate::session_env::session_env(sid).is_empty());
     assert!(
         super::set_live_session_env(&sessions, sid, env)
@@ -115,13 +120,13 @@ async fn removing_server_session_clears_active_pid_marker() {
     )
     .unwrap();
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.to_string(),
-        "agent",
-    )])));
+    let agent = test_agent(Arc::new(StreamingMockProvider::default())).await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.to_string(), agent.clone())]),
+    ));
     let removed = remove_session_entry(&sessions, session_id).await;
 
-    assert_eq!(removed, Some("agent"));
+    assert!(Arc::ptr_eq(&removed.unwrap(), &agent));
     assert!(crate::session_env::session_env(session_id).is_empty());
     assert!(!sessions.read().await.contains_key(session_id));
     assert!(
@@ -366,10 +371,9 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
@@ -467,10 +471,9 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
     let initial_message_count = agent.lock().await.messages().len();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
@@ -540,10 +543,9 @@ async fn idle_live_agent_wakes_restored_headless_member_without_attachments() {
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
     let agent = test_agent(provider).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let (closed_tx, closed_rx) = mpsc::unbounded_channel();
     drop(closed_rx);
     let mut member = attached_swarm_member(&session_id, closed_tx);
@@ -579,10 +581,9 @@ async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
     let agent = test_agent(provider).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel();
     let member = attached_swarm_member(&session_id, member_event_tx);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
@@ -616,10 +617,9 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let member = attached_swarm_member(&session_id, member_event_tx);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
@@ -688,10 +688,9 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let mut member = attached_swarm_member(&session_id, member_event_tx);
     member.swarm_id = Some("test-swarm".to_string());
@@ -789,10 +788,9 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
     let agent = test_agent(provider).await;
     let session_id = agent.lock().await.session_id().to_string();
     let queue = agent.lock().await.soft_interrupt_queue();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
         queue.clone(),

@@ -449,10 +449,9 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
         !snapshot_path.exists(),
         "fresh empty sessions are not persisted"
     );
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.to_string(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.to_string(), agent.clone())]),
+    ));
     let connections = Arc::new(RwLock::new(HashMap::new()));
     let count = Arc::new(RwLock::new(1));
     let (stream, mut peer) = crate::transport::stream_pair().unwrap();
@@ -500,12 +499,12 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     );
 
     // A nonexistent session is not the same as a registered, unsaved one.
-    sessions.write().await.clear();
+    sessions.clear_for_test().await;
     assert!(request(4, false).await.is_err());
     sessions
-        .write()
+        .register_new(session_id.into(), agent.clone())
         .await
-        .insert(session_id.into(), agent.clone());
+        .unwrap();
     // Corrupt snapshots must not silently become empty history either.
     std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
     std::fs::write(&snapshot_path, b"not valid session json").unwrap();
@@ -648,10 +647,9 @@ async fn assert_history_service_tier_and_pdf_capability(
     session.save().expect("restore persisted history snapshot");
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.to_string(), Arc::clone(&agent))]),
+    ));
     let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
     let client_count = Arc::new(RwLock::new(1usize));
 

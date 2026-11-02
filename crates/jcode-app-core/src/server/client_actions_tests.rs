@@ -629,10 +629,9 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     let registry = Registry::new(provider_dyn.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
+    ));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
@@ -744,10 +743,9 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
     let session_id = agent.lock().await.session_id().to_string();
     let queue = agent.lock().await.soft_interrupt_queue();
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
+    ));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
         queue.clone(),
@@ -910,10 +908,9 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
+    ));
     let (member, mut attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
@@ -1012,10 +1009,9 @@ async fn resume_all_skips_session_with_completed_turn() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
+    ));
     let (member, _attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();

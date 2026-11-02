@@ -120,10 +120,9 @@ async fn failed_server_resume_keeps_original_concurrency_owner() -> Result<()> {
     let registry = Registry::new(provider.clone()).await;
     let source = Arc::new(Mutex::new(Agent::new(provider.clone(), registry.clone())));
     let source_id = source.lock().await.session_id().to_owned();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        source_id.clone(),
-        source.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(source_id.clone(), source.clone())]),
+    ));
     let restored = restore_for_concurrency_test(
         "missing-concurrency-target",
         &source_id,
@@ -157,10 +156,12 @@ async fn viewer_attach_reuses_live_owner_without_tracking_placeholder() -> Resul
         None,
     )));
     let placeholder_id = placeholder.lock().await.session_id().to_owned();
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (live_id.clone(), live.clone()),
-        (placeholder_id.clone(), placeholder.clone()),
-    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([
+            (live_id.clone(), live.clone()),
+            (placeholder_id.clone(), placeholder.clone()),
+        ]),
+    ));
     assert!(!placeholder.lock().await.has_concurrency_tracking());
     let attached = restore_for_concurrency_test(
         &live_id,
@@ -201,10 +202,12 @@ async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
     )));
     let first_id = first.lock().await.session_id().to_owned();
     let second_id = second.lock().await.session_id().to_owned();
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (first_id.clone(), first.clone()),
-        (second_id.clone(), second.clone()),
-    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([
+            (first_id.clone(), first.clone()),
+            (second_id.clone(), second.clone()),
+        ]),
+    ));
     // Force both requests to enter before either can restore. Without the
     // target gate each passes live lookup and waits on its own source mutex.
     let first_guard = first.lock().await;
@@ -249,29 +252,47 @@ async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
 }
 
 #[tokio::test]
-async fn resume_gates_are_scoped_and_weak() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    let other_sessions = Arc::new(RwLock::new(HashMap::new()));
-    let gate = super::super::resume_target_lock(&sessions, "target");
-    let same = super::super::resume_target_lock(&sessions, "target");
-    assert!(Arc::ptr_eq(&gate, &same));
-    let held = gate.lock().await;
-    assert!(same.try_lock().is_err());
-    assert!(
-        super::super::resume_target_lock(&sessions, "other")
-            .try_lock()
-            .is_ok()
-    );
-    assert!(
-        super::super::resume_target_lock(&other_sessions, "target")
-            .try_lock()
-            .is_ok()
-    );
-    let weak = Arc::downgrade(&gate);
+async fn same_session_reattach_preserves_runtime_owner() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedConcurrencyEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry.clone())));
+    let id = agent.lock().await.session_id().to_owned();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(id.clone(), agent.clone())]),
+    ));
+    let attached = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        restore_for_concurrency_test(&id, &id, &agent, &provider, &registry, &sessions),
+    )
+    .await
+    .expect("same-session reattach must not deadlock")?;
+    assert!(Arc::ptr_eq(&attached, &agent));
+    assert!(Arc::ptr_eq(sessions.read().await.get(&id).unwrap(), &agent));
+    assert!(agent.lock().await.has_concurrency_tracking());
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_reservations_are_scoped_and_release_on_drop() {
+    let sessions = crate::server::session_manager::SessionManager::new();
+    let other_sessions = crate::server::session_manager::SessionManager::new();
+    let held = sessions.reserve("target").await;
+    let same = sessions.reserve("target");
+    tokio::pin!(same);
+    assert!(futures::poll!(&mut same).is_pending());
+    let other_target = sessions.reserve("other");
+    tokio::pin!(other_target);
+    assert!(futures::poll!(&mut other_target).is_ready());
+    let other_manager = other_sessions.reserve("target");
+    tokio::pin!(other_manager);
+    assert!(futures::poll!(&mut other_manager).is_ready());
     drop(held);
-    drop(gate);
-    drop(same);
-    assert!(weak.upgrade().is_none(), "idle gates must not be retained");
+    assert!(
+        futures::poll!(&mut same).is_ready(),
+        "dropping a reservation must release its gate"
+    );
 }
 
 #[tokio::test]
@@ -281,7 +302,9 @@ async fn comm_status_releases_member_guard_before_reading_connections() {
         ("target".to_string(), test_swarm_member("target", "ready")),
     ])));
     let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
     // Disconnect cleanup holds client_connections.write, then needs swarm_members.write.

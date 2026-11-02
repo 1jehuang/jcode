@@ -416,7 +416,7 @@ async fn handle_with_gate(
                 }
                 // Evict only transferred agents. Any outstanding Arc remains
                 // harmless because its durable away lease denies turns/saves.
-                sessions.write().await.retain(|id, _| !ids.contains(id));
+                sessions.retain(|id, _| !ids.contains(id)).await;
                 let mut members = state.members.write().await;
                 for id in &ids {
                     if let Some(member) = members.get_mut(id) {

@@ -38,7 +38,9 @@ async fn owner_is_notified_once_of_idle_headless_workers_stopped_by_restart() {
         HashMap::from([("swarm-1".to_string(), "coord".to_string())]),
     );
 
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let queue: jcode_agent_runtime::SoftInterruptQueue = Default::default();
     let queues = Arc::new(RwLock::new(HashMap::from([(
         "coord".to_string(),
