@@ -1174,6 +1174,50 @@ pub(crate) fn prepare_history_preview(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> PreparedMessages {
+    prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
+        .expect("an unbounded preview always completes")
+}
+
+/// Choose scrollbar width without fully rendering overflowing history twice.
+/// The budget excludes caller-owned header and padding rows. The flag is the
+/// wide layout's strict overflow decision, not a second narrow-layout decision.
+pub(crate) fn prepare_history_preview_for_viewport(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    wide_width: u16,
+    narrow_width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: usize,
+) -> (PreparedMessages, bool) {
+    if wide_width == narrow_width {
+        let prepared = prepare_history_preview(messages, hidden_prompts, wide_width, diff_mode);
+        let overflow = prepared.wrapped_lines.len() > max_body_rows;
+        return (prepared, overflow);
+    }
+    if let Some(wide) = prepare_history_preview_bounded(
+        messages,
+        hidden_prompts,
+        wide_width,
+        diff_mode,
+        Some(max_body_rows),
+    ) {
+        if wide.wrapped_lines.len() <= max_body_rows {
+            return (wide, false);
+        }
+    }
+    (
+        prepare_history_preview(messages, hidden_prompts, narrow_width, diff_mode),
+        true,
+    )
+}
+
+fn prepare_history_preview_bounded(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: Option<usize>,
+) -> Option<PreparedMessages> {
     markdown::with_center_code_blocks(false, || {
         let ctx = BodyRenderCtx {
             app: None,
@@ -1194,8 +1238,13 @@ pub(crate) fn prepare_history_preview(
         let mut acc = BodyAcc::default();
         for (idx, msg) in messages.iter().enumerate() {
             render_message_into(&ctx, &mut acc, msg, idx);
+            // Wrapping preserves at least one row per input line, including
+            // blanks and zero-width viewports. Equality may still fit.
+            if max_body_rows.is_some_and(|budget| acc.lines.len() > budget) {
+                return None;
+            }
         }
-        wrap_lines_with_map(
+        Some(wrap_lines_with_map(
             acc.lines,
             &acc.raw_plain_lines,
             &acc.line_raw_overrides,
@@ -1206,9 +1255,13 @@ pub(crate) fn prepare_history_preview(
             &acc.edit_tool_line_ranges,
             &acc.copy_targets,
             &acc.segments,
-        )
+        ))
     })
 }
+
+#[cfg(test)]
+#[path = "ui_prepare/viewport_preview_tests.rs"]
+mod viewport_preview_tests;
 
 /// Mutable accumulator for one body build. Both `prepare_body` (full) and
 /// `prepare_body_incremental` (tail only) push into one of these via the shared
