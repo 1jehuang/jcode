@@ -325,6 +325,16 @@ fn global_events_reports_bounded_queue_overflow() {
 
 #[test]
 fn missing_launch_binary_is_typed_and_cleans_up_its_temporary_home() {
+    // `launch_instance` creates its ephemeral home in std::env::temp_dir().
+    // Nextest runs test binaries concurrently, and unit tests in the jcode-sdk
+    // lib binary also create `jcode-sdk-instance-*` homes in the shared temp
+    // root, which races the before/after count below. Point TMPDIR at a private
+    // dir for this process so the count only sees this test's homes.
+    let private_temp = tempfile::tempdir().expect("private temp root");
+    // Single-threaded test start: no other threads exist yet, so mutating the
+    // environment here cannot race a concurrent getenv (same pattern as
+    // apply_patch_tests.rs).
+    unsafe { std::env::set_var("TMPDIR", private_temp.path()) };
     let before = std::fs::read_dir(std::env::temp_dir())
         .expect("temp root")
         .flatten()

@@ -2,6 +2,10 @@ use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
 /// Keep pinning deterministic without modifying the developer's config.
+///
+/// Takes the render-state lock here, inside the env lock, so callers cannot
+/// invert the canonical env-before-render order and ABBA-deadlock against
+/// idle-animation tests holding the env lock.
 fn with_pinned_todos_config(f: impl FnOnce()) {
     // Always acquire environment before render state. App construction under
     // with_temp_jcode_home takes these locks in this same order.
