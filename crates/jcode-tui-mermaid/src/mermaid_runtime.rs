@@ -176,8 +176,8 @@ fn tmux_has_native_sixel() -> bool {
     let output = String::from_utf8_lossy(&output.stdout);
     let mut lines = output.lines();
     tmux_reports_native_sixel(
-        lines.next().unwrap_or_default(),
-        lines.next().unwrap_or_default(),
+        lines.next().unwrap_or(""),
+        lines.next().unwrap_or(""),
     )
 }
 
@@ -603,17 +603,17 @@ pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
 /// SVG cache keys include the source bytes so edited graphs never reuse old pixels.
 pub fn register_markdown_image(path: &Path) -> Option<u64> {
     if !path.extension()?.eq_ignore_ascii_case("svg") {
-        let (width, height) = image::image_dimensions(path).ok()?;
+        let (width, height) = image::image_dimensions(path).map_or_else(|error| { crate::log_info(&format!("Markdown image dimensions unavailable: {error}")); None }, Some)?;
         return Some(register_external_image(path, width, height));
     }
 
-    let bytes = fs::read(path).ok()?;
+    let bytes = fs::read(path).map_or_else(|error| { crate::log_info(&format!("Markdown image read failed: {error}")); None }, Some)?;
     let mut hasher = std::hash::DefaultHasher::new();
     bytes.hash(&mut hasher);
     let content_hash = hasher.finish();
     let output = RENDER_CACHE
         .lock()
-        .ok()?
+        .map_or_else(|error| { crate::log_info(&format!("Markdown image cache lock failed: {error}")); None }, Some)?
         .cache_dir
         .join(format!("{content_hash:016x}_external_svg.png"));
     if !output.exists() {
@@ -626,7 +626,7 @@ pub fn register_markdown_image(path: &Path) -> Option<u64> {
             },
             ..Default::default()
         };
-        let tree = usvg::Tree::from_data(&bytes, &options).ok()?;
+        let tree = usvg::Tree::from_data(&bytes, &options).map_or_else(|error| { crate::log_info(&format!("Markdown SVG parse failed: {error}")); None }, Some)?;
         let size = tree.size().to_int_size();
         // Bound allocations for malformed or unexpectedly large documents.
         if u64::from(size.width()) * u64::from(size.height()) > 32_000_000 {
@@ -638,9 +638,9 @@ pub fn register_markdown_image(path: &Path) -> Option<u64> {
             resvg::tiny_skia::Transform::default(),
             &mut pixmap.as_mut(),
         );
-        pixmap.save_png(&output).ok()?;
+        pixmap.save_png(&output).map_or_else(|error| { crate::log_info(&format!("Markdown SVG cache write failed: {error}")); None }, Some)?;
     }
-    let (width, height) = image::image_dimensions(&output).ok()?;
+    let (width, height) = image::image_dimensions(&output).map_or_else(|error| { crate::log_info(&format!("Markdown SVG dimensions unavailable: {error}")); None }, Some)?;
     Some(register_external_image(&output, width, height))
 }
 

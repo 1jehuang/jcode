@@ -2576,7 +2576,7 @@ fn wrap_input_text_with_images<'a>(
                 return None;
             }
             let char_start = input[..start].chars().count();
-            let present = suffix[..digits].parse::<usize>().ok().is_some_and(attached);
+            let present = suffix[..digits].parse::<usize>().is_ok_and(attached);
             Some((char_start..char_start + 8 + digits, present))
         })
         .collect();

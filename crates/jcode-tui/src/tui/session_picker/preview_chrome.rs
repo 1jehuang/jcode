@@ -18,9 +18,10 @@ pub(super) fn persisted_info(session: &Session) -> InfoWidgetData {
 }
 
 fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoWidgetData {
-    let mut data = extras
-        .and_then(|extras| extras.info_data.clone())
-        .unwrap_or_default();
+    let mut data = extras.and_then(|extras| extras.info_data.clone()).unwrap_or_else(|| InfoWidgetData {
+        session_name: Some(session.short_name.clone()),
+        ..Default::default()
+    });
     // The index may have fresher identity than the saved transcript.
     data.model = session.model.clone().or(data.model);
     data.provider_name = session.provider_key.clone().or(data.provider_name);

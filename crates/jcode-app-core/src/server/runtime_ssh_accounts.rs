@@ -402,8 +402,7 @@ pub(super) async fn execute(
                         limit.usage_percent,
                         limit
                             .resets_at
-                            .map(|at| format!(" (resets {at})"))
-                            .unwrap_or_default()
+                            .map_or_else(String::new, |at| format!(" (resets {at})"))
                     ));
                 }
                 if provider.error.is_some() {

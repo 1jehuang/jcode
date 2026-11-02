@@ -145,7 +145,7 @@ pub(super) fn control(
             "Stopped /{command} at the next turn boundary. The current turn is not cancelled."
         ));
         let data = status_data(session_id, state)?;
-        Ok(Some((data, state.last_notice.clone().unwrap_or_default())))
+        Ok(Some((data, state.last_notice.as_deref().unwrap_or("").to_owned())))
     })
 }
 
@@ -200,7 +200,7 @@ pub(super) async fn execute(
         let message = format!(
             "Recovered remote runtime context in session `{session_id}` without clearing history. Repaired {} missing tool outputs and reset provider resume/cache state. {}",
             data["repaired_tool_outputs"],
-            data["compaction_message"].as_str().unwrap_or_default()
+            data["compaction_message"].as_str().unwrap_or("")
         );
         return Ok((data, message));
     }
@@ -273,7 +273,10 @@ pub(super) async fn execute(
                 active: true,
             });
         }
-        let workflow = state.workflow.as_ref().expect("workflow initialized");
+        let workflow = state
+            .workflow
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Workflow was not initialized"))?;
         state.policy = todo::followup::FollowUpPolicy::new(!workflow.plan_only);
         let prompt = launch_prompt(workflow, resume);
         state.last_notice = Some(format!(
@@ -283,7 +286,7 @@ pub(super) async fn execute(
         ));
         let mut data = status_data(&session_id, state)?;
         data["next_prompt"] = json!(prompt);
-        Ok((data, state.last_notice.clone().unwrap_or_default()))
+        Ok((data, state.last_notice.as_deref().unwrap_or("").to_owned()))
     })
 }
 

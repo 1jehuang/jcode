@@ -562,7 +562,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         app.status = ProcessingStatus::Thinking(Instant::now());
                     }
                     app.remote_resume_activity = Some(RemoteResumeActivity {
-                        session_id: app.remote_session_id.clone().unwrap_or_default(),
+                        session_id: app.remote_session_id.as_deref().unwrap_or("").to_owned(),
                         observed_at: Instant::now(),
                         current_tool_name: None,
                     });
@@ -1528,7 +1528,7 @@ fn handle_server_event_inner(
                 app.processing_started.get_or_insert_with(Instant::now);
                 app.last_stream_activity = Some(Instant::now());
                 app.remote_resume_activity = Some(RemoteResumeActivity {
-                    session_id: app.remote_session_id.clone().unwrap_or_default(),
+                    session_id: app.remote_session_id.as_deref().unwrap_or("").to_owned(),
                     observed_at: Instant::now(),
                     current_tool_name: None,
                 });

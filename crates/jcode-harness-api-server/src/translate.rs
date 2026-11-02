@@ -541,7 +541,7 @@ impl BridgeState {
 
         match req {
             "archive_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
@@ -560,7 +560,7 @@ impl BridgeState {
                 }
             }
             "restore_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
@@ -755,7 +755,7 @@ impl BridgeState {
             // attaching to a session merely to read it would disturb the very
             // thing being previewed.
             "peek_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 let limit = request["limit"].as_u64().unwrap_or(PEEK_LIMIT) as usize;
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
@@ -965,7 +965,7 @@ impl BridgeState {
                 ))]
             }
             "notify_auth_changed" => {
-                let provider = request["provider"].as_str().unwrap_or_default();
+                let provider = request["provider"].as_str().unwrap_or("");
                 if provider.is_empty()
                     || provider.len() > 64
                     || !provider
@@ -985,7 +985,7 @@ impl BridgeState {
                 }))]
             }
             "invalidate_usage" => {
-                let legacy_type = match request["provider"].as_str().unwrap_or_default() {
+                let legacy_type = match request["provider"].as_str().unwrap_or("") {
                     "claude" | "anthropic" => "invalidate_anthropic_usage",
                     "openai" => "invalidate_openai_usage",
                     _ => {
@@ -1013,7 +1013,7 @@ impl BridgeState {
                 }))]
             }
             "set_api_key" | "clear_api_key" => {
-                let provider = request["provider"].as_str().unwrap_or_default();
+                let provider = request["provider"].as_str().unwrap_or("");
                 let Some((provider, env_keys, file_name)) = Self::credential_binding(provider)
                 else {
                     return Self::error_reply(
@@ -1023,7 +1023,7 @@ impl BridgeState {
                     );
                 };
                 let configured = req == "set_api_key";
-                let key = request["api_key"].as_str().unwrap_or_default();
+                let key = request["api_key"].as_str().unwrap_or("");
                 if configured
                     && (key.trim().is_empty()
                         || key.trim() != key
@@ -1061,8 +1061,8 @@ impl BridgeState {
                 }))]
             }
             "read_file" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let relative = request["path"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let relative = request["path"].as_str().unwrap_or("");
                 let max = request["max_bytes"]
                     .as_u64()
                     .unwrap_or(DEFAULT_FILE_BYTES)
@@ -1082,8 +1082,8 @@ impl BridgeState {
                 }
             }
             "find_files" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let query = request["query"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let query = request["query"].as_str().unwrap_or("");
                 let limit = request["limit"]
                     .as_u64()
                     .unwrap_or(DEFAULT_FIND_LIMIT as u64)
@@ -1100,8 +1100,8 @@ impl BridgeState {
                 }
             }
             "search_text" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let query = request["query"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let query = request["query"].as_str().unwrap_or("");
                 let under = request["path"].as_str();
                 let limit = request["limit"]
                     .as_u64()
@@ -1119,7 +1119,7 @@ impl BridgeState {
                 }
             }
             "get_todo_state" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 match Self::todo_home(session_id) {
                     Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
                         api_id,
@@ -1132,7 +1132,7 @@ impl BridgeState {
                 }
             }
             "ack_todo_follow_up" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 let effects: jcode_todo_policy::TodoEffects =
                     match serde_json::from_value(request["effects"].clone()) {
                         Ok(effects) => effects,
@@ -1154,8 +1154,8 @@ impl BridgeState {
                 }
             }
             "file_status" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let relative = request["path"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let relative = request["path"].as_str().unwrap_or("");
                 match Self::session_file_status(session_id, relative) {
                     Ok((exists, kind, size, modified_ms)) => {
                         vec![Outbound::Reply(ServerFrame::reply(
@@ -1252,7 +1252,7 @@ impl BridgeState {
                     .filter(|sid| !sid.is_empty())
                     .map(str::to_string)
                     .or_else(|| self.session_id.clone());
-                let instance = request["instance"].as_str().unwrap_or_default();
+                let instance = request["instance"].as_str().unwrap_or("");
                 let (Some(session_id), false) = (session_id, instance.is_empty()) else {
                     return Self::error_reply(
                         api_id,
@@ -1632,7 +1632,7 @@ impl BridgeState {
                         self.pending_message_id = None;
                         return vec![ServerFrame::event(ApiEvent::Error {
                             code: ErrorCode::Internal,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                            message: event["message"].as_str().unwrap_or("").to_string(),
                         })];
                     }
                 }
@@ -1649,7 +1649,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Error {
                             code: ErrorCode::Internal,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                            message: event["message"].as_str().unwrap_or("").to_string(),
                         },
                     )];
                 }
@@ -2265,11 +2265,11 @@ impl BridgeState {
                     self.pending_recovery_history = None;
                     let mut frames: Vec<_> = Self::attachment_recovery(event).into_iter().collect();
                     frames.extend(Self::side_panel_frame(
-                        event["session_id"].as_str().unwrap_or_default(),
+                        event["session_id"].as_str().unwrap_or(""),
                         &event["side_panel"],
                     ));
                     frames.extend(Self::applet_frame(
-                        event["session_id"].as_str().unwrap_or_default(),
+                        event["session_id"].as_str().unwrap_or(""),
                         &event["applets"],
                     ));
                     return frames;
@@ -2620,7 +2620,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Error {
                             code: ErrorCode::Internal,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                            message: event["message"].as_str().unwrap_or("").to_string(),
                         },
                     )];
                 }
@@ -2646,7 +2646,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Error {
                             code,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                            message: event["message"].as_str().unwrap_or("").to_string(),
                         },
                     )];
                 }
@@ -2824,7 +2824,7 @@ impl BridgeState {
                         provider: route["provider"].as_str()?.to_string(),
                         api_method: route["api_method"].as_str()?.to_string(),
                         available: route["available"].as_bool().unwrap_or(false),
-                        detail: route["detail"].as_str().unwrap_or_default().to_string(),
+                        detail: route["detail"].as_str().unwrap_or("").to_string(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })

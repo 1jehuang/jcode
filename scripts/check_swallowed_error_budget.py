@@ -34,7 +34,7 @@ PATTERNS = {
     "unwrap_or_default": re.compile(r"\.unwrap_or_default\(\)"),
 }
 CFG_TEST_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*(?:all\s*\(\s*)?test\s*[,)]")
-ITEM_START_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:mod|fn)\b")
+ITEM_START_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const)\s+)*(?:mod|fn)\b")
 
 
 def parse_args() -> argparse.Namespace:

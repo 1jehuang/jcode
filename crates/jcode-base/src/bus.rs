@@ -751,7 +751,9 @@ impl Bus {
                 state.publish_pending = false;
                 state.last_published_at = Some(Instant::now());
                 drop(state);
-                let _ = sender.send(BusEvent::ModelsUpdated);
+                if sender.send(BusEvent::ModelsUpdated).is_err() {
+                    crate::logging::debug("Model update notification has no subscribers");
+                }
             });
             return;
         }

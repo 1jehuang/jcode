@@ -29,7 +29,7 @@ impl SessionPicker {
     pub(super) fn render_resume_canvas(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
-        let _ = self.poll_preview_load();
+        self.poll_preview_load();
         self.ensure_selected_preview_loading();
         let panel = panel_area(area);
         self.reserved_panel_area = Some(panel);

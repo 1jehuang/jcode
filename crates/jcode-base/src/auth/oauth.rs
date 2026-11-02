@@ -60,7 +60,7 @@ pub struct OAuthTokens {
 
 fn parse_oauth_scopes(scope: Option<&str>) -> Vec<String> {
     scope
-        .unwrap_or_default()
+        .unwrap_or("")
         .split_whitespace()
         .filter(|scope| !scope.trim().is_empty())
         .map(ToOwned::to_owned)

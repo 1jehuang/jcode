@@ -36,12 +36,7 @@ pub fn set_session_env(session_id: &str, env: HashMap<String, String>) -> Result
 
 /// Return an owned launch-time snapshot. Do not serialize it into diagnostics.
 pub fn session_env(session_id: &str) -> HashMap<String, String> {
-    SESSION_ENV
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(session_id)
-        .cloned()
-        .unwrap_or_default()
+    SESSION_ENV.read().unwrap_or_else(|e| e.into_inner()).get(session_id).map_or_else(HashMap::new, Clone::clone)
 }
 
 /// Give a child an independent copy of its parent's current overrides.

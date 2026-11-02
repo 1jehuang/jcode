@@ -145,16 +145,16 @@ pub(crate) fn build_preview_header(
     if !session.short_name.is_empty() {
         let icon = crate::id::session_icon(&session.short_name);
         lines.push(Line::from(Span::styled(
-            client_header_text(&session.short_name, &icon, None),
+            client_header_text(&session.short_name, icon, None),
             Style::default().fg(dim_color()),
         )));
     }
     if let Some(model) = session.model.as_deref().filter(|model| !model.is_empty()) {
         let nice_model =
-            header_model_display_name(model, session.provider_key.as_deref().unwrap_or_default());
+            header_model_display_name(model, session.provider_key.as_deref().unwrap_or(""));
         lines.push(model_header_line(
             &nice_model,
-            session.provider_key.as_deref().unwrap_or_default(),
+            session.provider_key.as_deref().unwrap_or(""),
             None,
             width as usize,
             model_is_placeholder(model),
@@ -407,7 +407,7 @@ fn header_model_display_name(model: &str, provider_name: &str) -> String {
         && rest.starts_with(|c: char| c.is_ascii_digit())
     {
         let mut segments = rest.split('-');
-        let version = segments.next().unwrap_or_default();
+        let version = segments.next().unwrap_or("");
         let mut name = format!("GPT-{}", version);
         for segment in segments {
             if segment.is_empty() {
@@ -790,7 +790,7 @@ fn build_persistent_header_with_auth(
     }
 
     if !session_name.is_empty() {
-        let client_text = client_header_text(&session_name, &icon, connection_icon);
+        let client_text = client_header_text(&session_name, icon, connection_icon);
         let mut spans = vec![Span::styled(
             client_text.clone(),
             Style::default().fg(dim_color()),

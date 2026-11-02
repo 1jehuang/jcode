@@ -288,7 +288,9 @@ pub(super) fn public_todos(todos: &[TodoItem]) -> Result<Value> {
     let mut value = serde_json::to_value(todos)?;
     if let Some(items) = value.as_array_mut() {
         for item in items {
-            let fields = item.as_object_mut().expect("serialized todo object");
+            let fields = item
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("Serialized todo must be an object"))?;
             fields.remove("id");
             if let Some(name) = fields.remove("content") {
                 fields.insert("name".into(), name);

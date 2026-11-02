@@ -102,7 +102,7 @@ pub(crate) async fn run(args: Args) -> Result<()> {
 
 #[cfg(unix)]
 async fn run_unix(args: Args) -> Result<()> {
-    let host = args.ssh.as_deref().expect("SSH dispatch requires a host");
+    let host = args.ssh.as_deref().context("SSH dispatch requires a host")?;
     let binary = args.ssh_binary.as_deref().unwrap_or("jcode");
     if let Some(id) = super::cloud_ephemeral::host_id(host) {
         let id = id.to_owned();

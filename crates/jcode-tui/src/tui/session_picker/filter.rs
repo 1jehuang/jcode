@@ -135,8 +135,8 @@ impl SessionPicker {
                     // intent evidence than incidental matches in tool output.
                     let fields = [
                         session.title.as_str(),
-                        session.save_label.as_deref().unwrap_or_default(),
-                        session.first_user_prompt.as_deref().unwrap_or_default(),
+                        session.save_label.as_deref().unwrap_or(""),
+                        session.first_user_prompt.as_deref().unwrap_or(""),
                     ];
                     let fields = fields.map(transcript_search::lowercase_field);
                     let intent_terms = tokens

@@ -26,12 +26,12 @@ impl App {
                 .remote_todos_payload
                 .as_ref()
                 .filter(|(id, _)| Some(id.as_str()) == session_id)
-                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).map_or_else(|error| { crate::logging::debug(&format!("Invalid remote todo snapshot: {error}")); None }, Some))
                 .unwrap_or_default();
             return (
-                serde_json::from_value(payload["todos"].clone()).unwrap_or_default(),
-                serde_json::from_value(payload["plan"].clone()).unwrap_or_default(),
-                serde_json::from_value(payload["goals"].clone()).unwrap_or_default(),
+                serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| { crate::logging::debug(&format!("Invalid remote todos: {error}")); Vec::new() }),
+                serde_json::from_value(payload["plan"].clone()).unwrap_or_else(|error| { crate::logging::debug(&format!("Invalid remote todo plan: {error}")); crate::todo::TodoPlan::default() }),
+                serde_json::from_value(payload["goals"].clone()).unwrap_or_else(|error| { crate::logging::debug(&format!("Invalid remote todo goals: {error}")); Vec::new() }),
             );
         }
         (
@@ -514,7 +514,7 @@ fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
     let Some(session_id) = session_id else {
         return Vec::new();
     };
-    crate::todo::load_todos(session_id).unwrap_or_default()
+    crate::todo::load_todos(session_id).unwrap_or_else(|error| { crate::logging::debug(&format!("Could not load current todos: {error}")); Vec::new() })
 }
 
 fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::TodoGoal> {

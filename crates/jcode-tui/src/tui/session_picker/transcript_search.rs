@@ -205,7 +205,7 @@ impl TranscriptSearch {
     }
 
     pub(super) fn rank(&self, id: &str) -> SearchRank {
-        self.ranks.get(id).copied().unwrap_or_default()
+        self.ranks.get(id).map_or_else(SearchRank::default, |rank| *rank)
     }
 
     pub(super) fn defers_metadata(&self) -> bool {
@@ -264,10 +264,10 @@ impl TranscriptSearch {
                                 .matches_search_text(&candidate.search_index)
                         });
                         candidate.search_index = String::new();
-                        if fuzzy_missing.is_empty() {
-                            if sender.send((candidate.id.clone(), rank)).is_err() {
-                                return;
-                            }
+                        if fuzzy_missing.is_empty()
+                            && sender.send((candidate.id.clone(), rank)).is_err()
+                        {
+                            return;
                         }
                         if !candidate.paths.is_empty() {
                             transcripts.push((candidate, fuzzy_missing, rank));

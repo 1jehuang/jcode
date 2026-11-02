@@ -270,7 +270,7 @@ fn config_set(path: &Path, key: &str, raw: &str) -> Result<()> {
     }
     let parsed = format!("value = {raw}")
         .parse::<toml::Value>()
-        .ok()
+        .map_or_else(|_| Some(toml::Value::String(raw.into())), Some)
         .and_then(|v| v.get("value").cloned())
         .unwrap_or_else(|| toml::Value::String(raw.into()));
     *target = serde_json::to_value(&parsed)?;
@@ -331,8 +331,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::rename(&temporary, path)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    if result.is_err()
+        && let Err(error) = std::fs::remove_file(&temporary)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::debug(&format!("Could not remove failed SSH edit temporary file: {error}"));
     }
     result
 }

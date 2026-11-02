@@ -119,7 +119,7 @@ pub(crate) async fn handle_account_command_remote(
         Ok(AccountCommand::Remove { provider_id, label })
             if crate::tui::is_ssh_remote() && label.ends_with(" confirm") =>
         {
-            let target = label.strip_suffix(" confirm").unwrap();
+            let target = label.strip_suffix(" confirm").unwrap_or(&label);
             remote
                 .runtime_command(
                     "ssh_account",
