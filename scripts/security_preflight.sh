@@ -109,9 +109,7 @@ audit_ignores=(
   --ignore RUSTSEC-2026-0195 # quick-xml via wayland-scanner (proc-macro); same build-time-only exposure as RUSTSEC-2026-0194
 )
 if command -v cargo-audit >/dev/null 2>&1; then
-  cargo audit "${audit_ignores[@]}"
-elif cargo audit --version >/dev/null 2>&1; then
-  cargo audit "${audit_ignores[@]}"
+  cargo-audit audit "${audit_ignores[@]}"
 else
   if [[ "$strict" -eq 1 ]]; then
     die "cargo-audit is not installed (install with: cargo install cargo-audit --locked)"
