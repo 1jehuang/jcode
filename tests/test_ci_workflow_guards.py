@@ -10,6 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_preview_dispatches_standalone_trusted_npm_publisher(self):
+        workflow = (ROOT / '.github/workflows/preview.yml').read_text()
+        publish = workflow.split('\n  publish-sdk:\n', 1)[1].split('\n  announce:', 1)[0]
+        self.assertIn('needs: publish', publish)
+        self.assertIn('actions: write', publish)
+        self.assertIn('gh workflow run publish-typescript-sdk.yml', publish)
+        self.assertIn('--ref master', publish)
+        self.assertIn('jcode_release_tag=$JCODE_BUILD_SEMVER', publish)
+        self.assertNotIn('uses: ./.github/workflows/publish-typescript-sdk.yml', publish)
+
     def test_exact_source_ci_can_be_manually_retried_after_bot_push(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]

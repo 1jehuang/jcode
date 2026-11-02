@@ -240,12 +240,18 @@ jobs:
 
   publish-sdk:
     needs: publish
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-    uses: ./.github/workflows/publish-typescript-sdk.yml
-    with:
-      jcode_release_tag: v1.0.0-preview.${{ github.run_number }}
+      actions: write
+    steps:
+      # npm's trusted publisher is bound to the standalone SDK workflow identity.
+      # A reusable call carries this caller's identity and is rejected by npm.
+      # GITHUB_TOKEN also suppresses release events, so dispatch explicitly.
+      - name: Dispatch trusted SDK preview publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish-typescript-sdk.yml --repo "$GITHUB_REPOSITORY" --ref master -f "jcode_release_tag=$JCODE_BUILD_SEMVER"
 
   announce:
     needs: publish
