@@ -203,6 +203,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_user_response: false,
         supports_server_failover: false,
         supports_turn_identity: false,
+        supports_decisions: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),

@@ -140,61 +140,6 @@ fn format_model(model: &str) -> String {
     }
 }
 
-/// Minimum task-text width kept on a vertical strip row before the per-worker
-/// meta tail starts dropping pieces.
-const STRIP_META_MIN_BODY: usize = 24;
-
-/// Right-side metadata for one vertical-strip row, most important first:
-/// elapsed time, context usage, model + effort, output tokens, provider route.
-fn strip_meta_parts(m: &GalleryMember) -> Vec<String> {
-    let mut parts = Vec::new();
-    if let Some(elapsed) = m.elapsed_secs {
-        parts.push(format_elapsed(elapsed));
-    }
-    match (m.context_tokens, m.context_limit) {
-        (Some(used), Some(limit)) if limit > 0 => parts.push(format!(
-            "{}/{} {}%",
-            format_tokens(used),
-            format_tokens(limit),
-            (used.saturating_mul(100) / limit).min(100)
-        )),
-        (Some(used), _) => parts.push(format!("{} ctx", format_tokens(used))),
-        _ => {}
-    }
-    let model = m
-        .model
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(format_model);
-    let effort = m.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    match (model, effort) {
-        (Some(model), Some(effort)) => parts.push(format!("{model} {effort}")),
-        (Some(model), None) => parts.push(model),
-        (None, Some(effort)) => parts.push(effort.to_string()),
-        (None, None) => {}
-    }
-    if let Some(output) = m.output_tokens {
-        parts.push(format!("↓{}", format_tokens(output)));
-    }
-    if let Some(route) = format_route(m.provider.as_deref(), m.auth_method.as_deref()) {
-        parts.push(route);
-    }
-    parts
-}
-
-/// Compact token count: 523, 12.4k, 355k, 1.0M.
-fn format_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 100_000 {
-        format!("{}k", tokens / 1_000)
-    } else if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
 /// Combine provider display name and credential route into one metadata piece,
 /// e.g. "OpenAI oauth". Returns `None` when both are blank.
 fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
@@ -290,12 +235,6 @@ pub struct GalleryMember {
     pub effort: Option<String>,
     /// Seconds since this member was spawned.
     pub elapsed_secs: Option<u64>,
-    /// Tokens currently in the member's context window.
-    pub context_tokens: Option<u64>,
-    /// Context window size for the member's model.
-    pub context_limit: Option<u64>,
-    /// Cumulative output tokens produced by the member.
-    pub output_tokens: Option<u64>,
 }
 
 /// One compact todo entry shown in the focused swarm detail view.
@@ -1042,24 +981,6 @@ pub fn render_swarm_strip_vertical(
             .saturating_sub(lead_w)
             .saturating_sub(if row_tail_w > 0 { row_tail_w + gap } else { 0 });
 
-        // Per-worker status tail, mirroring the main status line: route,
-        // model + effort, elapsed. Pieces drop (least important first) so the
-        // task text keeps at least STRIP_META_MIN_BODY cells.
-        let mut meta_parts = strip_meta_parts(m);
-        let mut meta = meta_parts.join(" · ");
-        while !meta_parts.is_empty()
-            && body_budget.saturating_sub(disp_w(&meta) + gap) < STRIP_META_MIN_BODY
-        {
-            meta_parts.pop();
-            meta = meta_parts.join(" · ");
-        }
-        let meta_w = if meta.is_empty() {
-            0
-        } else {
-            disp_w(&meta) + gap
-        };
-        let body_budget = body_budget.saturating_sub(meta_w);
-
         // Expanded workers use the full-width information card header approved
         // for the inline swarm view. Compact rows retain the older chip layout.
         if focused && is_sel && !m.todo_items.is_empty() {
@@ -1162,23 +1083,10 @@ pub fn render_swarm_strip_vertical(
             ));
         }
 
-        // ---- Right-align the per-worker meta (and first-row tail) ----
-        if !meta.is_empty() {
-            let tail_w = if row_tail_w > 0 { row_tail_w + gap } else { 0 };
-            let consumed = lead_w + used;
-            if consumed + meta_w + tail_w <= width {
-                let pad = width - consumed - tail_w - disp_w(&meta);
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(
-                    meta.clone(),
-                    Style::default().fg(rgb(120, 120, 135)),
-                ));
-                used += pad + disp_w(&meta);
-            }
-        }
+        // ---- Right-align the first-row tail ----
         if row_tail_w > 0 {
             let consumed = lead_w + used;
-            if consumed + row_tail_w <= width {
+            if consumed + gap + row_tail_w <= width {
                 let pad = width - consumed - row_tail_w;
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(

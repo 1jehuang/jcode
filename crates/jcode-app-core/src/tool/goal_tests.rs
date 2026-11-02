@@ -17,6 +17,7 @@ async fn initiative_tool_create_and_resume_round_trip() {
         tool_call_id: "tool1".to_string(),
         working_dir: Some(project.clone()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
     };
@@ -98,6 +99,7 @@ async fn initiative_tool_list_does_not_open_side_panel_by_default() {
         tool_call_id: "tool1".to_string(),
         working_dir: Some(project.clone()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
     };
@@ -150,6 +152,7 @@ async fn initiative_tool_update_refreshes_open_overview_without_stealing_focus()
         tool_call_id: "tool1".to_string(),
         working_dir: Some(project.clone()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
     };

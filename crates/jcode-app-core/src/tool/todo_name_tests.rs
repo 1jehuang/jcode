@@ -290,6 +290,7 @@ async fn named_tool_execution_persists_ids_but_returns_public_names() {
         tool_call_id: "call".into(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
