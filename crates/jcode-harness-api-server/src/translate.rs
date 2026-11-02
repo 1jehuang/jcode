@@ -1,12 +1,14 @@
 //! Pure JSON-to-JSON translation between the harness API and the legacy
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
+mod control_replies;
 mod credentials;
 mod turn_identity;
 #[cfg(test)]
 mod turn_identity_tests;
 
 use crate::background_progress::parse_background_notification;
+use control_replies::SimpleKind;
 use jcode_harness_api::{
     ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
 };
@@ -305,42 +307,6 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
             last_active_at_ms: entry.last_active_at_ms,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum SimpleKind {
-    RuntimeCommand,
-    Detach,
-    Tools,
-    ToolControl,
-    Ping,
-    History,
-    /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
-    /// and the legacy background-tool fallback. Their handlers do not reject
-    /// the control after ack (an idle interrupt can separately fail its turn).
-    Ok,
-    /// Fallible controls acknowledge receipt first, then finish with done/error.
-    OkOnDone,
-    /// Rewind controls finish with a replacement history rather than done.
-    OkOnHistory,
-    /// Awaiting `model_changed`, which carries its own error field.
-    Model,
-    ContextCap,
-    /// Awaiting `reasoning_effort_changed`.
-    ReasoningEffort,
-    /// Awaiting `compacted_history`.
-    Compact,
-    /// Awaiting the catalog reply that answers `list_models`.
-    Models,
-    RuntimeInfo,
-    /// Awaiting `background_tool_result`.
-    BackgroundTool,
-    /// Awaiting `soft_interrupts_cancelled`.
-    SoftInterruptCancel,
-    Credential {
-        provider: String,
-        configured: bool,
-    },
 }
 
 /// Whether translating this daemon event may perform synchronous file I/O.
@@ -2623,33 +2589,9 @@ impl BridgeState {
                 }
             }
             "error" => {
-                // A rejected control is not a failed model turn. Preserve
-                // streaming state and correlate only its request.
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some(index) = self
-                    .pending_simple
-                    .iter()
-                    .position(|(pending_id, _, kind)| {
-                        *pending_id == id
-                            && matches!(
-                                kind,
-                                SimpleKind::Tools
-                                    | SimpleKind::ToolControl
-                                    | SimpleKind::OkOnDone
-                                    | SimpleKind::OkOnHistory
-                            )
-                    })
-                {
-                    let (_, api_id, _) = self.pending_simple.remove(index);
-                    self.pending_control_done_ids.remove(&id);
-                    self.pending_activity_snapshots.remove(&id);
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::Error {
-                            code: ErrorCode::Internal,
-                            message: event["message"].as_str().unwrap_or("").to_string(),
-                        },
-                    )];
+                if let Some(reply) = self.control_error_reply(id, event) {
+                    return vec![reply];
                 }
                 self.activity_version += 1;
                 self.observed_turn_active = false;
