@@ -5,19 +5,22 @@ import SwiftUI
 struct ChatView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.compactEdgePads) private var edgePads
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showSettings = false
     @State private var sendCount = 0
+    @State private var bannerVisible = false
 
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
             header
 
-            if showConnectionBanner {
+            if bannerVisible {
                 ConnectionBanner(phase: model.session.phase) {
                     model.retryConnection()
                 }
                 .padding(.bottom, 8)
+                .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
 
             if let banner = model.session.errorBanner {
@@ -62,6 +65,15 @@ struct ChatView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .task(id: connectionBannerDelay) {
+            if let delay = connectionBannerDelay, delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+                if Task.isCancelled { return }
+            }
+            withAnimation(.easeInOut(duration: 0.3)) {
+                bannerVisible = connectionBannerDelay != nil
+            }
+        }
         .sensoryFeedback(.impact(weight: .light), trigger: sendCount)
         .sensoryFeedback(.impact(flexibility: .soft), trigger: finishedToolCallCount) {
             $1 > $0
@@ -71,10 +83,11 @@ struct ChatView: View {
         }
     }
 
-    private var showConnectionBanner: Bool {
+    private var connectionBannerDelay: UInt64? {
         switch model.session.phase {
-        case .reconnecting, .disconnected, .failed: true
-        case .connected, .connecting: false
+        case .reconnecting: 2_000_000_000
+        case .disconnected, .failed: 0
+        case .connected, .connecting: nil
         }
     }
 
