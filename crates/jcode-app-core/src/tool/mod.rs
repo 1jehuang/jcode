@@ -44,6 +44,7 @@ mod read;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
+pub(crate) mod session_http;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
