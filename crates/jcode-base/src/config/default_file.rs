@@ -214,6 +214,11 @@ prompt_entry_animation = true
 # instead of the full multi-line card with diff preview (default: false)
 # compact_notifications = false
 
+# Start sessions with typing scroll lock on, so typing in the prompt does not
+# jump the chat to the bottom. Toggle at runtime with typing_scroll_lock_toggle
+# (default: false)
+# typing_scroll_lock = false
+
 # Show the full agentgrep tool output inline in the transcript instead of just
 # the one-line summary (default: false). Useful when you want to read search
 # results directly in the chat.
