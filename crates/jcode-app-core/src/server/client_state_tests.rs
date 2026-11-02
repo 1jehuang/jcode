@@ -591,10 +591,14 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     // A nonexistent session is not the same as a registered, unsaved one.
     sessions.clear_for_test().await;
     assert!(request(4, false).await.is_err());
+    // Publication captures the runtime observer from an idle Agent. Preserve
+    // that invariant, then hold the Agent busy again for the corruption check.
+    drop(busy_guard);
     sessions
         .register_new(session_id.into(), agent.clone())
         .await
         .unwrap();
+    let busy_guard = agent.lock().await;
     // Corrupt snapshots must not silently become empty history either.
     std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
     std::fs::write(&snapshot_path, b"not valid session json").unwrap();
