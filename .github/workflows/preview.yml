@@ -3,8 +3,10 @@ name: V1 preview
 on:
   push:
     branches: [master]
+  workflow_dispatch:
 
 # A new master push cancels the sleep, CI wait, and any obsolete builds.
+# Manual retries use the same master-only gates and a fresh preview number.
 # No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
 concurrency:
   group: v1-preview-master
