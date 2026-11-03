@@ -19,7 +19,8 @@ fn pinned_todo_band_stays_left_anchored_with_centered_code_blocks() {
     for centered in [false, true] {
         markdown::set_center_code_blocks(centered);
         for width in [16, 40, 100, 200] {
-            let lines = render_pinned_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            let lines =
+                render_pinned_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
             assert!(!lines.is_empty());
             assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
             let first = lines[0].to_string();

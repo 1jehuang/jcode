@@ -70,11 +70,7 @@ mod tests {
             );
         };
         run(&["init", "-q"]);
-        run(&[
-            "symbolic-ref",
-            "HEAD",
-            "refs/heads/selected-preview",
-        ]);
+        run(&["symbolic-ref", "HEAD", "refs/heads/selected-preview"]);
         std::fs::write(repo.path().join("selected-file"), "pending change").unwrap();
         let mut data = InfoWidgetData::default();
         hydrate_workspace(

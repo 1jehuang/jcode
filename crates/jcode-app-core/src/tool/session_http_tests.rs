@@ -153,20 +153,21 @@ async fn concurrent_https_fetches_keep_session_proxy_credentials_across_rounds()
             .unwrap();
         }
         let tool = crate::tool::webfetch::WebFetchTool::new();
-        let (result_a, result_b) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::join!(
-                tool.execute(
-                    serde_json::json!({"url":"https://alice.example.test/"}),
-                    context(a),
-                ),
-                tool.execute(
-                    serde_json::json!({"url":"https://bob.example.test/"}),
-                    context(b),
-                ),
-            )
-        })
-        .await
-        .expect("both session proxy requests must finish");
+        let (result_a, result_b) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(
+                    tool.execute(
+                        serde_json::json!({"url":"https://alice.example.test/"}),
+                        context(a),
+                    ),
+                    tool.execute(
+                        serde_json::json!({"url":"https://bob.example.test/"}),
+                        context(b),
+                    ),
+                )
+            })
+            .await
+            .expect("both session proxy requests must finish");
         for (result, request, user, other) in [
             (result_a, request_a, "alice", "bob"),
             (result_b, request_b, "bob", "alice"),

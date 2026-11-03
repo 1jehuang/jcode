@@ -13,9 +13,7 @@ pub(super) fn panel_area(area: Rect) -> Rect {
     // overlay: its position and size must stay put while browsing sessions.
     let min_top = 5.min(area.height.saturating_sub(4));
     let available = area.height.saturating_sub(min_top).saturating_sub(2).max(1);
-    let height = ((area.height as u32 * 4 / 5) as u16)
-        .max(6)
-        .min(available);
+    let height = ((area.height as u32 * 4 / 5) as u16).max(6).min(available);
     let top = ((area.height - height) / 2).max(min_top);
     Rect::new(
         area.right()
