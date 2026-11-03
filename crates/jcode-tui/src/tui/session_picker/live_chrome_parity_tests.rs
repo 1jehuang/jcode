@@ -29,6 +29,7 @@ fn picker_history_uses_identical_live_message_rendering_and_wrapping() {
             duration_secs: Some(2.3),
             title: Some("Saved title".into()),
             tool_data: None,
+            tool_duration_ms: None,
         });
     }
     messages.insert(
@@ -46,6 +47,7 @@ fn picker_history_uses_identical_live_message_rendering_and_wrapping() {
                 intent: Some("Check the preview".into()),
                 thought_signature: None,
             }),
+            tool_duration_ms: None,
         },
     );
     for width in [4, 12, 40, 80, 120] {
