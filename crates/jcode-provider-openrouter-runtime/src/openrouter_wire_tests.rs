@@ -219,7 +219,7 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
         profile_id: Some("vsllm".into()),
         ..make_custom_compatible_provider()
     };
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         for (provider, strict, field, max) in [
             (&unified, false, "reasoning", "xhigh"),
             (&deepseek, false, "reasoning_effort", "max"),

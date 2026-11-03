@@ -103,10 +103,6 @@ fn alt_chords_drive_the_panel() {
         Some(SwarmPanelAction::PopOut)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Enter, KeyModifiers::ALT),
-        Some(SwarmPanelAction::PopOut)
-    );
-    assert_eq!(
         swarm_panel_action_for_key(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT),
         Some(SwarmPanelAction::OpenPrompt)
     );

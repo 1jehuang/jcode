@@ -134,6 +134,10 @@ mod turn_envelope_tests {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit wire and launch options avoid a second configuration type"
+)]
 pub async fn run_tui_client(
     resume_session: Option<String>,
     startup_hints: Option<setup_hints::StartupHints>,

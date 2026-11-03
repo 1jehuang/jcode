@@ -155,7 +155,7 @@ fn item(label: impl Into<String>, action: Option<ItemAction>) -> Item {
 fn operation(label: &str, args: Vec<String>, busy: bool, confirm: bool) -> Item {
     item(
         label,
-        (!busy).then(|| {
+        (!busy).then_some({
             if confirm {
                 ItemAction::Open(Route::PluginConfirm(args))
             } else {
@@ -170,14 +170,14 @@ impl Dialog {
         let Some(view) = self.stack.last() else {
             return false;
         };
-        if let Route::Plugin(tab) = &view.route {
-            if matches!(code, KeyCode::Left | KeyCode::Right) {
-                let tabs = ["discover", "installed", "marketplaces", "errors"];
-                let index = tabs.iter().position(|key| key == tab).unwrap_or(0);
-                let index = (index + if code == KeyCode::Left { 3 } else { 1 }) % 4;
-                self.stack = vec![self.plugin_view(&Route::Plugin(tabs[index].into()))];
-                return true;
-            }
+        if let Route::Plugin(tab) = &view.route
+            && matches!(code, KeyCode::Left | KeyCode::Right)
+        {
+            let tabs = ["discover", "installed", "marketplaces", "errors"];
+            let index = tabs.iter().position(|key| key == tab).unwrap_or(0);
+            let index = (index + if code == KeyCode::Left { 3 } else { 1 }) % 4;
+            self.stack = vec![self.plugin_view(&Route::Plugin(tabs[index].into()))];
+            return true;
         }
         if view.route == Route::PluginAddMarketplace && code == KeyCode::Enter {
             let source = view.filter.trim().to_string();

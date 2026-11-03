@@ -264,7 +264,7 @@ async fn startup_disk_wait_preserves_deadline_transcript_and_single_plan_complet
         agent
             .messages()
             .iter()
-            .filter(|message| message.role == Role::User)
+            .filter(|message| message.role == Role::User && !message.content.iter().any(|block| matches!(block, crate::message::ContentBlock::Text { text, .. } if text.trim_start().starts_with("<system-reminder>"))))
             .count(),
         1,
         "durable resume must not append a synthetic user turn"

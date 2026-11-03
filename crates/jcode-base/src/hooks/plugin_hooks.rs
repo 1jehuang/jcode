@@ -90,10 +90,10 @@ fn load_root(root: &Path) -> (Vec<CommandHook>, Vec<String>) {
     };
     let mut documents = Vec::new();
     let default = root.join("hooks/hooks.json");
-    if default.is_file() {
-        if let Some(value) = read_json(&root, &default, &mut seen, &mut diagnostics) {
-            documents.push(value);
-        }
+    if default.is_file()
+        && let Some(value) = read_json(&root, &default, &mut seen, &mut diagnostics)
+    {
+        documents.push(value);
     }
     if let Some(hooks) = manifest.as_ref().and_then(|m| m.get("hooks")) {
         let entries = hooks
@@ -429,53 +429,51 @@ async fn gate_commands(hooks: Vec<CommandHook>, event: &HookEvent, input: &str) 
                         .to_owned(),
                 };
             }
-            if output.status.success() {
-                if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
-                    if value["decision"] == "block" || value["continue"] == false {
-                        return GateDecision::Block {
-                            reason: super::truncate_bytes(
-                                value["reason"]
-                                    .as_str()
-                                    .or_else(|| value["stopReason"].as_str())
-                                    .unwrap_or("blocked by plugin hook"),
-                                super::BLOCK_REASON_LIMIT,
-                            )
-                            .to_owned(),
-                        };
-                    }
-                    let specific = &value["hookSpecificOutput"];
-                    if specific["permissionDecision"] == "deny" {
-                        return GateDecision::Block {
-                            reason: super::truncate_bytes(
-                                specific["permissionDecisionReason"]
-                                    .as_str()
-                                    .unwrap_or("blocked by plugin hook"),
-                                super::BLOCK_REASON_LIMIT,
-                            )
-                            .to_owned(),
-                        };
-                    }
-                    if specific["permissionDecision"] == "ask" {
-                        // There is no interactive permission prompt at this seam.
-                        // Do not silently convert an explicit ask to permission.
-                        return GateDecision::Block {
-                            reason: specific["permissionDecisionReason"]
+            if output.status.success()
+                && let Ok(value) = serde_json::from_slice::<Value>(&output.stdout)
+            {
+                if value["decision"] == "block" || value["continue"] == false {
+                    return GateDecision::Block {
+                        reason: super::truncate_bytes(
+                            value["reason"]
                                 .as_str()
-                                .unwrap_or(
-                                    "plugin hook requires user approval (ask is not supported)",
-                                )
-                                .to_owned(),
-                        };
-                    }
-                    if let Some(input) = specific.get("updatedInput") {
-                        if input.is_object() {
-                            current = input.to_string();
-                            rewritten = Some(input.clone());
-                        } else {
-                            return GateDecision::Block {
+                                .or_else(|| value["stopReason"].as_str())
+                                .unwrap_or("blocked by plugin hook"),
+                            super::BLOCK_REASON_LIMIT,
+                        )
+                        .to_owned(),
+                    };
+                }
+                let specific = &value["hookSpecificOutput"];
+                if specific["permissionDecision"] == "deny" {
+                    return GateDecision::Block {
+                        reason: super::truncate_bytes(
+                            specific["permissionDecisionReason"]
+                                .as_str()
+                                .unwrap_or("blocked by plugin hook"),
+                            super::BLOCK_REASON_LIMIT,
+                        )
+                        .to_owned(),
+                    };
+                }
+                if specific["permissionDecision"] == "ask" {
+                    // There is no interactive permission prompt at this seam.
+                    // Do not silently convert an explicit ask to permission.
+                    return GateDecision::Block {
+                        reason: specific["permissionDecisionReason"]
+                            .as_str()
+                            .unwrap_or("plugin hook requires user approval (ask is not supported)")
+                            .to_owned(),
+                    };
+                }
+                if let Some(input) = specific.get("updatedInput") {
+                    if input.is_object() {
+                        current = input.to_string();
+                        rewritten = Some(input.clone());
+                    } else {
+                        return GateDecision::Block {
                                 reason: "plugin hook updatedInput must be an object; refusing unapplied rewrite".into(),
                             };
-                        }
                     }
                 }
             }
@@ -510,11 +508,10 @@ pub(super) fn observe(event: &HookEvent) {
         {
             Ok(runtime) => runtime.block_on(super::with_client_terminal_env(terminal_env, async {
                 for hook in hooks {
-                    if let Some(output) = execute(&hook, &event, None).await {
-                        if output.status.code() == Some(2) || !output.stdout.is_empty() {
+                    if let Some(output) = execute(&hook, &event, None).await
+                        && (output.status.code() == Some(2) || !output.stdout.is_empty()) {
                             crate::logging::warn(&format!("Plugin {} observer output cannot gate or inject context; output ignored", hook.event));
                         }
-                    }
                 }
             })),
             Err(error) => crate::logging::warn(&format!("Plugin hook runtime: {error}")),

@@ -505,7 +505,7 @@ pub enum BusEvent {
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do
     /// not prevent clients from refreshing cached picker metadata.
-    ModelUsageUpdated(crate::provider::ModelRoute),
+    ModelUsageUpdated(Box<crate::provider::ModelRoute>),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,

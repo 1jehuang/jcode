@@ -393,10 +393,10 @@ impl Client {
             if line == "\r\n" || line == "\n" {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':') {
-                if name.eq_ignore_ascii_case("Content-Length") {
-                    length = Some(value.trim().parse::<usize>()?);
-                }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("Content-Length")
+            {
+                length = Some(value.trim().parse::<usize>()?);
             }
         }
         let length = length.context("LSP response missing Content-Length")?;
@@ -407,16 +407,15 @@ impl Client {
     }
     async fn handle(&mut self, message: &Value) -> Result<()> {
         if message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            && let Some(uri) = message.pointer("/params/uri").and_then(Value::as_str)
         {
-            if let Some(uri) = message.pointer("/params/uri").and_then(Value::as_str) {
-                self.diagnostics.insert(
-                    uri.into(),
-                    message
-                        .pointer("/params/diagnostics")
-                        .cloned()
-                        .unwrap_or(json!([])),
-                );
-            }
+            self.diagnostics.insert(
+                uri.into(),
+                message
+                    .pointer("/params/diagnostics")
+                    .cloned()
+                    .unwrap_or(json!([])),
+            );
         }
         if let (Some(id), Some(method)) = (
             message.get("id"),
@@ -948,13 +947,13 @@ async fn run_server(
         .read_to_string(&mut content)
         .await?;
     ensure!(content.len() <= MAX_MESSAGE / 2, "LSP file too large");
-    let uri = url::Url::from_file_path(&file)
+    let uri = url::Url::from_file_path(file)
         .map_err(|_| anyhow::anyhow!("Invalid file URI"))?
         .to_string();
-    let root_uri = url::Url::from_directory_path(&workspace)
+    let root_uri = url::Url::from_directory_path(workspace)
         .map_err(|_| anyhow::anyhow!("Invalid workspace URI"))?
         .to_string();
-    let mut client = Client::spawn(&server, &workspace)?;
+    let mut client = Client::spawn(server, workspace)?;
     let result: Result<Value> = async {
             let initialized = client.request("initialize", json!({"processId":std::process::id(),"rootUri":root_uri,
                 "capabilities":{"workspace":{"configuration":true},"textDocument":{"publishDiagnostics":{},"diagnostic":{},"hover":{"contentFormat":["plaintext","markdown"]}}},

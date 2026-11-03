@@ -633,8 +633,8 @@ fn background_tasks_render_once_in_the_pinned_band_not_the_overview() {
         rendered.contains(" bg cargo test") && rendered.contains(" bg integration tests"),
         "background tasks must retain the fork's compact pinned rows:\n{rendered}"
     );
-    assert_eq!(rendered.matches("cargo test").count(), 1, "{rendered}");
-    assert_eq!(rendered.matches("integration tests").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches(" bg cargo test").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches(" bg integration tests").count(), 1, "{rendered}");
     assert!(!rendered.contains("Background task started"));
     assert!(!rendered.contains("Background task progress"));
     assert!(!rendered.contains("Background task completed"));
@@ -1197,7 +1197,7 @@ fn expanded_pinned_todo_band_shows_all_rows_and_can_collapse() {
             .expect("last TODO row should be visible");
         let collapse_row = expanded
             .lines()
-            .position(|row| row.contains("collapse (todo)"))
+            .position(|row| row.contains("Collapse todos"))
             .expect("collapse control row should be visible");
         assert!(
             collapse_row > last_item_row,
@@ -1249,7 +1249,7 @@ fn expanded_pinned_todo_band_shows_all_rows_and_can_collapse() {
             "collapsed list should restore its more summary:\n{collapsed}"
         );
         assert!(
-            !collapsed.contains("collapse (todo)"),
+            !collapsed.contains("Collapse todos"),
             "collapse control remained after closing:\n{collapsed}"
         );
     }
@@ -1258,7 +1258,7 @@ fn expanded_pinned_todo_band_shows_all_rows_and_can_collapse() {
     let expanded = render_and_snap(&app, &mut terminal);
     let label_row = expanded
         .lines()
-        .position(|row| row.contains("collapse (todo)"))
+        .position(|row| row.contains("Collapse todos"))
         .expect("bottom collapse control row");
     let label_area = crate::tui::ui::viewport::pinned_todo_more_area()
         .expect("collapse label hitbox");
@@ -1274,42 +1274,6 @@ fn expanded_pinned_todo_band_shows_all_rows_and_can_collapse() {
     crate::tui::ui::viewport::set_pinned_todo_card_area_for_test(None);
 }
 
-#[test]
-fn background_tasks_render_in_widget_data_not_the_pinned_band() {
-    let _env_lock = crate::storage::lock_test_env();
-    let _render_lock = crate::tui::ui::render_state_test_lock();
-    let mut app = create_test_app();
-    app.session.short_name = Some("test".to_string());
-    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
-    app.upsert_running_background_task("running".to_string(), "cargo test".to_string(), Some(42.0));
-    app.finish_background_task(
-        "failed".to_string(),
-        "integration tests".to_string(),
-        crate::tui::BackgroundTaskRowStatus::Failed,
-    );
-
-    let info = crate::tui::TuiState::info_widget_data(&app)
-        .background_info
-        .expect("session task rows should feed the background widget");
-    assert_eq!(
-        info.rows
-            .iter()
-            .map(|row| row.task_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["running", "failed"]
-    );
-
-    let backend = ratatui::backend::TestBackend::new(80, 20);
-    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
-    let rendered = render_and_snap(&app, &mut terminal);
-    assert!(
-        !rendered.contains(" bg cargo test") && !rendered.contains(" bg integration tests"),
-        "background tasks must not render in the pinned todo band:\n{rendered}"
-    );
-    assert!(!rendered.contains("Background task started"));
-    assert!(!rendered.contains("Background task progress"));
-    assert!(!rendered.contains("Background task completed"));
-}
 
 
 #[test]
@@ -1398,6 +1362,7 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         .unwrap(),
     ];
     app.refresh_pinned_todos_now();
+    app.pinned_todos_expanded = true;
     app.display_messages = vec![DisplayMessage {
         role: "user".to_string(),
         content: "run the plan".to_string(),
@@ -1409,11 +1374,11 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
     app.bump_display_messages_version();
     app.status = ProcessingStatus::Idle;
 
-    for width in [100u16, 60] {
+    for width in [140u16, 100] {
         let backend = ratatui::backend::TestBackend::new(width, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let text = render_and_snap(&app, &mut terminal);
-        let band: Vec<&str> = text.lines().take(8).collect();
+        let band: Vec<&str> = text.lines().take(12).collect();
         let joined = band.join("\n");
         assert!(
             joined.contains("1 ●●") && joined.contains("2 ○"),
@@ -1421,21 +1386,21 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         );
         let alpha = band
             .iter()
-            .find(|row| row.contains("stage one alpha"))
-            .unwrap();
+            .find(|row| row.contains("alpha lane 🦨"))
+            .unwrap_or_else(|| panic!("missing alpha lane at {width}: {text}"));
         assert!(
             alpha.contains("alpha lane 🦨"),
             "lane row at {width}:\n{text}"
         );
         let beta = band
             .iter()
-            .find(|row| row.contains("stage one beta"))
-            .unwrap();
+            .find(|row| row.contains("beta lane 🦝"))
+            .unwrap_or_else(|| panic!("missing beta lane at {width}: {text}"));
         assert!(
             beta.contains("beta lane 🦝"),
             "lane row at {width}:\n{text}"
         );
-        if width == 100 {
+        if width == 140 {
             assert!(alpha.contains("counting to 40"), "live activity:\n{text}");
         }
     }

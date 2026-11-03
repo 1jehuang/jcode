@@ -1370,7 +1370,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         // Let each provider apply its own freshness policy rather than making
         // static defaults permanently suppress discovery for the whole picker.
 
-        if should_debounce_attach_model_prefetch(&provider_name) {
+        if !needs_capability_refresh && should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
                 "Skipping attach-time model prefetch for {} because a recent refresh already ran",
                 provider_name

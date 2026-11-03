@@ -354,7 +354,8 @@ fn test_remote_rewind_requests_checkpoints_even_when_local_session_transcript_is
 
     assert!(app.dialog.as_ref().is_some_and(|dialog| dialog.is_rewind()));
     assert!(app.rewind_ui.list_request.is_some());
-    assert_eq!(app.display_messages().last().unwrap().content, "hi there");
+    assert_eq!(app.display_messages().last().unwrap().content, "hi
+there");
 }
 
 #[test]
@@ -366,7 +367,8 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
 
     app.is_remote = true;
     app.push_display_message(DisplayMessage::user("hello"));
-    app.push_display_message(DisplayMessage::assistant("hi there"));
+    app.push_display_message(DisplayMessage::assistant("hi
+there"));
 
     app.input = "/rewind 1".to_string();
     app.cursor_pos = app.input.len();

@@ -283,7 +283,10 @@ async fn new_generation_owns_completion(path: CompletionPath) {
     );
     let terminals = terminal_events(&mut fixture.worker_rx);
     match path {
-        CompletionPath::Headless => assert!(terminals.is_empty()),
+        CompletionPath::Headless => assert!(matches!(
+            terminals.as_slice(),
+            [ServerEvent::Done { id: 0 }]
+        )),
         CompletionPath::Live => assert!(matches!(
             terminals.as_slice(),
             [ServerEvent::Done { id: 0 }]
@@ -360,12 +363,18 @@ async fn uncancelled_failure_keeps_each_actual_error_path() {
         .await;
         let members = fixture.swarm.members.read().await;
         assert_eq!(members[&fixture.worker].status, "failed", "{path:?}");
-        assert_eq!(members[&fixture.worker].latest_completion_report, None);
+        assert_eq!(
+            members[&fixture.worker].latest_completion_report.as_deref(),
+            if matches!(path, CompletionPath::Client) {
+                Some("partial output must not count as success")
+            } else {
+                None
+            }
+        );
         drop(members);
         let events = terminal_events(&mut fixture.worker_rx);
         match path {
-            CompletionPath::Headless => assert!(events.is_empty()),
-            CompletionPath::Live | CompletionPath::Client => assert!(
+            CompletionPath::Headless | CompletionPath::Live | CompletionPath::Client => assert!(
                 matches!(
                     events.as_slice(),
                     [

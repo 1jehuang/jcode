@@ -6,6 +6,10 @@ use super::{
 /// sender's session from the old identity to the new one, but only where its
 /// pin and/or failover home still equal the captured `{ label, old_identity }`.
 /// Sends no refresh: the caller follows with `notify_auth_changed`, which does.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit wire and launch options avoid a second configuration type"
+)]
 pub(in crate::server) async fn handle_replace_session_account_identity(
     id: u64,
     provider: String,

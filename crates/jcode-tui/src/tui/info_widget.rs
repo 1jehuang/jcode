@@ -1179,6 +1179,12 @@ pub(super) fn calculate_placements_with_cloud_reflow(
         .visible
         .iter()
         .find(|p| p.kind == WidgetKind::Overview)
+        .or_else(|| {
+            anchors
+                .iter()
+                .map(|anchor| &anchor.placement)
+                .find(|placement| placement.kind == WidgetKind::Overview)
+        })
     else {
         return resident;
     };

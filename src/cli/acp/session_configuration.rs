@@ -35,12 +35,12 @@ impl SessionUiState {
                         .is_some_and(|provider| route.provider.eq_ignore_ascii_case(provider)))
         });
         let first = candidates.next();
-        if candidates.next().is_none() {
-            if let Some(route) = first {
-                return Some(route_id(
-                    &crate::provider::RouteSelection::from_model_route(route),
-                ));
-            }
+        if candidates.next().is_none()
+            && let Some(route) = first
+        {
+            return Some(route_id(
+                &crate::provider::RouteSelection::from_model_route(route),
+            ));
         }
         Some(model.clone())
     }
@@ -71,19 +71,19 @@ impl SessionUiState {
                 choices.push((model.clone(), model.clone()));
             }
         }
-        if let Some(current) = self.current_model_id() {
-            if !choices.iter().any(|(id, _)| id == &current) {
-                let name = self.selected_route.as_ref().map_or_else(
-                    || self.model.clone().unwrap_or_default(),
-                    |route| {
-                        format!(
-                            "{} ({}, {})",
-                            route.model, route.provider_label, route.api_method
-                        )
-                    },
-                );
-                choices.insert(0, (current, name));
-            }
+        if let Some(current) = self.current_model_id()
+            && !choices.iter().any(|(id, _)| id == &current)
+        {
+            let name = self.selected_route.as_ref().map_or_else(
+                || self.model.clone().unwrap_or_default(),
+                |route| {
+                    format!(
+                        "{} ({}, {})",
+                        route.model, route.provider_label, route.api_method
+                    )
+                },
+            );
+            choices.insert(0, (current, name));
         }
         choices
     }

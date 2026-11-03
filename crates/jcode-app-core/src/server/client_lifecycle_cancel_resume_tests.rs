@@ -179,7 +179,7 @@ async fn direct_cancel_persists_an_active_headless_turn_without_stopping_a_finis
             &swarm_id,
             None,
             Some("owner"),
-            &[member.clone()],
+            std::slice::from_ref(&member),
         );
         let members = Arc::new(RwLock::new(HashMap::from([(session_id.into(), member)])));
         assert!(!has_pending_resume(session_id));

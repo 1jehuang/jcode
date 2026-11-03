@@ -62,7 +62,7 @@ fn pinned_todo_click_targets_follow_long_history_growth() {
             .lines()
             .nth(usize::from(control.y))
             .expect("visible collapse row");
-        assert!(row.contains("collapse (todo)"), "{control:?}: {row}");
+        assert!(row.contains("Collapse todos"), "{control:?}: {row}");
         let layout = crate::tui::ui::last_layout_snapshot().expect("layout");
         let card = crate::tui::ui::viewport::pinned_todo_card_area().expect("card target");
         assert_eq!(card.intersection(layout.messages_area), card);

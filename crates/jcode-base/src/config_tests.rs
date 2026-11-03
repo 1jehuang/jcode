@@ -1521,13 +1521,12 @@ fn sponsors_optout_survives_config_save_and_reload() {
             );
             let saved = std::fs::read_to_string(&path).expect("read saved config");
             let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
-            assert_eq!(
-                saved
+            assert!(
+                !saved
                     .get("sponsors")
                     .and_then(|s| s.get("enabled"))
                     .and_then(toml::Value::as_bool)
-                    .unwrap_or(false),
-                false
+                    .unwrap_or(false)
             );
         }
     }

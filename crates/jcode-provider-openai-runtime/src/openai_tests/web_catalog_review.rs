@@ -65,7 +65,7 @@ fn explicit_legacy_browser_selection_keeps_sol_max_in_either_catalog_order() {
         provider.apply_browser_catalog_refresh(review_browser_models(sol_first)).unwrap();
         assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
         assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
-        assert_eq!(provider.available_efforts(), ["max", "swarm", "swarm-deep"]);
+        assert_eq!(provider.available_efforts(), ["max", "swarm"]);
         assert_eq!(jcode_base::provider::chatgpt_web::legacy_web_alias(&provider.model()), Some(("gpt-5.6-sol[web]", "max")));
         assert_eq!(provider.fork().reasoning_effort().as_deref(), Some("max"));
     }

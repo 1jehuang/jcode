@@ -9,7 +9,6 @@ use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
-use tokio::sync::RwLock;
 
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -254,6 +253,7 @@ async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_ident
     let agent = Arc::new(Mutex::new(session_agent));
     let (tx, mut rx) = mpsc::unbounded_channel();
     for label in ["second", "third", "first"] {
+        apply_account_switch(81, "openai", label, &mut *agent.lock().await, &tx);
         spawn_account_switch_refresh(
             81,
             "openai",

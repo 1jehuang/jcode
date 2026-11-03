@@ -531,10 +531,10 @@ fn acquire_git(
     let mut command = git_command();
     command.args(["clone", "--no-checkout"]);
     // A SHA is authoritative even when a branch/tag is also declared (REA Xbs).
-    if sha.is_none() {
-        if let Some(git_ref) = git_ref {
-            command.args(["--branch", git_ref]);
-        }
+    if sha.is_none()
+        && let Some(git_ref) = git_ref
+    {
+        command.args(["--branch", git_ref]);
     }
     let output = command
         .arg("--")

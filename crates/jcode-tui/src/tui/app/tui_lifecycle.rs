@@ -24,11 +24,6 @@ pub(super) fn remote_auto_server_reload(
 mod reload_policy_tests;
 
 impl App {
-    /// Cached bindings refresh before keypresses and local/remote idle ticks,
-    /// including the 5s deep-idle cadence, without requiring a restart.
-    /// The generation check costs one atomic load when unchanged.
-    /// Returns true when bindings were re-parsed.
-
     pub(super) async fn begin_remote_send(
         &mut self,
         remote: &mut backend::RemoteConnection,

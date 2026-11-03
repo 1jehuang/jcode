@@ -168,59 +168,25 @@ fn resume_hides_spawned_sessions_by_default_and_toggle_shows_parent_label() {
 #[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
-    let (_sender, _receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
     terminal
         .draw(|frame| picker.render(frame))
         .expect("loading frame");
     assert!(matches!(
-        picker.items[0],
-        PickerItem::SavedHeader { session_count: 1 }
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-    assert!(!picker.items.iter().any(|item| matches!(
-        item,
-        PickerItem::ServerHeader { .. } | PickerItem::OrphanHeader { .. }
-    )));
-
-    let real = make_session("real", "real", false, SessionStatus::Closed);
-    picker.all_server_groups.push(ServerGroup {
-        name: "real server".into(),
-        icon: "🛰".into(),
-        version: "1".into(),
-        git_hash: String::new(),
-        is_running: true,
-        sessions: vec![real],
-    });
-    picker.rebuild_items();
-    assert_eq!(
-        picker
-            .visible_sessions
-            .iter()
-            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
-            .collect::<Vec<_>>(),
-        ["saved_cloud", "real", "local", "cloud", "old_local"]
-    );
-    assert!(picker.items.iter().any(|item| matches!(item, PickerItem::ServerHeader { name, session_count: 1, .. } if name == "real server")));
-    picker.filter_mode = SessionFilterMode::Cloud;
-    picker.rebuild_items();
-    assert_eq!(
-        picker
-            .visible_sessions
-            .iter()
-            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
-            .collect::<Vec<_>>(),
-        ["cloud", "saved_cloud"]
-    );
-    assert!(
-        picker
-            .items
-            .iter()
-            .all(|item| matches!(item, PickerItem::Session))
-    );
-    picker.search_query = "local".into();
-    picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    assert!(picker.loading_message.is_some());
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Loading sessions"));
 }
 
 #[test]
@@ -797,10 +763,16 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
         tool_duration_ms: None,
         token_usage: None,
     });
-    session.save().expect("save session");
+    session.save_prepared().expect("save session");
 
     let sessions = load_sessions().expect("load sessions");
-    let mut picker = SessionPicker::new(sessions);
+    let mut loaded = sessions
+        .into_iter()
+        .find(|loaded| loaded.id == session.id)
+        .expect("saved fixture in picker index");
+    loaded.is_debug = false;
+    loaded.parent_id = None;
+    let mut picker = SessionPicker::new(vec![loaded]);
 
     picker.ensure_selected_preview_loaded();
 

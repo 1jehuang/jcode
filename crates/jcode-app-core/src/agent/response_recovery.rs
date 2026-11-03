@@ -867,8 +867,7 @@ mod malformed_tool_call_recovery_tests {
                     .session
                     .messages
                     .iter()
-                    .filter(|m| m.role == Role::Assistant)
-                    .last()
+                    .rfind(|m| m.role == Role::Assistant)
                     .unwrap();
                 assert!(assistant.content.iter().any(
                     |b| matches!(b, ContentBlock::Text { text: stored, .. } if stored == text)

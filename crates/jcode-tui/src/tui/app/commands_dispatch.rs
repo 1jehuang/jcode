@@ -22,6 +22,7 @@ pub(super) fn ssh_presentation_command(input: &str) -> bool {
             | "/commands"
             | "/todos"
             | "/todo"
+            | "/side"
             | "/diff"
             | "/keys"
             | "/keybindings"
@@ -90,6 +91,7 @@ pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> boo
         || super::support::handle_support_command(app, input)
         || super::commands::handle_cancel_command(app, input)
         || app.handle_hotkeys_command(input)
+        || app.handle_side_command(input)
         || super::todos_view::handle_todos_view_command(app, input)
         || super::commands::handle_help_command(app, input)
         || super::commands::handle_diff_command(app, input)
@@ -107,6 +109,11 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
     if command.starts_with('!') {
         return true;
     }
+    if matches!(command, "/account" | "/accounts") {
+        return input
+            .split_whitespace()
+            .any(|word| matches!(word, "add" | "remove" | "delete" | "logout"));
+    }
     if command == "/fast" && words.next() == Some("default") {
         return true;
     }
@@ -115,7 +122,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
         "/plugin"
             | "/logout"
             | "/auth"
-            | "/accounts"
             | "/config"
             | "/permissions"
             | "/permission"
@@ -286,7 +292,8 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         }
         return false;
     }
-    super::commands::handle_cancel_command(app, trimmed)
+    app.handle_side_command(trimmed)
+        || super::commands::handle_cancel_command(app, trimmed)
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_ssh_command(app, trimmed)
@@ -377,6 +384,8 @@ mod tests {
         app.toggle_next_prompt_new_session_routing();
         assert!(app.session_picker_overlay.is_none());
         assert!(app.pending_session_picker_load.is_none());
+        assert!(app.remote_login.is_some(), "SSH login stays on the host");
+        app.cancel_ssh_login();
         assert!(app.inline_interactive_state.is_none());
         assert!(!app.route_next_prompt_to_new_session);
 

@@ -143,6 +143,65 @@ impl SessionPicker {
         Ok(OverlayAction::Continue)
     }
 
+    /// While the session index is still loading, a focused search box keeps
+    /// collecting the query (it survives `reseed_grouped` and filters the
+    /// loaded list). Esc clears a non-empty query, matching the loaded picker;
+    /// on an empty query it falls through and closes. Returns `true` when the
+    /// key was consumed.
+    pub(super) fn handle_loading_search_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        if !self.search_active {
+            if code == KeyCode::Char('/')
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                self.focus_search_input();
+                return true;
+            }
+            return self.start_search_from_list_key(code, modifiers);
+        }
+        // Ctrl+S / Ctrl+Shift+S pick the filter while the index loads too; the
+        // mode survives `reseed_grouped` and applies to the loaded list.
+        if let KeyCode::Char(c) = code
+            && modifiers.contains(KeyModifiers::CONTROL)
+            && !modifiers.contains(KeyModifiers::ALT)
+            && c.eq_ignore_ascii_case(&'s')
+        {
+            // A user choice: the project-scope default must not override it.
+            self.filter_mode_user_chosen = true;
+            if c == 'S' || modifiers.contains(KeyModifiers::SHIFT) {
+                self.filter_mode = self.filter_mode.previous();
+            } else {
+                self.filter_mode = self.filter_mode.next();
+            }
+            return true;
+        }
+        if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return false;
+        }
+        match code {
+            KeyCode::Tab => {
+                self.search_active = false;
+                true
+            }
+            KeyCode::Esc if !self.search_query.is_empty() => {
+                self.search_query.clear();
+                true
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                self.search_query.push(c);
+                true
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// In list mode, a printable character that is not a single-key shortcut
     /// starts a search and is inserted. Returns `true` when the key was
     /// consumed.

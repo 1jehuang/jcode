@@ -278,7 +278,10 @@ pub fn dock_width(data: &InfoWidgetData, chat_width: u16) -> Option<u16> {
     if DOCK_DISABLED_FOR_TEST.with(|flag| flag.get()) {
         return None;
     }
-    if data.has_data_for(WidgetKind::WorkspaceMap) || data.has_data_for(WidgetKind::Diagrams) {
+    if data.cloud_info.is_some()
+        || data.has_data_for(WidgetKind::WorkspaceMap)
+        || data.has_data_for(WidgetKind::Diagrams)
+    {
         return None;
     }
     let available = chat_width.checked_sub(DOCK_MIN_CHAT_WIDTH)?;

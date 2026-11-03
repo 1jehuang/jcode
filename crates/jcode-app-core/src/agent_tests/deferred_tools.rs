@@ -203,7 +203,7 @@ async fn late_mcp_tools_are_announced_once_in_the_transcript() {
         !text.contains("input_schema"),
         "schemas load on demand, not in the announcement: {text}"
     );
-    assert!(text.contains("mcp action=call"));
+    assert!(text.contains("mcp_call"));
 
     // Second pass: nothing new, no second announcement, and the cached
     // tool list is unchanged.

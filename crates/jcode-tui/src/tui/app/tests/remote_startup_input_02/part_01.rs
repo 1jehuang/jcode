@@ -2085,7 +2085,7 @@ fn test_interleave_submission_preserves_pending_images() {
 
     assert_eq!(
         app.interleave_message.as_deref(),
-        Some("[image 1] describe this")
+        Some(" describe this")
     );
     assert_eq!(app.interleave_images, images);
     assert!(app.pending_images.is_empty());

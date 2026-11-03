@@ -442,12 +442,12 @@ impl Provider for OpenRouterProvider {
                 while let Some(event) = rx2.recv().await {
                     match &event {
                         Ok(StreamEvent::TextDelta(delta)) => text.push_str(delta),
-                        Ok(StreamEvent::TextSuffixReplace { old_text, new_text }) => {
-                            if text.ends_with(old_text.as_str()) {
-                                let keep = text.len() - old_text.len();
-                                text.truncate(keep);
-                                text.push_str(new_text);
-                            }
+                        Ok(StreamEvent::TextSuffixReplace { old_text, new_text })
+                            if text.ends_with(old_text.as_str()) =>
+                        {
+                            let keep = text.len() - old_text.len();
+                            text.truncate(keep);
+                            text.push_str(new_text);
                         }
                         _ => {}
                     }
@@ -486,11 +486,11 @@ impl Provider for OpenRouterProvider {
                     if tail_is_prefill {
                         let prefill = astra_jb::escalation_prefill(&text, level)
                             .or_else(|| astra_jb::prefill_continuation(&snapshot));
-                        if let Some(prefill) = prefill {
-                            if let Some(last) = messages_arr.last_mut() {
-                                last["content"] = serde_json::to_value(prefill.content)
-                                    .unwrap_or(serde_json::Value::Null);
-                            }
+                        if let Some(prefill) = prefill
+                            && let Some(last) = messages_arr.last_mut()
+                        {
+                            last["content"] = serde_json::to_value(prefill.content)
+                                .unwrap_or(serde_json::Value::Null);
                         }
                     }
                 }

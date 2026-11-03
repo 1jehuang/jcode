@@ -212,6 +212,7 @@ fn narrow_terminal_has_no_dock() {
 fn dock_width_ignores_content() {
     let before_reply = dock_data();
     let after_reply = info_widget::InfoWidgetData {
+        session_name: Some("a much longer session name ".repeat(5)),
         cache_hit_info: Some(info_widget::CacheHitInfo {
             reported_input_tokens: 20_000,
             prompt_tokens: Some(38_000),
@@ -228,16 +229,10 @@ fn dock_width_ignores_content() {
         }),
         ..dock_data()
     };
-    let lines = |data: &info_widget::InfoWidgetData| {
-        info_widget::dock_text_lines(data, 200)
-            .iter()
-            .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
-            .max()
-            .unwrap_or(0)
-    };
-    assert!(
-        lines(&after_reply) > lines(&before_reply),
-        "precondition: the KV cache line is longer than the others"
+    assert_ne!(
+        info_widget::dock_text_lines(&after_reply, 200),
+        info_widget::dock_text_lines(&before_reply, 200),
+        "cache information changes the dock contents"
     );
     assert_eq!(
         info_widget::dock_width(&before_reply, 160),

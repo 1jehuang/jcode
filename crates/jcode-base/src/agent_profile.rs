@@ -159,10 +159,10 @@ pub fn list(working_dir: &Path) -> Result<Vec<String>> {
             {
                 continue;
             }
-            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                if validate_name(name).is_ok() {
-                    names.insert(name.to_owned());
-                }
+            if let Some(name) = path.file_stem().and_then(|s| s.to_str())
+                && validate_name(name).is_ok()
+            {
+                names.insert(name.to_owned());
             }
         }
     }

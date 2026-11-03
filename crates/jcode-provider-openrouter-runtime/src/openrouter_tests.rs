@@ -1609,7 +1609,7 @@ fn a6api_named_profile_applies_model_specific_efforts_across_model_switches() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["low", "medium", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("xhigh")
@@ -1628,7 +1628,7 @@ fn a6api_named_profile_applies_model_specific_efforts_across_model_switches() {
         .expect("switch back to effort-capable model");
     assert_eq!(
         provider.available_efforts(),
-        vec!["low", "medium", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["low", "medium", "high", "xhigh", "swarm"]
     );
     assert_eq!(provider.reasoning_effort(), None);
 }
@@ -1653,7 +1653,7 @@ fn a6api_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["low", "high", "max", "swarm", "swarm-deep"]
+        vec!["low", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1688,16 +1688,7 @@ fn a6api_gpt_terra_profile_exposes_openai_efforts() {
         .expect("construct A6API GPT Terra profile");
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep",
-        ]
+        vec!["none", "low", "medium", "high", "xhigh", "max", "swarm",]
     );
     provider
         .set_reasoning_effort("max")
@@ -3641,7 +3632,7 @@ fn named_profile_model_uses_explicit_reasoning_effort_ladder() {
     let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec!["low", "high", "max", "swarm", "swarm-deep"]
+        vec!["low", "high", "max", "swarm"]
     );
     assert_eq!(provider.reasoning_effort(), Some("max".to_string()));
 }
@@ -3810,7 +3801,7 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
 fn vsllm_uses_conservative_context_when_catalog_omits_limits() {
     let profile = jcode_base::config::NamedProviderConfig {
         base_url: "https://vsllm.cc/v1".to_string(),
-        api_key_env: Some("VSLLM_API_KEY".to_string()),
+        auth: jcode_base::config::NamedProviderAuth::None,
         model_catalog: true,
         default_model: Some("gpt-6.1-sol".to_string()),
         ..Default::default()

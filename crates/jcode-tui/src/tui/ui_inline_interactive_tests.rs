@@ -41,7 +41,7 @@ fn account_priority_titles_and_normalized_colors_are_width_safe() {
         bright,
         account_priority_color(base, 90, [90, 90].into_iter())
     );
-    assert!(model_picker_top_hint(&picker).unwrap().contains("Ctrl+R"));
+    assert!(model_picker_top_hint(&picker).unwrap().contains("Ctrl+D"));
 }
 
 #[test]

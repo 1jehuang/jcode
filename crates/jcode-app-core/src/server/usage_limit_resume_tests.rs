@@ -234,9 +234,14 @@ impl Fixture {
     /// Paused time auto-advances, so the 2 h bound costs nothing in real time
     /// but turns a missing event into a failure instead of a hang.
     async fn next_terminal(&mut self) -> ServerEvent {
-        tokio::time::timeout(Duration::from_secs(2 * 3600), async {
+        tokio::time::timeout(Duration::from_secs(3 * 3600), async {
             loop {
-                match self.events.recv().await.expect("member event stream open") {
+                let event = self.events.recv().await.expect("member event stream open");
+                let event = match event {
+                    ServerEvent::TurnEvent { event, .. } => *event,
+                    event => event,
+                };
+                match event {
                     event @ (ServerEvent::Done { .. } | ServerEvent::Error { .. }) => {
                         return event;
                     }
@@ -276,7 +281,7 @@ fn scheduled_messages(agent: &Agent) -> usize {
 
 #[tokio::test(start_paused = true)]
 async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resumes() {
-    let provider = UsageLimitedProvider::new(1, Some(Duration::from_secs(2)));
+    let provider = UsageLimitedProvider::new(1, Some(Duration::from_secs(7200)));
     let mut fx = Fixture::new(&provider).await;
     fx.start_scheduled_turn().await;
 
@@ -293,7 +298,7 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
     assert_eq!(id, 0);
     let retry_after = retry_after_secs.expect("usage-limit error must carry retry_after_secs");
     assert!(
-        (2 + 5..=2 + 30).contains(&retry_after),
+        (7200 + 5..=7200 + 30).contains(&retry_after),
         "resume at the reset plus 5-30 s of jitter, got {retry_after}"
     );
 
@@ -313,7 +318,7 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
     fx.wait_status("ready").await;
     assert_eq!(provider.calls(), 2);
     assert!(
-        provider.gaps()[0] >= Duration::from_secs(2 + 5),
+        provider.gaps()[0] >= Duration::from_secs(7200 + 5),
         "never resumed before the reported reset: {:?}",
         provider.gaps()
     );

@@ -482,6 +482,13 @@ fn handle_server_event_inner(
     if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event
         && app.current_message_id.is_some_and(|current| current != *id)
         && app.pending_agent_model_request_id != Some(*id)
+        && !matches!(
+            &event,
+            ServerEvent::Error {
+                server_resumes: true,
+                ..
+            }
+        )
     {
         crate::logging::debug(&format!(
             "Ignoring unrelated terminal id={} while current_message_id={:?}",

@@ -56,6 +56,7 @@ impl Provider for StaticDiscoveryProvider {
 #[test]
 fn model_prefetch_discovers_new_models_despite_static_fallback_names() {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -147,6 +148,7 @@ impl Provider for CapabilityRefreshProvider {
 #[test]
 fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     // Serialize process-wide environment outside the asynchronous runtime.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -692,6 +694,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     racing_turn: bool,
 ) {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());
@@ -1125,6 +1128,7 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
 #[tokio::test]
 async fn handle_get_model_catalog_busy_unsaved_session_keeps_account_labels() {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());
@@ -1228,6 +1232,7 @@ impl Provider for PinnedProvider {
 #[tokio::test]
 async fn handle_get_model_catalog_busy_unsaved_session_reports_live_pin() {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());
@@ -1300,6 +1305,7 @@ async fn handle_get_model_catalog_busy_unsaved_session_reports_live_pin() {
 #[tokio::test]
 async fn handle_get_model_catalog_busy_live_attach_reports_attached_agent_pin() {
     let _guard = crate::storage::lock_test_env();
+    crate::bus::reset_models_updated_publish_state_for_tests();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());

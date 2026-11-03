@@ -205,7 +205,6 @@ fn test_remote_chatgpt_web_efforts_survive_empty_client_catalog() {
                 "xhigh",
                 "max",
                 "swarm",
-                "swarm-deep"
             ]
         );
         assert!(

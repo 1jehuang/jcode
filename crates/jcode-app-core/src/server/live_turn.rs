@@ -221,7 +221,11 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
                 .read()
                 .await
                 .get(session_id)
-                .is_some_and(member_accepts_automatic_turn)
+                .is_some_and(|member| {
+                    member_accepts_automatic_turn(member)
+                        || swarm.recovery_reload_id.is_some()
+                            && super::reload_recovery::has_pending_for_session(session_id)
+                })
             {
                 return;
             }

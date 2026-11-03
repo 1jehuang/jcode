@@ -34,10 +34,10 @@ async fn worker_report_publishes_one_owner_wake_without_explicit_await() {
     }
     let mut reports = Vec::new();
     while let Ok(event) = bus.try_recv() {
-        if let crate::bus::BusEvent::SwarmWorkerReported(report) = event {
-            if report.worker_session_id == worker_id {
-                reports.push(report);
-            }
+        if let crate::bus::BusEvent::SwarmWorkerReported(report) = event
+            && report.worker_session_id == worker_id
+        {
+            reports.push(report);
         }
     }
     assert_eq!(

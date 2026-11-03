@@ -1,5 +1,9 @@
 //! Interrupting a coordinator stops the workers it spawned.
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn cancelling_a_coordinator_cancels_waiting_descendant_without_active_turn() {
     let _lock = crate::storage::lock_test_env();
@@ -139,6 +143,10 @@ fn swarm_descendants_follow_the_spawn_tree_only() {
 
 /// Cancelling a coordinator must stop the running turns of every worker it
 /// spawned (and theirs), and leave idle workers and unrelated sessions alone.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn cancelling_a_coordinator_stops_its_running_workers() {
     let tag = format!("cascade-{}", std::process::id());

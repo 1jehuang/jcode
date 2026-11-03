@@ -45,6 +45,7 @@ impl Drop for ProjectScopeRefreshEnv {
 
 fn project_scope_session(id: &str, dir: &str, minutes_ago: i64) -> SessionInfo {
     let mut session = make_session(id, id, false, SessionStatus::Closed);
+    session.title = id.to_string();
     session.working_dir = Some(dir.to_string());
     session.last_message_time = Utc::now() - ChronoDuration::minutes(minutes_ago);
     session
@@ -563,10 +564,14 @@ fn test_search_bar_always_rendered_with_placeholder() {
         .expect("render picker");
     let buffer = terminal.backend().buffer();
     let first_row: String = (0..buffer.area.width)
-        .map(|x| buffer[(x, 0)].symbol().to_string())
+        .map(|x| {
+            buffer[(x, picker.reserved_panel_area.unwrap().y)]
+                .symbol()
+                .to_string()
+        })
         .collect();
     assert!(
-        first_row.contains("Type or / to search"),
+        first_row.contains("Search sessions"),
         "list-mode placeholder should render on the first row: {first_row:?}"
     );
 
@@ -576,10 +581,14 @@ fn test_search_bar_always_rendered_with_placeholder() {
         .expect("render picker");
     let buffer = terminal.backend().buffer();
     let first_row: String = (0..buffer.area.width)
-        .map(|x| buffer[(x, 0)].symbol().to_string())
+        .map(|x| {
+            buffer[(x, picker.reserved_panel_area.unwrap().y)]
+                .symbol()
+                .to_string()
+        })
         .collect();
     assert!(
-        first_row.contains("Type to search sessions") && first_row.contains("Tab for shortcuts"),
+        first_row.contains("🔍") && first_row.contains("▎"),
         "focused placeholder should render on the first row: {first_row:?}"
     );
 
@@ -591,7 +600,11 @@ fn test_search_bar_always_rendered_with_placeholder() {
         .expect("render picker");
     let buffer = terminal.backend().buffer();
     let first_row: String = (0..buffer.area.width)
-        .map(|x| buffer[(x, 0)].symbol().to_string())
+        .map(|x| {
+            buffer[(x, picker.reserved_panel_area.unwrap().y)]
+                .symbol()
+                .to_string()
+        })
         .collect();
     assert!(
         first_row.contains('z'),
@@ -682,10 +695,7 @@ fn test_search_ctrl_s_cycles_filter_without_typing() {
 
     let text = rendered_text(&mut picker);
     assert!(text.contains("(Ctrl+S filter)"), "title names the chord");
-    assert!(
-        text.contains("Ctrl+S filter · Tab shortcuts"),
-        "footer names it"
-    );
+    assert!(text.contains("Ctrl+S filter"), "footer names it");
 
     // Plain `s` is still text while searching.
     picker

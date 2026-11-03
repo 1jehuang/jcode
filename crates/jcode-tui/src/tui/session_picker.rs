@@ -1227,13 +1227,6 @@ impl SessionPicker {
         }
     }
 
-    /// Delete the word immediately before the (implicit) end-of-line cursor in
-    /// the search query. Used for Ctrl+W / Ctrl+Backspace inside the search bar.
-
-    /// Shared handling for key events while the search bar is active. Used by
-    /// both the overlay (`handle_overlay_key`) and the standalone `run` loop so
-    /// the editing and navigation keybindings stay consistent.
-
     /// Standalone picker input follows the main TUI's press/repeat policy.
     /// Release events must not trigger navigation, editing, or selection.
     fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
@@ -1270,13 +1263,10 @@ impl SessionPicker {
         if let Some(action) = self.handle_claude_takeover_confirmation_key(code, modifiers) {
             return Ok(action);
         }
-        // Search editing must work even before the first cached list arrives.
-        // Keep the query in picker state so reseeding applies it to new entries.
-        if self.search_active {
-            return self.handle_search_key(code, modifiers);
-        }
-
         if self.loading_message.is_some() {
+            if self.handle_loading_search_key(code, modifiers) {
+                return Ok(OverlayAction::Continue);
+            }
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(OverlayAction::Close),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1289,6 +1279,10 @@ impl SessionPicker {
                 _ => {}
             }
             return Ok(OverlayAction::Continue);
+        }
+
+        if self.search_active {
+            return self.handle_search_key(code, modifiers);
         }
 
         // The first-run choice is deliberately simpler than the full session

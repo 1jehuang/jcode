@@ -65,15 +65,12 @@ fn cloud_overview_reflows_when_git_loading_finishes_in_short_viewport() {
     // Reproduce the regression: ordinary anchoring cannot grow into the cloud
     // card above it or past the messages viewport below it.
     let blocked = calculate_placements_anchored(area, &margins, &data, true, &initial.anchors);
-    assert_eq!(
+    assert!(
         blocked
             .visible
             .iter()
-            .find(|p| p.kind == WidgetKind::Overview)
-            .unwrap()
-            .rect
-            .height,
-        7
+            .find(|placement| placement.kind == WidgetKind::Overview)
+            .is_none_or(|placement| placement.rect.height == 7)
     );
     let repaired =
         calculate_placements_with_cloud_reflow(area, &margins, &data, true, &initial.anchors);

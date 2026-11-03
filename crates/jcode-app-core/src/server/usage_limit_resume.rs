@@ -852,14 +852,13 @@ async fn resume_turn_after_usage_limit_inner(
                 .catch_unwind(),
             )
             .await
-            .map(|result| {
+            .and_then(|result| {
                 result.unwrap_or_else(|_| {
                     Some(Err(anyhow::anyhow!(
                         "Processing task panicked while resuming"
                     )))
                 })
-            })
-            .flatten();
+            });
         let Some(result) = result else {
             return ResumeOutcome::Superseded;
         };

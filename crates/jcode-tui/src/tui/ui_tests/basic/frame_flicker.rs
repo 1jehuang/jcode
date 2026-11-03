@@ -833,7 +833,7 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         "expected log hint in notification line, got: {rendered}"
     );
     assert!(
-        rendered.contains("[Alt⇧Z]"),
+        rendered.contains(&format!("[{}⇧Z]", if cfg!(target_os = "macos") { "⌥" } else { "Alt" })),
         "expected copy badge in notification line, got: {rendered}"
     );
 

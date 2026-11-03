@@ -563,6 +563,17 @@ mod tests {
         let _guard = storage::lock_test_env();
         let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
+        struct Home(Option<std::ffi::OsString>);
+        impl Drop for Home {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _home = Home(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", root.join("private-state"));
         std::fs::create_dir(root.join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(8);
         let statuses = std::thread::scope(|scope| {

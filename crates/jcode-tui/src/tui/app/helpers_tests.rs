@@ -143,7 +143,7 @@ fn named_compatible_profile_uses_per_model_effort_vocabulary() {
     );
     assert_eq!(
         named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("kimi-k3")),
-        Some(vec!["low", "high", "max", "swarm", "swarm-deep"]),
+        Some(vec!["low", "high", "max", "swarm"]),
     );
 }
 
@@ -189,7 +189,7 @@ fn a6api_model_catalog_exposes_model_specific_effort_ladders() {
         ),
         ("gemini-3.5-flash", vec!["low", "medium", "high"]),
     ] {
-        expected.extend(["swarm", "swarm-deep"]);
+        expected.extend(["swarm"]);
         assert_eq!(
             named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some(model)),
             Some(expected),
@@ -239,7 +239,7 @@ fn a6api_glm_models_use_zai_effort_vocabulary() {
     );
     assert_eq!(
         named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("glm-5.3")),
-        Some(vec!["low", "high", "max", "swarm", "swarm-deep"]),
+        Some(vec!["low", "high", "max", "swarm"]),
     );
 }
 
@@ -272,14 +272,7 @@ fn a6api_gpt_terra_uses_openai_effort_vocabulary() {
             Some("gpt-5.6-terra"),
         ),
         Some(vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep",
+            "none", "low", "medium", "high", "xhigh", "max", "swarm",
         ]),
     );
 }

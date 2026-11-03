@@ -1110,10 +1110,7 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set connection transport on the server (for OpenAI models)
-    /// Run a runtime command (e.g. `mcp`). Returns the request id; the reply
-    /// is a `RuntimeCommandResult` or an `Error` carrying that id.
-
+    /// Set connection transport on the server (for OpenAI models).
     pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
         let request = Request::SetTransport {
             id: self.next_request_id,

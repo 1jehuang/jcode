@@ -8,7 +8,7 @@ use serde_json::json;
 mod assistant_targets;
 
 #[tokio::test]
-async fn checkpoint_tools_restore_edits_replacements_moves_and_partial_patches() {
+async fn checkpoint_tools_restore_edits_writes_moves_and_partial_patches() {
     use crate::message::Role;
     use crate::tool::{ToolContext, ToolExecutionMode};
     let _env_lock = crate::storage::lock_test_env();
@@ -57,8 +57,8 @@ async fn checkpoint_tools_restore_edits_replacements_moves_and_partial_patches()
             json!({"file_path":"source.txt","old_string":"original","new_string":"edited"}),
         ),
         (
-            "replace",
-            json!({"path":"source.txt","pattern":"edited","replacement":"replaced","expected_count":1}),
+            "edit",
+            json!({"file_path":"source.txt","old_string":"edited","new_string":"replaced"}),
         ),
         (
             "write",
