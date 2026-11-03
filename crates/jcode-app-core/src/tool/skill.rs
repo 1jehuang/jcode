@@ -220,10 +220,13 @@ impl SkillTool {
     ) -> Result<ToolOutput> {
         let name = normalize_skill_name(name, "reload")?;
 
-        // A project skill can shadow a global one with the same name. Check the
-        // session's effective skill so a manual-only project skill is refused
-        // instead of reloading and describing the shadowed global copy.
-        if let Some(skill) = self.effective_registry(working_dir).await.get(&name)
+        // A project skill shadows a global one with the same name. The project
+        // overlay is read fresh from disk, so check it first: a manual-only
+        // project skill is refused instead of reloading and describing the
+        // shadowed global copy. Global skills are checked after the refresh
+        // below, so an edit to their frontmatter takes effect.
+        if let Ok(overlay) = SkillRegistry::load_project_overlay(working_dir)
+            && let Some(skill) = overlay.get(&name)
             && skill.disable_model_invocation
         {
             return Err(model_invocation_disabled(&skill.name));
@@ -904,6 +907,39 @@ mod tests {
         assert!(
             !error.contains(&global_root.path().display().to_string()),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_picks_up_global_skill_that_reenables_model_invocation() {
+        let global_root = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(global_root.path(), "toggled-skill");
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(global_root.path())).unwrap(),
+        )));
+        let skill_md = global_root
+            .path()
+            .join(".agents/skills/toggled-skill/SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: toggled-skill\ndescription: Re-enabled skill\ndisable-model-invocation: false\n---\n\nBody.",
+        )
+        .unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        let output = tool
+            .execute(
+                json!({"action": "reload", "name": "toggled-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output.output,
+            format!(
+                "Reloaded skill 'toggled-skill'\n\nDescription: Re-enabled skill\nPath: {}",
+                skill_md.display()
+            )
         );
     }
 
