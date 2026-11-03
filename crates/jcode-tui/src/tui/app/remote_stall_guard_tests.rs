@@ -9,8 +9,7 @@ async fn remote_debug_state_exposes_pending_interrupt_lifecycle() {
     app.pending_soft_interrupt_requests = vec![(89, "correction".into())];
     app.pending_queued_dispatch = true;
     let state: serde_json::Value =
-        serde_json::from_str(&handle_debug_command(&mut app, "state", &mut remote).await)
-            .unwrap();
+        serde_json::from_str(&handle_debug_command(&mut app, "state", &mut remote).await).unwrap();
     assert_eq!(state["current_message_id"], 88);
     assert_eq!(state["pending_soft_interrupts"], 1);
     assert_eq!(state["pending_soft_interrupt_requests"], 1);

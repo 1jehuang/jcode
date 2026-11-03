@@ -114,7 +114,14 @@ async fn idle_soft_interrupt_without_client_id_is_picked_up_before_cancel() {
 }
 
 async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
-    sdk_socket_cancel_workflow(response_only, terminal_race, identity_capability, false, false).await;
+    sdk_socket_cancel_workflow(
+        response_only,
+        terminal_race,
+        identity_capability,
+        false,
+        false,
+    )
+    .await;
 }
 
 async fn sdk_socket_cancel_workflow(
@@ -307,8 +314,11 @@ async fn sdk_socket_cancel_workflow(
                             // asynchronous TurnStarted notification.
                             active = Some(identity.clone());
                         }
-                        assert_eq!(active.as_ref(), Some(&identity),
-                            "every emission belongs to accepted runtime turn");
+                        assert_eq!(
+                            active.as_ref(),
+                            Some(&identity),
+                            "every emission belongs to accepted runtime turn"
+                        );
                         match *event {
                             ServerEvent::TextDelta { ref text } if text == "completed" => {
                                 scoped_text = true

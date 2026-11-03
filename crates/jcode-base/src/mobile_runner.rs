@@ -38,7 +38,9 @@ pub fn is_cloud_machine() -> bool {
 }
 
 fn busy_marker() -> Option<PathBuf> {
-    crate::storage::jcode_dir().ok().map(|d| d.join("mobile-runner-busy"))
+    crate::storage::jcode_dir()
+        .ok()
+        .map(|d| d.join("mobile-runner-busy"))
 }
 
 fn workspace_dir() -> PathBuf {
@@ -121,7 +123,10 @@ async fn run_turn(command: &MobileCommand) -> Result<String> {
     // brings a model login; turns must use the same provider.
     cmd.args(inherited_provider_args(std::env::args()));
     if command.kind == "message" {
-        let id = command.session_id.as_deref().context("message without session")?;
+        let id = command
+            .session_id
+            .as_deref()
+            .context("message without session")?;
         cmd.arg("--resume").arg(id);
     }
     cmd.arg("run").arg("--ndjson").arg(&command.text);
@@ -163,7 +168,14 @@ async fn run_turn(command: &MobileCommand) -> Result<String> {
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(600)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         anyhow::bail!("jcode run failed ({}): {}", output.status, tail.trim());
     }
     session.context("jcode run did not report a session id")
@@ -173,11 +185,16 @@ async fn run_turn(command: &MobileCommand) -> Result<String> {
 pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
     let key = crate::subscription_catalog::configured_api_key()
         .context("no Jcode account credential is configured")?;
-    let base = subscription_api::configured_api_base().trim_end_matches('/').to_string();
+    let base = subscription_api::configured_api_base()
+        .trim_end_matches('/')
+        .to_string();
     let Some(command) = claim(client, &base, &key).await? else {
         return Ok(false);
     };
-    crate::logging::info(&format!("mobile runner: {} command {}", command.kind, command.command_id));
+    crate::logging::info(&format!(
+        "mobile runner: {} command {}",
+        command.kind, command.command_id
+    ));
     let outcome = run_turn(&command).await;
     let _ = mobile_sync::sync_once(client).await;
     complete(client, &base, &key, &command.command_id, &outcome).await?;
@@ -218,7 +235,8 @@ mod tests {
     #[test]
     fn parses_session_from_start_event() {
         assert_eq!(
-            session_id_from_ndjson_line(r#"{"type":"start","session_id":"session_abc"}"#).as_deref(),
+            session_id_from_ndjson_line(r#"{"type":"start","session_id":"session_abc"}"#)
+                .as_deref(),
             Some("session_abc")
         );
         assert_eq!(session_id_from_ndjson_line("not json"), None);
@@ -228,6 +246,9 @@ mod tests {
     #[test]
     fn forwards_provider_and_model_only() {
         let args = ["jcode", "--provider", "jcode", "--model=x", "serve", "-q"].map(String::from);
-        assert_eq!(inherited_provider_args(args), vec!["--provider", "jcode", "--model=x"]);
+        assert_eq!(
+            inherited_provider_args(args),
+            vec!["--provider", "jcode", "--model=x"]
+        );
     }
 }
