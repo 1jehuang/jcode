@@ -834,6 +834,10 @@ pub struct OpenRouterProvider {
     reasoning_effort_support: Option<bool>,
     disable_reasoning_heuristics: bool,
     /// Per-model `(supports effort, default effort)` overrides from a named profile.
+    #[allow(
+        clippy::type_complexity,
+        reason = "compact stored config tuple, not a new public model"
+    )]
     static_reasoning_config: HashMap<String, (Option<bool>, Option<String>, Vec<String>)>,
     max_tokens: Option<u32>,
     /// Extra top-level JSON object fields merged into every chat/completions

@@ -934,8 +934,8 @@ fn narrow_rows_fold_finished_titles_and_never_wrap() {
             || parser.matches(", ").count() == 2,
         "{rows:?}"
     );
-    assert!(render(&grid_todos(), &[], 30)[0].contains("1 ●●○●●●  2 ○○○"));
-    assert!(render(&grid_todos(), &[], 18)[0].contains("1 4/6  2 0/3"));
+    assert!(render(&grid_todos(), &[], 24)[0].contains("1 ●●○●●●  2 ○○○"));
+    assert!(render(&grid_todos(), &[], 14)[0].contains("1 4/6  2 0/3"));
 }
 
 #[test]
@@ -1094,7 +1094,7 @@ fn live_worker_dot_spins_and_quiet_worker_turns_amber() {
     let rows = render(&live_lane_todos(), &agents, 120);
     let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
     assert!(
-        parser.starts_with("  ●") && parser.contains(LIVE_DOT_SENTINEL),
+        parser.starts_with("●") && parser.contains(LIVE_DOT_SENTINEL),
         "{rows:?}"
     );
     assert!(parser.contains("justrust test · 12s"), "{rows:?}");

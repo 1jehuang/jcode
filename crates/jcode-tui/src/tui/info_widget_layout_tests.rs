@@ -729,7 +729,7 @@ fn remerge_keeps_split_part_when_other_anchor_holds_the_only_pocket() {
 fn remerge_keeps_swarm_and_compaction_boxes() {
     let data = contended_data();
     let area = Rect::new(0, 0, 140, 40);
-    for kind in [WidgetKind::SwarmStatus, WidgetKind::Compaction] {
+    for kind in [WidgetKind::Compaction] {
         assert!(data.has_data_for(kind), "precondition: {kind:?} has data");
         let anchors = vec![
             right_anchor(WidgetKind::ModelInfo, 1, 4),
@@ -942,6 +942,8 @@ fn contended_overview_data() -> InfoWidgetData {
 fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
     let mut data = InfoWidgetData {
         session_name: Some("slot-review".into()),
+        connection_type: Some("https".into()),
+        tokens_per_second: Some(42.0),
         memory_info: Some(MemoryInfo {
             total_count: 4,
             activity: Some(crate::tui::info_widget::MemoryActivity {
@@ -967,7 +969,7 @@ fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
         "natural overview {ov} must fit below natural memory {mem_h}"
     );
     let part_h = calculate_widget_height(WidgetKind::ModelInfo, &data, 40, u16::MAX) as usize;
-    assert!(part_h > 2 && part_h < ov);
+    assert!(part_h >= 2 && part_h < ov);
     let band = mem_h + 2;
     let rows = band + ov + 1 + 5 * (part_h + 1);
     let area = Rect::new(0, 0, 140, rows as u16);

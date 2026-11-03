@@ -546,7 +546,7 @@ pub(super) async fn mcp(
             // Project servers already report their fresh approval state.
             if server["source"]
                 .as_str()
-                .is_some_and(|source| crate::mcp::is_project_mcp_source(source))
+                .is_some_and(crate::mcp::is_project_mcp_source)
             {
                 continue;
             }
@@ -607,7 +607,7 @@ pub(super) async fn mcp(
         .as_array()
         .and_then(|servers| servers.iter().find(|s| s["name"] == server))
         .and_then(|s| s["source"].as_str())
-        .is_some_and(|source| crate::mcp::is_project_mcp_source(source));
+        .is_some_and(crate::mcp::is_project_mcp_source);
     let approval = match action {
         "approve" => Some(crate::mcp::McpApproval::Approve),
         "approve-all" => Some(crate::mcp::McpApproval::ApproveAll),

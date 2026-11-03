@@ -434,12 +434,6 @@ opt-level = 3
 [profile.test.package.unicode-truncate]
 opt-level = 3
 
-[profile.dev.package.unicode-linebreak]
-opt-level = 3
-[profile.selfdev.package.unicode-linebreak]
-opt-level = 3
-[profile.test.package.unicode-linebreak]
-opt-level = 3
 
 [profile.dev.package.compact_str]
 opt-level = 3
@@ -458,12 +452,6 @@ opt-level = 3
 # 3 costs a one-time compile and is then reused across every iterative jcode
 # rebuild (same rationale as jcode-tui-anim above). It does NOT slow down
 # recompiles of jcode's own crates.
-[profile.dev.package.cosmic-text]
-opt-level = 3
-[profile.selfdev.package.cosmic-text]
-opt-level = 3
-[profile.test.package.cosmic-text]
-opt-level = 3
 
 [profile.dev.package.rustybuzz]
 opt-level = 3
@@ -479,19 +467,7 @@ opt-level = 3
 [profile.test.package.ttf-parser]
 opt-level = 3
 
-[profile.dev.package.swash]
-opt-level = 3
-[profile.selfdev.package.swash]
-opt-level = 3
-[profile.test.package.swash]
-opt-level = 3
 
-[profile.dev.package.yazi]
-opt-level = 3
-[profile.selfdev.package.yazi]
-opt-level = 3
-[profile.test.package.yazi]
-opt-level = 3
 
 [profile.dev.package.fontdb]
 opt-level = 3

@@ -102,7 +102,7 @@ fn loading_picker_search_is_editable_and_escape_clears_without_closing() {
             .expect("leave search"),
         OverlayAction::Continue
     ));
-    assert!(!picker.search_active);
+    assert!(picker.search_active);
     assert!(picker.search_query.is_empty());
     assert!(picker.loading_message.is_some());
     assert!(matches!(

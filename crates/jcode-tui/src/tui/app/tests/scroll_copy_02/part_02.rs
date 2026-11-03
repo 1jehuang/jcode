@@ -928,7 +928,7 @@ fn test_side_panel_header_close_hides_without_deleting_page() {
     assert!(!redraw);
     assert!(app.side_panel.focused_page().is_none());
     assert_eq!(app.side_panel.pages[0].id, "plan");
-    assert_eq!(app.status_notice(), Some("Side panel: OFF".to_string()));
+    assert_eq!(app.status_notice(), Some(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT.to_string()));
 
     app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Updated plan"));
     assert!(app.side_panel.focused_page().is_none());

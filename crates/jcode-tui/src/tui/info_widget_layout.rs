@@ -669,6 +669,10 @@ fn place_remaining(
             Side::Left => margin.x_offset,
         };
     }
+    if overview_placed {
+        placements.retain(|placement| !overview_renders(placement.kind));
+        next_anchors.retain(|anchor| !overview_renders(anchor.placement.kind));
+    }
     placed_overview_now
 }
 

@@ -59,26 +59,21 @@ fn local_image_submission_invalidates_cached_image_set() {
 #[test]
 fn test_image_attachment_deletion_reports_detach_and_keeps_other_image() {
     let mut app = create_test_app();
-    attach_test_image(&mut app);
-    attach_test_image(&mut app);
-    app.set_input_for_test("[image 2]");
-    app.sync_model_picker_preview_from_input();
-    assert_eq!(
-        app.status_notice(),
-        Some("Detached 1 image · 1 attached".to_string())
-    );
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    assert!(crate::tui::TuiState::input_image_attached(&app, 2));
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 0));
+    paste_selection_test_png(&mut app, 91);
+    let second = paste_selection_test_png(&mut app, 92);
+    let end = app.input.find("]").unwrap() + 1;
+    app.remove_input_range(0, end);
+    assert_eq!(app.status_notice(), Some("Detached 1 image · 1 attached".to_string()));
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
-    assert_eq!(prepared.images.len(), 1);
-    assert_eq!(prepared.raw_input, "[image 2]");
+    assert_eq!(prepared.images, [("image/png".into(), second)]);
+    assert!(prepared.raw_input.contains("[image 1]"));
 }
 
 #[test]
 fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
     let mut app = create_test_app();
-    attach_test_image(&mut app);
+    paste_selection_test_png(&mut app, 93);
     app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
         .unwrap();
     assert_eq!(
@@ -86,12 +81,12 @@ fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
         Some("Detached 1 image · 0 attached".to_string())
     );
     assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    // Undoing the text cannot falsely claim that the released payload exists.
+    // Undo restores the image and its owned marker together.
     app.undo_input_change();
     assert_eq!(app.input(), "[image 1]");
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
-    assert!(prepared.images.is_empty());
+    assert_eq!(prepared.images.len(), 1);
 }
 
 #[test]

@@ -21,7 +21,8 @@ fn assert_cached_selection(
             vec![first.clone(), second.clone()],
         )))
         .unwrap();
-    assert!(rendered_text(&mut picker).contains("outside_first"));
+    let text = rendered_text(&mut picker);
+    assert!(text.contains("outside_first"), "{text}");
     assert_eq!(picker.selected_session().unwrap().id, "outside_first");
     assert!(!picker.user_selection_intent);
     interact(&mut picker);

@@ -550,9 +550,9 @@ mod tests {
         let gate = Arc::new(ActivityGate::default());
         let selected = BTreeSet::from(["selected".into()]);
         let other_gate = gate.clone();
-        let child = gate
+        let (child,) = gate
             .spawn_session("selected", async move {
-                other_gate.spawn(std::future::pending::<()>()).unwrap()
+                (other_gate.spawn(std::future::pending::<()>()).unwrap(),)
             })
             .unwrap()
             .await

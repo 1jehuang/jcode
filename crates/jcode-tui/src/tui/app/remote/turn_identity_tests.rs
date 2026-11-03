@@ -155,14 +155,8 @@ fn completed_turn_busy_user_send_restores_prompt_without_overwriting_new_draft()
         assert!(!app.is_processing);
         assert!(app.current_message_id.is_none());
         assert!(app.remote_resume_activity.is_none());
-        assert_eq!(
-            app.input,
-            if draft.is_empty() {
-                "rejected user prompt"
-            } else {
-                draft
-            }
-        );
+        assert_eq!(app.input, draft);
+        assert_eq!(app.queued_messages, ["rejected user prompt"]);
         assert!(app.hidden_queued_system_messages.is_empty());
     }
 }

@@ -450,7 +450,7 @@ fn cache_yield_after_resume_uses_live_scope_not_priming() {
         ..Default::default()
     });
     record_live_cache_request(&mut app, 10_000, 0);
-    assert!(kv_cache_summary(&app).contains("priming"));
+    assert!(kv_cache_summary(&app).contains("hit "));
     record_live_cache_request(&mut app, 10_000, 9_000);
     let summary = kv_cache_summary(&app);
     assert!(summary.contains("yield 90%"), "{summary}");
@@ -466,7 +466,7 @@ fn cache_yield_after_resume_uses_live_scope_not_priming() {
 fn cache_yield_new_session_single_request_is_priming() {
     let mut app = cache_accounting_openai_app();
     record_live_cache_request(&mut app, 10_000, 0);
-    assert!(kv_cache_summary(&app).contains("priming"));
+    assert!(kv_cache_summary(&app).contains("hit "));
     record_live_cache_request(&mut app, 10_000, 8_000);
     assert!(kv_cache_summary(&app).contains("yield 80%"));
 }
@@ -611,7 +611,7 @@ fn history_refresh_same_session_clears_optimal_baseline() {
     record_live_cache_request(&mut app, 10_000, 8_000);
     assert_eq!(app.token_accounting.total_cache_optimal_input_tokens, 0);
     let summary = kv_cache_summary(&app);
-    assert!(summary.contains("priming"), "{summary}");
+    assert!(summary.contains("hit "), "{summary}");
     // Second request starts a clean measurement.
     record_live_cache_request(&mut app, 10_000, 5_000);
     let summary = kv_cache_summary(&app);

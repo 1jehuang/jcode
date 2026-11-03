@@ -291,9 +291,11 @@ impl App {
     pub(super) fn set_remote_prompt_history_session(&mut self, session_id: &str) {
         self.capture_visible_prompt_history();
         let adopting_startup = self.remote_session_id.is_none() && self.resume_session_id.is_none();
-        let startup_prompts = adopting_startup
-            .then(|| self.persisted_prompt_history.clone().unwrap_or_default())
-            .unwrap_or_default();
+        let startup_prompts = if adopting_startup {
+            self.persisted_prompt_history.clone().unwrap_or_default()
+        } else {
+            Default::default()
+        };
         self.activate_prompt_history(session_id);
         self.remote_session_id = Some(session_id.to_string());
         self.prompt_history_scope.switch_pending = false;

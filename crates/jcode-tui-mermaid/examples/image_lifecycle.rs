@@ -205,18 +205,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             images::finish_terminal_image_frame(frame.buffer_mut());
         })?;
-        if event::poll(Duration::from_millis(80))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char(value @ '1'..='7') if !auto => {
-                            phase = value as usize - '1' as usize
-                        }
-                        KeyCode::Char(' ') if !auto => phase = (phase + 1) % names.len(),
-                        _ => {}
-                    }
-                }
+        if event::poll(Duration::from_millis(80))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char(value @ '1'..='7') if !auto => phase = value as usize - '1' as usize,
+                KeyCode::Char(' ') if !auto => phase = (phase + 1) % names.len(),
+                _ => {}
             }
         }
     }

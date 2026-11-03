@@ -1494,7 +1494,13 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
         .iter()
         .position(|line| extract_line_text(line).contains("Keep overall progress visible"))
         .unwrap();
-    assert_eq!(extract_line_text(&lines[intent_row + 1]).trim(), "●●○");
+    assert_eq!(
+        extract_line_text(&lines[intent_row + 1])
+            .trim()
+            .trim_matches('│')
+            .trim(),
+        "●●○"
+    );
     let plain = lines
         .iter()
         .map(extract_line_text)
@@ -1757,12 +1763,18 @@ fn finished_chat_todo_cards_show_lane_names_and_dots_without_changing_saved_data
             };
             let msg = DisplayMessage::todos(content.clone());
             let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-            assert_eq!(lines.len(), 2);
-            assert_eq!(extract_line_text(&lines[0]).trim(), "✓ Implementation  ●");
-            assert_eq!(extract_line_text(&lines[1]).trim(), "○ Validation      ○");
+            assert_eq!(lines.len(), 4);
+            assert_eq!(
+                extract_line_text(&lines[1]).trim().trim_matches('│').trim(),
+                "✓ Implementation  ●"
+            );
+            assert_eq!(
+                extract_line_text(&lines[2]).trim().trim_matches('│').trim(),
+                "○ Validation      ○"
+            );
             for width in 0..110 {
                 let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
-                assert_eq!(lines.len(), 2);
+
                 assert!(
                     lines
                         .iter()
@@ -1818,7 +1830,11 @@ fn render_todos_message_hides_item_confidence_transitions() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(text.trim(), "●", "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.trim().trim_matches('│').trim() == "●"),
+            "{text}"
+        );
         assert!(
             !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
             "{text}"

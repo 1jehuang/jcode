@@ -144,7 +144,11 @@ async fn assert_replacement_usage(streaming: bool, replacement_usage: bool) {
         let mut reported_usage = Vec::new();
         while let Ok(event) = rx.try_recv() {
             match event {
-                ServerEvent::RetryRollback { attempt: 1, max: 2 } => rollback_count += 1,
+                ServerEvent::RetryRollback { attempt: 1, max: 2 } => {
+                    rollback_count += 1;
+                    // Live usage belongs to the same discarded attempt as text.
+                    reported_usage.clear();
+                }
                 ServerEvent::TokenUsage {
                     input,
                     output,
@@ -157,6 +161,8 @@ async fn assert_replacement_usage(streaming: bool, replacement_usage: bool) {
             }
         }
         assert_eq!(rollback_count, 1);
+        // Usage snapshots can arrive while streaming and again at completion.
+        reported_usage.dedup();
         assert_eq!(
             reported_usage,
             if replacement_usage {

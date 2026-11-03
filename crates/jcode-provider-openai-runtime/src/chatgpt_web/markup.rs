@@ -27,12 +27,12 @@ pub(super) fn strip_web_markup(response: &str) -> String {
                 rest = &rest[tag.len()..];
                 continue;
             }
-            if rest.starts_with("<Cite ") {
-                if let Some(end) = rest.find("/>") {
-                    text.truncate(text.trim_end_matches(' ').len());
-                    rest = &rest[end + 2..];
-                    continue;
-                }
+            if rest.starts_with("<Cite ")
+                && let Some(end) = rest.find("/>")
+            {
+                text.truncate(text.trim_end_matches(' ').len());
+                rest = &rest[end + 2..];
+                continue;
             }
         }
         let ch = rest.chars().next().expect("nonempty suffix");

@@ -18,12 +18,14 @@ pub(super) async fn recover(server: &Server) {
                     member.status.as_str(),
                     "stopped" | "completed" | "done" | "failed" | "suspended" | "paused"
                 );
-                if member.is_headless && paused {
+                let recovery_pending = reload_recovery::has_pending_for_session(&member.session_id);
+                if member.is_headless && paused && !recovery_pending {
                     usage_limit_resume::cancel_pending_resume(&member.session_id);
                 }
                 (member.is_headless
-                    && !paused
-                    && (headless_member_should_restore(&member.status, true)
+                    && (!paused || recovery_pending)
+                    && (recovery_pending
+                        || headless_member_should_restore(&member.status, true)
                         || usage_limit_resume::has_pending_resume(&member.session_id)))
                 .then(|| member.session_id.clone())
             })
@@ -115,7 +117,8 @@ pub(super) async fn recover(server: &Server) {
         if matches!(
             member.status.as_str(),
             "stopped" | "completed" | "done" | "failed" | "suspended" | "paused"
-        ) {
+        ) && stored_directive.is_none()
+        {
             usage_limit_resume::cancel_pending_resume(&session_id);
             continue;
         }
@@ -242,16 +245,16 @@ pub(super) async fn recover(server: &Server) {
             )
             .await;
         }
-        if let Some(directive) = stored_directive {
-            if let Err(error) = reload_recovery::mark_delivered_if_matching_continuation(
+        if let Some(directive) = stored_directive
+            && let Err(error) = reload_recovery::mark_delivered_if_matching_continuation(
                 &session_id,
                 &directive.continuation_message,
                 "server_startup_headless",
-            ) {
-                crate::logging::warn(&format!(
-                    "Could not acknowledge recovery for {session_id}: {error}"
-                ));
-            }
+            )
+        {
+            crate::logging::warn(&format!(
+                "Could not acknowledge recovery for {session_id}: {error}"
+            ));
         }
         stats.resumed += 1;
         ReloadContext::log_recovery_outcome(

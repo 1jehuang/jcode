@@ -119,7 +119,14 @@ impl App {
                     Self::format_compaction_number(count as u64),
                     if count == 1 { "" } else { "s" },
                 ),
-                None => format!("📦 Compacted ({strategy})"),
+                None => match event.messages_dropped.filter(|count| *count > 0) {
+                    Some(count) => format!(
+                        "📦 Compacted ({strategy}): {} message{} dropped",
+                        Self::format_compaction_number(count as u64),
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    None => format!("📦 Compacted ({strategy})"),
+                },
             },
         }
     }

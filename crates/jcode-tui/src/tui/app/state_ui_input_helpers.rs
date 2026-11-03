@@ -36,6 +36,7 @@ impl RegisteredCommand {
 }
 
 const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
+    RegisteredCommand::public("/side", "Show or hide the side panel"),
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),

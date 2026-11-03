@@ -1034,6 +1034,9 @@ pub(crate) fn render_todo_card_body(
     width: u16,
     cap_width: bool,
 ) -> Option<Vec<Line<'static>>> {
+    if width == 0 {
+        return Some(Vec::new());
+    }
     let payload = serde_json::from_str::<TodoCardPayload>(content).ok()?;
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
@@ -1045,7 +1048,7 @@ pub(crate) fn render_todo_card_body(
         (width as usize).max(1)
     };
     let base_indent = "";
-    let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
+    let inner_width = card_width.saturating_sub(base_indent.width());
     // Long assessment prose is useful in a wide transcript, but wrapping it
     // with a hanging label quickly overwhelms the actual task list in a narrow
     // terminal. Keep those details to one ellipsized line at small widths.

@@ -331,6 +331,14 @@ impl App {
             index += 1;
             retain
         });
+        let removed = keep.iter().filter(|&&retained| !retained).count();
+        if removed > 0 {
+            self.set_status_notice(format!(
+                "Detached {removed} image{} · {} attached",
+                if removed == 1 { "" } else { "s" },
+                self.pending_images.len()
+            ));
+        }
         self.input_image_markers.spans = spans;
         self.input_image_markers.text.clone_from(&self.input);
     }

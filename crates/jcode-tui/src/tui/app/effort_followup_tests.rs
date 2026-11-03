@@ -290,18 +290,18 @@ cycle_case!(
     Some("swarm")
 );
 cycle_case!(
-    cycle_swarm_up_enters_deep_swarm,
+    cycle_swarm_up_wraps_to_minimum,
     OPENAI,
     Some("swarm"),
     1,
-    Some("swarm-deep")
+    Some("none")
 );
 cycle_case!(
-    cycle_deep_swarm_up_wraps_to_minimum,
+    cycle_unknown_effort_up_uses_default,
     OPENAI,
-    Some("swarm-deep"),
+    Some("unknown"),
     1,
-    Some("none")
+    Some("max")
 );
 cycle_case!(
     cycle_swarm_down_returns_to_reasoning,
@@ -311,11 +311,11 @@ cycle_case!(
     Some("max")
 );
 cycle_case!(
-    cycle_deep_swarm_down_returns_to_swarm,
+    cycle_unknown_effort_down_steps_below_default,
     OPENAI,
-    Some("swarm-deep"),
+    Some("unknown"),
     -1,
-    Some("swarm")
+    Some("xhigh")
 );
 cycle_case!(
     cycle_reasoning_up_advances_one_rung,
@@ -362,15 +362,15 @@ cycle_case!(
 cycle_case!(cycle_empty_ladder_returns_none, &[], None, 1, None);
 cycle_case!(
     cycle_swarm_only_unknown_uses_last_sentinel,
-    &["swarm", "swarm-deep"],
+    &["swarm"],
     None,
     1,
-    Some("swarm-deep")
+    Some("swarm")
 );
 cycle_case!(
     cycle_swarm_only_last_does_not_wrap,
-    &["swarm", "swarm-deep"],
-    Some("swarm-deep"),
+    &["swarm"],
+    Some("swarm"),
     1,
-    Some("swarm-deep")
+    Some("swarm")
 );

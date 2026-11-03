@@ -32,7 +32,10 @@ impl App {
             .or_else(|| trimmed.strip_prefix("/account"))?;
 
         if rest.is_empty() {
-            return None;
+            return crate::tui::is_ssh_remote().then(|| InlinePickerPreviewRequest::Account {
+                provider_filter: None,
+                filter: String::new(),
+            });
         }
 
         if !rest

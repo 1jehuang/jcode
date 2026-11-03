@@ -1512,8 +1512,23 @@ pub(crate) fn pinned_todo_band(
             crate::tui::justrust_status::Tone::Success => Color::Green,
             crate::tui::justrust_status::Tone::Failure => Color::Red,
         };
+        let row = if let Some(detail) = status.text.strip_prefix("justrust") {
+            Line::from(vec![
+                Span::styled(
+                    "justrust",
+                    Style::default().fg(if status.own_session {
+                        Color::Cyan
+                    } else {
+                        Color::Magenta
+                    }),
+                ),
+                Span::styled(detail.to_string(), Style::default().fg(color)),
+            ])
+        } else {
+            Line::styled(status.text.clone(), Style::default().fg(color))
+        };
         band.tasks.push(super::truncate_line_with_ellipsis_to_width(
-            &Line::styled(status.text.clone(), Style::default().fg(color)),
+            &row,
             width as usize,
         ));
     }
@@ -1572,7 +1587,7 @@ fn pinned_todo_band_for_payload(
         card.extend(card_lines);
         more_line = Some(card.len());
         card.push(Line::from(Span::styled(
-            "… collapse (todo)",
+            "▴ Collapse todos",
             Style::default().fg(dim_color()),
         )));
     } else if has_more {

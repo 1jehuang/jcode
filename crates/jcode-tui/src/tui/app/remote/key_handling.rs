@@ -257,7 +257,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
     {
         if !prepared.images.is_empty()
             && matches!(
-                app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()),
+                app_mod::commands_cloud::parse_cloud_command(prepared.routing_input().trim()),
                 Some(
                     app_mod::commands_cloud::CloudCommand::Move { .. }
                         | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
@@ -273,12 +273,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             ));
             return Ok(());
         }
-        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.routing_input().trim())
+        {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
             return Ok(());
         }
         if app.cloud_handoff_blocks_work()
-            && app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()).is_none()
+            && app_mod::commands_cloud::parse_cloud_command(prepared.routing_input().trim())
+                .is_none()
         {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
             app.set_status_notice(
@@ -286,7 +288,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             );
             return Ok(());
         }
-        let trimmed = prepared.expanded.trim();
+        let trimmed = prepared.routing_input().trim();
 
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.

@@ -899,12 +899,12 @@ impl App {
     }
 
     pub(super) fn start_claude_login_for_account_mode(&mut self, label: &str, replace: bool) {
-        if let Some(previous) = self.pending_login.take() {
-            if !previous.cancel_saved_attempt() {
-                self.pending_login = Some(previous);
-                self.set_status_notice("Login is already saving; waiting for completion");
-                return;
-            }
+        if let Some(previous) = self.pending_login.take()
+            && !previous.cancel_saved_attempt()
+        {
+            self.pending_login = Some(previous);
+            self.set_status_notice("Login is already saving; waiting for completion");
+            return;
         }
         let target_snapshot = match Self::saved_login_snapshot("claude", label) {
             Ok(snapshot) => snapshot,
@@ -1104,12 +1104,12 @@ impl App {
     }
 
     pub(super) fn start_openai_login_for_account_mode(&mut self, label: &str, replace: bool) {
-        if let Some(previous) = self.pending_login.take() {
-            if !previous.cancel_saved_attempt() {
-                self.pending_login = Some(previous);
-                self.set_status_notice("Login is already saving; waiting for completion");
-                return;
-            }
+        if let Some(previous) = self.pending_login.take()
+            && !previous.cancel_saved_attempt()
+        {
+            self.pending_login = Some(previous);
+            self.set_status_notice("Login is already saving; waiting for completion");
+            return;
         }
         let target_snapshot = match Self::saved_login_snapshot("openai", label) {
             Ok(snapshot) => snapshot,

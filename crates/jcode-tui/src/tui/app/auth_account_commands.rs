@@ -88,6 +88,11 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
 
     if let Some(parsed) = parse_account_command(trimmed) {
         match parsed {
+            Ok(AccountCommand::OpenOverlay { provider_filter })
+                if trimmed.starts_with("/account") && !trimmed.starts_with("/accounts") =>
+            {
+                app.open_account_picker(provider_filter.as_deref())
+            }
             Ok(command) => execute_account_command_local(app, command),
             Err(message) => app.push_display_message(DisplayMessage::error(message)),
         }
@@ -139,7 +144,9 @@ pub(crate) async fn handle_account_command_remote(
 }
 
 fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>> {
-    let rest = trimmed.strip_prefix("/accounts")?;
+    let rest = trimmed
+        .strip_prefix("/accounts")
+        .or_else(|| trimmed.strip_prefix("/account"))?;
     if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
         return None;
     }

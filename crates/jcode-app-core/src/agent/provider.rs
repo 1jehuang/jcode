@@ -1,13 +1,6 @@
 use super::*;
 
 impl Agent {
-    /// Speculatively prewarm the provider while a newly created session is idle.
-    ///
-    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
-    /// appropriate once an actual turn starts. Late MCP registration or user
-    /// customization can therefore still change the foreground tool snapshot;
-    /// the provider is responsible for discarding an incompatible warmup.
-
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
     }
@@ -204,7 +197,7 @@ impl Agent {
         match crate::model_usage::record_turn(turn_id, &route) {
             Ok(usage) => {
                 route.usage = Some(usage);
-                Bus::global().publish(BusEvent::ModelUsageUpdated(route));
+                Bus::global().publish(BusEvent::ModelUsageUpdated(Box::new(route)));
             }
             Err(error) => logging::warn(&format!("Could not record model turn usage: {error}")),
         }

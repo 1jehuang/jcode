@@ -873,7 +873,7 @@ impl Agent {
         }
         if fresh.len() > MAX_ANNOUNCED_MCP_TOOLS {
             text.push_str(&format!(
-                "... and {} more; use mcp action=search to find them.\n",
+                "... and {} more; use mcp_search to find them.\n",
                 fresh.len() - MAX_ANNOUNCED_MCP_TOOLS
             ));
         }

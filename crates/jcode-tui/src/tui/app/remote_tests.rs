@@ -487,7 +487,7 @@ fn process_remote_followups_waits_for_history_before_sending_startup_image() {
         app.display_messages()
             .iter()
             .filter(|message| {
-                message.role == "user" && message.content == "Start the fork immediately"
+                message.role == "user" && message.content.starts_with("Start the fork immediately")
             })
             .count(),
         1

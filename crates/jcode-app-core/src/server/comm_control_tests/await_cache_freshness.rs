@@ -276,6 +276,8 @@ async fn await_cache_expired_pending_preserves_deadline_and_timeout() {
     for background in [false, true] {
         let mut state = cached_wait(vec![], vec!["peer".into()], None);
         state.final_response = None;
+        // Distinct generations even when both fixtures start in the same millisecond.
+        state.created_at_unix_ms += u64::from(background);
         state.deadline_unix_ms = state.created_at_unix_ms.saturating_sub(1000);
         state.background = background;
         let (completed, rows, summary, background_started) = issue_cached_wait(

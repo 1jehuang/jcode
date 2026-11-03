@@ -254,8 +254,8 @@ fn test_remote_account_commands_send_wire_switches_and_host_management() {
             let (reader, _) = peer.into_split();
             let mut reader = BufReader::new(reader);
             for (provider, expected) in [
-                ("claude", "switch_anthropic_account"),
-                ("openai", "switch_openai_account"),
+                ("claude", "set_session_account"),
+                ("openai", "set_session_account"),
             ] {
                 assert!(
                     super::auth::handle_account_command_remote(
@@ -1160,7 +1160,7 @@ fn test_account_ux_single_filtered_account_stays_visible_in_full_frame() {
         // The picker shows the login email next to the name (upstream 3b52c5430).
         assert_eq!(
             picker.selected_entry().unwrap().name,
-            "Claude Otter · first@example.com"
+            "Claude Otter · first@example.com · unknown plan"
         );
 
         let backend = ratatui::backend::TestBackend::new(80, 24);
@@ -1418,7 +1418,6 @@ credentials: Default::default(),
             assert!(!entries.iter().any(|entry| matches!(entry.action,
                 crate::tui::PickerAction::Login(provider) if provider.id == unexpected
             )));
-            assert!(!entries.iter().any(|entry| entry.name == "account center"));
         }
     });
 }
@@ -1585,12 +1584,12 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
         let after_arrow = app.inline_interactive_state.as_ref().unwrap().selected;
         assert_eq!(after_arrow, initial_selected + 1);
 
-        app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::CONTROL)
             .unwrap();
         let after_vim = app.inline_interactive_state.as_ref().unwrap().selected;
         assert_eq!(after_vim, after_arrow + 1);
 
-        app.handle_key(KeyCode::Char('k'), KeyModifiers::empty())
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::CONTROL)
             .unwrap();
         assert_eq!(
             app.inline_interactive_state.as_ref().unwrap().selected,

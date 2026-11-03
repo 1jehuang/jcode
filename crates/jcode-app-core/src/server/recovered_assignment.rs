@@ -187,6 +187,10 @@ mod tests {
         )
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "test environment guard serializes process globals across async assertions"
+    )]
     #[tokio::test]
     async fn recovered_light_assignment_waits_then_completes_once() {
         let _lock = crate::storage::lock_test_env();
@@ -227,6 +231,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "test environment guard serializes process globals across async assertions"
+    )]
     #[tokio::test]
     async fn recovered_assignment_never_clobbers_reassignment_or_terminal_node() {
         let _lock = crate::storage::lock_test_env();
@@ -255,6 +263,10 @@ mod tests {
         assert_eq!(swarm.plans.read().await["swarm"].items[0].status, "done");
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "test environment guard serializes process globals across async assertions"
+    )]
     #[tokio::test]
     async fn recovered_capture_rejects_queued_terminal_and_ambiguous_assignments() {
         let swarm = fixture();
@@ -287,6 +299,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "test environment guard serializes process globals across async assertions"
+    )]
     #[tokio::test]
     async fn recovered_failure_marks_only_owned_inflight_assignment_failed() {
         let _lock = crate::storage::lock_test_env();

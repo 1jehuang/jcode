@@ -739,7 +739,7 @@ pub(super) async fn handle_client(
                 match bus_event {
                     Ok(BusEvent::ModelUsageUpdated(route)) => {
                         if model_usage_updates_enabled {
-                            let _ = client_event_tx.send(ServerEvent::ModelUsageUpdated { route });
+                            let _ = client_event_tx.send(ServerEvent::ModelUsageUpdated { route: *route });
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
@@ -1555,15 +1555,14 @@ server_resumes: false,
                         continue;
                     }
                 };
-                if let Some(profile) = profile {
-                    if let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
+                if let Some(profile) = profile
+                    && let Err(error) = agent.lock().await.set_agent_profile(Some(profile)) {
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id, message: format!("Failed to save agent profile: {error:#}"),
                             retry_after_secs: None, server_resumes: false,
                         });
                         continue;
                     }
-                }
                 // Overrides are creation-only. In particular, never apply one to
                 // a target attachment or a repeated Subscribe on this connection.
                 if let Some(prompt) = new_session_system_prompt(
@@ -3448,22 +3447,20 @@ server_resumes: false,
             while let Ok((done_id, result, report, owner, _finalization, published)) =
                 processing_done_rx.try_recv()
             {
-                if Some(done_id) == processing_message_id && owner == owner_id {
-                    if !published {
-                        record_processing_completion(
-                            processing_session_id.as_deref(),
-                            &result,
-                            report,
-                            &SwarmStatusRefs {
-                                members: &swarm_members,
-                                swarms_by_id: &swarms_by_id,
-                                event_history: &event_history,
-                                event_counter: &event_counter,
-                                event_tx: &swarm_event_tx,
-                            },
-                        )
-                        .await;
-                    }
+                if Some(done_id) == processing_message_id && owner == owner_id && !published {
+                    record_processing_completion(
+                        processing_session_id.as_deref(),
+                        &result,
+                        report,
+                        &SwarmStatusRefs {
+                            members: &swarm_members,
+                            swarms_by_id: &swarms_by_id,
+                            event_history: &event_history,
+                            event_counter: &event_counter,
+                            event_tx: &swarm_event_tx,
+                        },
+                    )
+                    .await;
                 }
             }
             client_is_processing = false;

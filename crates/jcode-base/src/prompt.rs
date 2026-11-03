@@ -578,6 +578,10 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the prompt sources passed by the public builder"
+)]
 fn build_system_prompt_split_from_sources(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],

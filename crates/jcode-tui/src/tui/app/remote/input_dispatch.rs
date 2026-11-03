@@ -765,7 +765,7 @@ mod ssh_slash_tests {
             )
             .await
             .unwrap();
-            assert_eq!(app.input, "/local");
+            assert_eq!(app.input, "/local [image 1]");
             assert_eq!(app.pending_images, images);
             assert_eq!(remote.next_request_id_for_test(), next_id);
         });

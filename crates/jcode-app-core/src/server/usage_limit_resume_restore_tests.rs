@@ -58,6 +58,7 @@ impl crate::provider::Provider for RestoreTestProvider {
     }
 }
 
+#[allow(clippy::await_holding_lock, reason = "test environment guard serializes process globals across async assertions")]
 #[tokio::test(start_paused = true)]
 async fn disk_only_wait_restores_deadline_and_original_transcript() {
     let _env = crate::storage::lock_test_env();
@@ -72,7 +73,7 @@ async fn disk_only_wait_restores_deadline_and_original_transcript() {
         .append_user_context_message("original assignment", vec![])
         .unwrap();
     let session_id = original.session_id().to_string();
-    let original_messages = original.message_count();
+    let original_messages = original.messages().iter().filter(|message| message.display_role.is_none()).count();
     let agent = Arc::new(AsyncMutex::new(original));
     let state = ResumeState {
         session_id: session_id.clone(),
@@ -149,7 +150,7 @@ None,
     };
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        guard.message_count(),
+        guard.messages().iter().filter(|message| !message.content.iter().any(|block| matches!(block, crate::message::ContentBlock::Text { text, .. } if text.trim_start().starts_with("<system-reminder>")))).count(),
         original_messages + 1,
         "restore must not append a synthetic user turn"
     );
@@ -191,6 +192,7 @@ fn cancel_disk_only_wait_and_stale_generation_cannot_replace_successor() {
     assert!(!has_pending_resume(&state.session_id));
 }
 
+#[allow(clippy::await_holding_lock, reason = "test environment guard serializes process globals across async assertions")]
 #[tokio::test]
 async fn stop_before_first_registration_cannot_leave_durable_orphan() {
     let _env = crate::storage::lock_test_env();
@@ -254,6 +256,7 @@ async fn stop_before_first_registration_cannot_leave_durable_orphan() {
     assert_eq!(members.read().await[&session_id].status, "stopped");
 }
 
+#[allow(clippy::await_holding_lock, reason = "test environment guard serializes process globals across async assertions")]
 #[tokio::test(start_paused = true)]
 async fn superseded_driver_cleanup_preserves_successor_durable_record() {
     let _env = crate::storage::lock_test_env();

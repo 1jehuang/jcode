@@ -322,8 +322,8 @@ fn effort_step_preselects_current_effort_for_the_current_model() {
         press(&mut app, KeyCode::Enter);
         assert_eq!(
             selected_row_name(&app),
-            "high",
-            "a family without a saved default level starts on high"
+            crate::config::Config::load().provider.anthropic_reasoning_effort.as_deref().unwrap_or("high"),
+            "another family starts on its configured default"
         );
 
         // Another OpenAI model starts on the family's saved level.

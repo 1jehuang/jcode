@@ -16,48 +16,48 @@ fn compaction_notice_preserves_known_usage_and_handles_missing_metadata() {
     let notice = |event: &crate::compaction::CompactionEvent| {
         App::format_compaction_complete_message(event, 200_000)
     };
-    assert_eq!(notice(&event), "📦 Context compacted (automatic recovery)");
+    assert_eq!(notice(&event), "📦 Compacted (automatic recovery)");
 
     event.messages_dropped = Some(1);
     assert_eq!(
         notice(&event),
-        "📦 Context compacted (automatic recovery): 1 message dropped"
+        "📦 Compacted (automatic recovery): 1 message dropped"
     );
     event.messages_dropped = Some(1_234);
     assert_eq!(
         notice(&event),
-        "📦 Context compacted (automatic recovery): 1,234 messages dropped"
+        "📦 Compacted (automatic recovery): 1,234 messages dropped"
     );
     event.messages_compacted = Some(1);
     assert_eq!(
         notice(&event),
-        "📦 Compacted 1 message (automatic recovery)"
+        "📦 Compacted (automatic recovery): 1 older message summarized"
     );
     event.messages_compacted = Some(0);
     assert_eq!(
         notice(&event),
-        "📦 Compacted 0 messages (automatic recovery)"
+        "📦 Compacted (automatic recovery): 1,234 messages dropped"
     );
 
     event.pre_tokens = Some(123_456);
     assert_eq!(
         notice(&event),
-        "📦 Compacted (automatic recovery): before ~123,456 tokens (61.7%); after unavailable"
+        "📦 Compacted (automatic recovery): from ~123,456 tokens (61.7%)"
     );
     assert_eq!(
         App::format_compaction_complete_message(&event, 0),
-        "📦 Compacted (automatic recovery): before ~123,456 tokens; after unavailable"
+        "📦 Compacted (automatic recovery): from ~123,456 tokens"
     );
     event.pre_tokens = None;
     event.post_tokens = Some(0);
     assert_eq!(
         notice(&event),
-        "📦 Compacted (automatic recovery): after ~0 tokens (0.0%); before unavailable"
+        "📦 Compacted (automatic recovery): now ~0 tokens (0.0%)"
     );
     event.post_tokens = Some(4_321);
     assert_eq!(
         App::format_compaction_complete_message(&event, 0),
-        "📦 Compacted (automatic recovery): after ~4,321 tokens; before unavailable"
+        "📦 Compacted (automatic recovery): now ~4,321 tokens"
     );
     event.pre_tokens = Some(123_456);
     assert_eq!(
@@ -132,11 +132,14 @@ fn native_auto_compaction_notice_reaches_terminal_without_invented_usage() {
         .join("\n");
     println!("NATIVE AUTO COMPACTION TERMINAL\n{screen}");
     assert!(
-        screen.contains("Compacted 24 messages (automatic)"),
+        screen.contains("Compacted (automatic): 24 older messages summarized"),
         "{screen}"
     );
     assert!(!screen.contains("unknown"), "{screen}");
     assert!(!screen.contains("~0 tokens"), "{screen}");
     let notice = &app.display_messages().last().unwrap().content;
-    assert_eq!(notice, "📦 Compacted 24 messages (automatic)");
+    assert_eq!(
+        notice,
+        "📦 Compacted (automatic): 24 older messages summarized"
+    );
 }

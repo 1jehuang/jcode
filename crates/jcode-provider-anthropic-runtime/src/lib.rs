@@ -746,13 +746,6 @@ impl AnthropicProvider {
         self.set_credential_mode(mode)
     }
 
-    /// Fetch the live Anthropic model catalog using the resolved credential.
-    ///
-    /// Mirrors [`Provider::prefetch_models`] but returns the model ids to the
-    /// caller (rather than only persisting them) so the doctor can assert the
-    /// live `GET /v1/models` endpoint works and that the model under test is in
-    /// the live catalog.
-
     pub fn new() -> Self {
         let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
             if Self::is_usage_exhausted() {
