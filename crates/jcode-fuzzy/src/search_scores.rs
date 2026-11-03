@@ -39,7 +39,8 @@ impl CachedWordScores {
     /// Score one whitespace-delimited word, bounded to 128 Unicode characters.
     pub fn score(&mut self, token: &str, word: &str) -> Option<i32> {
         self.prepare(token);
-        let scores = self.tokens.get_mut(token).expect("prepared token exists");
+        // A missing cache entry is a miss, never a reason to panic in search.
+        let scores = self.tokens.get_mut(token)?;
         Self::score_word(scores, &mut self.entries, &mut self.bytes, word)
     }
 
@@ -47,7 +48,8 @@ impl CachedWordScores {
     /// distinguish a near typo from an incidental longer prefix/suffix match.
     pub fn best_score(&mut self, token: &str, text: &str, penalize_length: bool) -> Option<i32> {
         self.prepare(token);
-        let scores = self.tokens.get_mut(token).expect("prepared token exists");
+        // A missing cache entry is a miss, never a reason to panic in search.
+        let scores = self.tokens.get_mut(token)?;
         let token_len = if penalize_length {
             token.chars().count()
         } else {

@@ -625,12 +625,19 @@ fn system_hostname() -> Option<String> {
 /// subscribe. Without this, every real-server subscribe from a remote client
 /// fails with "Subscribe requires the client's working directory".
 fn default_client_working_dir() -> String {
-    std::env::current_dir()
-        .ok()
-        .filter(|p| p.is_absolute())
-        .or_else(dirs::home_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/".to_string())
+    match std::env::current_dir() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Gateway working directory unavailable, using home: {error}"
+            ));
+            None
+        }
+    }
+    .filter(|p| p.is_absolute())
+    .or_else(dirs::home_dir)
+    .map(|p| p.to_string_lossy().to_string())
+    .unwrap_or_else(|| "/".to_string())
 }
 
 #[cfg(test)]

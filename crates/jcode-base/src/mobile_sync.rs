@@ -71,11 +71,20 @@ fn state_path() -> Result<PathBuf> {
 }
 
 pub fn load_state() -> MobileSyncState {
-    state_path()
-        .ok()
-        .filter(|p| p.exists())
-        .and_then(|p| storage::read_json(&p).ok())
-        .unwrap_or_default()
+    let state = (|| -> Result<MobileSyncState> {
+        let path = state_path()?;
+        if !path.exists() {
+            return Ok(MobileSyncState::default());
+        }
+        storage::read_json(&path)
+    })();
+    match state {
+        Ok(state) => state,
+        Err(error) => {
+            crate::logging::warn(&format!("Could not load mobile sync state: {error:#}"));
+            MobileSyncState::default()
+        }
+    }
 }
 
 pub fn save_state(state: &MobileSyncState) -> Result<()> {
@@ -100,9 +109,16 @@ pub fn session_source() -> &'static str {
 }
 
 fn host_name() -> Option<String> {
-    std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+    std::env::var_os("HOSTNAME")
+        .map(|value| value.to_string_lossy().into_owned())
+        .or_else(|| match std::fs::read_to_string("/etc/hostname") {
+            Ok(value) => Some(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                crate::logging::debug(&format!("Mobile hostname unavailable: {error}"));
+                None
+            }
+        })
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -185,12 +201,20 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
 }
 
 fn mtime_ms(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => match modified.duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis() as u64,
+            Err(error) => {
+                crate::logging::debug(&format!("Mobile snapshot predates epoch: {error}"));
+                0
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            crate::logging::debug(&format!("Mobile snapshot mtime unavailable: {error}"));
+            0
+        }
+    }
 }
 
 fn session_mtime_ms(snapshot: &Path) -> u64 {
@@ -257,7 +281,9 @@ async fn upload(
         .context("mobile sync upload failed")?;
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
+        let text = response.text().await.with_context(|| {
+            format!("mobile sync upload returned {status}, response body unreadable")
+        })?;
         anyhow::bail!(
             "mobile sync upload returned {status}: {}",
             text.chars().take(300).collect::<String>()
@@ -296,7 +322,12 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
         if !valid_session_id(&id) {
             continue;
         }
-        let progress = state.sessions.get(&id).cloned().unwrap_or_default();
+        // No previous upload means a new session, not an error.
+        let progress = state
+            .sessions
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(SessionProgress::default);
         if progress.mtime_ms >= mtime {
             continue;
         }

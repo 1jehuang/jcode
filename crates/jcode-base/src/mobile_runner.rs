@@ -38,9 +38,13 @@ pub fn is_cloud_machine() -> bool {
 }
 
 fn busy_marker() -> Option<PathBuf> {
-    crate::storage::jcode_dir()
-        .ok()
-        .map(|d| d.join("mobile-runner-busy"))
+    match crate::storage::jcode_dir() {
+        Ok(directory) => Some(directory.join("mobile-runner-busy")),
+        Err(error) => {
+            crate::logging::warn(&format!("mobile runner busy marker unavailable: {error:#}"));
+            None
+        }
+    }
 }
 
 fn workspace_dir() -> PathBuf {
@@ -72,7 +76,10 @@ pub fn inherited_provider_args(args: impl IntoIterator<Item = String>) -> Vec<St
 
 /// Extract the session id from `jcode run --ndjson` output.
 pub fn session_id_from_ndjson_line(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    // Non-JSON stdout is not a session-start event.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return None;
+    };
     value
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -84,7 +91,7 @@ async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option
     let response = client
         .post(format!("{base}/mobile/commands/claim"))
         .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": std::env::var("HOSTNAME").unwrap_or_default() }))
+        .json(&serde_json::json!({ "machine": std::env::var_os("HOSTNAME").map_or_else(String::new, |name| name.to_string_lossy().into_owned()) }))
         .timeout(Duration::from_secs(30))
         .send()
         .await?;
@@ -154,17 +161,28 @@ async fn run_turn(command: &MobileCommand) -> Result<String> {
                 None => break,
             },
             _ = touch.tick() => {
-                if let Some(m) = &marker { let _ = std::fs::write(m, b""); }
+                if let Some(m) = &marker
+                    && let Err(error) = std::fs::write(m, b"")
+                {
+                    crate::logging::warn(&format!("mobile runner busy marker update failed: {error}"));
+                }
             }
             _ = &mut deadline => {
-                let _ = child.kill().await;
+                if let Err(error) = child.kill().await {
+                    crate::logging::warn(&format!("mobile runner timed-out child cleanup failed: {error}"));
+                }
                 anyhow::bail!("turn timed out");
             }
         }
     }
     let output = child.wait_with_output().await?;
-    if let Some(m) = &marker {
-        let _ = std::fs::remove_file(m);
+    if let Some(m) = &marker
+        && let Err(error) = std::fs::remove_file(m)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!(
+            "mobile runner busy marker removal failed: {error}"
+        ));
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -196,7 +214,9 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
         command.kind, command.command_id
     ));
     let outcome = run_turn(&command).await;
-    let _ = mobile_sync::sync_once(client).await;
+    if let Err(error) = mobile_sync::sync_once(client).await {
+        crate::logging::warn(&format!("mobile runner transcript sync failed: {error:#}"));
+    }
     complete(client, &base, &key, &command.command_id, &outcome).await?;
     outcome.map(|_| true)
 }
@@ -206,7 +226,9 @@ pub fn ensure_sync_enabled() {
     let mut state = mobile_sync::load_state();
     if !state.enabled {
         state.enabled = true;
-        let _ = mobile_sync::save_state(&state);
+        if let Err(error) = mobile_sync::save_state(&state) {
+            crate::logging::warn(&format!("mobile runner could not enable sync: {error:#}"));
+        }
     }
 }
 

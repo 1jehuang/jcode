@@ -308,7 +308,13 @@ pub fn enrich_routes(routes: &mut [ModelRoute]) {
     // Legacy selections remain independently retried on every read. A failed
     // legacy file read must not become sticky behind the SQLite memo either.
     let mut usage = legacy();
-    let aggregate = usage_aggregate().ok();
+    let aggregate = match usage_aggregate() {
+        Ok(aggregate) => Some(aggregate),
+        Err(error) => {
+            crate::logging::warn(&format!("Could not load model usage aggregate: {error:#}"));
+            None
+        }
+    };
     let started = aggregate.as_ref().map(|aggregate| aggregate.0);
     if let Some(aggregate) = aggregate.as_ref() {
         for (key, recorded) in &aggregate.1 {

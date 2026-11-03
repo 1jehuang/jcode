@@ -361,7 +361,7 @@ pub(super) async fn dispatch_swarm_worker_report(
         sessions,
         swarm,
     ).await {
-        let _ = queue_soft_interrupt_for_session(
+        let queued = queue_soft_interrupt_for_session(
             &event.session_id,
             format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
             false,
@@ -369,6 +369,9 @@ pub(super) async fn dispatch_swarm_worker_report(
             soft_interrupt_queues,
             sessions,
         ).await;
+        if !queued {
+            crate::logging::warn("Could not queue worker report for coordinator session");
+        }
     }
 }
 

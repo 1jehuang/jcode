@@ -142,12 +142,12 @@ mod client;
 /// Jcode Cloud account sign-in and managed host connection (feature `cloud`).
 #[cfg(feature = "cloud")]
 pub mod cloud;
-#[cfg(feature = "ssh-native")]
-mod native_ssh;
 pub mod collections;
 mod diagnostics;
 mod errors;
 mod launch;
+#[cfg(feature = "ssh-native")]
+mod native_ssh;
 mod process;
 mod ssh;
 mod structured;
@@ -183,9 +183,9 @@ pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
 };
-pub use ssh::SshConnectOptions;
 #[cfg(feature = "ssh-native")]
 pub use native_ssh::{NativeSshKey, NativeSshOptions, NativeSshTransport};
+pub use ssh::SshConnectOptions;
 #[cfg(unix)]
 pub use ssh::{SharedSshTransport, WeakSharedSshTransport};
 pub use structured::{

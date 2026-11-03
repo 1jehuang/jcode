@@ -95,12 +95,27 @@ pub fn save_context(
         account_usage,
     };
     // Best-effort UI metadata must never fail a provider turn.
-    let _ = crate::storage::write_json_fast(&path, &snapshot);
+    if let Err(error) = crate::storage::write_json_fast(&path, &snapshot) {
+        crate::logging::warn(&format!("Could not save session telemetry: {error:#}"));
+    }
 }
 
 pub fn load_context(session: &Session) -> Option<SessionTelemetry> {
-    let bytes = std::fs::read(path(&session.id)?).ok()?;
-    let snapshot: SessionTelemetry = serde_json::from_slice(&bytes).ok()?;
+    let bytes = match std::fs::read(path(&session.id)?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::logging::warn(&format!("Could not read session telemetry: {error}"));
+            return None;
+        }
+    };
+    let snapshot: SessionTelemetry = match serde_json::from_slice(&bytes) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::logging::warn(&format!("Could not decode session telemetry: {error}"));
+            return None;
+        }
+    };
     snapshot.matches_session(session).then_some(snapshot)
 }
 

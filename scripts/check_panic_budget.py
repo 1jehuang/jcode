@@ -22,12 +22,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from rust_safety_scan import production_lines, test_module_files
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = REPO_ROOT / "scripts" / "panic_budget.json"
 SCAN_ROOTS = (REPO_ROOT / "src", REPO_ROOT / "crates")
 PATTERN = re.compile(r"\.unwrap\(|\.expect\(|\b(?:panic!|todo!|unimplemented!)")
-CFG_TEST_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*(?:all\s*\(\s*)?test\s*[,)]")
-ITEM_START_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const)\s+)*(?:mod|fn)\b")
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,46 +63,8 @@ def production_rust_files() -> list[Path]:
         for path in sorted(root.rglob("*.rs")):
             if path.suffix == ".rs" and not is_test_rust_file(path):
                 files.append(path)
-    return files
-
-
-def brace_delta(line: str) -> int:
-    """Approximate Rust block nesting for budget classification.
-
-    The panic budget is a ratchet, not a parser. This intentionally simple scan
-    ignores comments and strings, which is acceptable for excluding normal
-    `#[cfg(test)] mod tests { ... }` blocks from production counts.
-    """
-    return line.count("{") - line.count("}")
-
-
-def production_lines(path: Path) -> list[str]:
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    output: list[str] = []
-    skip_stack: list[int] = []
-    pending_cfg_test = False
-
-    for line in lines:
-        stripped = line.strip()
-        current_depth = sum(skip_stack)
-        if current_depth == 0:
-            if pending_cfg_test and ITEM_START_RE.match(line):
-                delta = brace_delta(line)
-                if delta > 0:
-                    skip_stack.append(delta)
-                pending_cfg_test = False
-                continue
-            if pending_cfg_test and stripped and not stripped.startswith("#"):
-                pending_cfg_test = False
-            if CFG_TEST_RE.match(line):
-                pending_cfg_test = True
-                continue
-            output.append(line)
-        else:
-            skip_stack[-1] += brace_delta(line)
-            if skip_stack[-1] <= 0:
-                skip_stack.pop()
-    return output
+    test_only = test_module_files(files, production_lines)
+    return [path for path in files if path not in test_only]
 
 
 def current_counts() -> dict[str, int]:

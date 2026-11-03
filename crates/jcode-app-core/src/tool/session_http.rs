@@ -144,8 +144,21 @@ pub(crate) fn clients(session: &str, profiles: &[Profile]) -> Result<Vec<reqwest
     })
 }
 
+fn daemon_env(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            crate::logging::warn(&format!(
+                "Ignoring non-Unicode daemon environment variable {key}"
+            ));
+            None
+        }
+    }
+}
+
 fn select(env: &HashMap<String, String>, profile: Profile) -> Result<reqwest::Client> {
-    let config = ProxyConfig::resolve(env, |key| std::env::var(key).ok());
+    let config = ProxyConfig::resolve(env, daemon_env);
     let Some(config) = config else {
         return if profile == Profile::Shared {
             Ok(crate::provider::shared_http_client())
@@ -160,7 +173,9 @@ fn select(env: &HashMap<String, String>, profile: Profile) -> Result<reqwest::Cl
         .iter()
         .position(|e| e.config == config && e.profile == profile)
     {
-        let entry = cache.remove(index).unwrap();
+        let entry = cache
+            .remove(index)
+            .ok_or_else(|| anyhow!("Session HTTP cache entry disappeared"))?;
         let client = entry.client.clone();
         cache.push_back(entry);
         return Ok(client);
@@ -185,7 +200,7 @@ fn select(env: &HashMap<String, String>, profile: Profile) -> Result<reqwest::Cl
 pub(crate) fn prune(envs: &HashMap<String, HashMap<String, String>>) {
     let configs: Vec<_> = envs
         .values()
-        .filter_map(|env| ProxyConfig::resolve(env, |key| std::env::var(key).ok()))
+        .filter_map(|env| ProxyConfig::resolve(env, daemon_env))
         .collect();
     CACHE
         .lock()

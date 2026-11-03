@@ -33,11 +33,15 @@ pub fn semver_core(value: &str) -> Option<(u32, u32, u32)> {
     let trimmed = value.trim().trim_start_matches('v');
     let core = trimmed.split_once('-').map_or(trimmed, |(core, _)| core);
     let mut parts = core.split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    ))
+    let (Ok(major), Ok(minor), Ok(patch)) = (
+        parts.next()?.parse(),
+        parts.next()?.parse(),
+        parts.next()?.parse(),
+    ) else {
+        // Invalid and overflowing components are not semantic versions.
+        return None;
+    };
+    Some((major, minor, patch))
 }
 
 fn numeric_component(value: &str) -> bool {

@@ -9,8 +9,9 @@
 use crate::cloud::CloudTarget;
 use crate::{ConnectOptions, Error, ErrorKind, JcodeClient, Result, Transport};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// An in-memory SSH private key.
@@ -31,18 +32,25 @@ impl std::fmt::Debug for NativeSshKey {
 impl NativeSshKey {
     /// A fresh ed25519 key. `comment` ends up in the OpenSSH public key line.
     pub fn generate(comment: &str) -> Result<Self> {
-        let private = russh::keys::PrivateKey::random(
-            &mut rand_core::OsRng,
-            russh::keys::Algorithm::Ed25519,
-        )
-        .map_err(|e| Error::new(ErrorKind::ConnectFailed, format!("Could not generate a connection key: {e}")))?;
+        let private =
+            russh::keys::PrivateKey::random(&mut rand_core::OsRng, russh::keys::Algorithm::Ed25519)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::ConnectFailed,
+                        format!("Could not generate a connection key: {e}"),
+                    )
+                })?;
         Self::from_private(private, comment)
     }
 
     /// Load an OpenSSH private key (unencrypted).
     pub fn from_openssh(pem: &str) -> Result<Self> {
-        let private = russh::keys::PrivateKey::from_openssh(pem)
-            .map_err(|e| Error::new(ErrorKind::InvalidOption, format!("invalid SSH private key: {e}")))?;
+        let private = russh::keys::PrivateKey::from_openssh(pem).map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidOption,
+                format!("invalid SSH private key: {e}"),
+            )
+        })?;
         let comment = private.comment().to_string();
         Self::from_private(private, &comment)
     }
@@ -61,7 +69,10 @@ impl NativeSshKey {
             public_openssh.push(' ');
             public_openssh.push_str(&comment);
         }
-        Ok(Self { private: Arc::new(private), public_openssh })
+        Ok(Self {
+            private: Arc::new(private),
+            public_openssh,
+        })
     }
 
     /// `ssh-ed25519 AAAA... comment`, for authorized_keys or Jcode Cloud.
@@ -111,7 +122,10 @@ impl NativeSshOptions {
             || self.remote_binary.starts_with('-')
             || self.remote_binary.chars().any(char::is_control)
         {
-            return Err(Error::new(ErrorKind::InvalidOption, "invalid remote_binary"));
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "invalid remote_binary",
+            ));
         }
         Ok(format!(
             "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
@@ -122,15 +136,18 @@ impl NativeSshOptions {
 
 struct PinnedHost {
     keys: Vec<russh::keys::PublicKey>,
-    mismatch: Arc<Mutex<bool>>,
+    mismatch: Arc<AtomicBool>,
 }
 
 impl russh::client::Handler for PinnedHost {
     type Error = russh::Error;
-    async fn check_server_key(&mut self, key: &russh::keys::PublicKey) -> std::result::Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
         let ok = self.keys.iter().any(|k| k.key_data() == key.key_data());
         if !ok {
-            *self.mismatch.lock().unwrap() = true;
+            self.mismatch.store(true, Ordering::Relaxed);
         }
         Ok(ok)
     }
@@ -154,10 +171,20 @@ impl NativeSshTransport {
         let keys: Vec<_> = options
             .host_keys
             .iter()
-            .filter_map(|k| russh::keys::PublicKey::from_openssh(k).ok())
-            .collect();
+            .map(|key| {
+                russh::keys::PublicKey::from_openssh(key).map_err(|error| {
+                    Error::new(
+                        ErrorKind::InvalidOption,
+                        format!("invalid pinned host key: {error}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         if keys.is_empty() {
-            return Err(Error::new(ErrorKind::InvalidOption, "no valid pinned host keys"));
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "no valid pinned host keys",
+            ));
         }
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
         let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>();
@@ -169,12 +196,15 @@ impl NativeSshTransport {
                 let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(Error::new(ErrorKind::ConnectFailed, e.to_string())));
+                        // A dropped receiver means the caller already abandoned startup.
+                        if ready_tx.send(Err(Error::new(ErrorKind::ConnectFailed, e.to_string()))).is_err() {
+                            return;
+                        }
                         return;
                     }
                 };
                 rt.block_on(async move {
-                    let mismatch = Arc::new(Mutex::new(false));
+                    let mismatch = Arc::new(AtomicBool::new(false));
                     let opened = tokio::time::timeout(
                         options.connect_timeout,
                         open(&options, keys, Arc::clone(&mismatch), &command),
@@ -183,21 +213,28 @@ impl NativeSshTransport {
                     let (session, mut channel) = match opened {
                         Ok(Ok(pair)) => pair,
                         Ok(Err(e)) => {
-                            let e = if *mismatch.lock().unwrap() {
+                            let e = if mismatch.load(Ordering::Relaxed) {
                                 Error::new(ErrorKind::HostKeyMismatch, "the host's SSH key does not match the pinned key")
                             } else {
                                 e
                             };
-                            let _ = ready_tx.send(Err(e));
+                            if ready_tx.send(Err(e)).is_err() {
+                                return;
+                            }
                             return;
                         }
                         Err(_) => {
-                            let _ = ready_tx.send(Err(Error::new(ErrorKind::StartupTimeout, "SSH connection timed out")));
+                            if ready_tx.send(Err(Error::new(ErrorKind::StartupTimeout, "SSH connection timed out"))).is_err() {
+                                return;
+                            }
                             return;
                         }
                     };
-                    let _ = ready_tx.send(Ok(()));
+                    let caller_ready = ready_tx.send(Ok(())).is_ok();
                     loop {
+                        if !caller_ready {
+                            break;
+                        }
                         tokio::select! {
                             msg = channel.wait() => match msg {
                                 Some(russh::ChannelMsg::Data { data }) => {
@@ -211,23 +248,33 @@ impl NativeSshTransport {
                                     if channel.data(&bytes[..]).await.is_err() { break; }
                                 }
                                 Some(Outgoing::Close) | None => {
-                                    let _ = tokio::time::timeout(Duration::from_secs(2), channel.eof()).await;
+                                    // Shutdown is best effort: timeout or EOF failure both close the channel.
+                                    match tokio::time::timeout(Duration::from_secs(2), channel.eof()).await {
+                                        Ok(Ok(())) | Ok(Err(_)) | Err(_) => {}
+                                    }
                                     break;
                                 }
                             },
                         }
                     }
-                    let _ = session
-                        .disconnect(russh::Disconnect::ByApplication, "", "en")
-                        .await;
+                    if session.disconnect(russh::Disconnect::ByApplication, "", "en").await.is_err() {
+                        // The peer may already have closed. Dropping the handle still tears down SSH.
+                        drop(session);
+                    }
                     // Dropping in_tx signals EOF to the reader.
                 });
             })
             .map_err(|e| Error::new(ErrorKind::ConnectFailed, e.to_string()))?;
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { incoming: in_rx, outgoing: out_tx }),
+            Ok(Ok(())) => Ok(Self {
+                incoming: in_rx,
+                outgoing: out_tx,
+            }),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(Error::new(ErrorKind::ConnectFailed, "SSH thread exited during startup")),
+            Err(_) => Err(Error::new(
+                ErrorKind::ConnectFailed,
+                "SSH thread exited during startup",
+            )),
         }
     }
 }
@@ -235,9 +282,12 @@ impl NativeSshTransport {
 async fn open(
     options: &NativeSshOptions,
     keys: Vec<russh::keys::PublicKey>,
-    mismatch: Arc<Mutex<bool>>,
+    mismatch: Arc<AtomicBool>,
     command: &str,
-) -> Result<(russh::client::Handle<PinnedHost>, russh::Channel<russh::client::Msg>)> {
+) -> Result<(
+    russh::client::Handle<PinnedHost>,
+    russh::Channel<russh::client::Msg>,
+)> {
     let failed = |m: String| Error::new(ErrorKind::ConnectFailed, m);
     let config = Arc::new(russh::client::Config {
         keepalive_interval: options.keepalive_interval,
@@ -249,7 +299,12 @@ async fn open(
         PinnedHost { keys, mismatch },
     )
     .await
-    .map_err(|e| failed(format!("Could not connect to {}:{}: {e}", options.address, options.port)))?;
+    .map_err(|e| {
+        failed(format!(
+            "Could not connect to {}:{}: {e}",
+            options.address, options.port
+        ))
+    })?;
     let auth = session
         .authenticate_publickey(
             &options.user,
@@ -299,9 +354,9 @@ struct ChannelWriter(tokio::sync::mpsc::UnboundedSender<Outgoing>);
 
 impl Write for ChannelWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .send(Outgoing::Data(data.to_vec()))
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "SSH channel closed"))?;
+        self.0.send(Outgoing::Data(data.to_vec())).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "SSH channel closed")
+        })?;
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -313,12 +368,20 @@ impl Transport for NativeSshTransport {
     fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         let tx = self.outgoing.clone();
         Some(Arc::new(move || {
-            let _ = tx.send(Outgoing::Close);
+            match tx.send(Outgoing::Close) {
+                Ok(()) => {}
+                // The worker has already stopped, which satisfies shutdown.
+                Err(_) => {}
+            }
         }))
     }
 
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
-        let reader = ChannelReader { rx: self.incoming, buf: Vec::new(), pos: 0 };
+        let reader = ChannelReader {
+            rx: self.incoming,
+            buf: Vec::new(),
+            pos: 0,
+        };
         Ok((
             Box::new(BufReader::new(reader)),
             Box::new(ChannelWriter(self.outgoing)),
@@ -367,11 +430,31 @@ mod tests {
             user: "u".into(),
             host_keys: vec!["ssh-ed25519 notbase64!".into()],
         };
-        let err = NativeSshTransport::connect(&NativeSshOptions::new(target.clone(), key.clone())).err().unwrap();
+        let err = NativeSshTransport::connect(&NativeSshOptions::new(target.clone(), key.clone()))
+            .err()
+            .unwrap();
         assert_eq!(err.kind, ErrorKind::InvalidOption);
         let mut opts = NativeSshOptions::new(target, key);
         opts.remote_binary = "-oProxyCommand=x".into();
         assert!(opts.remote_command().is_err());
+    }
+
+    #[tokio::test]
+    async fn host_key_mismatch_is_recorded_without_poisonable_state() {
+        use russh::client::Handler;
+        let mismatch = Arc::new(AtomicBool::new(false));
+        let mut handler = PinnedHost {
+            keys: Vec::new(),
+            mismatch: Arc::clone(&mismatch),
+        };
+        let key = NativeSshKey::generate("host").unwrap();
+        assert!(
+            !handler
+                .check_server_key(key.private.public_key())
+                .await
+                .unwrap()
+        );
+        assert!(mismatch.load(Ordering::Relaxed));
     }
 
     /// The reader/writer bridge speaks the SDK protocol end to end.
@@ -380,14 +463,23 @@ mod tests {
         use crate::api::{API_VERSION_MAJOR, ApiEvent, ServerFrame};
         let (in_tx, in_rx) = mpsc::channel();
         let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
-        let transport = NativeSshTransport { incoming: in_rx, outgoing: out_tx };
+        let transport = NativeSshTransport {
+            incoming: in_rx,
+            outgoing: out_tx,
+        };
         std::thread::spawn(move || {
-            let Some(Outgoing::Data(hello)) = out_rx.blocking_recv() else { panic!() };
+            let Some(Outgoing::Data(hello)) = out_rx.blocking_recv() else {
+                panic!()
+            };
             let hello: serde_json::Value = serde_json::from_slice(&hello).unwrap();
             let frame = ServerFrame {
                 v: API_VERSION_MAJOR,
                 reply_to: hello["id"].as_u64(),
-                event: ApiEvent::HelloOk { version: API_VERSION_MAJOR, server: "fake".into(), capabilities: vec![] },
+                event: ApiEvent::HelloOk {
+                    version: API_VERSION_MAJOR,
+                    server: "fake".into(),
+                    capabilities: vec![],
+                },
             };
             let mut line = serde_json::to_vec(&frame).unwrap();
             line.push(b'\n');
@@ -396,14 +488,19 @@ mod tests {
             in_tx.send(a.to_vec()).unwrap();
             in_tx.send(b.to_vec()).unwrap();
             while let Some(m) = out_rx.blocking_recv() {
-                if matches!(m, Outgoing::Close) { break; }
+                if matches!(m, Outgoing::Close) {
+                    break;
+                }
             }
         });
-        let client = JcodeClient::connect_with(Box::new(transport), ConnectOptions {
-            socket_path: Some(std::path::PathBuf::new()),
-            ensure_runtime: false,
-            ..ConnectOptions::default()
-        })
+        let client = JcodeClient::connect_with(
+            Box::new(transport),
+            ConnectOptions {
+                socket_path: Some(std::path::PathBuf::new()),
+                ensure_runtime: false,
+                ..ConnectOptions::default()
+            },
+        )
         .unwrap();
         drop(client);
     }

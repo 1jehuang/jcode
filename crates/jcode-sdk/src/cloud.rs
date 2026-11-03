@@ -96,8 +96,9 @@ impl CloudTarget {
         let address = reply
             .address
             .as_deref()
-            .and_then(|a| a.parse().ok())
-            .ok_or_else(|| invalid("Jcode Cloud returned an invalid host address"))?;
+            .ok_or_else(|| invalid("Jcode Cloud returned no host address"))?
+            .parse()
+            .map_err(|_| invalid("Jcode Cloud returned an invalid host address"))?;
         let user = reply
             .user
             .as_deref()
@@ -105,7 +106,8 @@ impl CloudTarget {
                 !u.is_empty()
                     && u.len() <= 32
                     && !u.starts_with('-')
-                    && u.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    && u.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
             })
             .ok_or_else(|| invalid("Jcode Cloud returned an invalid user"))?;
         let host_keys: Vec<String> = reply
@@ -230,12 +232,15 @@ impl CloudClient {
         )?;
         if (200..300).contains(&status) {
             let r: LoginReply = serde_json::from_value(body).map_err(|e| {
-                Error::new(ErrorKind::UnexpectedReply, format!("Unexpected reply from jcode.sh: {e}"))
+                Error::new(
+                    ErrorKind::UnexpectedReply,
+                    format!("Unexpected reply from jcode.sh: {e}"),
+                )
             })?;
             return Ok(Some(self.account(r)));
         }
         let err = &body["error"];
-        match err["code"].as_str().unwrap_or_default() {
+        match err["code"].as_str().unwrap_or("") {
             "authorization_pending" => Ok(None),
             "slow_down" => {
                 login.interval = err["interval"]
@@ -244,7 +249,11 @@ impl CloudClient {
                     .unwrap_or(login.interval + 2);
                 Ok(None)
             }
-            code => Err(describe(status, code, err["message"].as_str().unwrap_or_default())),
+            code => Err(describe(
+                status,
+                code,
+                err["message"].as_str().unwrap_or(""),
+            )),
         }
     }
 
@@ -256,11 +265,18 @@ impl CloudClient {
     ) -> Result<Account> {
         let mut login = login.clone();
         let deadline = Instant::now()
-            + Duration::from_secs(if login.expires_in > 0 { login.expires_in } else { 900 });
+            + Duration::from_secs(if login.expires_in > 0 {
+                login.expires_in
+            } else {
+                900
+            });
         loop {
             sleep_unless(Duration::from_secs(login.interval.max(2)), cancelled)?;
             if Instant::now() > deadline {
-                return Err(Error::new(ErrorKind::CloudAuth, "Sign-in expired. Try again."));
+                return Err(Error::new(
+                    ErrorKind::CloudAuth,
+                    "Sign-in expired. Try again.",
+                ));
             }
             if let Some(account) = self.poll_device_login(&mut login)? {
                 return Ok(account);
@@ -270,7 +286,11 @@ impl CloudClient {
 
     /// Ask the control plane to authorize `public_key_openssh` on the
     /// account's host for a short window, waking or provisioning it.
-    pub fn request_host_connect(&self, account: &Account, public_key_openssh: &str) -> Result<ConnectReply> {
+    pub fn request_host_connect(
+        &self,
+        account: &Account,
+        public_key_openssh: &str,
+    ) -> Result<ConnectReply> {
         let client = Self {
             api_base: account.api_base.trim_end_matches('/').to_string(),
             ..self.clone()
@@ -320,39 +340,62 @@ impl CloudClient {
         ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
-            .user_agent(format!("{} jcode-sdk-rs/{}", self.client_name, env!("CARGO_PKG_VERSION")))
+            .user_agent(format!(
+                "{} jcode-sdk-rs/{}",
+                self.client_name,
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .into()
     }
 
-    fn post_raw(&self, path: &str, api_key: Option<&str>, body: serde_json::Value) -> Result<(u16, serde_json::Value)> {
+    fn post_raw(
+        &self,
+        path: &str,
+        api_key: Option<&str>,
+        body: serde_json::Value,
+    ) -> Result<(u16, serde_json::Value)> {
         let mut req = self.agent().post(self.url(path));
         if let Some(k) = api_key {
             req = req.header("Authorization", &format!("Bearer {k}"));
         }
         let mut resp = req.send_json(body).map_err(|e| {
-            Error::new(ErrorKind::ConnectFailed, format!("Could not reach jcode.sh: {e}"))
+            Error::new(
+                ErrorKind::ConnectFailed,
+                format!("Could not reach jcode.sh: {e}"),
+            )
         })?;
         let status = resp.status().as_u16();
         let text = resp
             .body_mut()
             .read_to_string()
             .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        Ok((status, serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)))
+        Ok((
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        ))
     }
 
-    fn post<T: for<'de> Deserialize<'de>>(&self, path: &str, api_key: Option<&str>, body: serde_json::Value) -> Result<T> {
+    fn post<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        api_key: Option<&str>,
+        body: serde_json::Value,
+    ) -> Result<T> {
         let (status, body) = self.post_raw(path, api_key, body)?;
         if (200..300).contains(&status) {
             return serde_json::from_value(body).map_err(|e| {
-                Error::new(ErrorKind::UnexpectedReply, format!("Unexpected reply from jcode.sh: {e}"))
+                Error::new(
+                    ErrorKind::UnexpectedReply,
+                    format!("Unexpected reply from jcode.sh: {e}"),
+                )
             });
         }
         let err = &body["error"];
         Err(describe(
             status,
-            err["code"].as_str().unwrap_or_default(),
-            err["message"].as_str().unwrap_or_default(),
+            err["code"].as_str().unwrap_or(""),
+            err["message"].as_str().unwrap_or(""),
         ))
     }
 }
@@ -378,7 +421,10 @@ fn sleep_unless(total: Duration, cancelled: &dyn Fn() -> bool) -> Result<()> {
 /// Map a control-plane error to an SDK error with a sentence a user can act on.
 pub fn describe(status: u16, code: &str, message: &str) -> Error {
     match (status, code) {
-        (401, _) => Error::new(ErrorKind::CloudAuth, "Your Jcode sign-in has expired. Sign in again."),
+        (401, _) => Error::new(
+            ErrorKind::CloudAuth,
+            "Your Jcode sign-in has expired. Sign in again.",
+        ),
         (402, "cloud_not_entitled") => Error::new(
             ErrorKind::CloudNotEntitled,
             "Jcode Cloud requires an active paid Jcode subscription.",
@@ -386,7 +432,10 @@ pub fn describe(status: u16, code: &str, message: &str) -> Error {
         (402, _) if !message.is_empty() => Error::new(ErrorKind::CloudNotEntitled, message),
         (400..500, _) if !message.is_empty() => Error::new(ErrorKind::InvalidOption, message),
         _ if !message.is_empty() => Error::new(ErrorKind::Transport, message),
-        _ => Error::new(ErrorKind::Transport, format!("Request failed (HTTP {status})")),
+        _ => Error::new(
+            ErrorKind::Transport,
+            format!("Request failed (HTTP {status})"),
+        ),
     }
 }
 
@@ -417,7 +466,9 @@ mod tests {
 
     #[test]
     fn target_validation_rejects_injection() {
-        let ok = reply(serde_json::json!({"ready":true,"address":"203.0.113.7","user":"ec2-user","host_keys":["ssh-ed25519 AAAAC3", "ssh-rsa AAAA"]}));
+        let ok = reply(
+            serde_json::json!({"ready":true,"address":"203.0.113.7","user":"ec2-user","host_keys":["ssh-ed25519 AAAAC3", "ssh-rsa AAAA"]}),
+        );
         let t = CloudTarget::from_reply(&ok).unwrap();
         assert_eq!(t.port, 22);
         assert_eq!(t.host_keys, vec!["ssh-ed25519 AAAAC3".to_string()]);
@@ -429,7 +480,10 @@ mod tests {
             serde_json::json!({"address":"203.0.113.7","user":"u","host_keys":["ssh-ed25519 A\n* x"]}),
             serde_json::json!({"address":"203.0.113.7","user":"u","port":0,"host_keys":["ssh-ed25519 AAAA"]}),
         ] {
-            assert!(CloudTarget::from_reply(&reply(bad.clone())).is_err(), "accepted {bad}");
+            assert!(
+                CloudTarget::from_reply(&reply(bad.clone())).is_err(),
+                "accepted {bad}"
+            );
         }
     }
 
@@ -442,7 +496,10 @@ mod tests {
     #[test]
     fn errors_explain_sign_in_and_subscription() {
         assert_eq!(describe(401, "", "").kind, ErrorKind::CloudAuth);
-        assert_eq!(describe(402, "cloud_not_entitled", "").kind, ErrorKind::CloudNotEntitled);
+        assert_eq!(
+            describe(402, "cloud_not_entitled", "").kind,
+            ErrorKind::CloudNotEntitled
+        );
         assert_eq!(describe(500, "", "").message, "Request failed (HTTP 500)");
     }
 
@@ -464,11 +521,19 @@ mod tests {
                     if let Some(end) = text.find("\r\n\r\n") {
                         let len = text[..end]
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
                             .unwrap_or(0);
                         let body = &text[end + 4..];
-                        let chunked = text[..end].to_ascii_lowercase().contains("transfer-encoding: chunked");
-                        if (chunked && body.ends_with("0\r\n\r\n")) || (!chunked && buf.len() >= end + 4 + len) {
+                        let chunked = text[..end]
+                            .to_ascii_lowercase()
+                            .contains("transfer-encoding: chunked");
+                        if (chunked && body.ends_with("0\r\n\r\n"))
+                            || (!chunked && buf.len() >= end + 4 + len)
+                        {
                             tx.send(text).unwrap();
                             break;
                         }
@@ -490,10 +555,18 @@ mod tests {
         assert_eq!(cloud.start_email_login("a@b").unwrap(), "lt");
         let first = seen.recv().unwrap();
         assert!(first.starts_with("POST /auth/email/start"));
-        let body: serde_json::Value = serde_json::from_str(first.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(first.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["client_name"], "jcode-test", "{first}");
         let account = cloud.verify_email_login("lt", "123456").unwrap();
-        assert_eq!(account, Account { api_key: "k".into(), email: Some("a@b".into()), api_base: base });
+        assert_eq!(
+            account,
+            Account {
+                api_key: "k".into(),
+                email: Some("a@b".into()),
+                api_base: base
+            }
+        );
     }
 
     #[test]
@@ -504,37 +577,73 @@ mod tests {
             (200, r#"{"api_key":"k"}"#),
         ]);
         let cloud = CloudClient::new("t").with_api_base(base);
-        let mut login = DeviceLogin { device_code: "d".into(), verification_uri_complete: "u".into(), interval: 5, expires_in: 0 };
+        let mut login = DeviceLogin {
+            device_code: "d".into(),
+            verification_uri_complete: "u".into(),
+            interval: 5,
+            expires_in: 0,
+        };
         assert!(cloud.poll_device_login(&mut login).unwrap().is_none());
         assert!(cloud.poll_device_login(&mut login).unwrap().is_none());
         assert_eq!(login.interval, 9);
-        assert_eq!(cloud.poll_device_login(&mut login).unwrap().unwrap().api_key, "k");
+        assert_eq!(
+            cloud
+                .poll_device_login(&mut login)
+                .unwrap()
+                .unwrap()
+                .api_key,
+            "k"
+        );
     }
 
     #[test]
     fn host_connect_polls_until_ready_with_bearer_auth() {
         let (base, seen) = serve(vec![
             (200, r#"{"state":"provisioning","ready":false}"#),
-            (200, r#"{"state":"running","ready":true,"address":"203.0.113.7","user":"u","host_keys":["ssh-ed25519 AAAA"]}"#),
+            (
+                200,
+                r#"{"state":"running","ready":true,"address":"203.0.113.7","user":"u","host_keys":["ssh-ed25519 AAAA"]}"#,
+            ),
         ]);
         let mut cloud = CloudClient::new("t");
         cloud.poll_interval = Duration::from_millis(10);
-        let account = Account { api_key: "secret".into(), email: None, api_base: base };
+        let account = Account {
+            api_key: "secret".into(),
+            email: None,
+            api_base: base,
+        };
         let progress = std::sync::Mutex::new(Vec::new());
         let target = cloud
-            .wait_for_host(&account, "ssh-ed25519 KEY", &|m| progress.lock().unwrap().push(m.to_string()), &|| false)
+            .wait_for_host(
+                &account,
+                "ssh-ed25519 KEY",
+                &|m| progress.lock().unwrap().push(m.to_string()),
+                &|| false,
+            )
             .unwrap();
         assert_eq!(target.user, "u");
-        assert_eq!(progress.into_inner().unwrap(), vec!["Jcode Cloud machine is provisioning…"]);
+        assert_eq!(
+            progress.into_inner().unwrap(),
+            vec!["Jcode Cloud machine is provisioning…"]
+        );
         let req = seen.recv().unwrap().to_ascii_lowercase();
         assert!(req.contains("authorization: bearer secret"));
     }
 
     #[test]
     fn unauthorized_host_connect_is_cloud_auth() {
-        let (base, _seen) = serve(vec![(401, r#"{"error":{"code":"unauthorized","message":"x"}}"#)]);
-        let account = Account { api_key: "k".into(), email: None, api_base: base };
-        let err = CloudClient::new("t").request_host_connect(&account, "k").unwrap_err();
+        let (base, _seen) = serve(vec![(
+            401,
+            r#"{"error":{"code":"unauthorized","message":"x"}}"#,
+        )]);
+        let account = Account {
+            api_key: "k".into(),
+            email: None,
+            api_base: base,
+        };
+        let err = CloudClient::new("t")
+            .request_host_connect(&account, "k")
+            .unwrap_err();
         assert_eq!(err.kind, ErrorKind::CloudAuth);
     }
 }
