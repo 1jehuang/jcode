@@ -1277,7 +1277,7 @@ fn test_drag_release_over_side_panel_close_does_not_hide_page() {
     let backend = ratatui::backend::TestBackend::new(80, 16);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     render_and_snap(&app, &mut terminal);
-    let pane = crate::tui::ui::last_layout_snapshot()
+    let _pane = crate::tui::ui::last_layout_snapshot()
         .unwrap()
         .diff_pane_area
         .unwrap();

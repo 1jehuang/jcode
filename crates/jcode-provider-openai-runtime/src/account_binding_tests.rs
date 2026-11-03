@@ -162,7 +162,6 @@ struct AccountSandbox {
     previous_url: Option<std::ffi::OsString>,
     previous_api_key: Option<std::ffi::OsString>,
     previous_account: Option<String>,
-    previous_api_key: Option<std::ffi::OsString>,
 }
 
 impl AccountSandbox {
@@ -183,7 +182,6 @@ impl AccountSandbox {
             previous_url,
             previous_api_key,
             previous_account,
-            previous_api_key,
         }
     }
 }
@@ -196,7 +194,6 @@ impl Drop for AccountSandbox {
             ("JCODE_HOME", self.previous_home.take()),
             ("JCODE_RUNTIME_PROVIDER", self.previous_runtime.take()),
             ("JCODE_TEST_OPENAI_RESPONSES_URL", self.previous_url.take()),
-            ("OPENAI_API_KEY", self.previous_api_key.take()),
         ] {
             match value {
                 Some(value) => jcode_base::env::set_var(key, value),
@@ -266,7 +263,7 @@ async fn cloud_import_replaces_live_daemon_cached_bearer() {
         OpenAIProvider::new(jcode_base::auth::codex::load_credentials_for_account(&label).unwrap());
     provider.set_oauth_account(Some(&label)).unwrap();
     save_account(&label, "imported-access", "imported-refresh", "same-id");
-    let token = openai_access_token(provider.refresh_account_label(), &provider.credentials)
+    let token = openai_access_token(&provider.credentials, &provider.account_pin)
         .await
         .unwrap();
     assert_eq!(token, "imported-access");

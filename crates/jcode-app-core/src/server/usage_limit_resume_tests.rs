@@ -143,7 +143,7 @@ impl Provider for UsageLimitedProvider {
 struct Fixture {
     session_id: String,
     agent: Arc<Mutex<Agent>>,
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: super::SessionAgents,
     members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: Arc<RwLock<VecDeque<super::SwarmEvent>>>,
@@ -154,7 +154,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(provider: &UsageLimitedProvider) -> Self {
-        let provider: Arc<dyn Provider> = Arc::new(provider.clone());
+        Self::with_provider(Arc::new(provider.clone())).await
+    }
+
+    async fn with_provider(provider: Arc<dyn Provider>) -> Self {
         let registry = Registry::new(provider.clone()).await;
         let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
         let session_id = agent.lock().await.session_id().to_string();
@@ -182,10 +185,9 @@ impl Fixture {
             task_label: None,
         };
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::from([(
-                session_id.clone(),
-                agent.clone(),
-            )]))),
+            sessions: Arc::new(super::session_manager::SessionManager::from_agents(
+                HashMap::from([(session_id.clone(), agent.clone())]),
+            )),
             members: Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)]))),
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
             event_history: Arc::new(RwLock::new(VecDeque::new())),
@@ -439,3 +441,6 @@ async fn a_second_limit_replaces_the_pending_resume() {
     );
     drop(second);
 }
+
+#[path = "usage_limit_resume_race_tests.rs"]
+mod race_tests;

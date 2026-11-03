@@ -561,7 +561,7 @@ mod tests {
     #[cfg(unix)]
     fn concurrent_workspace_receives_publish_once() {
         let _guard = storage::lock_test_env();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(8);
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn rejects_payload_before_writing() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
         let good = Resource::ProjectFile {
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn rejects_private_key_environment_before_publishing_project_files() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
         let file = Resource::ProjectFile {

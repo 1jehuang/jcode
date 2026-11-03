@@ -2020,11 +2020,6 @@ impl App {
             },
             remote_provider_name: self.remote_provider_name.clone(),
             current_api_method: self.current_route_api_method(),
-            current_effort: if self.is_remote {
-                self.remote_reasoning_effort.clone()
-            } else {
-                self.provider.reasoning_effort()
-            },
             recent_authenticated_provider: self
                 .recent_authenticated_provider
                 .as_ref()
@@ -2046,7 +2041,6 @@ impl App {
             current_provider,
             remote_provider_name,
             current_api_method,
-            current_effort,
             recent_authenticated_provider,
         } = ctx;
         // UI preferences may be local, but provider defaults must not be.

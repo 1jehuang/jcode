@@ -1582,6 +1582,7 @@ pub(super) async fn handle_invalidate_anthropic_usage(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+#[cfg(test)]
 fn account_switch_selection(
     agent: &Agent,
     provider_kind: &str,
@@ -1635,6 +1636,7 @@ fn account_switch_selection(
     })
 }
 
+#[cfg(test)]
 fn apply_account_switch(
     id: u64,
     provider_kind: &str,

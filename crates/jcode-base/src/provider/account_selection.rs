@@ -5,6 +5,11 @@ impl MultiProvider {
     /// fall back to an API key when refresh fails. Bind the subscription before
     /// sending anything so only the pool/countdown router may change billing.
     pub(super) fn bind_auto_account_for_request(&self, target: ActiveProvider) -> Result<()> {
+        if target == ActiveProvider::OpenAI
+            && jcode_provider_core::is_chatgpt_web_model(&self.model())
+        {
+            return Ok(());
+        }
         if target == ActiveProvider::Claude
             && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|token| !token.trim().is_empty())
         {
@@ -181,6 +186,11 @@ impl MultiProvider {
             ActiveProvider::OpenAI => self.openai_provider(),
             _ => None,
         }?;
+        if target == ActiveProvider::OpenAI
+            && jcode_provider_core::is_chatgpt_web_model(&runtime.model())
+        {
+            return None;
+        }
         if runtime.credential_mode() != CredentialMode::OAuth {
             return None;
         }

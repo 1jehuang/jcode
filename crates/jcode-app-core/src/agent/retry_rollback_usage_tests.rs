@@ -150,6 +150,7 @@ async fn assert_replacement_usage(streaming: bool, replacement_usage: bool) {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    ..
                 } => reported_usage.push((input, output, cache_read_input, cache_creation_input)),
                 ServerEvent::ToolDone { .. } => panic!("discarded tool must not complete"),
                 _ => {}

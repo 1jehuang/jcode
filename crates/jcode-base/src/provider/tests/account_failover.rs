@@ -254,6 +254,12 @@ impl Provider for FakeAccountRuntime {
         fork
     }
 
+    fn credential_mode(&self) -> CredentialMode { CredentialMode::OAuth }
+    fn oauth_account_label(&self) -> Option<String> { Some(self.current_label()) }
+    fn set_oauth_account(&self, label: Option<&str>) -> anyhow::Result<()> {
+        self.set_account_pin(self.kind, label.map(|label| account_failover::pin_for_label(self.kind, label)))
+    }
+
     fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
         (kind == self.kind)
             .then(|| self.pin.read().unwrap().clone())
@@ -382,8 +388,18 @@ fn with_account_failover_env<T>(f: impl FnOnce() -> T) -> T {
 fn complete_text(rt: &tokio::runtime::Runtime, provider: &MultiProvider) -> anyhow::Result<String> {
     let messages = billing_test_messages();
     rt.block_on(async {
-        let stream = provider.complete(&messages, &[], "", None).await?;
-        drain_text(stream).await
+        for _ in 0..4 {
+            match provider.complete(&messages, &[], "", None).await {
+                Ok(stream) => return drain_text(stream).await,
+                Err(error) => {
+                    let Some(prompt) = parse_failover_prompt_message(&error.to_string()) else { return Err(error) };
+                    if prompt.from_provider != prompt.to_provider { return Err(error); }
+                    let Some(route) = prompt.target_route else { return Err(error) };
+                    provider.set_model(&route)?;
+                }
+            }
+        }
+        anyhow::bail!("fixture exceeded its approved account attempts")
     })
 }
 
@@ -604,13 +620,13 @@ fn all_exhausted_error_names_earliest_reset_without_unapproved_cross_provider_sw
             "each account is tried once, nothing is sent to OpenAI"
         );
         assert_eq!(
-            a.account_pin(AccountProviderKind::Claude),
-            None,
-            "the original (unpinned) state is restored"
+            a.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            Some("claude-panda".to_string()),
+            "the last explicitly approved account stays selected"
         );
-        assert!(
-            a.account_failover_home(AccountProviderKind::Claude)
-                .is_none()
+        assert_eq!(
+            a.account_failover_home(AccountProviderKind::Claude).map(|pin| pin.label),
+            Some("claude-otter".to_string())
         );
     });
 }
@@ -739,7 +755,7 @@ fn rejected_login_moves_window_but_excluded_source_stays_manual() {
 }
 
 #[test]
-fn short_429_retries_same_account() {
+fn short_429_offers_failover_without_moving_account() {
     with_account_failover_env(|| {
         store_claude_accounts(3);
         let world = Arc::new(FakeAccountWorld::default());
@@ -750,7 +766,10 @@ fn short_429_retries_same_account() {
         // session stays on its account.
         world.set("claude-otter", FakeAccountBehavior::InStreamShort429);
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
-        let err = complete_text(&rt, &a).expect_err("the short 429 reaches the consumer");
+        let err = match rt.block_on(a.complete(&billing_test_messages(), &[], "", None)) {
+            Err(err) => err,
+            Ok(_) => panic!("short 429 should offer a route before another request"),
+        };
         assert!(err.to_string().contains("429"), "{err:#}");
         assert_eq!(world.labels_for("A"), ["claude-otter"]);
         assert_eq!(a.account_pin(AccountProviderKind::Claude), None);
@@ -758,6 +777,7 @@ fn short_429_retries_same_account() {
 
         // Not recorded as exhausted: the next turn goes to the same account.
         world.set("claude-otter", FakeAccountBehavior::Ok);
+        models::clear_provider_unavailable_for_label("claude", "claude-otter");
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
 
         // A synchronous short 429 does not move the session either, and
@@ -769,7 +789,7 @@ fn short_429_retries_same_account() {
             ),
         );
         let b = account_session(&world, "B", ActiveProvider::Claude, false);
-        let _ = complete_text(&rt, &b).expect_err("short 429");
+        assert!(rt.block_on(b.complete(&billing_test_messages(), &[], "", None)).is_err());
         assert_eq!(world.labels_for("B"), ["claude-otter"]);
         assert_eq!(b.account_pin(AccountProviderKind::Claude), None);
         assert_eq!(crate::auth::claude::get_active_account_override(), None);

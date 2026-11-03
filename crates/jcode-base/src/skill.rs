@@ -284,19 +284,18 @@ impl SkillRegistry {
         Ok(registry)
     }
 
-    /// Global skill directories, lowest precedence first: `~/.jcode/skills/`,
-    /// `~/.claude/skills/` (read live, so skills added in Claude Code show up
-    /// without a re-import; it shadows stale copies from the old first-run
-    /// import), then `~/.agents/skills/`.
+    /// Global skill directories, lowest precedence first: `~/.claude/skills/`,
+    /// `~/.agents/skills/`, then explicitly configured `~/.jcode/skills/`.
+    /// External skills are read live without copying them on every reload.
     fn global_skill_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            dirs.push(jcode_dir.join("skills"));
-        }
         for rel in [".claude/skills", ".agents/skills"] {
             if let Ok(dir) = crate::storage::user_home_path(rel) {
                 dirs.push(dir);
             }
+        }
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            dirs.push(jcode_dir.join("skills"));
         }
         dirs
     }

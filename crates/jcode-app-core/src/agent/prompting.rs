@@ -255,7 +255,7 @@ impl Agent {
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
-            let mut split = crate::prompt::SplitSystemPrompt {
+            let split = crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
                 dynamic_part: String::new(),
             };
@@ -276,7 +276,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             None,
             available_skills,
             self.session.is_canary,

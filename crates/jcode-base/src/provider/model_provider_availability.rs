@@ -18,7 +18,18 @@ pub(super) fn runtime_provider_unavailability_for_key(
         }
     };
     if let Some(entry) = unavailable.get(key) {
-        if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
+        let quota_reset_passed = is_quota_failure(&entry.reason)
+            && jcode_provider_core::classify_account_usage_limit(&entry.reason)
+                .and_then(|limit| limit.resets_at)
+                .is_some_and(|reset| {
+                    let observed = entry
+                        .observed_at
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs() as i64)
+                        .unwrap_or(i64::MAX);
+                    reset > observed && reset <= chrono::Utc::now().timestamp()
+                });
+        if !quota_reset_passed && entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
             return Some(entry.clone());
         }
         unavailable.remove(key);
@@ -88,19 +99,18 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
     }
 }
 
-/// A successful live usage probe can supersede an older quota failure, but
-/// cannot prove that authentication, billing, or transport failures recovered.
-/// Compare the request start, not completion, so an in-flight probe cannot
-/// erase a newer failure from an actual completion request.
-pub(crate) fn clear_quota_unavailability_after_probe(
+/// A confirmed reset or successful usage probe can supersede older quota
+/// failures, while retaining authentication, billing, and transport failures.
+/// The observation cutoff prevents clearing a newer completion failure.
+pub(crate) fn clear_quota_unavailability_observed_before(
     provider: &str,
     label: &str,
-    probe_started: Instant,
+    observed_before: Instant,
 ) {
     let key = provider_runtime_scope_key(provider, Some(label));
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
         && unavailable.get(&key).is_some_and(|entry| {
-            entry.recorded_at <= probe_started && is_quota_failure(&entry.reason)
+            entry.recorded_at <= observed_before && is_quota_failure(&entry.reason)
         })
     {
         unavailable.remove(&key);
@@ -295,13 +305,13 @@ mod quota_recovery_tests {
         record_provider_unavailable_for_account_label("openai", Some(other), "quota exhausted");
         record_provider_unavailable_for_account_label("claude", Some(label), "quota exhausted");
         let started = Instant::now();
-        clear_quota_unavailability_after_probe("openai", label, started);
+        clear_quota_unavailability_observed_before("openai", label, started);
         assert!(provider_unavailability_detail_for_account_label("openai", Some(label)).is_none());
         assert!(provider_unavailability_detail_for_account_label("openai", Some(other)).is_some());
         assert!(provider_unavailability_detail_for_account_label("claude", Some(label)).is_some());
 
         record_provider_unavailable_for_account_label("openai", Some(label), "usage_limit_reached");
-        clear_quota_unavailability_after_probe("openai", label, started);
+        clear_quota_unavailability_observed_before("openai", label, started);
         assert!(provider_unavailability_detail_for_account_label("openai", Some(label)).is_some());
         clear_openai_provider_unavailability_for_account_label(Some(label));
         clear_openai_provider_unavailability_for_account_label(Some(other));
@@ -326,7 +336,7 @@ mod quota_recovery_tests {
             "rate-limited due to requests per minute",
         ] {
             record_provider_unavailable_for_account_label("claude", Some(label), reason);
-            clear_quota_unavailability_after_probe("claude", label, Instant::now());
+            clear_quota_unavailability_observed_before("claude", label, Instant::now());
             assert!(
                 provider_unavailability_detail_for_account_label("claude", Some(label)).is_some(),
                 "{reason}"

@@ -372,7 +372,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         while fresh.next().await.is_some() {}
         drop(stalled);
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}/v1/responses"))
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses"))
         .await
         .unwrap();
     let provider = prewarm_test_provider().await;

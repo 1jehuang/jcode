@@ -2,6 +2,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use super::*;
+use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::session::Session;
@@ -9,6 +10,7 @@ use crate::tool::Registry;
 use async_trait::async_trait;
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 struct TestHome {
     previous: Option<OsString>,
@@ -137,7 +139,7 @@ fn members() -> Arc<RwLock<HashMap<String, SwarmMember>>> {
 }
 
 fn sessions(agent: Option<Arc<Mutex<Agent>>>) -> SessionAgents {
-    Arc::new(RwLock::new(
+    Arc::new(crate::server::session_manager::SessionManager::from_agents(
         agent
             .into_iter()
             .map(|agent| ("summary-fixture".into(), agent))

@@ -90,6 +90,18 @@ impl MultiProvider {
                 }
             }
         }
+        let exhausted_reason = account_kind(provider).and_then(|kind| {
+            let labels: Vec<_> = stored_accounts(kind)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect();
+            (!labels.is_empty()
+                && labels
+                    .iter()
+                    .all(|label| account_exhausted(kind, label).is_some()))
+            .then(|| account_failover::all_accounts_exhausted_reason(kind, &labels))
+        });
+        let initial_reason = exhausted_reason.as_deref().unwrap_or(initial_reason);
         if let Some(prompt) = current.as_deref().and_then(|current| {
             self.account_failover_prompt(provider, current, initial_reason, messages, tools, mode)
         }) {
@@ -122,6 +134,9 @@ impl MultiProvider {
                     }
                 }
             }
+        }
+        if let Some(reason) = exhausted_reason {
+            return Err(anyhow!(reason));
         }
         Ok(None)
     }
@@ -549,9 +564,15 @@ impl MultiProvider {
             if account_exhausted(kind, &home.label).is_some() {
                 continue;
             }
+            let reset_observed = std::time::Instant::now();
             match self.set_account_pin(kind, Some(home.clone())) {
                 Ok(()) => {
                     self.account_failover.set_home(kind, None);
+                    models::clear_quota_unavailability_observed_before(
+                        account_label_prefix(kind),
+                        &home.label,
+                        reset_observed,
+                    );
                     crate::logging::info(&format!(
                         "{} account {} reset; this session is back on it",
                         account_kind_display(kind),

@@ -76,7 +76,9 @@ async fn fixture(
     };
     (
         id.clone(),
-        Arc::new(RwLock::new(HashMap::from([(id.clone(), agent)]))),
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(id.clone(), agent)]),
+        )),
         Arc::new(RwLock::new(HashMap::from([(id, member)]))),
         receiver,
     )
@@ -110,7 +112,7 @@ async fn detached_client_and_missing_headless_agent_are_not_live() {
         "closed cached attachments are not live"
     );
     members.write().await.get_mut(&id).unwrap().is_headless = true;
-    sessions.write().await.clear();
+    sessions.clear_for_test().await;
     assert!(idle_live_agent(&id, &sessions, &members).await.is_none());
 }
 

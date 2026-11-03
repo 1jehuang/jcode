@@ -46,7 +46,6 @@ pub use crate::memory_types::{
 };
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
-use crate::todo::TodoItem;
 #[cfg(test)]
 pub use dock::set_dock_disabled_for_test;
 pub use dock::{dock_height, dock_rect, dock_text_lines, dock_width, render_dock};
@@ -1871,6 +1870,7 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
+#[cfg(test)]
 pub(crate) use cache_render::render_kv_cache_summary_line;
 use cache_render::render_kv_cache_widget;
 

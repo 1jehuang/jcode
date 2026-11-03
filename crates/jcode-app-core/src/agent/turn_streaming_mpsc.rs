@@ -102,7 +102,6 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
-        let mut unparsed_tool_markup_nudges = 0u32;
         // Pins restore dropped (account removed or relabeled) not yet announced.
         for notice in self.take_account_notices() {
             let _ = event_tx.send(notice);

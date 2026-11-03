@@ -198,7 +198,7 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
     let unrelated = work.join("unrelated.txt");
     std::fs::write(&unrelated, "leave this alone\n").unwrap();
     let provider: Arc<dyn Provider> = Arc::new(RewindEditingProvider::default());
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
     let connections = Arc::new(RwLock::new(HashMap::new()));
     let (_, client_stream, server_task) = {
         let (server_stream, client_stream) = crate::transport::Stream::pair().unwrap();
@@ -442,7 +442,7 @@ async fn checkpoint_socket_restores_files_and_conversation_and_rejects_conflicts
         checkpoints.is_empty(),
         "consumed checkpoints must leave the picker"
     );
-    sessions.write().await.clear();
+    sessions.clear_for_test().await;
     drop(writer);
     drop(reader);
     tokio::time::timeout(Duration::from_secs(5), server_task)

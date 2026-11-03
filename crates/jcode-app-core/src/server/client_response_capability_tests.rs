@@ -21,10 +21,9 @@ async fn user_response_deferred_refresh_reads_current_connections() {
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let connections = Arc::new(RwLock::new(HashMap::from([(
         "desktop".into(),
         ClientConnectionInfo {
@@ -160,7 +159,7 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let provider_template: Arc<dyn Provider> = Arc::new(SdkCallbackProvider::default());
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -356,7 +355,7 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
         .unwrap();
 
     // Avoid idle unsaved-session grace timers in this isolated fixture.
-    sessions.write().await.clear();
+    sessions.clear_for_test().await;
     drop(tui_reader);
     drop(tui_writer);
     drop(target_reader);

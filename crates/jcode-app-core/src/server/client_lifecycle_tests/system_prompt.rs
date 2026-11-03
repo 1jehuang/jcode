@@ -70,7 +70,8 @@ impl SystemPromptSocketFixture {
         let provider_template: Arc<dyn Provider> =
             Arc::new(SystemPromptCaptureProvider(captured.clone()));
 
-        let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+        let sessions: SessionAgents =
+            Arc::new(crate::server::session_manager::SessionManager::new());
         let global_session_id = Arc::new(RwLock::new(String::new()));
         let client_count = Arc::new(RwLock::new(0usize));
         let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -143,6 +144,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
     let home = IsolatedReloadRecoveryEnv::new();
     let fixture = SystemPromptSocketFixture::new();
     let captured = fixture.captured.clone();
+    let sessions = fixture.sessions.clone();
     let connect = || fixture.connect();
     let (server_task, client_stream) = connect();
 

@@ -229,7 +229,8 @@ mod account_snapshot_tests {
         let accounts = [("saved-a", token)];
         let key =
             |label| anthropic_usage_cache_key_with_accounts(token, label, accounts.into_iter());
-        assert_eq!(key(Some("saved-a")), "label:saved-a");
+        assert!(key(Some("saved-a")).starts_with("label:saved-a:"));
+        assert!(!key(Some("saved-a")).contains(token));
         assert_eq!(key(None), key(Some("saved-a")));
         assert_eq!(key(Some("default")), key(None));
         let unknown = anthropic_usage_cache_key_with_accounts(token, None, std::iter::empty());
@@ -277,7 +278,11 @@ mod account_snapshot_tests {
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
         let label = "router-cache-only-test";
-        let key = format!("label:{label}");
+        let key = anthropic_usage_cache_key_with_accounts(
+            "fixture-token",
+            Some(label),
+            std::iter::empty(),
+        );
         let provider = MultiAccountProviderKind::Anthropic;
         let data = UsageData {
             five_hour: 0.42,
@@ -429,7 +434,7 @@ fn anthropic_usage_cache_key_with_accounts<'a>(
         .map(|(label, _)| label);
     let fingerprint = anthropic_token_fingerprint(access_token);
     match actual_label
-        .or(account_label)
+        .or(account_label.filter(|label| label.trim() != "default"))
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {

@@ -779,6 +779,7 @@ async fn cancelled_during_actual_usage_limit_wait_cannot_resume() {
             &fixture.swarm,
             &super::super::usage_limit_resume::no_wait_hook,
             Some(&publication),
+            None,
         ),
     );
     tokio::task::yield_now().await;
@@ -838,6 +839,7 @@ async fn superseded_actual_usage_limit_wait_cannot_restart_successor() {
             &fixture.swarm,
             &super::super::usage_limit_resume::no_wait_hook,
             Some(&old),
+            None,
         ),
     );
     tokio::task::yield_now().await;
@@ -893,6 +895,7 @@ async fn uncancelled_actual_usage_limit_wait_resumes_with_reservation() {
             &fixture.swarm,
             &super::super::usage_limit_resume::no_wait_hook,
             Some(&publication),
+            None,
         ),
     );
     tokio::task::yield_now().await;

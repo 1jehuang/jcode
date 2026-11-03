@@ -983,15 +983,6 @@ impl App {
 }
 
 impl App {
-    pub(crate) fn should_open_inline_account_picker(&self, provider_filter: Option<&str>) -> bool {
-        provider_filter.is_none()
-            || self
-                .inline_account_picker_scope_key(provider_filter)
-                .is_some()
-    }
-}
-
-impl App {
     fn account_credential_entry(
         name: String,
         provider: String,

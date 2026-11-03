@@ -72,8 +72,6 @@ async fn stopped_backup_only_worker_cannot_resurrect_and_keeps_its_plan() {
         version: 7,
         participants: HashSet::from([session_id.into()]),
         task_progress: HashMap::new(),
-        mode: "deep".into(),
-        node_meta: HashMap::new(),
     };
     persist_swarm_state(swarm_id, Some(&plan), Some("owner"), &[member]);
     let path = state_path(swarm_id);
@@ -91,6 +89,5 @@ async fn stopped_backup_only_worker_cannot_resurrect_and_keeps_its_plan() {
     assert_eq!(restarted.members[session_id].status, "stopped");
     let saved_plan = &restarted.plans[swarm_id];
     assert_eq!(saved_plan.version, 7);
-    assert_eq!(saved_plan.mode, "deep");
     assert_eq!(restarted.coordinators[swarm_id], "owner");
 }

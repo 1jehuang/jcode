@@ -23,9 +23,6 @@ pub(super) enum Peeked {
         error: anyhow::Error,
         /// Billing exhaustion (HTTP 402 or credit wording without a reset time).
         out_of_credit: bool,
-        /// Subscription usage spent on this account (stable marker, see
-        /// `jcode_provider_core::usage_limit`).
-        usage_limit: Option<jcode_provider_core::AccountUsageLimit>,
         /// The exact stream as the runtime produced it, for callers that do
         /// not fail over and must surface the error unchanged.
         replay: EventStream,
@@ -45,7 +42,6 @@ pub(super) async fn peek_before_output(mut stream: EventStream) -> Peeked {
             }) => {
                 let out_of_credit =
                     jcode_provider_core::is_billing_exhausted_error_message(&message);
-                let usage_limit = jcode_provider_core::classify_account_usage_limit(&message);
                 let error = anyhow::anyhow!(message.clone());
                 buffered.push(Ok(StreamEvent::Error {
                     message,
@@ -54,7 +50,6 @@ pub(super) async fn peek_before_output(mut stream: EventStream) -> Peeked {
                 return Peeked::Failed {
                     error,
                     out_of_credit,
-                    usage_limit,
                     replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
                 };
             }
@@ -80,12 +75,10 @@ pub(super) async fn peek_before_output(mut stream: EventStream) -> Peeked {
             Err(error) => {
                 let text = format!("{error:#}");
                 let out_of_credit = jcode_provider_core::is_billing_exhausted_error_message(&text);
-                let usage_limit = jcode_provider_core::classify_account_usage_limit(&text);
                 buffered.push(Err(error));
                 return Peeked::Failed {
                     error: anyhow::anyhow!(text),
                     out_of_credit,
-                    usage_limit,
                     replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
                 };
             }

@@ -33,7 +33,9 @@ use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast, mpsc};
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast, mpsc};
 
 use super::SessionAgents;
 
@@ -294,7 +296,7 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         // A usage limit that resets later is a pause, not a failure: wait for
         // the reset and continue the same turn (bounded, see
         // usage_limit_resume). Other errors and panics fail as before.
-        let (result, completion_report, reservation) = match result {
+        let (result, completion_report, mut reservation) = match result {
             Err(error) if stop_reason == crate::protocol::TurnStopReason::Failure => {
                 match super::usage_limit_resume::resume_turn_after_usage_limit_with_publication(
                     agent_arc,
@@ -339,6 +341,18 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
+        }
+        if let (Err((error, _)), Some(agent)) = (&result, reservation.as_mut()) {
+            let message = crate::util::format_error_chain(error);
+            publication
+                .publish_start(async {
+                    if let Err(persist_error) = agent.persist_turn_error(&message) {
+                        crate::logging::warn(&format!(
+                            "Could not persist failed turn for {session_id}: {persist_error:#}"
+                        ));
+                    }
+                })
+                .await;
         }
         complete_live_turn(
             &session_id,

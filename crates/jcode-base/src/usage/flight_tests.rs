@@ -230,3 +230,46 @@ fn aborted_http_body_read_persists_backoff() {
     })
     });
 }
+
+#[test]
+fn successful_fingerprinted_probe_clears_only_its_current_accounts_quota() {
+    with_home(|runtime| {
+        runtime.block_on(async {
+        use crate::auth::claude;
+        use crate::provider::models;
+        for replaced in [false, true] {
+            let token = format!("fixture-quota-token-{replaced}");
+            let label = claude::upsert_account(claude::AnthropicAccount {
+                label: format!("quota-probe-{replaced}"), access: token.clone(),
+                refresh: format!("fixture-refresh-{replaced}"),
+                expires: chrono::Utc::now().timestamp_millis() + 3_600_000,
+                email: Some(format!("quota-{replaced}@example.com")),
+                subscription_type: None, scopes: Vec::new(),
+            }).unwrap();
+            let key = super::super::anthropic_usage_cache_key(&token, Some(&label));
+            if replaced {
+                let mut stored = claude::load_auth_file().unwrap();
+                let account = stored.anthropic_accounts.iter_mut().find(|a| a.label == label).unwrap();
+                account.access = "fixture-replacement-token".into();
+                account.email = Some("replacement@example.com".into());
+                claude::save_auth_file(&stored).unwrap();
+            }
+            models::record_provider_unavailable_for_account_label("claude", Some(&label), "quota exhausted");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/usage", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                assert!(stream.read(&mut bytes).await.unwrap() > 0);
+                let body = r#"{"five_hour":{"utilization":20},"seven_day":{"utilization":30}}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            super::super::fetch_anthropic_usage_data_uncached(token, key, &url).await.unwrap();
+            server.await.unwrap();
+            assert_eq!(models::provider_unavailability_detail_for_account_label("claude", Some(&label)).is_some(), replaced,
+                "a probe must clear its own login, and retain a replacement login's mark");
+            models::clear_claude_provider_unavailability_for_account_label(Some(&label));
+        }
+    })
+    });
+}

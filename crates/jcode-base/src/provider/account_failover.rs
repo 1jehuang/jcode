@@ -5,7 +5,7 @@
 //! out of usage must not move or block any other window.
 
 use super::ActiveProvider;
-use jcode_provider_core::{AccountPin, AccountProviderKind};
+use jcode_provider_core::{AccountPin, AccountProviderKind, Provider};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{LazyLock, Mutex, RwLock};
 
@@ -83,6 +83,11 @@ impl super::MultiProvider {
         let Some(runtime) = runtime else {
             return false;
         };
+        if provider == ActiveProvider::OpenAI
+            && jcode_provider_core::is_chatgpt_web_model(&runtime.model())
+        {
+            return false;
+        }
         if let Some(credential) = runtime.active_resolved_credential() {
             return credential.is_subscription();
         }
@@ -99,6 +104,9 @@ impl super::MultiProvider {
 
     pub(super) fn provider_runtime_cooldown_key(&self, provider: ActiveProvider) -> &'static str {
         match provider {
+            ActiveProvider::OpenAI if jcode_provider_core::is_chatgpt_web_model(&self.model()) => {
+                "openai-web"
+            }
             ActiveProvider::OpenAI if !self.provider_uses_oauth_accounts(provider) => "openai-api",
             ActiveProvider::Claude if !self.provider_uses_oauth_accounts(provider) => {
                 "anthropic-api"
@@ -208,6 +216,7 @@ pub(super) fn default_account_label(kind: AccountProviderKind) -> Option<String>
 /// wraps), minus accounts whose recorded usage limit has not reset yet. A
 /// known-exhausted account is a doomed request, so it is skipped rather than
 /// tried last.
+#[cfg(test)]
 pub(super) fn account_rotation(
     kind: AccountProviderKind,
     current: Option<&str>,

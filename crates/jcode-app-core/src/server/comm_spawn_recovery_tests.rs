@@ -145,6 +145,7 @@ async fn spawn_worker(
     handle_comm_spawn(
         71,
         owner_id.clone(),
+        None,
         Some(root.to_string_lossy().into_owned()),
         Some("fresh-worker-original-prompt-marker".into()),
         Some("fresh-quota-spawn".into()),
@@ -326,6 +327,7 @@ async fn public_stop_without_plan_persists_removal_and_preserves_other_workers()
     handle_comm_spawn(
         72,
         owner.clone(),
+        None,
         Some(root.path().to_string_lossy().into_owned()),
         None,
         Some("preserved-idle-sibling".into()),
