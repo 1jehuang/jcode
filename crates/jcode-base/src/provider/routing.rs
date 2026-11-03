@@ -1,5 +1,8 @@
 pub(crate) fn anthropic_oauth_route_availability(model: &str) -> (bool, String) {
-    if !anthropic_catalog_allows_route(model, true) {
+    // Normalize once so catalog matching and every eligibility check below see
+    // the same id (trimmed, dotted versions dashed).
+    let model = jcode_provider_core::model_id::claude_dashed_version(model);
+    if !anthropic_catalog_allows_route(&model, true) {
         return (false, "not in OAuth model catalog".to_string());
     }
     if model.ends_with("[1m]") && !crate::usage::has_extra_usage() {
@@ -22,16 +25,20 @@ pub(crate) fn anthropic_oauth_route_availability(model: &str) -> (bool, String) 
 pub(crate) fn anthropic_api_key_route_availability(model: &str) -> (bool, String) {
     // Subscription extra usage is unrelated to API-key billing. The API
     // catalog and request-time access errors determine API model access.
-    if anthropic_catalog_allows_route(model, false) {
+    let model = jcode_provider_core::model_id::claude_dashed_version(model);
+    if anthropic_catalog_allows_route(&model, false) {
         (true, String::new())
     } else {
         (false, "not in API-key model catalog".to_string())
     }
 }
 
+/// `model` must already be normalized with `claude_dashed_version`. Anthropic's
+/// catalog uses dashed versions (`claude-opus-5-5`), while config, favorites,
+/// and other providers spell them dotted (`claude-opus-5.5`).
 fn anthropic_catalog_allows_route(model: &str, oauth: bool) -> bool {
     let scope = super::anthropic_catalog_scope_for_route(oauth);
     super::known_anthropic_model_ids_for_scope(&scope)
         .iter()
-        .any(|id| id == model)
+        .any(|id| id == model || jcode_provider_core::model_id::claude_dashed_version(id) == model)
 }
