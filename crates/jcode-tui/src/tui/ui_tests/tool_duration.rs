@@ -106,8 +106,11 @@ fn test_tool_row_duration_badge_suppressed_when_usage_label_has_time() {
         .first()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .unwrap_or_default();
-    assert_eq!(row.matches("48.3s").count(), 1, "one duration only: {row}");
-    assert_eq!(row.matches("48s").count(), 1, "one compact label: {row}");
+    // The usage label renders the measured time once ("48s, 0 tok"); the
+    // suffix must not append its own " · 48.3s" badge on top of it.
+    assert_eq!(row.matches(" · ").count(), 1, "one separator: {row}");
+    assert!(row.contains("48s"), "usage label carries the time: {row}");
+    assert!(!row.contains(" · 48.3s"), "no suffix duplicate: {row}");
 
     // Restored row: elapsed time lives in the stored [tool timing:] header.
     let mut stored = duration_tool_msg(Some(48_300));
