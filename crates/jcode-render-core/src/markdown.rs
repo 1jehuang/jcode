@@ -137,8 +137,65 @@ fn current_kind(blockquote_depth: usize, list_stack: &[ListFrame]) -> BlockKind 
     }
 }
 
-/// Parse markdown into a backend-neutral [`Document`].
+/// Presentation options for backend-neutral Markdown parsing.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkdownParseOptions {
+    /// Append destinations after link labels. Defaults to true for compatibility
+    /// with callers of [`parse_markdown`]. Front-ends may opt out explicitly.
+    pub show_link_urls: bool,
+}
+
+impl Default for MarkdownParseOptions {
+    fn default() -> Self {
+        Self {
+            show_link_urls: true,
+        }
+    }
+}
+
+/// Parse markdown into a backend-neutral [`Document`], including link URLs.
 pub fn parse_markdown(text: &str) -> Document {
+    parse_markdown_with_options(text, MarkdownParseOptions::default())
+}
+
+#[cfg(test)]
+#[test]
+fn link_urls_option_preserves_core_default_and_link_style() {
+    let source = "[docs](https://example.com) and [empty]()";
+    let plain = |doc: &Document| {
+        doc.blocks
+            .iter()
+            .flat_map(|block| &block.lines)
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        plain(&parse_markdown(source)),
+        "docs (https://example.com) and empty"
+    );
+    for show_link_urls in [false, true] {
+        let doc = parse_markdown_with_options(source, MarkdownParseOptions { show_link_urls });
+        assert_eq!(
+            plain(&doc),
+            if show_link_urls {
+                "docs (https://example.com) and empty"
+            } else {
+                "docs and empty"
+            }
+        );
+        assert!(
+            doc.blocks
+                .iter()
+                .flat_map(|block| &block.lines)
+                .flat_map(|line| &line.spans)
+                .any(|span| { span.text == "docs" && span.role == StyleRole::Link })
+        );
+    }
+}
+
+/// Parse Markdown with explicit presentation options.
+pub fn parse_markdown_with_options(text: &str, config: MarkdownParseOptions) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_MATH);
@@ -681,6 +738,7 @@ pub fn parse_markdown(text: &str) -> Document {
             Event::End(TagEnd::Link) => {
                 style.link = false;
                 if let Some(url) = link_targets.pop()
+                    && config.show_link_urls
                     && !url.is_empty()
                 {
                     spans.push(StyledSpan::new(format!(" ({url})"), StyleRole::Dim));

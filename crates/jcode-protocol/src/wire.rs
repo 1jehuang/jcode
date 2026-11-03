@@ -160,6 +160,9 @@ pub enum Request {
         /// pool-approved account and retries the turn itself.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_server_failover: bool,
+        /// Accept runtime-generation and turn-scoped events. Legacy readers get flat events.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_turn_identity: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -892,7 +895,7 @@ pub enum Request {
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, ServerEvent};
+pub use events::{AccountUsageSnapshot, ServerEvent, TurnIdentity};
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

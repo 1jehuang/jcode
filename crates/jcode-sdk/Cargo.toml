@@ -20,5 +20,20 @@ socket2 = "0.6"
 tempfile = "3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+# Jcode Cloud control plane (feature `cloud`).
+ureq = { version = "3", features = ["json"], optional = true }
+# In-process SSH (feature `ssh-native`), for platforms without an `ssh` binary.
+# Keep RSA disabled: native SSH generates Ed25519 keys and uses pinned host keys.
+# russh 0.65 migrates the elliptic-curve stack to patched crypto-bigint 0.7.
+russh = { version = "0.65", default-features = false, features = ["ring"], optional = true }
+rand = { version = "0.10", optional = true }
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "io-util", "macros"], optional = true }
+
+[features]
+default = []
+# Account sign-in (email code, browser/device flow) and host wake/provision.
+cloud = ["dep:ureq"]
+# Pure-Rust SSH transport with pinned host keys; also enables `cloud::connect`.
+ssh-native = ["cloud", "dep:russh", "dep:rand", "dep:tokio"]
 
 [dev-dependencies]

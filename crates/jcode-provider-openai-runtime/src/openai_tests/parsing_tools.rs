@@ -597,13 +597,17 @@ fn test_build_tools_keeps_strict_for_nested_anyof_object_branches_with_propertie
 }
 
 #[test]
-fn test_parse_text_wrapped_tool_call_prefers_trailing_json_object() {
+fn test_tool_call_example_in_completed_message_stays_text() {
     let text = "Status update\nassistant to=functions.batch commentary {}json\n{\"tool_calls\":[{\"tool\":\"read\",\"file_path\":\"src/main.rs\"}]}";
-    let parsed = parse_text_wrapped_tool_call(text).expect("should parse wrapped tool call");
-    assert_eq!(parsed.1, "batch");
-    assert!(parsed.0.contains("Status update"));
-    let args: Value = serde_json::from_str(&parsed.2).expect("valid args json");
-    assert!(args.get("tool_calls").is_some());
+    let mut pending = VecDeque::new();
+    let event = handle_openai_output_item(
+        serde_json::json!({"type":"message", "content":[{"type":"output_text", "text":text}]}),
+        &mut false,
+        &mut false,
+        &mut pending,
+    );
+    assert!(matches!(event, Some(StreamEvent::TextDelta(actual)) if actual == text));
+    assert!(pending.is_empty());
 }
 
 #[test]
@@ -645,7 +649,7 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
 }
 
 #[test]
-fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
+fn test_handle_openai_output_item_preserves_bright_pearl_fixture_as_text() {
     let item = serde_json::json!({
         "type": "message",
         "content": [{
@@ -671,36 +675,14 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
         events.push(ev);
     }
 
-    let mut saw_prefix = false;
-    let mut saw_tool = false;
-    let mut saw_input = false;
-
+    let mut rendered = String::new();
     for event in events {
         match event {
-            StreamEvent::TextDelta(text)
-                if text.contains("Status: I detected pre-existing local edits") =>
-            {
-                saw_prefix = true;
-            }
-            StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
-                saw_tool = true;
-            }
-            StreamEvent::ToolInputDeltaFor { delta, .. } => {
-                let args: Value = serde_json::from_str(&delta).expect("valid tool args");
-                let calls = args
-                    .get("tool_calls")
-                    .and_then(|v| v.as_array())
-                    .expect("tool_calls array");
-                assert_eq!(calls.len(), 3);
-                saw_input = true;
-            }
-            _ => {}
+            StreamEvent::TextDelta(text) => rendered.push_str(&text),
+            other => panic!("assistant text must not become a tool event: {other:?}"),
         }
     }
-
-    assert!(saw_prefix);
-    assert!(saw_tool);
-    assert!(saw_input);
+    assert_eq!(rendered, BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE);
 }
 
 #[test]

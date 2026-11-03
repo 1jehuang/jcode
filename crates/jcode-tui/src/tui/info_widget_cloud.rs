@@ -343,6 +343,8 @@ mod tests {
                     uptime_secs: Some(3600),
                 }),
                 last_transfer_at: Some("2026-10-20T07:00:00Z".into()),
+                directories: None,
+                directories_stale: false,
             }),
             ..Default::default()
         }

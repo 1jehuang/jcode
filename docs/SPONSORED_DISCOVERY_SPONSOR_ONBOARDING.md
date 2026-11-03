@@ -296,6 +296,11 @@ Verify all of the following:
   debugging without a persistent user identifier; and
 - disabling the catalog entry removes it from browse and prevents selection.
 
+Integration discovery is disabled by default. To enable the `integration_tools`
+tool, set `[sponsors] enabled = true` in `~/.jcode/config.toml` and start a new
+session. The legacy section name is retained for compatibility. Existing explicit
+`enabled = true` settings remain enabled. Set it to `false` to disable the tool.
+
 Then validate through jcode by pointing a test config at staging:
 
 ```toml

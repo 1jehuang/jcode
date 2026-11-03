@@ -1665,14 +1665,13 @@ impl CommunicateTool {
     }
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
-        const BASE_DESCRIPTION: &str = "Coordinate agents: spawn workers for todo lanes, message them, and manage swarm plans.";
+        const BASE_DESCRIPTION: &str =
+            "Coordinate agents: spawn todo-lane workers, message them, and manage plans.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
-            format!(
-                "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
-            )
+            format!("{BASE_DESCRIPTION}\n\nSwarm prompt:\n{swarm_prompt}")
         };
         Self { description }
     }
@@ -1862,63 +1861,61 @@ impl Tool for CommunicateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ADVERTISED_SWARM_ACTIONS,
-                    "description": "launch: lanes. spawn requires label. message: agent/channel, coordinator-only broadcast. list_models."
+                    "enum": ADVERTISED_SWARM_ACTIONS
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message body. Goes to to_session, or to channel; with neither, everyone (coordinator only)."
+                    "description": "Routes to to_session, then channel, else broadcasts (coordinator only)."
                 },
                 "tldr": {
                     "type": "string",
-                    "description": "Optional one-line summary (under ~120 chars); recommended for bodies over 240 chars, else auto-derived."
+                    "description": "Summary under ~120 chars; auto-derived if omitted."
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Session ID or unique friendly name of one agent. Alias of target_session."
+                    "description": "Agent ID/unique name; alias of target_session."
                 },
                 "to_swarm": {
                     "type": "string",
-                    "description": "Cross-swarm DM: swarm label or id (see list_swarms). With to_session, that agent; else its coordinator."
+                    "description": "Swarm ID/label; targets to_session or its coordinator."
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Channel name for channel actions. Discouraged: prefer DMs."
+                    "description": "Prefer DMs."
                 },
                 "target_session": {
                     "type": "string",
-                    "description": "Session ID or unique friendly name for management actions. Alias of to_session."
+                    "description": "Alias of to_session."
                 },
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: lane name, the source of truth. Existing lane tasks are prepopulated and synced."
+                    "description": "Required for spawn: todo lane (source of truth)."
                 },
                 "phase": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "For spawn: which phase the worker's lane belongs to. Defaults to the active phase."
+                    "description": "Spawn lane phase; defaults to active phase."
                 },
                 "working_dir": {
-                    "type": "string",
-                    "description": "Optional working directory for spawn."
+                    "type": "string"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Optional extra context for spawn. Lane tasks are prepopulated: do not repeat its tasks."
+                    "description": "Extra spawn context, not lane tasks."
                 },
                 "initial_message": {
                     "type": "string",
-                    "description": "Alias of prompt for spawn; wins when both are set."
+                    "description": "Overrides prompt for spawn."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional max items for summary-style reads."
+                    "description": "Max summary items."
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Optional plan task ID. When omitted the coordinator picks or resumes the relevant task."
+                    "description": "Plan task; auto-selected if omitted."
                 },
                 "spawn_mode": {
                     "type": "string",
@@ -1932,47 +1929,46 @@ impl Tool for CommunicateTool {
                 "mode": {
                     "type": "string",
                     "enum": ["all", "any"],
-                    "description": "await_members: all or any."
+                    "description": "await_members."
                 },
                 "target_status": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional completion statuses for await_members. Defaults to ready/completed/stopped/failed."
+                    "description": "await_members; defaults to ready/completed/stopped/failed."
                 },
                 "timeout_minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "await_members timeout. Returned dependency ID pauses todo.waiting_on until completion or timeout."
+                    "description": "await_members; returned ID can be used in todo.waiting_on."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "For launch/run_plan: detach as a background task (default true); false blocks until the plan resolves."
+                    "description": "launch: default true; false waits for completion."
                 },
                 "notify": {
                     "type": "boolean",
-                    "description": "For await_members/run_plan: show a notification when resolved. Defaults to true."
+                    "description": "await_members: default true."
                 },
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max live workers for launch."
+                    "description": "Max live launch workers."
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "For stop/cleanup: allow stopping non-owned/user-created swarm sessions. Defaults to false."
+                    "description": "stop: allow stopping non-owned/user-created sessions; default false."
                 },
                 "retain_agents": {
                     "type": "boolean",
-                    "description": "For launch/run_plan: keep spawned workers after the plan finishes. Defaults to false."
+                    "description": "launch: keep workers after completion; default false."
                 },
                 "wake": {
                     "type": "boolean",
-                    "description": "Wake this agent when a message or awaited background task resolves (default true)."
+                    "description": "Wake on message/await completion; default true."
                 },
                 "delivery": {
                     "type": "string",
-                    "enum": ["notify", "interrupt", "wake"],
-                    "description": "Optional delivery mode for dm/channel messaging."
+                    "enum": ["notify", "interrupt", "wake"]
                 },
             }
         });

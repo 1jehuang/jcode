@@ -20,6 +20,56 @@ pub struct CloudStatusInfo {
     pub state: CloudProbeState,
     pub machine: Option<CloudMachineStats>,
     pub last_transfer_at: Option<String>,
+    pub directories: Option<CloudDirectorySnapshot>,
+    pub directories_stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+pub struct CloudDirectorySnapshot {
+    pub entries: Vec<CloudDirectoryEntry>,
+    pub truncated: bool,
+    pub current_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+pub struct CloudDirectoryEntry {
+    pub path: String,
+    pub agents: usize,
+    pub busy: usize,
+}
+
+const DIRECTORIES_PROBE: &str = include_str!("cloud_directories_probe.py");
+
+fn directories_script(session_id: Option<&str>) -> String {
+    let hint = session_id.unwrap_or("").replace('\'', "'\\''");
+    format!(
+        "python3 - \"$1\" '{hint}' <<'JCODE_DIRECTORIES_PY'\n{DIRECTORIES_PROBE}\nJCODE_DIRECTORIES_PY\n"
+    )
+}
+
+fn parse_directories(bytes: &[u8]) -> Option<CloudDirectorySnapshot> {
+    let snapshot: CloudDirectorySnapshot = match serde_json::from_slice(bytes) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::logging::debug(&format!("Cloud directory response rejected: {error}"));
+            return None;
+        }
+    };
+    if snapshot.entries.len() > 4096
+        || snapshot.entries.iter().any(|entry| {
+            entry.path.is_empty() || entry.path.len() > 16384 || entry.busy > entry.agents
+        })
+    {
+        return None;
+    }
+    Some(snapshot)
+}
+
+fn apply_directories(info: &mut CloudStatusInfo, snapshot: Option<CloudDirectorySnapshot>) {
+    info.directories_stale = snapshot.is_none();
+    if let Some(snapshot) = snapshot {
+        info.directories = Some(snapshot);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -169,8 +219,11 @@ fn apply_result(
 }
 
 #[cfg(not(test))]
-pub(crate) fn gather() -> Option<CloudStatusInfo> {
+pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
     use std::sync::{Arc, Mutex, OnceLock};
+    static SESSION_HINT: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
+    let hint = SESSION_HINT.get_or_init(|| Arc::new(Mutex::new(None)));
+    *hint.lock().unwrap_or_else(|e| e.into_inner()) = session_id;
     let host = super::ssh_remote_host()?;
     if host.is_empty()
         || host.starts_with('-')
@@ -192,8 +245,11 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
             state: CloudProbeState::Loading,
             machine: None,
             last_transfer_at: std::env::var("JCODE_SSH_LAST_TRANSFER_AT").ok(),
+            directories: None,
+            directories_stale: false,
         }));
         let output = cache.clone();
+        let current_session = hint.clone();
         let config = std::env::var_os("JCODE_SSH_CONFIG").map(std::path::PathBuf::from);
         std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -233,6 +289,28 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
                         start.elapsed(),
                         SystemTime::now(),
                     );
+                    let session_hint = current_session
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let directory_response = super::cloud_git::bounded_output(
+                        super::cloud_git::script_command(
+                            Some(&host),
+                            config.as_deref(),
+                            &remote_dir,
+                            &directories_script(session_hint.as_deref()),
+                        ),
+                        Duration::from_secs(8),
+                        1024 * 1024,
+                    )
+                    .await;
+                    let directories = directory_response
+                        .filter(|(status, _)| status.success())
+                        .and_then(|(_, bytes)| parse_directories(&bytes));
+                    apply_directories(
+                        &mut output.lock().unwrap_or_else(|e| e.into_inner()),
+                        directories,
+                    );
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -244,7 +322,7 @@ pub(crate) fn gather() -> Option<CloudStatusInfo> {
 }
 
 #[cfg(test)]
-pub(crate) fn gather() -> Option<CloudStatusInfo> {
+pub(crate) fn gather(_session_id: Option<String>) -> Option<CloudStatusInfo> {
     None
 }
 
@@ -317,7 +395,7 @@ mod tests {
         assert!(parse(b"bad", None).is_none());
         let (empty, _) = parse(b"jcode-machine-v1\0\0\0\0\0\0", None).unwrap();
         assert_eq!(empty, CloudMachineStats::default());
-        assert!(gather().is_none());
+        assert!(gather(None).is_none());
     }
     #[test]
     fn failure_retains_stale_success() {
@@ -333,6 +411,8 @@ mod tests {
             state: CloudProbeState::Loading,
             machine: None,
             last_transfer_at: None,
+            directories: None,
+            directories_stale: false,
         };
         apply_result(
             &mut info,
@@ -352,6 +432,80 @@ mod tests {
         assert!(info.machine.is_some());
         assert_eq!(info.probe_duration_ms, Some(12000));
     }
+    #[test]
+    fn directory_snapshot_validation_and_failure_retains_last_good() {
+        let bytes = br#"{"entries":[{"path":"~/project","agents":3,"busy":2}],"truncated":false,"current_path":"~/project"}"#;
+        let snapshot = parse_directories(bytes).unwrap();
+        assert_eq!(snapshot.entries[0].agents, 3);
+        assert_eq!(snapshot.current_path.as_deref(), Some("~/project"));
+        for invalid in [
+            br#"{"entries":[{"path":"x","agents":1,"busy":2}],"truncated":false}"#.as_slice(),
+            br#"{"entries":[{"path":"","agents":0,"busy":0}],"truncated":false}"#.as_slice(),
+            br#"{"entries":[],"truncated":"false"}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(parse_directories(invalid).is_none());
+        }
+        let mut info = CloudStatusInfo {
+            host: "vm".into(),
+            remote_dir: "/project".into(),
+            local_dir: None,
+            local_is_source: false,
+            started_at: SystemTime::UNIX_EPOCH,
+            last_success: None,
+            probe_duration_ms: None,
+            state: CloudProbeState::Ready,
+            machine: None,
+            last_transfer_at: None,
+            directories: None,
+            directories_stale: false,
+        };
+        apply_directories(&mut info, Some(snapshot.clone()));
+        assert!(!info.directories_stale);
+        apply_directories(&mut info, None);
+        assert!(info.directories_stale);
+        assert_eq!(info.directories.as_ref(), Some(&snapshot));
+        // A successful resource probe must not clear an inventory failure.
+        apply_result(
+            &mut info,
+            Some(CloudMachineStats::default()),
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        assert!(info.directories_stale);
+        apply_directories(&mut info, Some(CloudDirectorySnapshot::default()));
+        assert!(!info.directories_stale);
+        assert!(info.directories.unwrap().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn directory_script_runs_through_real_shell_transport() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project ' 雲");
+        std::fs::create_dir(&project).unwrap();
+        let mut command = super::super::cloud_git::script_command(
+            None,
+            None,
+            project.to_str().unwrap(),
+            &directories_script(None),
+        );
+        command.env("HOME", home.path());
+        command.env("JCODE_HOME", home.path().join(".jcode"));
+        let (status, bytes) =
+            super::super::cloud_git::bounded_output(command, Duration::from_secs(8), 1024 * 1024)
+                .await
+                .expect("bounded directory probe");
+        assert!(status.success());
+        let snapshot = parse_directories(&bytes).expect("valid directory wire response");
+        assert_eq!(snapshot.current_path.as_deref(), Some("~/project ' 雲"));
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .any(|entry| entry.path == "~/project ' 雲" && entry.agents == 0)
+        );
+    }
+
     #[tokio::test]
     async fn bounded_transport_timeout_and_output_cap() {
         let cmd = super::super::cloud_git::script_command(None, None, "/", "sleep 30");

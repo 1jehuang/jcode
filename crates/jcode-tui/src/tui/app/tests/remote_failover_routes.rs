@@ -1,3 +1,92 @@
+#[test]
+fn test_remote_background_shortcut_during_connection_phase() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        app.is_remote = true;
+        app.is_processing = true;
+        app.status =
+            ProcessingStatus::Connecting(crate::message::ConnectionPhase::WaitingForResponse);
+        app.input = "keep draft".into();
+        app.cursor_pos = app.input.len();
+        rt.block_on(async {
+            remote::handle_remote_key_event(
+                &mut app,
+                crossterm::event::KeyEvent::new(KeyCode::Char('b'), modifiers),
+                &mut remote,
+            )
+            .await
+            .unwrap();
+            use tokio::io::AsyncBufReadExt;
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::io::BufReader::new(&mut peer).read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<crate::protocol::Request>(&line).unwrap(),
+                crate::protocol::Request::BackgroundTool { .. }
+            ));
+        });
+        assert_eq!(app.input, "keep draft");
+        assert_eq!(app.cursor_pos, app.input.len());
+    }
+}
+
+#[test]
+fn test_remote_background_result_notice() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    for (moved, expected) in [
+        (true, "Tool signalled to move to background"),
+        (false, "No running tool to move to background"),
+    ] {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::BackgroundToolResult {
+                id: 1,
+                moved,
+                tool_call_id: None,
+                tool_name: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(app.status_notice().as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn test_remote_background_shortcut_idle_keeps_word_navigation() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        app.input = "keep draft".into();
+        app.cursor_pos = app.input.len();
+        let request_id = remote.next_request_id_for_test();
+        rt.block_on(remote::handle_remote_key_event(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Char('b'), modifiers),
+            &mut remote,
+        ))
+        .unwrap();
+        assert_eq!(remote.next_request_id_for_test(), request_id);
+        assert_eq!(app.input, "keep draft");
+        assert_eq!(app.cursor_pos, 5);
+    }
+}
+
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
         model: model.to_string(),
