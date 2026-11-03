@@ -93,6 +93,35 @@ fn runtime_command_error_preserves_active_turn_and_clears_request_ownership() {
 }
 
 #[test]
+fn remote_poke_response_synchronizes_toggle_without_disrupting_turn() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _runtime_guard = runtime.enter();
+    let mut app = create_test_app();
+    let mut remote = RemoteConnection::dummy();
+    app.is_processing = true;
+    app.current_message_id = Some(99);
+    app.input = "unsent draft".into();
+    for enabled in [false, true, false] {
+        assert!(handle_server_event(
+            &mut app,
+            ServerEvent::RuntimeCommandResult {
+                id: 42,
+                command: "poke".into(),
+                data: serde_json::json!({"poke_enabled": enabled, "server_owned": true}),
+                message: "Remote poke updated".into(),
+            },
+            &mut remote,
+        ));
+        assert_eq!(app.auto_poke_incomplete_todos, enabled);
+        assert_eq!(app.auto_poke_default_on, enabled);
+        assert!(app.is_processing);
+        assert_eq!(app.current_message_id, Some(99));
+        assert_eq!(app.input, "unsent draft");
+        assert!(app.queued_messages.is_empty());
+    }
+}
+
+#[test]
 fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
