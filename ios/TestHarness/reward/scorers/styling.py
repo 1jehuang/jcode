@@ -53,13 +53,16 @@ WEIGHT = 0.04
 # Neutral Theme tokens (surfaces, borders, text). These are the canvas, not an
 # accent, so they never count toward the accent palette.
 _NEUTRAL_TOKENS = {
-    "background", "surface", "surfaceElevated", "border",
-    "textPrimary", "textSecondary", "textTertiary",
+    "background", "surface", "surfaceElevated", "border", "borderStrong",
+    "borderFocus", "textPrimary", "textSecondary", "textTertiary", "textUser",
+    "toolSurface", "codeBackground", "codeHeader", "inlineCode",
+    "inputBackground", "inputBorder", "onAccent",
 }
 # Chromatic Theme tokens that DO read as accents. mintTint folds into mint (it is
 # the same hue at lower alpha, not a second accent).
 _ACCENT_TOKEN_FAMILY = {
     "mint": "mint", "mintTint": "mint",
+    "accent": "mint", "accentTint": "mint", "link": "mint", "ok": "ok",
     "warning": "warning", "error": "error",
 }
 
@@ -77,7 +80,7 @@ _CORNER_RADIUS_RE = re.compile(r"cornerRadius:\s*([0-9]+(?:\.[0-9]+)?)")
 
 # Mint hue (~158 deg) defines the accent band; warning/error are functional
 # state colours, not the brand accent we measure for sparingness.
-_MINT_HUE = 158.0
+_MINT_HUE = 30.0  # Theme.accent sandstone #B6A08A (Desktop ACCENT)
 _HUE_TOL = 26.0
 
 

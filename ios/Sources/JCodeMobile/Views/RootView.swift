@@ -10,7 +10,7 @@ struct RootView: View {
         GeometryReader { proxy in
             ZStack {
                 Theme.background.ignoresSafeArea()
-                if model.activeServer == nil {
+                if model.activeServer == nil && !model.isDemo {
                     PairingView()
                 } else {
                     ChatView()
@@ -19,6 +19,40 @@ struct RootView: View {
             .environment(\.compactEdgePads, CompactEdgePads(safeArea: proxy.safeAreaInsets))
         }
         .task {
+            // `-jcodeDemo YES` starts in demo mode. Screenshot and E2E tooling
+            // uses it to reach the reviewer's exact first-run path without a
+            // UI driver; it changes nothing for a normal launch.
+            if UserDefaults.standard.bool(forKey: "jcodeDemo"), !model.isDemo {
+                model.startDemo()
+                // `-jcodeDemoPrompt "..."` additionally sends one message, so
+                // screenshot runs land on a rendered conversation instead of
+                // an empty transcript.
+                if let prompt = UserDefaults.standard.string(forKey: "jcodeDemoPrompt"),
+                    !prompt.isEmpty
+                {
+                    // Wait for the scripted socket to report connected, since
+                    // the composer refuses to send while offline.
+                    for _ in 0..<50 where !model.isConnected {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    // "a || b" sends several prompts in turn, each after the
+                    // previous reply finishes, for multi-turn screenshots.
+                    let prompts = prompt.components(separatedBy: "||")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    for (index, next) in prompts.enumerated() {
+                        if index > 0 {
+                            for _ in 0..<200 where model.session.isProcessing {
+                                try? await Task.sleep(nanoseconds: 100_000_000)
+                            }
+                        }
+                        model.draft = next
+                        model.sendDraft()
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                    }
+                }
+                return
+            }
             // Auto-connect to the most recent server on launch.
             if let server = model.activeServer, !model.isConnected {
                 model.connect(to: server)
@@ -49,43 +83,35 @@ struct RootView: View {
     }
 }
 
-/// Connection status pill shown in the chat header.
+/// Connection status shown in the chat header.
+///
+/// Connected is the steady state, so it renders as a single calm mint dot;
+/// any degraded phase gets a labeled pill so the words appear exactly when
+/// they carry information.
 struct StatusPill: View {
     let phase: ConnectionPhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 6) {
-            ZStack {
-                if isLive && !reduceMotion {
-                    Circle()
-                        .fill(color.opacity(0.35))
-                        .frame(width: 14, height: 14)
-                        .scaleEffect(pulse ? 1.35 : 0.8)
-                        .opacity(pulse ? 0 : 1)
-                        .animation(
-                            .easeOut(duration: 1.6).repeatForever(autoreverses: false),
-                            value: pulse
-                        )
-                }
-                Circle()
-                    .fill(color)
-                    .frame(width: 7, height: 7)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            if phase != .connected {
+                Text(label)
+                    .font(Theme.mono(12))
+                    .foregroundStyle(Theme.textSecondary)
             }
-            .frame(width: 14, height: 14)
-            .accessibilityHidden(true)
-            Text(label)
-                .font(Theme.mono(11, weight: .medium))
-                .foregroundStyle(Theme.textSecondary)
-                .lineLimit(1)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 12)
-        .padding(.vertical, 6)
-        .background(Theme.surface)
+        .padding(.horizontal, phase == .connected ? 0 : 12)
+        .padding(.vertical, 4)
+        .background(phase == .connected ? .clear : Theme.surface)
         .clipShape(Capsule())
-        .overlay(Capsule().stroke(isLive ? color.opacity(0.35) : Theme.border, lineWidth: 1))
-        .onAppear { pulse = true }
+        .overlay(
+            Capsule().stroke(
+                phase == .connected ? .clear : Theme.border, lineWidth: 1)
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Connection")
         .accessibilityValue(label)
@@ -100,7 +126,7 @@ struct StatusPill: View {
 
     private var color: Color {
         switch phase {
-        case .connected: Theme.mint
+        case .connected: Theme.ok
         case .connecting, .reconnecting: Theme.warning
         case .disconnected, .failed: Theme.error
         }
@@ -184,7 +210,7 @@ private struct NoticeRow: View {
     private var tint: Color {
         switch notice.kind {
         case .info: Theme.textSecondary
-        case .notification: Theme.mint
+        case .notification: Theme.accent
         case .compaction: Theme.warning
         }
     }

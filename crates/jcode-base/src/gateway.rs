@@ -420,6 +420,7 @@ async fn handle_http(
                 "status": "ok",
                 "version": jcode_build_meta::version(),
                 "gateway": true,
+                "working_dir": default_client_working_dir(),
             });
             http_response(200, "OK", &body.to_string())
         }
@@ -512,6 +513,7 @@ async fn handle_pair_request(
         "token": token,
         "server_name": "jcode",
         "server_version": jcode_build_meta::version(),
+        "working_dir": default_client_working_dir(),
     });
     http_response(200, "OK", &body.to_string())
 }
@@ -612,6 +614,23 @@ fn system_hostname() -> Option<String> {
             None
         }
     }
+}
+
+/// Working directory advertised to gateway clients.
+///
+/// `Subscribe` requires an absolute working directory, but a phone or browser
+/// has no directory on the host, so it cannot invent one. The gateway therefore
+/// publishes the server's own cwd (falling back to the home directory) in the
+/// `/health` and `/pair` responses, and remote clients echo it back on
+/// subscribe. Without this, every real-server subscribe from a remote client
+/// fails with "Subscribe requires the client's working directory".
+fn default_client_working_dir() -> String {
+    std::env::current_dir()
+        .ok()
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/".to_string())
 }
 
 #[cfg(test)]
