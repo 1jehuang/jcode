@@ -29,10 +29,22 @@ pub(super) fn clear_headed_startup_message(session_id: &str) {
 pub(super) fn cleanup_prepared_visible_spawn_session(session_id: &str) {
     crate::session_env::remove_session_env(session_id);
     clear_headed_startup_message(session_id);
-    if let Ok(path) = crate::session::session_path(session_id) {
-        let _ = std::fs::remove_file(path);
+    if let Ok(path) = crate::session::session_path(session_id)
+        && let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!(
+            "Failed to clean prepared session file {}: {error}",
+            path.display()
+        ));
     }
-    if let Ok(path) = crate::session::session_journal_path(session_id) {
-        let _ = std::fs::remove_file(path);
+    if let Ok(path) = crate::session::session_journal_path(session_id)
+        && let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!(
+            "Failed to clean prepared session file {}: {error}",
+            path.display()
+        ));
     }
 }

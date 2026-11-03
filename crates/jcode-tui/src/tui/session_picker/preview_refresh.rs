@@ -10,6 +10,21 @@ fn same_transcript(a: &SessionInfo, b: &SessionInfo) -> bool {
         && a.source == b.source
         && a.resume_target == b.resume_target
         && a.external_path == b.external_path
+        && (b.messages_preview.is_empty()
+            || (a.messages_preview.len() == b.messages_preview.len()
+                && a.messages_preview
+                    .iter()
+                    .zip(&b.messages_preview)
+                    .all(|(a, b)| {
+                        a.role == b.role
+                            && a.content == b.content
+                            && a.tool_calls == b.tool_calls
+                            && a.tool_data == b.tool_data
+                            && a.timestamp == b.timestamp
+                            && a.duration_secs.map(f32::to_bits)
+                                == b.duration_secs.map(f32::to_bits)
+                            && a.title == b.title
+                    })))
 }
 
 impl SessionPicker {
@@ -43,7 +58,16 @@ impl SessionPicker {
                 if incoming.messages_preview.is_empty() {
                     incoming.messages_preview.clone_from(&old.messages_preview);
                 }
-                unchanged.insert(incoming.id.clone());
+                // Transcript reuse does not authorize reusing another
+                // workspace/account route's metadata after a chdir or switch.
+                if old.working_dir == incoming.working_dir
+                    && old.model == incoming.model
+                    && old.provider_key == incoming.provider_key
+                    && old.server_name == incoming.server_name
+                    && old.server_icon == incoming.server_icon
+                {
+                    unchanged.insert(incoming.id.clone());
+                }
             }
         }
         self.preview_extras.retain(|id, _| unchanged.contains(id));

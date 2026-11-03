@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Allows exact-source validation after bot-authored commits, whose pushes
+  # do not trigger workflows when made with GITHUB_TOKEN.
+  workflow_dispatch:
   push:
     branches: [main, master]
   pull_request:
@@ -139,6 +142,8 @@ jobs:
           python3 tests/test_install_justrust_hosted_ci.py
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
+          python3 scripts/test_safety_budgets.py
+          python3 tests/test_bash_platform_guards.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
           python3 tests/test_preview_linux_hosted.py
@@ -431,7 +436,7 @@ jobs:
           scripts/check_warning_budget.sh
 
       - name: Security preflight (Linux)
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         shell: bash
         run: |
           cargo install cargo-audit --locked
@@ -660,6 +665,9 @@ jobs:
       - name: Typecheck, build, and test
         run: npm run check
         working-directory: sdk/typescript
+
+      - name: SDK release versioning
+        run: node --test scripts/test_version_sdk_release.mjs
 
       # `npm run check` proves the source compiles; it says nothing about what
       # a consumer actually receives. The published tarball is a separate

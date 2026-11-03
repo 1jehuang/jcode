@@ -294,10 +294,29 @@ fn structured_stream_read_error_is_extracted_and_classified_as_transient() {
 }
 
 #[test]
-fn parse_text_wrapped_tool_call_rejects_non_object_json() {
-    let text = "prefix to=functions.read [1,2,3]";
-    let parsed = parse_text_wrapped_tool_call(text);
-    assert!(parsed.is_none());
+fn tool_call_examples_stay_literal_in_text_events() {
+    for text in [
+        "to=functions.read {\"file_path\":\"README.md\"}",
+        "The literal marker `to=functions.read` is followed by {}.",
+        "```json\nto=functions.read {\"file_path\":\"README.md\"}\n```\nEnd of example.",
+        r#""to=functions.read {\"file_path\":\"README.md\"}""#,
+    ] {
+        let mut pending = VecDeque::new();
+        let mut calls = HashMap::new();
+        let mut completed = HashSet::new();
+        let event = parse_openai_response_event(
+            &serde_json::json!({"type":"response.output_text.delta", "delta":text}).to_string(),
+            &mut false,
+            &mut false,
+            &mut calls,
+            &mut completed,
+            &mut pending,
+        );
+        assert!(matches!(event, Some(StreamEvent::TextDelta(actual)) if actual == text));
+        assert!(pending.is_empty());
+        assert!(calls.is_empty());
+        assert!(completed.is_empty());
+    }
 }
 
 #[test]

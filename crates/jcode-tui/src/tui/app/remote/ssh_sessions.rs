@@ -195,7 +195,11 @@ pub(in crate::tui::app) async fn handle_event(
             .as_ref()
             .is_some_and(|child| child.request_id == *id) =>
         {
-            let child = app.ssh_sessions.child.take().expect("matched child");
+            let child = app
+                .ssh_sessions
+                .child
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Matched SSH child request disappeared"))?;
             navigate(app, remote, new_session_id, false, child.prompt).await?;
             return Ok(true);
         }
@@ -210,7 +214,7 @@ pub(in crate::tui::app) async fn handle_event(
                 .ssh_sessions
                 .navigation
                 .take()
-                .expect("matched navigation");
+                .ok_or_else(|| anyhow::anyhow!("Matched SSH navigation disappeared"))?;
             if navigation.returning {
                 app.ssh_sessions.back.pop();
             } else if let Some(previous) = navigation

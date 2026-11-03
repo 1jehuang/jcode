@@ -70,6 +70,7 @@ fn low_open_goal_records_an_observation_without_interrupting() {
 fn low_intent_is_plan_level_and_independent_of_goals() {
     let todos = vec![open_todo(Some("coverage"))];
     let plan = TodoPlan {
+        title: None,
         user_intention: Some("partially understood".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
@@ -104,6 +105,7 @@ fn low_intent_is_plan_level_and_independent_of_goals() {
 fn severely_low_first_intent_still_nudges_immediately() {
     let todos = vec![open_todo(None)];
     let plan = TodoPlan {
+        title: None,
         user_intention: Some("guessing".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Uncertain),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Uncertain],
@@ -171,6 +173,7 @@ fn a_group_closed_by_this_write_is_still_observed() {
 fn both_weak_links_are_recorded_independently() {
     let todos = vec![open_todo(Some("coverage"))];
     let plan = TodoPlan {
+        title: None,
         user_intention: Some("partially understood".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
@@ -248,6 +251,7 @@ fn observations_cover_the_ungrouped_implicit_goal() {
 #[test]
 fn plan_and_goal_score_histories_are_tool_maintained() {
     let stored = TodoPlan {
+        title: None,
         user_intention: Some("ship it".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],

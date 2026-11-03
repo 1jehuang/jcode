@@ -55,6 +55,10 @@ impl Projection {
     }
 
     fn observe(&mut self, event: &ServerEvent, now: Instant) {
+        let event = match event {
+            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
+            event => event,
+        };
         match event {
             ServerEvent::ConnectionType { connection } => {
                 self.value.connection_type = Some(connection.clone())

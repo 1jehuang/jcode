@@ -435,9 +435,9 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     };
     assert_eq!(count, 1);
     let message = run_actionable_poke_message(message, &todos, &actionable);
-    assert!(message.contains("Actionable todos:\n- independent:"));
+    assert!(message.contains("Actionable todos:\n- \"todo independent\""));
     assert!(
-        !message.contains("- waiting:"),
+        !message.contains("\"todo waiting\""),
         "blocked work is not actionable"
     );
     assert!(crate::todo::is_auto_poke_message(&message));

@@ -303,6 +303,14 @@ pub struct SwarmAwaitCompleted {
     pub wake: bool,
 }
 
+/// A worker report that must reach its owner's model, not just its UI.
+#[derive(Clone, Debug)]
+pub struct SwarmWorkerReported {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -432,6 +440,8 @@ pub enum BusEvent {
     BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
+    /// A spawned worker finished and its owner needs to coordinate next steps.
+    SwarmWorkerReported(SwarmWorkerReported),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -512,6 +522,7 @@ impl BusEvent {
             Self::BackgroundTaskProgress(event) => Some(&event.session_id),
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
+            Self::SwarmWorkerReported(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
             Self::SubagentStatus(event) => Some(&event.session_id),
@@ -649,6 +660,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskProgress(_)
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
+                | BusEvent::SwarmWorkerReported(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)
@@ -751,7 +763,9 @@ impl Bus {
                 state.publish_pending = false;
                 state.last_published_at = Some(Instant::now());
                 drop(state);
-                let _ = sender.send(BusEvent::ModelsUpdated);
+                if sender.send(BusEvent::ModelsUpdated).is_err() {
+                    crate::logging::debug("Model update notification has no subscribers");
+                }
             });
             return;
         }
@@ -774,6 +788,25 @@ mod tests {
             notify: true,
             wake: true,
         })
+    }
+
+    #[tokio::test]
+    async fn worker_report_uses_reliable_owner_scoped_runtime_delivery() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(BusEvent::SwarmWorkerReported(super::SwarmWorkerReported {
+            session_id: "root".into(),
+            worker_session_id: "worker".into(),
+            notification: "ready for next chunk".into(),
+        }));
+        assert!(bus.runtime_delivery_checkpoint().is_none());
+        let delivery = receiver.recv().await.unwrap();
+        assert_eq!(delivery.event.runtime_session_id(), Some("root"));
+        assert!(
+            matches!(&delivery.event, BusEvent::SwarmWorkerReported(report) if report.notification == "ready for next chunk")
+        );
+        drop(delivery);
+        assert!(bus.runtime_delivery_checkpoint().is_some());
     }
 
     #[tokio::test]
