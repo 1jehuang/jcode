@@ -1936,6 +1936,12 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
     if cmd == "state" {
         return serde_json::json!({
             "processing": app.is_processing,
+            "processing_status": format!("{:?}", app.status),
+            "current_message_id": app.current_message_id,
+            "pending_soft_interrupts": app.pending_soft_interrupts.len(),
+            "pending_soft_interrupt_requests": app.pending_soft_interrupt_requests.len(),
+            "pending_queued_dispatch": app.pending_queued_dispatch,
+            "remote_session_id": app.remote_session_id,
             "messages": app.messages.len(),
             "display_messages": app.display_messages.len(),
             "input": app.input,
