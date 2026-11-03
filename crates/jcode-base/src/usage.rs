@@ -119,7 +119,7 @@ async fn fetch_anthropic_usage_data_uncached(
             .header("Content-Type", "application/json")
             .header(
                 "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                crate::provider::anthropic::claude_cli_user_agent(),
             )
             .header("Authorization", format!("Bearer {}", access_token))
             .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219"),

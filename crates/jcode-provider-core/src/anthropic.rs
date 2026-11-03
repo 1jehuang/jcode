@@ -1,3 +1,80 @@
+use std::sync::OnceLock;
+
+/// Claude Code release that jcode identifies as on Claude OAuth (subscription)
+/// requests: the `claude-cli/<version>` User-Agent, the `cc_version` billing
+/// attribution, and the OAuth preflight `app_version`.
+///
+/// Anthropic gates newer models on a minimum Claude Code version and rejects an
+/// older identity with `claude_code_version_too_old` (#1134, #1390). Bump this
+/// default when the floor moves; users can also override it at runtime with
+/// [`CLAUDE_CODE_VERSION_ENV`] instead of waiting for a release.
+pub const CLAUDE_CODE_VERSION_DEFAULT: &str = "2.1.280";
+
+/// Environment variable that overrides [`CLAUDE_CODE_VERSION_DEFAULT`].
+pub const CLAUDE_CODE_VERSION_ENV: &str = "JCODE_CLAUDE_CODE_VERSION";
+
+/// Resolve the Claude Code version from an optional override.
+///
+/// The value is sent in HTTP headers, so only a dotted numeric version
+/// (`2.1.280`) is accepted; anything else falls back to the default rather
+/// than producing an invalid header.
+pub fn resolve_claude_code_version(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|value| is_dotted_numeric_version(value))
+        .unwrap_or(CLAUDE_CODE_VERSION_DEFAULT)
+        .to_string()
+}
+
+fn is_dotted_numeric_version(value: &str) -> bool {
+    // At least two components: a bare number such as `1` is not a version.
+    value.contains('.')
+        && value.len() <= 32
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The Claude Code version for this process (read once).
+pub fn claude_code_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        // `var_os` so a non-UTF-8 value is reported below instead of silently dropped.
+        let raw =
+            std::env::var_os(CLAUDE_CODE_VERSION_ENV).map(|v| v.to_string_lossy().into_owned());
+        let resolved = resolve_claude_code_version(raw.as_deref());
+        if let Some(raw) = raw.as_deref().map(str::trim).filter(|raw| !raw.is_empty())
+            && raw != resolved
+        {
+            jcode_logging::warn(&format!(
+                "ignoring {CLAUDE_CODE_VERSION_ENV}={raw:?}: expected a dotted numeric version \
+                 such as {CLAUDE_CODE_VERSION_DEFAULT}; using {resolved}"
+            ));
+        }
+        resolved
+    })
+}
+
+/// User-Agent for Claude OAuth requests, matching the official Claude Code CLI.
+pub fn claude_cli_user_agent() -> &'static str {
+    static USER_AGENT: OnceLock<String> = OnceLock::new();
+    USER_AGENT.get_or_init(|| claude_cli_user_agent_for(claude_code_version()))
+}
+
+/// Claude Code billing attribution text observed in the official CLI's system
+/// prompt blocks.
+pub fn claude_code_billing_header() -> &'static str {
+    static HEADER: OnceLock<String> = OnceLock::new();
+    HEADER.get_or_init(|| claude_code_billing_header_for(claude_code_version()))
+}
+
+fn claude_cli_user_agent_for(version: &str) -> String {
+    format!("claude-cli/{version} (external, sdk-cli)")
+}
+
+fn claude_code_billing_header_for(version: &str) -> String {
+    format!("cc_version={version}; cc_entrypoint=sdk-cli; cch=33f85;")
+}
+
 /// Claude Code OAuth beta headers used by the Anthropic transport.
 pub const ANTHROPIC_OAUTH_BETA_HEADERS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24";
 
@@ -433,6 +510,65 @@ pub fn anthropic_stainless_os() -> &'static str {
 mod tests {
     use super::*;
     use crate::ALL_CLAUDE_MODELS;
+
+    #[test]
+    fn claude_code_version_defaults_when_unset_or_blank() {
+        assert_eq!(
+            resolve_claude_code_version(None),
+            CLAUDE_CODE_VERSION_DEFAULT
+        );
+        assert_eq!(
+            resolve_claude_code_version(Some("")),
+            CLAUDE_CODE_VERSION_DEFAULT
+        );
+        assert_eq!(
+            resolve_claude_code_version(Some("   ")),
+            CLAUDE_CODE_VERSION_DEFAULT
+        );
+    }
+
+    #[test]
+    fn claude_code_version_override_is_trimmed_and_applied() {
+        assert_eq!(resolve_claude_code_version(Some("2.1.281")), "2.1.281");
+        assert_eq!(resolve_claude_code_version(Some(" 2.2.0\n")), "2.2.0");
+    }
+
+    #[test]
+    fn claude_code_version_override_rejects_values_unsafe_for_headers() {
+        for bad in [
+            "latest",
+            "1",
+            "2801",
+            "2.1.280-beta",
+            "2..1",
+            ".2.1",
+            "2.1.",
+            "2.1.280 (external)",
+            "2.1.280\r\nX-Injected: 1",
+            "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16",
+        ] {
+            assert_eq!(
+                resolve_claude_code_version(Some(bad)),
+                CLAUDE_CODE_VERSION_DEFAULT,
+                "{bad:?} must fall back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_oauth_identity_strings_share_one_version() {
+        assert_eq!(
+            claude_cli_user_agent_for("2.1.280"),
+            "claude-cli/2.1.280 (external, sdk-cli)"
+        );
+        assert_eq!(
+            claude_code_billing_header_for("2.1.280"),
+            "cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;"
+        );
+        let version = claude_code_version();
+        assert!(claude_cli_user_agent().contains(&format!("claude-cli/{version} ")));
+        assert!(claude_code_billing_header().starts_with(&format!("cc_version={version};")));
+    }
 
     #[test]
     fn opus_55_documented_capabilities_and_mandatory_thinking() {
