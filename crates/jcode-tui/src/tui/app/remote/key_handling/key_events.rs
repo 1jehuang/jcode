@@ -411,7 +411,9 @@ pub(super) async fn handle_remote_key_internal(
         let alt_code = macos_option_shortcut.map(KeyCode::Char).unwrap_or(code);
         match alt_code {
             KeyCode::Char('b') => {
-                if matches!(app.status, ProcessingStatus::RunningTool(_)) {
+                // Cloud/reconnected clients can display a connection phase while
+                // the server is still executing a tool. The server is authoritative.
+                if app.is_processing || matches!(app.status, ProcessingStatus::RunningTool(_)) {
                     remote.background_tool().await?;
                     app.set_status_notice("Moving tool to background...");
                     return Ok(());
@@ -570,7 +572,7 @@ pub(super) async fn handle_remote_key_internal(
         }
         match code {
             KeyCode::Char('b') => {
-                if matches!(app.status, ProcessingStatus::RunningTool(_)) {
+                if app.is_processing || matches!(app.status, ProcessingStatus::RunningTool(_)) {
                     remote.background_tool().await?;
                     app.set_status_notice("Moving tool to background...");
                     return Ok(());

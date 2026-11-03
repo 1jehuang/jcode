@@ -1006,6 +1006,14 @@ fn handle_server_event_inner(
             }
             true
         }
+        ServerEvent::BackgroundToolResult { moved, .. } => {
+            app.set_status_notice(if moved {
+                "Tool signalled to move to background"
+            } else {
+                "No running tool to move to background"
+            });
+            true
+        }
         ServerEvent::Ack { id } => {
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
