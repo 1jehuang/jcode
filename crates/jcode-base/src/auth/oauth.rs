@@ -967,10 +967,8 @@ async fn send_claude_refresh_request(
     Ok(resp.json().await?)
 }
 
-async fn refresh_claude_tokens_inner(
-    refresh_token: &str,
-    label: Option<&str>,
-) -> Result<OAuthTokens> {
+async fn refresh_claude_tokens_inner(refresh_token: &str, label: &str) -> Result<OAuthTokens> {
+    let expected = claude_auth::capture_refresh_account(label, refresh_token)?;
     let scoped_result =
         send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES)).await;
     let tokens = match scoped_result {
@@ -1004,18 +1002,7 @@ async fn refresh_claude_tokens_inner(
         scopes,
     };
 
-    let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
-        claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
-    });
-    let previous_access = stored_claude_tokens(&save_label).map(|tokens| tokens.access_token);
-    save_claude_tokens_for_account(&oauth_tokens, &save_label)?;
-    if let Some(previous_access) = previous_access {
-        crate::usage::carry_anthropic_usage_across_token_refresh(
-            &save_label,
-            &previous_access,
-            &oauth_tokens.access_token,
-        );
-    }
+    claude_auth::commit_refresh_account(&expected, &oauth_tokens)?;
 
     Ok(oauth_tokens)
 }
@@ -1092,7 +1079,7 @@ pub async fn refresh_claude_tokens_for_account(
                 .map(|tokens| tokens.refresh_token)
                 .filter(|token| !token.is_empty())
                 .unwrap_or(observed_refresh);
-            refresh_claude_tokens_inner(&token, Some(&label)).await
+            refresh_claude_tokens_inner(&token, &label).await
         },
     )
     .await;

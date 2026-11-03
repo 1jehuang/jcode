@@ -365,6 +365,13 @@ impl ClaudeCodeProvider {
             self.host_tool_executor.load(Ordering::Acquire) && self.settings().expose_jcode_tools,
         );
         let settings = self.settings();
+        let launch_args = instance
+            .launch_args
+            .as_deref()
+            .map(settings::parse_launch_args)
+            .unwrap_or_default();
+        let permission_mode =
+            settings::effective_permission_mode(&settings.permission_mode, &launch_args);
 
         if let Some(child) = state.child.take() {
             let launch = &child.launch;
@@ -372,6 +379,7 @@ impl ClaudeCodeProvider {
                 && launch.instance.env == instance.env
                 && launch.instance.launch_args == instance.launch_args;
             let same_shape = launch.spec.expose_mcp == expose_mcp
+                && launch.spec.permission_mode == permission_mode
                 && launch.spec.host_file_tools == host_file_tools
                 && launch.spec.effort == effort
                 && launch.cwd == cwd
@@ -415,18 +423,13 @@ impl ClaudeCodeProvider {
             .clone()
             .or(hint)
             .filter(|id| uuid::Uuid::parse_str(id).is_ok());
-        let launch_args = instance
-            .launch_args
-            .as_deref()
-            .map(settings::parse_launch_args)
-            .unwrap_or_default();
         let make_launch = |session: SessionStart| LaunchConfig {
             binary: settings.resolved_binary(),
             instance: instance.clone(),
             spec: SpawnSpec {
                 model: model.clone(),
                 effort: effort.clone(),
-                permission_mode: settings.permission_mode.clone(),
+                permission_mode: permission_mode.to_string(),
                 setting_sources: settings.setting_sources.clone(),
                 session,
                 expose_mcp,

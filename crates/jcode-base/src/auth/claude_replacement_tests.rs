@@ -92,6 +92,71 @@ fn fixture() -> JcodeAuthFile {
 }
 
 #[test]
+fn pending_refresh_cannot_overwrite_a_replacement_login_or_recreate_a_removed_one() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&fixture()).unwrap();
+    let expected = capture_refresh_account("work", "refresh-work").unwrap();
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "refreshed-old-access".into(),
+        refresh_token: "rotated-old-refresh".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    replace_account_if_unchanged(
+        "work",
+        Some("old@example.com"),
+        account("replacement", Some("new@example.com")),
+    )
+    .unwrap();
+    let path = jcode_path().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(commit_refresh_account(&expected, &tokens).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    remove_account("work").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(commit_refresh_account(&expected, &tokens).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn refresh_follows_the_original_login_across_rename_without_changing_metadata() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&fixture()).unwrap();
+    let expected = capture_refresh_account("work", "refresh-work").unwrap();
+    rename_account("work", "renamed").unwrap();
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "new-access".into(),
+        refresh_token: "new-refresh".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    commit_refresh_account(&expected, &tokens).unwrap();
+    let saved = load_auth_file().unwrap();
+    let updated = saved
+        .anthropic_accounts
+        .iter()
+        .find(|a| a.label == "renamed")
+        .unwrap();
+    assert_eq!(updated.access, "new-access");
+    assert_eq!(updated.email, expected.email);
+    assert_eq!(saved.active_anthropic_account.as_deref(), Some("personal"));
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    assert!(
+        commit_refresh_account(&expected, &tokens).is_err(),
+        "a rotated refresh is stale too"
+    );
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
+}
+
+#[test]
 fn replacement_preserves_slot_default_and_other_account_and_clears_old_metadata() {
     let mut auth = fixture();
     auth.anthropic_accounts[0].subscription_type = Some("old-plan".into());

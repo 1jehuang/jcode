@@ -839,6 +839,27 @@ pub(super) fn ensure_external_api_key_auth_allowed_for_explicit_choice(
     )
 }
 
+fn ensure_anthropic_api_auth_allowed_for_explicit_choice() -> Result<()> {
+    if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
+        if std::env::var("JCODE_ANTHROPIC_AUTH")
+            .is_ok_and(|mode| mode.trim().eq_ignore_ascii_case("none"))
+        {
+            return Ok(());
+        }
+        let key = std::env::var("JCODE_ANTHROPIC_API_KEY_NAME")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .unwrap_or_else(|| "ANTHROPIC_API_KEY".to_string());
+        if std::env::var("JCODE_ANTHROPIC_ENV_FILE")
+            .is_ok_and(|file| direct_env_file_contains_key(&key, &file))
+        {
+            return Ok(());
+        }
+        return ensure_external_api_key_auth_allowed_for_explicit_choice(&key);
+    }
+    ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")
+}
+
 fn direct_api_key_configured_for_env(env_key: &str) -> bool {
     let env_key = env_key.trim();
     if env_key.is_empty() {
@@ -1606,7 +1627,7 @@ async fn init_provider_with_model_policy(
         }
         ProviderChoice::AnthropicApi => {
             disable_subscription_runtime_mode();
-            ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            ensure_anthropic_api_auth_allowed_for_explicit_choice()?;
             init_notice("Using Anthropic API key as the initial provider (use /model to switch)");
             select_initial_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
