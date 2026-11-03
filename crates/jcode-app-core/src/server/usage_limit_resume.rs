@@ -749,7 +749,13 @@ async fn resume_turn_after_usage_limit_inner(
         // Let the user use the session while this turn waits.
         drop(held.take());
 
-        if !ticket.wait(plan.delay).await {
+        if ticket
+            .run_if_current(crate::runtime_activity::wait_without_activity(
+                ticket.wait(plan.delay),
+            ))
+            .await
+            != Some(true)
+        {
             crate::logging::info(&format!(
                 "Usage-limit resume for {session_id} was cancelled or replaced"
             ));
