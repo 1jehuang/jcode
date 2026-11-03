@@ -150,11 +150,17 @@ def handle_host_control(msg):
             tools = resp["response"]["mcp_response"]["result"]["tools"]
             global mcp_tools
             mcp_tools = [t["name"] for t in tools]
-        send({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": {
+        response = {"subtype": "success", "response": {
             "account": {"email": "fake@example.com", "subscriptionType": "Claude Max", "organization": "Fake Org"},
             "models": [{"value": "default", "resolvedModel": "claude-opus-5-5"},
                        {"value": "sonnet", "resolvedModel": "claude-sonnet-5"}],
-            "commands": [], "current_permission_mode": "default"}}})
+            "commands": [], "current_permission_mode": "default"}}
+        catalog_file = os.environ.get("FAKE_CLAUDE_CATALOG_FILE", os.path.join(state_dir, "initialize.json"))
+        if os.path.exists(catalog_file):
+            with open(catalog_file) as f:
+                response = json.load(f)
+        response["request_id"] = rid
+        send({"type": "control_response", "response": response})
     elif sub == "interrupt":
         interrupted[0] = True
         send({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": {}}})
