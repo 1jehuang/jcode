@@ -371,8 +371,17 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
                     if matches!(end, RemoteTurnEnd::Cancel) {
                         send_native(&mut writer, serde_json::json!({"type":"cancel", "id":4}))
                             .await?;
-                        native_until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 2 }))
-                            .await?;
+                        // Cancellation suppresses the original turn's success publication.
+                        let events =
+                            native_until(&mut reader, |e| matches!(e, ServerEvent::Interrupted))
+                                .await
+                                .context("waiting for reattached turn cancellation")?;
+                        anyhow::ensure!(
+                            !events
+                                .iter()
+                                .any(|e| matches!(e, ServerEvent::Done { id: 2 })),
+                            "cancelled turn must not report successful completion"
+                        );
                     } else {
                         provider.finish.notify_one();
                         let events =
