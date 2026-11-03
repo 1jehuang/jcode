@@ -85,6 +85,7 @@ pub(super) async fn run_replay(
         rebuild_session: None,
         update_session: None,
         restart_session: None,
+        hibernate_session: None,
         cloud_handoff: None,
         exit_code: None,
         session_id: if app.is_remote {
@@ -125,8 +126,6 @@ pub(super) async fn run_swarm_replay(
     loop {
         terminal.draw(|frame| {
             draw_swarm_replay_frame(frame, &mut panes, sim_time_ms);
-            jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
-            crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
         })?;
 
         if should_quit {
@@ -320,8 +319,10 @@ impl SwarmReplayPane {
     fn render_buffer(&self, width: u16, height: u16) -> Result<Buffer> {
         let backend = TestBackend::new(width.max(1), height.max(1));
         let mut terminal = Terminal::new(backend)?;
-        terminal.draw(|frame| crate::tui::render_frame(frame, &self.app))?;
-        Ok(terminal.backend().buffer().clone())
+        let completed = terminal.draw(|frame| crate::tui::render_frame(frame, &self.app))?;
+        // Preserve deferred image markers and skip flags until the outer frame
+        // has blitted every pane. TestBackend's post-diff buffer loses them.
+        Ok(completed.buffer.clone())
     }
 }
 
@@ -337,6 +338,14 @@ fn schedule_replay_events(timeline: &[TimelineEvent]) -> Vec<(f64, ReplayEvent)>
 }
 
 fn draw_swarm_replay_frame(frame: &mut Frame<'_>, panes: &mut [SwarmReplayPane], sim_time_ms: f64) {
+    jcode_tui_mermaid::begin_terminal_image_frame();
+    draw_swarm_replay_panes(frame, panes, sim_time_ms);
+    jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
+    crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
+    jcode_tui_mermaid::finish_terminal_image_frame(frame.buffer_mut());
+}
+
+fn draw_swarm_replay_panes(frame: &mut Frame<'_>, panes: &mut [SwarmReplayPane], sim_time_ms: f64) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     crate::tui::color_support::clear_buf(area, frame.buffer_mut());
     if panes.is_empty() || area.width == 0 || area.height == 0 {
@@ -372,7 +381,10 @@ fn draw_swarm_replay_frame(frame: &mut Frame<'_>, panes: &mut [SwarmReplayPane],
             },
         );
 
-        if let Ok(buf) = pane.render_buffer(pane_area.width, pane_area.height) {
+        let rendered = jcode_tui_mermaid::with_image_frame_offset(pane_area.x, pane_area.y, || {
+            pane.render_buffer(pane_area.width, pane_area.height)
+        });
+        if let Ok(buf) = rendered {
             blit_buffer(frame.buffer_mut(), pane_area, &buf);
         }
     }
@@ -490,6 +502,142 @@ pub(super) fn update_replay_elapsed_override(app: &mut App, sim_time_ms: f64) {
 mod tests {
     use super::schedule_replay_events;
     use crate::replay::{ReplayEvent, TimelineEvent, TimelineEventKind};
+
+    #[test]
+    fn swarm_replay_composes_classic_images_into_distinct_panes() {
+        const CHILD: &str = "JCODE_TEST_SWARM_REPLAY_CLASSIC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // The renderer dependency is not cfg(test), so exercise its actual
+            // Zellij detection in a child process rather than changing this
+            // test runner's process-wide environment or global picker.
+            let home = tempfile::tempdir().unwrap();
+            let test_name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .env("JCODE_HOME", home.path())
+                .env("ZELLIJ", "1")
+                .env("TERM", "xterm-kitty")
+                .env("JCODE_ZELLIJ_KITTY_IMAGES", "1")
+                .env_remove("HERDR_ENV")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated swarm replay regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("SWARM_CLASSIC_REPLAY_VERIFIED"),
+                "isolated test did not execute the replay assertions"
+            );
+            return;
+        }
+
+        use super::{
+            Buffer, DisplayMessage, PaneReplayInput, SwarmReplayPane, draw_swarm_replay_frame,
+        };
+        use ratatui::{
+            Terminal,
+            backend::{Backend, CrosstermBackend, TestBackend},
+            layout::Rect,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        jcode_tui_mermaid::force_test_kitty_picker();
+        let temporary = tempfile::tempdir().unwrap();
+        let image_path = temporary.path().join("synthetic.png");
+        image::RgbaImage::from_pixel(80, 80, image::Rgba([20, 120, 220, 255]))
+            .save(&image_path)
+            .unwrap();
+        let hash = jcode_tui_mermaid::register_external_image(&image_path, 80, 80);
+        let mut panes: Vec<_> = (0..2)
+            .map(|index| {
+                let session = crate::session::Session::create_with_id(
+                    format!("synthetic_replay_image_{index}"),
+                    None,
+                    None,
+                );
+                let mut pane = SwarmReplayPane::new(
+                    PaneReplayInput {
+                        session,
+                        timeline: vec![],
+                    },
+                    Some(false),
+                );
+                pane.app.diagram_mode = crate::config::DiagramDisplayMode::None;
+                pane.app.push_display_message(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content: jcode_tui_mermaid::image_widget_placeholder_markdown(hash),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                pane
+            })
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        let mut previous = Buffer::empty(Rect::new(0, 0, 160, 50));
+        let placement = regex::Regex::new("\x1b\\[(\\d+);(\\d+)H\x1b_Ga=p,").unwrap();
+        for frame_index in 0..2 {
+            let composed = terminal
+                .draw(|frame| draw_swarm_replay_frame(frame, &mut panes, 0.0))
+                .unwrap()
+                .buffer
+                .clone();
+            let mut wire = Vec::new();
+            CrosstermBackend::new(&mut wire)
+                .draw(previous.diff(&composed).into_iter())
+                .unwrap();
+            let wire = String::from_utf8(wire).unwrap();
+            let positions: Vec<_> = placement
+                .captures_iter(&wire)
+                .map(|capture| {
+                    (
+                        capture[1].parse::<u16>().unwrap(),
+                        capture[2].parse::<u16>().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                positions.len(),
+                2,
+                "both replay panes must retain their image placement"
+            );
+            assert!(
+                positions[0].1 <= 80,
+                "first placement must stay in the left pane"
+            );
+            assert!(
+                positions[1].1 > 80,
+                "second placement must translate into the right pane"
+            );
+            assert_eq!(positions[0].0, positions[1].0);
+            assert!(!wire.contains("jcode-image="));
+            assert!(!wire.contains("U=1"));
+            if frame_index != 0 {
+                assert!(
+                    !wire.contains("a=t,"),
+                    "unchanged replay panes must reuse uploaded pixels"
+                );
+                assert_eq!(wire.matches("a=d,d=i,").count(), 2);
+                assert!(wire.rfind("a=d,d=i,").unwrap() < wire.find("a=p,").unwrap());
+            }
+            previous = composed;
+        }
+        drop(panes);
+        jcode_tui_mermaid::clear_image_state();
+        let _ = jcode_tui_mermaid::take_terminal_image_cleanup_payload();
+        println!("SWARM_CLASSIC_REPLAY_VERIFIED");
+    }
 
     #[test]
     fn schedule_replay_events_accumulates_relative_delays() {

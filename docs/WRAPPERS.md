@@ -70,10 +70,32 @@ Typical event types:
 - `tool_exec`
 - `tool_done`
 - `tokens`
+- `service_tier`
 - `done`
 - `error`
 
 The final `done` event includes the assembled text and usage summary.
+
+### Service-tier evidence
+
+When the provider reports a tier, `service_tier` events include `requested`,
+`tier` (the raw provider report), and `report_status`. The final `done` event
+also includes `requested_service_tier`, `reported_service_tier`, and
+`service_tier_report_status`. Status values compare metadata only:
+
+- `not_reported`: no tier report was received.
+- `unresolved`: the provider reported `auto`, not a resolved tier.
+- `reported_match`: the requested and reported tier agree, including known aliases.
+- `reported_mismatch`: the requested and reported tier differ.
+
+`served_service_tier` remains a compatibility alias for `reported_service_tier`.
+Despite its older name, it is **not independent verification** of backend
+routing or billing. Subscription-backed Codex responses can report `default`
+even when controlled measurements show different speed behavior for requested
+tiers. Do not infer a confirmed downgrade, an applied Ultrafast tier, or a billing
+rate from throughput or that field alone. Preserve the raw report and request
+separately. Provider support can correlate requests using the allowlisted
+`request_id` / `oai_request_id` fields in Jcode's stream lifecycle logs.
 
 Example shape:
 

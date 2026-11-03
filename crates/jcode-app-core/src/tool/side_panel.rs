@@ -37,6 +37,10 @@ impl Tool for SidePanelTool {
         "side_panel"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &str {
         "Legacy panel management. Prefer panel. Load accepts Markdown or PDF files."
     }

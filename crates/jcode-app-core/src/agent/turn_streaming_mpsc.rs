@@ -1,30 +1,15 @@
-use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
-use super::streaming::{find_wrap_marker_incremental, record_partial_stream_usage};
+use super::streaming::StreamUsageRecorder;
 
-#[path = "turn_streaming_helpers.rs"]
-mod helpers;
-use helpers::reload_interrupted_tool_result;
-
-/// Called only after automatic continuations have been exhausted.
-fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
-    let reason = stop_reason?;
-    if Agent::should_continue_after_stop_reason(reason)
-        || Agent::is_stranded_tool_use_stop(Some(reason))
-    {
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::LimitReached,
-            message: format!(
-                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
-            ),
-            provider_stop_reason: Some(reason.to_string()),
-        })
-    } else {
-        None
-    }
-}
-
+#[path = "tool_handoff.rs"]
+mod tool_handoff;
+pub(super) use tool_handoff::execute_with_background;
+use tool_handoff::{
+    auto_background_allowed, incomplete_turn_stop, reload_interrupted_tool_result,
+    wait_for_tool_handoff,
+};
 impl Agent {
     /// Detect a provider route change made during the request (a transparent
     /// model fallback such as Anthropic's retired `claude-fable-5` ->
@@ -41,6 +26,7 @@ impl Agent {
         provider_at_request_start: &str,
         credential_at_request_start: &Option<jcode_provider_core::ResolvedCredential>,
         oauth_email_at_request_start: &Option<crate::protocol::ProviderOAuthEmail>,
+        oauth_account_label_at_request_start: &Option<String>,
     ) {
         // Same-provider account failover can move this session's pin during
         // the request. Persist and announce it on every exit path too.
@@ -69,9 +55,11 @@ impl Agent {
         // request, including auto credential resolution and OAuth failover.
         let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
         let credential_after_stream = self.provider.active_resolved_credential();
+        let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
         if route_changed
             || credential_after_stream != *credential_at_request_start
             || oauth_email_after_stream != *oauth_email_at_request_start
+            || oauth_account_label_after_stream != *oauth_account_label_at_request_start
         {
             let _ = event_tx.send(ServerEvent::ModelChanged {
                 id: 0,
@@ -81,6 +69,7 @@ impl Agent {
                 error: None,
                 resolved_credential: credential_after_stream,
                 provider_oauth_email: oauth_email_after_stream,
+                provider_oauth_account_label: oauth_account_label_after_stream,
                 reasoning_effort: self.provider.reasoning_effort(),
             });
         }
@@ -91,6 +80,8 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.ensure_provider_conversation_reset().await?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -280,18 +271,34 @@ impl Agent {
             // model alone does not reveal the switch.
             let provider_at_request_start = provider.display_name();
             let credential_at_request_start = provider.active_resolved_credential();
+            let oauth_account_label_at_request_start = provider.serving_oauth_account_label();
             let oauth_email_at_request_start =
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
+            // Hash the whole system prompt, not only the static block.
+            // Providers place the dynamic block ahead of the transcript (in
+            // the system param or right after the latest user prompt), so a
+            // change there is a harness-caused miss and must be attributed.
+            let system_signature_text = if split_prompt.dynamic_part.is_empty() {
+                std::borrow::Cow::Borrowed(split_prompt.static_part.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!(
+                    "{}\n\n{}",
+                    split_prompt.static_part, split_prompt.dynamic_part
+                ))
+            };
             let kv_request = kv_cache_request_event(
                 &cache_signature_messages,
                 &tools,
-                &split_prompt.static_part,
+                &system_signature_text,
                 &ephemeral_signature_messages,
             );
+            drop(system_signature_text);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
-            let _ = event_tx.send(kv_request);
+            if let Err(error) = event_tx.send(kv_request) {
+                logging::debug(&format!("KV request event receiver disconnected: {error}"));
+            }
             // These vectors are only needed to build the cache telemetry event.
             // Explicitly release their deeply cloned transcript strings before
             // waiting for the provider stream.
@@ -301,6 +308,7 @@ impl Agent {
             provider.set_host_tool_executor_available(true);
             provider.bind_session(&self.session.id);
             let mut stream = {
+                provider.set_session_id(&self.session.id);
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
                     &tools,
@@ -341,17 +349,7 @@ impl Agent {
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
                                             ));
                                         }
-                                        let _ = event_tx.send(ServerEvent::Compaction {
-                                            trigger: "auto_recovery".to_string(),
-                                            pre_tokens: None,
-                                            post_tokens: None,
-                                            tokens_saved: None,
-                                            duration_ms: None,
-                                            messages_dropped: None,
-                                            messages_compacted: None,
-                                            summary_chars: None,
-                                            active_messages: None,
-                                        });
+                                        let _ = event_tx.send(self.take_recovery_compaction_event());
                                         continue 'turn;
                                     }
                                     self.sync_route_change_after_stream(
@@ -360,6 +358,7 @@ impl Agent {
                                         &provider_at_request_start,
                                         &credential_at_request_start,
                                         &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
                                     );
                                     return Err(e);
                                 }
@@ -394,7 +393,6 @@ impl Agent {
             );
 
             let mut text_content = String::new();
-            let mut text_wrapped_detected = false;
             // Inline swarm worker output tap: publish a throttled tail of the
             // in-progress assistant text to the bus so a coordinator can render
             // a live inline gallery viewport.
@@ -416,6 +414,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
@@ -440,7 +439,7 @@ impl Agent {
                 jcode_message_types::provider_native::ProviderNativeItems::default();
             let mut provider_native_tracker =
                 jcode_message_types::provider_native::ProviderNativeTracker::default();
-            let mut openai_native_compaction: Option<(String, usize, Option<u64>)> = None;
+            let mut openai_native_compaction: Option<(String, usize, Option<u64>, String)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
@@ -497,17 +496,7 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         self.record_failed_account_route(&e.to_string());
-                        record_partial_stream_usage(
-                            &self.session.id,
-                            provider.name(),
-                            &model_at_request_start,
-                            [
-                                usage_input,
-                                usage_output,
-                                usage_cache_read,
-                                usage_cache_creation,
-                            ],
-                        );
+                        usage_recorder.finish();
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
@@ -543,17 +532,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -573,6 +552,7 @@ impl Agent {
                             &provider_at_request_start,
                             &credential_at_request_start,
                             &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
                         );
                         return Err(e);
                     }
@@ -681,6 +661,16 @@ impl Agent {
                                 output,
                                 is_error,
                             }) => {
+                                if already_open
+                                    && provider == jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI
+                                {
+                                    // OpenAI only supplies action/query metadata in
+                                    // the final snapshot, after execution started.
+                                    let _ = event_tx.send(ServerEvent::ToolInput {
+                                        id: Some(id.clone()),
+                                        delta: input.to_string(),
+                                    });
+                                }
                                 if !already_open {
                                     // Result without a start (e.g. OpenAI items
                                     // arrive whole): open the row first.
@@ -732,23 +722,7 @@ impl Agent {
                                 self.publish_inline_tail();
                             }
                         }
-                        if !text_wrapped_detected {
-                            // Scan only the new delta (plus a short overlap for
-                            // markers straddling the boundary) instead of the
-                            // whole accumulated response on every token.
-                            if let Some(marker_idx) =
-                                find_wrap_marker_incremental(&text_content, text.len())
-                            {
-                                text_wrapped_detected = true;
-                                let clean_prefix =
-                                    text_content[..marker_idx].trim_end().to_string();
-                                let _ =
-                                    event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
-                            } else {
-                                let _ =
-                                    event_tx.send(ServerEvent::TextDelta { text: text.clone() });
-                            }
-                        }
+                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                         if self.is_graceful_shutdown() {
                             logging::info(
                                 "Graceful shutdown during streaming - checkpointing partial response",
@@ -927,6 +901,28 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        // Publish observed counters immediately, not only when
+                        // the response finishes. Do not manufacture a missing
+                        // input or output count from context/session totals.
+                        if let (Some(input), Some(output)) = (usage_input, usage_output) {
+                            let _ = event_tx.send(ServerEvent::TokenUsage {
+                                input,
+                                output,
+                                cache_read_input: usage_cache_read,
+                                cache_creation_input: usage_cache_creation,
+                                effective_budget: Some(self.effective_context_budget().await),
+                            });
+                        }
+                        usage_recorder.observe(
+                            provider.name(),
+                            &provider.model(),
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         if let Some(input) = usage_input {
                             self.update_compaction_usage_from_stream(
                                 input,
@@ -948,6 +944,9 @@ impl Agent {
                     StreamEvent::StatusDetail { detail } => {
                         self.last_status_detail = Some(detail.clone());
                         let _ = event_tx.send(ServerEvent::StatusDetail { detail });
+                    }
+                    StreamEvent::ServiceTier { tier, requested } => {
+                        let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
                         // A transient transport fault hit mid-stream after partial
@@ -981,7 +980,6 @@ impl Agent {
                             // discarded partial from the live tail too.
                             self.inline_tail.clear_live();
                         }
-                        text_wrapped_detected = false;
                         tool_calls.clear();
                         current_tool = None;
                         streaming_tools.clear();
@@ -1061,15 +1059,16 @@ impl Agent {
                         }
                     }
                     StreamEvent::Compaction {
+                        trigger,
                         pre_tokens,
                         openai_encrypted_content,
-                        ..
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction.get_or_insert((
                                 encrypted_content,
                                 self.session.messages.len(),
                                 pre_tokens,
+                                trigger,
                             ));
                         }
                     }
@@ -1089,10 +1088,13 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self
-                            .registry
-                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
-                            .await;
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -1118,17 +1120,7 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
-                        record_partial_stream_usage(
-                            &self.session.id,
-                            provider.name(),
-                            &model_at_request_start,
-                            [
-                                usage_input,
-                                usage_output,
-                                usage_cache_read,
-                                usage_cache_creation,
-                            ],
-                        );
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -1163,17 +1155,7 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
-                            });
+                            let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
                         log_agent_provider_stream_lifecycle(
@@ -1198,12 +1180,14 @@ impl Agent {
                             &provider_at_request_start,
                             &credential_at_request_start,
                             &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
                         );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }
 
+            usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
@@ -1254,18 +1238,6 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
-                crate::telemetry::record_provider_usage(
-                    Some(&self.session.id),
-                    provider.name(),
-                    &model_at_request_start,
-                    crate::telemetry::UsageSource::Agent,
-                    crate::telemetry::ProviderUsage {
-                        input_tokens: usage_input.unwrap_or(0),
-                        output_tokens: usage_output.unwrap_or(0),
-                        cache_read_input_tokens: usage_cache_read,
-                        cache_creation_input_tokens: usage_cache_creation,
-                    },
-                );
 
                 let input = usage_input.unwrap_or(0);
                 let output = usage_output.unwrap_or(0);
@@ -1277,6 +1249,16 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                if usage_input.is_some() {
+                    crate::session_telemetry::save_context(
+                        &self.session,
+                        total.saturating_sub(output),
+                        Some(self.effective_context_budget().await),
+                        self.provider.name(),
+                        self.provider.active_resolved_credential(),
+                        self.provider.serving_oauth_account_label(),
+                    );
+                }
             }
 
             if usage_input.is_some()
@@ -1289,7 +1271,16 @@ impl Agent {
                     output: usage_output.unwrap_or(0),
                     cache_read_input: usage_cache_read,
                     cache_creation_input: usage_cache_creation,
+                    effective_budget: Some(self.effective_context_budget().await),
                 });
+                // Native compaction is applied and announced below, after
+                // usage. Attribute this response's cache refresh now using
+                // evidence from the completed stream, not the later event or
+                // a heuristic based on a smaller prompt. RetryRollback clears
+                // this item, so discarded attempts cannot explain a real miss.
+                if openai_native_compaction.is_some() {
+                    self.kv_cache_monitor.note_provider_compaction();
+                }
                 if let Some(miss) = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),
                     usage_cache_read,
@@ -1320,36 +1311,8 @@ impl Agent {
                 &provider_at_request_start,
                 &credential_at_request_start,
                 &oauth_email_at_request_start,
+                &oauth_account_label_at_request_start,
             );
-
-            let had_tool_calls_before = !tool_calls.is_empty();
-            let text_tool_recovery =
-                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
-
-            if !had_tool_calls_before && text_tool_recovery == TextToolRecovery::Recovered {
-                let _ = event_tx.send(ServerEvent::TextReplace {
-                    text: text_content.clone(),
-                });
-                // Markup envelopes can carry several calls, so announce each.
-                for tc in tool_calls
-                    .iter()
-                    .filter(|tc| tc.id.starts_with("fallback_text_call_"))
-                {
-                    let _ = event_tx.send(ServerEvent::ToolStart {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                    });
-                    tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                    let _ = event_tx.send(ServerEvent::ToolInput {
-                        id: Some(tc.id.clone()),
-                        delta: tc.input.to_string(),
-                    });
-                    let _ = event_tx.send(ServerEvent::ToolExec {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                    });
-                }
-            }
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -1398,10 +1361,11 @@ impl Agent {
                 None
             };
 
-            if let Some((encrypted_content, compacted_count, native_pre_tokens)) =
+            if let Some((encrypted_content, compacted_count, native_pre_tokens, native_trigger)) =
                 openai_native_compaction.take()
             {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                let (estimated_pre_tokens, estimated_post_tokens) =
+                    self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
                 // Native OpenAI compaction is applied after the provider stream,
                 // so `messages_for_provider()` did not have an event to emit at
                 // the top of this iteration. Notify clients now, before any
@@ -1409,14 +1373,18 @@ impl Agent {
                 // The FIFO event ordering lets the TUI invalidate its old
                 // append-only baseline before seeing the compacted signature.
                 //
-                // Only a provider-supplied pre-compaction count is trustworthy
-                // here. The response's own input usage is not the pre-compaction
-                // context size, so omit the value rather than mislabel it (#1178).
+                // Prefer a provider-supplied pre-compaction count. Otherwise use
+                // jcode's own context estimate, never the response's input usage,
+                // which is not the pre-compaction context size (#1178).
+                let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
+                let post_tokens = estimated_post_tokens;
                 let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: "openai_native".to_string(),
-                    pre_tokens: native_pre_tokens,
-                    post_tokens: None,
-                    tokens_saved: None,
+                    trigger: native_trigger,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved: pre_tokens
+                        .zip(post_tokens)
+                        .map(|(pre, post)| pre.saturating_sub(post)),
                     duration_ms: None,
                     messages_dropped: None,
                     messages_compacted: Some(compacted_count),
@@ -1449,26 +1417,6 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
-                // The model printed a tool call as markup we could not parse
-                // (issue #1702): say so visibly and ask it to re-issue the
-                // call natively instead of silently ending the turn.
-                if saw_message_end
-                    && !self.is_graceful_shutdown()
-                    && let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
-                        &text_tool_recovery,
-                        stop_reason.as_deref(),
-                        &mut unparsed_tool_markup_nudges,
-                    )?
-                {
-                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                        content: notice,
-                        display_role: Some("system".to_string()),
-                        point: "B".to_string(),
-                        tools_skipped: None,
-                        client_ids: Vec::new(),
-                    });
-                    continue;
-                }
                 if saw_message_end
                     && !self.is_graceful_shutdown()
                     && self.maybe_reconsider_fable_guardrail(
@@ -1710,25 +1658,31 @@ impl Agent {
                 }
                 let tool_start = Instant::now();
 
-                // Spawn tool in its own task so we can detach it to background on Alt+B
+                // Spawn independently so automatic and Alt+B handoffs keep it running.
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle = tokio::spawn(async move {
-                    registry_clone
-                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                        .await
-                });
+                let tool_handle =
+                    crate::runtime_activity::spawn_session(&self.session.id, async move {
+                        registry_clone
+                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                            .await
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                    })?;
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // Wait for tool completion OR background signal from user (Alt+B)
-                // OR graceful shutdown signal from server reload
+                // All tools share the same default foreground budget, including
+                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
+                let foreground_budget = tool_handoff::foreground_budget();
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
+                let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
@@ -1740,12 +1694,8 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    _ = async {
-                        tokio::select! {
-                            _ = bg_signal.notified() => {}
-                            _ = shutdown_signal.notified() => {}
-                        }
-                    } => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
+                        automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
@@ -1889,7 +1839,7 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // User pressed Alt+B — move tool to background
+                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
@@ -1900,11 +1850,17 @@ impl Agent {
                         .adopt(&tc.name, &self.session.id, tool_handle)
                         .await;
 
+                    let reason = if automatic_background {
+                        tool_handoff::automatic_handoff_reason(foreground_budget)
+                    } else {
+                        "by the user".to_string()
+                    };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background by the user (task_id: {}). \
-                         Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
-                         or action 'status'/'output' to inspect it.",
-                        tc.name, bg_info.task_id
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        tc.name,
+                        reason,
+                        bg_info.task_id,
+                        crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {

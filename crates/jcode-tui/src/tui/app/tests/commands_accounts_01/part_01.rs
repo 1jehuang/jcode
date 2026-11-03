@@ -1,111 +1,5 @@
-#[test]
-fn session_picker_resume_action_keeps_overlay_open() {
-    let mut app = create_test_app();
-    app.session_picker_mode = SessionPickerMode::CatchUp;
-    app.session_picker_overlay = Some(RefCell::new(
-        crate::tui::session_picker::SessionPicker::new(vec![
-            crate::tui::session_picker::SessionInfo {
-                id: "session_keep_open".to_string(),
-                parent_id: None,
-                short_name: "keep-open".to_string(),
-                icon: "k".to_string(),
-                title: "Keep Open".to_string(),
-                message_count: 1,
-                user_message_count: 1,
-                assistant_message_count: 0,
-                created_at: chrono::Utc::now(),
-                last_message_time: chrono::Utc::now(),
-                last_active_at: None,
-                working_dir: None,
-                model: None,
-                provider_key: None,
-                is_canary: false,
-                is_debug: false,
-                saved: false,
-                save_label: None,
-                status: crate::session::SessionStatus::Closed,
-                needs_catchup: false,
-                estimated_tokens: 0,
-                first_user_prompt: None,
-                messages_preview: Vec::new(),
-                search_index: "keep-open keep open".to_string(),
-                server_name: None,
-                server_icon: None,
-                source: crate::tui::session_picker::SessionSource::Jcode,
-                resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
-                    session_id: "session_keep_open".to_string(),
-                },
-                external_path: None,
-            },
-        ]),
-    ));
-
-    app.handle_session_picker_key(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::empty(),
-    )
-    .expect("session picker enter should succeed");
-
-    assert!(app.session_picker_overlay.is_some());
-}
-
-#[test]
-fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
-    let mut app = create_test_app();
-    app.session_picker_mode = SessionPickerMode::Resume;
-    app.session_picker_overlay = Some(RefCell::new(
-        crate::tui::session_picker::SessionPicker::new(vec![
-            crate::tui::session_picker::SessionInfo {
-                id: "session_here_123".to_string(),
-                parent_id: None,
-                short_name: "here".to_string(),
-                icon: "h".to_string(),
-                title: "Here".to_string(),
-                message_count: 1,
-                user_message_count: 1,
-                assistant_message_count: 0,
-                created_at: chrono::Utc::now(),
-                last_message_time: chrono::Utc::now(),
-                last_active_at: None,
-                working_dir: None,
-                model: None,
-                provider_key: None,
-                is_canary: false,
-                is_debug: false,
-                saved: false,
-                save_label: None,
-                status: crate::session::SessionStatus::Closed,
-                needs_catchup: false,
-                estimated_tokens: 0,
-                first_user_prompt: None,
-                messages_preview: Vec::new(),
-                search_index: "here".to_string(),
-                server_name: None,
-                server_icon: None,
-                source: crate::tui::session_picker::SessionSource::Jcode,
-                resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
-                    session_id: "session_here_123".to_string(),
-                },
-                external_path: None,
-            },
-        ]),
-    ));
-
-    app.handle_session_picker_key(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::empty(),
-    )
-    .expect("session picker enter should succeed");
-
-    assert!(app.session_picker_overlay.is_none());
-    assert_eq!(
-        app.workspace_client
-            .take_pending_resume_session()
-            .as_deref(),
-        Some("session_here_123")
-    );
-}
-
+#[path = "part_01/session_picker_actions.rs"]
+mod session_picker_actions;
 #[test]
 fn slash_resume_opens_session_picker_overlay_locally() {
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
@@ -119,6 +13,53 @@ fn slash_resume_opens_session_picker_overlay_locally() {
     assert_eq!(app.session_picker_mode, SessionPickerMode::Resume);
     assert!(app.pending_session_picker_load.is_some());
     assert!(app.input.is_empty());
+}
+
+#[test]
+fn session_picker_cached_update_keeps_fresh_refresh_pending() {
+    use crate::tui::session_picker::{SessionListUpdate, SessionPicker};
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(SessionPicker::loading()));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+
+    sender
+        .send(SessionListUpdate::Cached((vec![], vec![])))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app.pending_session_picker_load.is_some());
+    assert!(!app.poll_session_picker_load());
+
+    sender
+        .send(SessionListUpdate::Fresh(Ok((vec![], vec![]))))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app.pending_session_picker_load.is_none());
+}
+
+#[test]
+fn session_picker_closed_overlay_is_not_reopened_by_cached_or_fresh_results() {
+    use crate::tui::session_picker::SessionListUpdate;
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = None;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+
+    sender
+        .send(SessionListUpdate::Cached((vec![], vec![])))
+        .unwrap();
+    assert!(!app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_none());
+    sender
+        .send(SessionListUpdate::Fresh(Ok((vec![], vec![]))))
+        .unwrap();
+    assert!(!app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_none());
+    assert!(app.pending_session_picker_load.is_none());
 }
 
 #[test]
@@ -370,6 +311,8 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
             content: format!("prompt line {i}"),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
         messages.push(PreviewMessage {
@@ -377,6 +320,8 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
             content: format!("assistant reply {i}"),
             tool_calls: Vec::new(),
             tool_data: None,
+            duration_secs: None,
+            title: None,
             timestamp: None,
         });
     }
@@ -412,6 +357,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
             session_id: "session_scroll".to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     };
 
     let mut picker = crate::tui::session_picker::SessionPicker::new(vec![session]);
@@ -439,12 +385,12 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
         "long preview should auto-scroll to the bottom on first render"
     );
 
-    // A wheel up over the preview pane (right ~60% of width) routes through the
+    // A wheel up over the preview pane (left ~60% of width) routes through the
     // shared mouse-scroll momentum (enqueue + drain) instead of an instant jump,
     // and actually moves the preview offset.
     let scroll_only = app.handle_mouse_event(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::ScrollUp,
-        column: 90,
+        column: 20,
         row: 10,
         modifiers: crossterm::event::KeyModifiers::empty(),
     });
@@ -754,6 +700,44 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
             persisted.updated_at,
             &persisted.status
         ));
+    });
+}
+
+#[test]
+fn test_catchup_brief_reveals_side_panel_the_user_hid() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        // The user dismissed the panel before opening Catch Up.
+        app.dismiss_side_panel();
+        assert!(app.side_panel.focused_page_id.is_none());
+
+        let mut target = Session::create(None, Some("hidden catchup".to_string()));
+        target.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Check the release notes.".to_string(),
+                cache_control: None,
+            }],
+        );
+        target.mark_closed();
+        target.save().expect("save catchup session");
+        let target_id = target.id.clone();
+
+        app.begin_in_flight_catchup_resume(PendingCatchupResume {
+            target_session_id: target_id.clone(),
+            source_session_id: Some(app.session.id.clone()),
+            queue_position: None,
+            show_brief: true,
+        });
+        app.maybe_show_catchup_after_history(&target_id);
+
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("catchup"),
+            "an explicit Catch Up must show its brief"
+        );
+        assert!(!app.side_panel_user_hidden);
     });
 }
 
@@ -1457,6 +1441,42 @@ fn test_goals_show_command_focuses_goal_page() {
 }
 
 #[test]
+fn test_initiatives_commands_reopen_a_closed_side_panel() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().expect("project dir");
+        let goal = crate::goal::create_goal(
+            crate::goal::GoalCreateInput {
+                title: "Ship mobile MVP".to_string(),
+                scope: crate::goal::GoalScope::Project,
+                ..crate::goal::GoalCreateInput::default()
+            },
+            Some(project.path()),
+        )
+        .expect("create goal");
+
+        let mut app = create_test_app();
+        app.session.working_dir = Some(project.path().display().to_string());
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        for command in [
+            "/initiatives".to_string(),
+            "/initiatives resume".to_string(),
+            format!("/initiatives show {}", goal.id),
+        ] {
+            // The user closed the panel, then asks for initiatives.
+            app.dismiss_side_panel();
+            assert!(!app.diff_pane_visible());
+            app.input = command.clone();
+            app.submit_input();
+            assert!(
+                app.diff_pane_visible() && app.side_panel.focused_page().is_some(),
+                "{command} must show the side panel the user closed"
+            );
+            assert!(!app.side_panel_user_hidden, "{command}");
+        }
+    });
+}
+
+#[test]
 fn test_compact_mode_command_updates_local_session_mode() {
     let mut app = create_test_app();
 
@@ -1504,40 +1524,10 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
     assert_eq!(last.role, "system");
     assert_eq!(
         last.content,
-        "✓ Fast mode on (Fast)\nApplies to the next request/turn. The current in-flight request keeps its existing tier."
+        "✓ Fast mode configured on (Fast)\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed."
     );
     assert_eq!(
         app.status_notice(),
         Some("Fast: on (next request)".to_string())
     );
-}
-#[test]
-fn test_catchup_brief_reveals_side_panel_the_user_hid() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.side_panel = test_side_panel_snapshot("plan", "Plan");
-        assert!(app.handle_side_command("/side off"));
-        assert!(app.side_panel.focused_page_id.is_none());
-        let mut target = Session::create(None, Some("hidden catchup".to_string()));
-        target.add_message(
-            crate::message::Role::User,
-            vec![crate::message::ContentBlock::Text {
-                text: "Check the release notes.".to_string(),
-                cache_control: None,
-            }],
-        );
-        target.mark_closed();
-        target.save().expect("save catchup session");
-        let target_id = target.id.clone();
-        app.begin_in_flight_catchup_resume(PendingCatchupResume {
-            target_session_id: target_id.clone(),
-            source_session_id: Some(app.session.id.clone()),
-            queue_position: None,
-            show_brief: true,
-        });
-        app.maybe_show_catchup_after_history(&target_id);
-        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("catchup"));
-        assert!(!app.side_panel_user_hidden);
-        assert!(!app.side_panel_explicit_hidden);
-    });
 }

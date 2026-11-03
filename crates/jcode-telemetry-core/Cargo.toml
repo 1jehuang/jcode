@@ -9,6 +9,7 @@ name = "jcode_telemetry_core"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 jcode-build-meta = { path = "../jcode-build-meta" }
 jcode-core = { path = "../jcode-core" }

@@ -517,6 +517,25 @@ fn interactables_maps_to_bridge_action() {
 }
 
 #[test]
+fn model_definition_size_budget() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _disabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "1");
+    let tool = BrowserTool::new();
+    let definition = json!({
+        "name": tool.name(),
+        "description": tool.description(),
+        "parameters": tool.parameters_schema(),
+    })
+    .to_string();
+    println!("BROWSER_DEFINITION={definition}");
+    assert!(
+        definition.len() < 1_400,
+        "browser definition: {} bytes",
+        definition.len()
+    );
+}
+
+#[test]
 fn schema_exposes_advanced_browser_fields() {
     let schema = BrowserTool::new().parameters_schema();
     let props = schema["properties"]
@@ -530,17 +549,14 @@ fn schema_exposes_advanced_browser_fields() {
     assert!(props.contains_key("frame_id"));
     assert!(props.contains_key("selector"));
     assert!(props.contains_key("text"));
-    assert!(props.contains_key("contains"));
     assert!(props.contains_key("script"));
     assert!(props.contains_key("key"));
     assert!(props.contains_key("x"));
     assert!(props.contains_key("y"));
-    assert!(props.contains_key("format"));
     assert!(props.contains_key("wait"));
     assert!(props.contains_key("new_tab"));
     assert!(props.contains_key("timeout_ms"));
     assert!(props.contains_key("path"));
-    assert!(props.contains_key("fields"));
     assert!(props.contains_key("provider_action"));
     assert!(props.contains_key("params"));
     assert!(props.contains_key("all_frames"));
@@ -548,9 +564,41 @@ fn schema_exposes_advanced_browser_fields() {
     assert!(props.contains_key("clear"));
     assert!(props.contains_key("submit"));
     assert!(props.contains_key("page_world"));
-    assert!(props.contains_key("position"));
-    assert!(props.contains_key("behavior"));
-    assert!(props.contains_key("scroll_to"));
+    for field in [
+        "contains",
+        "format",
+        "fields",
+        "position",
+        "behavior",
+        "scroll_to",
+    ] {
+        assert!(!props.contains_key(field), "redundant field: {field}");
+    }
+    let actions = props["action"]["enum"].as_array().unwrap();
+    for action in [
+        "get_content",
+        "interactables",
+        "fill_form",
+        "select",
+        "wait",
+        "scroll",
+    ] {
+        assert!(
+            !actions.contains(&json!(action)),
+            "redundant action: {action}"
+        );
+    }
+    for action in [
+        "eval",
+        "snapshot",
+        "click",
+        "type",
+        "press",
+        "upload",
+        "screenshot",
+    ] {
+        assert!(actions.contains(&json!(action)), "missing action: {action}");
+    }
 }
 
 #[test]
@@ -679,8 +727,39 @@ fn prepend_setup_message_preserves_images_and_metadata() {
 fn description_tells_models_to_check_status_before_setup() {
     let tool = BrowserTool::new();
     let description = tool.description();
-    assert!(description.contains("action='status'"));
+    assert!(description.contains("Check status first"));
     assert!(description.contains("setup only if not ready"));
+}
+
+#[test]
+fn hidden_dom_helpers_remain_compatible_with_existing_callers() {
+    for (input, expected) in [
+        (
+            json!({"action":"get_content", "format":"title"}),
+            "getContent",
+        ),
+        (json!({"action":"interactables"}), "getInteractables"),
+        (
+            json!({"action":"fill_form", "fields":[{"selector":"#name", "value":"test"}]}),
+            "fillForm",
+        ),
+        (
+            json!({"action":"select", "selector":"#choice", "text":"one"}),
+            "fillForm",
+        ),
+        (
+            json!({"action":"wait", "contains":"ready", "timeout_ms":100}),
+            "waitFor",
+        ),
+        (
+            json!({"action":"scroll", "scroll_to":{"y":100}, "behavior":"instant"}),
+            "scroll",
+        ),
+    ] {
+        let input: BrowserInput = serde_json::from_value(input).unwrap();
+        let (action, _, _) = bridge_request(&input.action, &input).unwrap();
+        assert_eq!(action, expected, "{}", input.action);
+    }
 }
 
 #[cfg(unix)]
@@ -750,21 +829,37 @@ fn ordinary_click_preserves_existing_bridge_dispatch() {
     assert!(params.get("dispatchEvents").is_none());
 }
 
+pub(super) struct HandoffEnvGuard(&'static str, Option<std::ffi::OsString>);
+
+impl HandoffEnvGuard {
+    pub(super) fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        jcode_base::env::set_var(key, value);
+        Self(key, previous)
+    }
+}
+
+impl Drop for HandoffEnvGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => jcode_base::env::set_var(self.0, value),
+            None => jcode_base::env::remove_var(self.0),
+        }
+    }
+}
+
 #[test]
-fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
+fn handoff_schema_keeps_eval_primary_and_bounds_inputs() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
+    let _disabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "0");
     let tool = BrowserTool::new();
     assert!(
         tool.description()
-            .contains("Use action='handoff' by default for browser tasks")
+            .contains("Use eval as the primary interaction method")
     );
     let schema = tool.parameters_schema();
-    assert!(
-        schema["properties"]["action"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Use handoff by default for browser tasks")
-    );
+    assert!(schema["properties"]["action"].get("description").is_none());
     assert_eq!(schema["properties"]["max_steps"]["default"], 40);
     assert_eq!(schema["properties"]["max_steps"]["maximum"], 100);
     assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
@@ -788,19 +883,27 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
 
     let _guard = jcode_base::storage::lock_test_env();
     let _restore = RestoreEnv(std::env::var_os(KEY));
+    let _enabled = HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
     let tool = BrowserTool::new();
-    for value in [None, Some("0"), Some("1")] {
+    for (enabled, value) in [
+        ("0", None),
+        ("false", Some("0")),
+        ("1", None),
+        ("true", Some("0")),
+        ("1", Some("1")),
+    ] {
+        jcode_base::env::set_var("JCODE_BROWSER_HANDOFF", enabled);
         match value {
             Some(value) => jcode_base::env::set_var(KEY, value),
             None => jcode_base::env::remove_var(KEY),
         }
-        let disabled = value == Some("1");
+        let disabled = value == Some("1") || matches!(enabled, "0" | "false");
         assert_eq!(browser_handoff_disabled(), disabled);
         let schema = tool.parameters_schema();
         let properties = &schema["properties"];
         let actions = properties["action"]["enum"].as_array().unwrap();
         assert_eq!(actions.contains(&json!("handoff")), !disabled);
-        for action in ["status", "setup", "open", "click", "fill_form", "eval"] {
+        for action in ["status", "setup", "open", "click", "eval"] {
             assert!(actions.contains(&json!(action)));
         }
         for key in [
@@ -813,18 +916,19 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
         ] {
             assert_eq!(properties.get(key).is_some(), !disabled, "{key}");
         }
-        assert_eq!(
-            tool.description()
-                .contains("Use action='handoff' by default"),
-            !disabled
-        );
-        assert_eq!(
-            properties["action"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Use handoff by default"),
-            !disabled
-        );
+        assert!(tool.description().contains("Use eval"));
+        assert_eq!(tool.description().contains("handoff"), !disabled);
+        assert!(!schema.to_string().to_lowercase().contains("disabled"));
+        for action in [
+            "get_content",
+            "interactables",
+            "fill_form",
+            "select",
+            "wait",
+            "scroll",
+        ] {
+            assert!(!actions.contains(&json!(action)), "{action}");
+        }
         let ctx = ToolContext {
             session_id: "browser-disable-test".into(),
             message_id: "m".into(),
@@ -1028,3 +1132,135 @@ async fn live_macos_bridge_explicit_tab_ignores_selected_decoy() -> Result<()> {
 #[cfg(unix)]
 #[path = "browser_live_1743_tests.rs"]
 mod browser_live_1743_tests;
+
+#[test]
+fn open_defaults_to_new_tab_unless_targeted_or_explicitly_reused() {
+    for (tab_id, new_tab, expected) in [
+        (None, None, true),
+        (Some(7), None, false),
+        (None, Some(false), false),
+        (Some(7), Some(true), true),
+    ] {
+        let input = BrowserInput {
+            action: "open".into(),
+            url: Some("https://example.com".into()),
+            tab_id,
+            new_tab,
+            ..Default::default()
+        };
+        let (_, params, _) = bridge_request("open", &input).unwrap();
+        assert_eq!(params["newTab"], expected);
+    }
+}
+
+#[test]
+fn fresh_handoff_replaces_stale_tab_window_and_frame() {
+    let mut input = BrowserInput {
+        tab_id: Some(7),
+        window_id: Some(8),
+        frame_id: Some(9),
+        all_frames: Some(true),
+        new_tab: Some(true),
+        ..Default::default()
+    };
+    bind_created_handoff_tab(&mut input, Some(&json!({"tabId": 42, "windowId": 43}))).unwrap();
+    assert_eq!(input.tab_id, Some(42));
+    assert_eq!(input.window_id, Some(43));
+    assert_eq!(input.frame_id, Some(0));
+    assert_eq!(input.all_frames, Some(false));
+    assert_eq!(input.new_tab, Some(false));
+}
+
+#[test]
+fn fresh_handoff_never_falls_back_to_old_tab_on_invalid_response() {
+    for result in [None, Some(json!({})), Some(json!({"tabId": "42"}))] {
+        let mut input = BrowserInput {
+            tab_id: Some(7),
+            ..Default::default()
+        };
+        assert!(bind_created_handoff_tab(&mut input, result.as_ref()).is_err());
+    }
+}
+
+struct FreshTabProvider;
+
+#[async_trait]
+impl BrowserProvider for FreshTabProvider {
+    fn id(&self) -> &'static str {
+        "test"
+    }
+    fn supported_browsers(&self) -> &'static [&'static str] {
+        &["auto"]
+    }
+    async fn status(&self, _: &ToolContext) -> Result<ToolOutput> {
+        unreachable!()
+    }
+    async fn setup(&self) -> Result<ToolOutput> {
+        unreachable!()
+    }
+    async fn ensure_ready(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn execute(
+        &self,
+        action: &str,
+        input: &BrowserInput,
+        _: &ToolContext,
+    ) -> Result<ToolOutput> {
+        assert_eq!(action, "new_tab");
+        assert_eq!(input.url.as_deref(), Some("https://example.com"));
+        assert_eq!(input.tab_id, None);
+        assert_eq!(input.frame_id, None);
+        Ok(ToolOutput::new("created").with_metadata(json!({"tabId": 42, "windowId": 43})))
+    }
+}
+
+#[tokio::test]
+async fn handoff_creates_and_binds_fresh_tab_in_one_call() {
+    let ctx = ToolContext {
+        session_id: "fresh-tab-test".into(),
+        message_id: "m".into(),
+        tool_call_id: "t".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+    for (tab_id, new_tab, expected) in [
+        (Some(7), Some(true), 42),
+        (None, None, 42),
+        (Some(7), None, 7),
+    ] {
+        let mut input = BrowserInput {
+            action: "handoff".into(),
+            goal: Some("Read the page".into()),
+            url: Some("https://example.com".into()),
+            tab_id,
+            new_tab,
+            frame_id: Some(9),
+            ..Default::default()
+        };
+        prepare_handoff_tab(&FreshTabProvider, &mut input, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(input.tab_id, Some(expected));
+    }
+    let mut invalid = BrowserInput {
+        new_tab: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        prepare_handoff_tab(&FreshTabProvider, &mut invalid, &ctx)
+            .await
+            .is_err()
+    );
+    assert!(
+        recover_slow_navigation(
+            &json!({"newTab": true, "tabId": 7, "url": "https://example.com"}),
+            None,
+            &ctx,
+        )
+        .await
+        .is_none()
+    );
+}

@@ -10,6 +10,7 @@ pub fn has_requested_action(run_result: &RunResult) -> bool {
         || run_result.rebuild_session.is_some()
         || run_result.update_session.is_some()
         || run_result.restart_session.is_some()
+        || run_result.hibernate_session.is_some()
 }
 
 pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
@@ -27,6 +28,13 @@ pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
 
     if let Some(ref restart_session_id) = run_result.restart_session {
         hot_restart(restart_session_id)?;
+    }
+
+    if let Some(ref session_id) = run_result.hibernate_session {
+        let mut cmd = super::hibernate_wait::waiter_command(session_id)?;
+        crate::logging::info("Hibernating: exec into idle waiter");
+        let err = crate::platform::replace_process(&mut cmd);
+        return Err(anyhow::anyhow!("Failed to exec hibernation waiter: {err}"));
     }
 
     Ok(())
@@ -403,9 +411,19 @@ pub fn run_auto_update() -> Result<()> {
 
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
-pub fn run_update() -> Result<()> {
+pub fn run_update(channel: Option<&str>) -> Result<()> {
+    let explicit_channel = channel
+        .map(|value| {
+            crate::config::UpdateChannel::parse(value)
+                .ok_or_else(|| anyhow::anyhow!("Unknown update channel: {value}"))
+        })
+        .transpose()?;
+    if let Some(channel) = explicit_channel {
+        crate::config::Config::set_update_channel(channel)?;
+        super::output::print_centered(&format!("Update channel: {channel}"));
+    }
     super::output::print_centered("Checking GitHub for latest release...");
-    match update::check_for_update_blocking() {
+    match update::check_for_update_with_channel_blocking(explicit_channel) {
         Ok(Some(release)) => {
             super::output::print_centered(&format!(
                 "Downloading {} \u{2192} {}...",

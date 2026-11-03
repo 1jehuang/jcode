@@ -8,9 +8,14 @@ values. A bounded controller uses Jev's typed Decisions API with
 The main LLM supplies generated code or text only when asked, then hands the
 next stretch back to Jev. Jev never generates executable browser arguments.
 
-This is the default browser-task path in both the tool description and action
-schema. Direct actions remain available for setup, tab discovery/creation, and
-tasks handoff cannot complete. The implementation lives in the shared
+Handoff is disabled by default. Opt in with `browser_handoff = true` under
+`[tools]` in `~/.jcode/config.toml`, or `JCODE_BROWSER_HANDOFF=1`.
+`JCODE_BROWSER_HANDOFF=0` disables it, and the legacy
+`JCODE_BROWSER_HANDOFF_DISABLED=1` kill switch overrides any opt-in.
+When disabled, handoff and its arguments are omitted from the tool schema and
+handoff calls are rejected before browser setup. Direct actions remain available.
+When enabled, the tool instructions prefer handoff for browser tasks.
+The implementation lives in the shared
 runtime, so Desktop and the TUI use the same controller.
 
 ## Setup

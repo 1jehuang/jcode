@@ -8,6 +8,61 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[path = "client_checkpoint_tests.rs"]
 mod checkpoint_tests;
+
+#[test]
+fn identity_transport_negotiation_preserves_legacy_payload_shape() {
+    let identity = crate::protocol::TurnIdentity {
+        runtime_generation: "runtime".into(),
+        turn_id: 7,
+    };
+    let wrapped = ServerEvent::TurnEvent {
+        identity: identity.clone(),
+        event: Box::new(ServerEvent::Done { id: 99 }),
+    };
+    assert!(matches!(
+        event_for_transport(wrapped.clone(), false),
+        Some(ServerEvent::Done { id: 99 })
+    ));
+    assert!(matches!(
+        event_for_transport(wrapped, true),
+        Some(ServerEvent::TurnEvent { .. })
+    ));
+    let started = ServerEvent::TurnStarted { identity };
+    assert!(event_for_transport(started.clone(), false).is_none());
+    assert!(matches!(
+        event_for_transport(started, true),
+        Some(ServerEvent::TurnStarted { .. })
+    ));
+    assert!(
+        event_for_transport(
+            ServerEvent::TurnState {
+                session_id: "session".into(),
+                runtime_generation: "runtime".into(),
+                turn_id: None,
+                latest_turn_id: 7
+            },
+            false
+        )
+        .is_none()
+    );
+}
+
+fn turn_payload(event: ServerEvent) -> ServerEvent {
+    match event {
+        ServerEvent::TurnEvent { event, .. } => *event,
+        event => event,
+    }
+}
+
+async fn recv_turn_payload(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Option<ServerEvent> {
+    loop {
+        let event = rx.recv().await?;
+        if !matches!(event, ServerEvent::TurnStarted { .. }) {
+            return Some(turn_payload(event));
+        }
+    }
+}
+
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
@@ -19,460 +74,8 @@ struct IsolatedReloadRecoveryEnv {
     _runtime: tempfile::TempDir,
 }
 
-#[test]
-fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
-    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let control = SessionControlHandle::cancel_only(
-        "session_cancel_by_id_test",
-        Arc::clone(&queue),
-        InterruptSignal::new(),
-    );
-    let user = SoftInterruptSource::User;
-    for (content, id) in [
-        ("a", Some("f1")),
-        ("b", None),
-        ("c", Some("f2")),
-        ("d", Some("f3")),
-    ] {
-        assert!(control.queue_soft_interrupt_with_id(
-            content.into(),
-            Vec::new(),
-            false,
-            user,
-            id.map(str::to_string),
-        ));
-    }
-    assert_eq!(control.pending_soft_interrupt_count(), 4);
-
-    let requested: Vec<String> = ["f3", "gone", "f1", "f3"].map(String::from).to_vec();
-    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&requested);
-    assert_eq!(cancelled, vec!["f3".to_string(), "f1".to_string()]);
-    assert_eq!(not_queued, vec!["gone".to_string()]);
-
-    let remaining: Vec<String> = queue
-        .lock()
-        .expect("queue lock")
-        .iter()
-        .map(|message| message.content.clone())
-        .collect();
-    assert_eq!(remaining, vec!["b".to_string(), "c".to_string()]);
-
-    // Once drained (injected), the same id can no longer be cancelled.
-    queue.lock().expect("queue lock").clear();
-    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&["f2".to_string()]);
-    assert!(cancelled.is_empty());
-    assert_eq!(not_queued, vec!["f2".to_string()]);
-}
-
-#[tokio::test]
-async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::new(AtomicBool::new(false)),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
-
-    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let background_signal = InterruptSignal::new();
-    let stop_signal = InterruptSignal::new();
-    let control = SessionControlHandle::new(
-        "session_control_test",
-        Arc::clone(&queue),
-        background_signal.clone(),
-        stop_signal.clone(),
-    );
-
-    let _busy_agent_lock = agent.lock().await;
-
-    tokio::time::timeout(Duration::from_millis(100), async {
-        assert!(control.queue_soft_interrupt(
-            "please stop".to_string(),
-            Vec::new(),
-            true,
-            SoftInterruptSource::User,
-        ));
-        control.request_cancel();
-        assert!(control.request_background_current_tool());
-        control.clear_soft_interrupts();
-    })
-    .await
-    .expect("lock-free control operations should not wait for the agent mutex");
-
-    assert!(stop_signal.is_set());
-    assert!(background_signal.is_set());
-    assert!(queue.lock().expect("queue lock").is_empty());
-}
-
-#[tokio::test]
-async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::new(AtomicBool::new(false)),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let mut session = crate::session::Session::create_with_id(
-        "session_busy_control_refresh".to_string(),
-        None,
-        None,
-    );
-    session.model = Some("panic-on-fork".to_string());
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider, registry, session, None,
-    )));
-
-    let stop_signal = InterruptSignal::new();
-    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(
-        "session_busy_control_refresh".to_string(),
-        stop_signal.clone(),
-    )])));
-    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
-        "session_busy_control_refresh".to_string(),
-        soft_interrupt_queue,
-    )])));
-
-    let _busy_agent_lock = agent.lock().await;
-
-    tokio::time::timeout(Duration::from_millis(100), async {
-        let control = refresh_session_control_handle(
-            "session_busy_control_refresh",
-            &agent,
-            &shutdown_signals,
-            &soft_interrupt_queues,
-        )
-        .await;
-        control.request_cancel();
-    })
-    .await
-    .expect("refreshing a session control handle must not wait for the busy agent mutex");
-
-    assert!(stop_signal.is_set());
-}
-
-#[tokio::test]
-async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
-    // Regression: pressing Alt+B/Ctrl+B while a turn owns the agent mutex (e.g.
-    // running `await_members`) used to silently no-op because the lock-free
-    // `cancel_only` control handle dropped the background-tool signal
-    // (BACKGROUND_TOOL_SIGNAL_FIRE result=no_signal_handle). Building a full
-    // SessionControlHandle now registers the signal in a process-global registry
-    // so the cancel-only fallback can still fire it without the agent lock.
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::new(AtomicBool::new(false)),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let session_id = "session_busy_background_signal_registry";
-    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("panic-on-fork".to_string());
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider, registry, session, None,
-    )));
-
-    let background_signal = {
-        let agent_guard = agent.lock().await;
-        agent_guard.background_tool_signal()
-    };
-
-    // Build a full control handle once (registers the background signal), then
-    // simulate the busy-turn reconnect path which yields a cancel-only handle.
-    let stop_signal = InterruptSignal::new();
-    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let _full = SessionControlHandle::new(
-        session_id,
-        Arc::clone(&soft_interrupt_queue),
-        background_signal.clone(),
-        stop_signal.clone(),
-    );
-
-    let cancel_only =
-        SessionControlHandle::cancel_only(session_id, soft_interrupt_queue, stop_signal);
-
-    // The cancel-only handle has no directly-held background signal, yet it must
-    // still fire the registered one.
-    assert!(cancel_only.request_background_current_tool());
-    assert!(background_signal.is_set());
-
-    // Cleanup so the global registry does not leak across tests.
-    crate::server::state::remove_background_tool_signal(session_id);
-}
-
-#[tokio::test]
-async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::new(AtomicBool::new(false)),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-
-    let busy_agent_lock = agent.lock().await;
-    let rejected = tokio::time::timeout(Duration::from_millis(100), async {
-        reject_if_agent_busy_for_request(
-            17,
-            "rename_session",
-            "session_busy_reject",
-            true,
-            &agent,
-            &client_event_tx,
-        )
-    })
-    .await
-    .expect("busy-agent request rejection must not wait for the agent mutex");
-    assert!(rejected);
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Error {
-            id: 17,
-            retry_after_secs: Some(1),
-            ..
-        })
-    ));
-
-    drop(busy_agent_lock);
-    assert!(!reject_if_agent_busy_for_request(
-        18,
-        "rename_session",
-        "session_busy_reject",
-        false,
-        &agent,
-        &client_event_tx,
-    ));
-    assert!(client_event_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn context_message_persists_without_starting_turn() {
-    let _guard = crate::storage::lock_test_env();
-    let _env = IsolatedReloadRecoveryEnv::new();
-    let session_id = "session_context_only_no_reply";
-    let forked = Arc::new(AtomicBool::new(false));
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::clone(&forked),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("panic-on-fork".to_string());
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider, registry, session, None,
-    )));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let before = agent.lock().await.message_count();
-
-    append_context_message(
-        77,
-        "remember this context",
-        vec![("image/png".to_string(), "AAA".to_string())],
-        session_id,
-        false,
-        &agent,
-        &client_event_tx,
-    )
-    .await;
-
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::ContextMessageAdded { id: 77 })
-    ));
-    assert!(client_event_rx.try_recv().is_err());
-    assert!(!forked.load(Ordering::SeqCst));
-
-    let persisted = crate::session::Session::load(session_id).expect("persisted session");
-    assert_eq!(persisted.messages.len(), before + 1);
-    let message = persisted.messages.last().unwrap();
-    assert_eq!(format!("{:?}", message.role), "User");
-    assert!(matches!(
-        &message.content[0],
-        ContentBlock::Image { media_type, data }
-            if media_type == "image/png" && data == "AAA"
-    ));
-    assert!(matches!(
-        &message.content[1],
-        ContentBlock::Text { text, .. } if text == "remember this context"
-    ));
-}
-
-#[tokio::test]
-async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
-    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
-        forked: Arc::new(AtomicBool::new(false)),
-    });
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let _busy_agent_lock = agent.lock().await;
-
-    tokio::time::timeout(Duration::from_millis(100), async {
-        append_context_message(
-            78,
-            "too busy",
-            Vec::new(),
-            "session_context_busy",
-            true,
-            &agent,
-            &client_event_tx,
-        )
-        .await;
-    })
-    .await
-    .expect("busy rejection must not wait for the agent mutex");
-
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Error {
-            id: 78,
-            retry_after_secs: Some(1),
-            ..
-        })
-    ));
-}
-
-#[tokio::test]
-async fn cancel_without_local_task_still_signals_session_control() {
-    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stop_signal = InterruptSignal::new();
-    let control = SessionControlHandle::cancel_only(
-        "session_detached_cancel",
-        soft_interrupt_queue,
-        stop_signal.clone(),
-    );
-    // The point of this path is a turn this connection does not own (attach
-    // after reload, server-initiated turn). Without a registered active turn
-    // the cancel is a deliberate no-op, because arming the signal with nothing
-    // running only kills the *next* message.
-    let _active_turn = crate::turn_cancel_registry::register_active_turn(
-        "session_detached_cancel",
-        InterruptSignal::new(),
-    );
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (swarm_event_tx, _) = broadcast::channel(8);
-    let mut client_is_processing = true;
-    let mut message_id = Some(99);
-    let mut session_id = Some("session_detached_cancel".to_string());
-    let mut task = None;
-
-    cancel_processing_message(
-        &mut ProcessingState {
-            client_is_processing: &mut client_is_processing,
-            message_id: &mut message_id,
-            session_id: &mut session_id,
-            task: &mut task,
-        },
-        &control,
-        &client_event_tx,
-        &SwarmStatusRefs {
-            members: &swarm_members,
-            swarms_by_id: &swarms_by_id,
-            event_history: &event_history,
-            event_counter: &event_counter,
-            event_tx: &swarm_event_tx,
-        },
-        Some(99),
-        None,
-    )
-    .await;
-
-    assert!(stop_signal.is_set());
-    assert!(!client_is_processing);
-    assert!(message_id.is_none());
-    assert!(session_id.is_none());
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            ..
-        })
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Interrupted)
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Done { id: 99 })
-    ));
-}
-
-/// Regression for issue #428: the detached-turn cancel path schedules a
-/// deferred reset of the shared stop signal. That reset must be epoch-guarded:
-/// if a newer cancel fires during the reset window (rapid repeated Esc), the
-/// stale timer must not clear it, otherwise the running turn never observes
-/// the interrupt and keeps generating.
-#[tokio::test]
-async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
-    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stop_signal = InterruptSignal::new();
-    let control = SessionControlHandle::cancel_only(
-        "session_detached_cancel_race",
-        Arc::clone(&soft_interrupt_queue),
-        stop_signal.clone(),
-    );
-    // A turn owned by another connection is what makes this the signalling
-    // path rather than the idle no-op; see the sibling test.
-    let _active_turn = crate::turn_cancel_registry::register_active_turn(
-        "session_detached_cancel_race",
-        InterruptSignal::new(),
-    );
-    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (swarm_event_tx, _) = broadcast::channel(8);
-
-    let cancel_via_no_task_path = async |request_id: u64| {
-        let mut client_is_processing = true;
-        let mut message_id = Some(request_id);
-        let mut session_id = Some("session_detached_cancel_race".to_string());
-        let mut task = None;
-        cancel_processing_message(
-            &mut ProcessingState {
-                client_is_processing: &mut client_is_processing,
-                message_id: &mut message_id,
-                session_id: &mut session_id,
-                task: &mut task,
-            },
-            &control,
-            &client_event_tx,
-            &SwarmStatusRefs {
-                members: &swarm_members,
-                swarms_by_id: &swarms_by_id,
-                event_history: &event_history,
-                event_counter: &event_counter,
-                event_tx: &swarm_event_tx,
-            },
-            Some(request_id),
-            None,
-        )
-        .await;
-    };
-
-    // First Esc: fires the signal and schedules a 500ms deferred reset.
-    cancel_via_no_task_path(1).await;
-    assert!(stop_signal.is_set());
-
-    // 400ms later the user presses Esc again (turn still hasn't stopped).
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    cancel_via_no_task_path(2).await;
-    assert!(stop_signal.is_set());
-
-    // The first press's timer expires now. It must NOT clear the second
-    // press's still-unobserved cancel.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        stop_signal.is_set(),
-        "stale deferred reset erased a newer cancel (issue #428)"
-    );
-
-    // The second press's own timer may still clear it afterwards.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert!(
-        !stop_signal.is_set(),
-        "the newest cancel's deferred reset should eventually clear the flag"
-    );
-}
+#[path = "client_lifecycle_tests/control_requests.rs"]
+mod control_requests;
 
 impl IsolatedRuntimeDir {
     fn new() -> Self {
@@ -618,6 +221,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
             },
             Some(1),
             None,
+            None,
         )
         .await;
 
@@ -704,6 +308,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
                 event_tx: &swarm_event_tx,
             },
             Some(1),
+            None,
             None,
         )
         .await;
@@ -852,12 +457,15 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_server_failover: false,
+        supports_turn_identity: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
         target_session_id: None,
         client_instance_id: None,
         client_has_local_history: false,
+        history_base: None,
         allow_session_takeover: false,
         crash_on_disconnect: false,
         continue_on_disconnect: false,
@@ -1004,6 +612,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                server_failover: false,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1105,6 +714,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            server_failover: false,
         },
         session_id,
         &mut ProcessingState {
@@ -1128,7 +738,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     .await;
 
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), origin_rx.recv())
+        let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(&mut origin_rx))
             .await
             .expect("origin should receive the initial stream event promptly")
             .expect("origin event channel should remain open");
@@ -1150,7 +760,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         let mut saw_message_end = false;
         let mut saw_done = false;
         while !saw_post_attach_delta || !saw_message_end || !saw_done {
-            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(rx))
                 .await
                 .expect("attachment should receive streamed event promptly")
                 .expect("attachment event channel should remain open");
@@ -1166,7 +776,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         }
     }
 
-    let (done_id, result, _) =
+    let (done_id, result, _, _, _) =
         tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
             .await
             .expect("processing should complete promptly")
@@ -1176,6 +786,410 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     if let Some(handle) = processing_task.take() {
         handle.await.expect("processing task join");
+    }
+}
+
+#[tokio::test]
+async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drains() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut agent = Agent::new(provider, registry);
+    let initial_messages = agent.message_count();
+    let reserved = agent.claim_server_turn().unwrap();
+    let (output, _) = mpsc::unbounded_channel();
+    assert!(agent.run_once("forbidden direct turn").await.is_err());
+    assert!(agent.run_once_capture("forbidden capture").await.is_err());
+    assert!(
+        agent
+            .run_once_streaming_mpsc("forbidden stream", Vec::new(), None, output)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent.message_count(),
+        initial_messages,
+        "rejected entries must not touch transcript"
+    );
+    drop(reserved);
+    for abort in [false, true] {
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        // Block delivery so the forbidden handoff is deterministic.
+        let blocked_delivery = members.write().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let lease = agent.claim_server_turn().unwrap();
+        let events = super::super::state::TurnEventChannel::new(
+            agent.session_id().into(),
+            Arc::clone(&members),
+            tx,
+            &lease,
+        );
+        let retained_sender = events.sender();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let producer = tokio::spawn(async move {
+            events
+                .sender()
+                .send(ServerEvent::TextDelta {
+                    text: "old output".into(),
+                })
+                .unwrap();
+            events.sender().send(ServerEvent::Done { id: 7 }).unwrap();
+            ready_tx.send(()).unwrap();
+            if abort {
+                std::future::pending::<()>().await;
+            }
+            events.finish().await;
+            drop(lease);
+        });
+        ready_rx.await.unwrap();
+        if abort {
+            producer.abort();
+            assert!(producer.await.unwrap_err().is_cancelled());
+        } else {
+            // Drop the handle, not the task. Normal finalization must also
+            // remain reserved while the publication queue is blocked.
+            drop(producer);
+        }
+        assert!(
+            agent.claim_server_turn().is_err(),
+            "queue still owns the old turn"
+        );
+        assert!(rx.try_recv().is_err());
+        drop(blocked_delivery);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::TurnStarted { .. })
+        ));
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
+            if matches!(&*event, ServerEvent::TextDelta { text } if text == "old output"))
+        );
+        assert!(
+            matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
+            if matches!(*event, ServerEvent::Done { id: 7 }))
+        );
+        let next = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(lease) = agent.claim_server_turn() {
+                    break lease;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drained queue releases the runtime");
+        assert!(
+            retained_sender.send(ServerEvent::Done { id: 7 }).is_err(),
+            "late producer clones cannot inject terminals into the new turn"
+        );
+        assert!(rx.try_recv().is_err());
+        drop(next);
+    }
+}
+
+#[tokio::test]
+async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_terminal_then_message";
+    let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    session.model = Some("complete-immediately".into());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms = Arc::new(RwLock::new(HashMap::new()));
+    let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_tx, _) = broadcast::channel(8);
+    let swarm = SwarmStatusRefs {
+        members: &members,
+        swarms_by_id: &swarms,
+        event_history: &history,
+        event_counter: &counter,
+        event_tx: &swarm_tx,
+    };
+    let mut processing = false;
+    let mut message_id = None;
+    let mut processing_session = None;
+    let mut task = None;
+    let mut state = ProcessingState {
+        client_is_processing: &mut processing,
+        message_id: &mut message_id,
+        session_id: &mut processing_session,
+        task: &mut task,
+    };
+
+    // Another connection has accepted a turn but has not spawned its provider
+    // task yet. Connection-local flags are idle and the Agent mutex is free.
+    // Only the runtime reservation can reject this competing acceptance.
+    let initial_messages = agent.lock().await.message_count();
+    let other_connection = agent.lock().await.claim_server_turn().unwrap();
+    start_processing_message(
+        ProcessingMessage {
+            id: 1,
+            content: "must not enter transcript".into(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+            server_failover: false,
+        },
+        session_id,
+        &mut state,
+        &agent,
+        &event_tx,
+        &done_tx,
+        Vec::new(),
+        &swarm,
+    )
+    .await;
+    assert!(matches!(event_rx.recv().await.unwrap(),
+        ServerEvent::Error { id: 1, message, .. } if message == "Already processing a message"));
+    assert!(!*state.client_is_processing);
+    assert!(state.task.is_none());
+    assert!(done_rx.try_recv().is_err());
+    assert_eq!(agent.lock().await.message_count(), initial_messages);
+    drop(other_connection);
+
+    for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
+        request_tx
+            .send(ProcessingMessage {
+                id,
+                content: content.into(),
+                images: Vec::new(),
+                system_reminder: None,
+                active_skill: None,
+                server_failover: false,
+            })
+            .unwrap();
+        // Force the real actor's worst-case ordering: after Done, both input
+        // and completion are ready, but biased select chooses input first.
+        let message = tokio::select! {
+            biased;
+            message = request_rx.recv() => message.unwrap(),
+            _ = done_rx.recv() => panic!("input must win the biased select"),
+        };
+        if id == 2 {
+            assert!(
+                *state.client_is_processing,
+                "old local state is still busy after Done"
+            );
+            assert_eq!(*state.message_id, Some(1));
+        }
+        reconcile_processing_completions(
+            None,
+            &mut done_rx,
+            &mut state,
+            "connection",
+            &connections,
+            &swarm,
+        )
+        .await;
+        assert!(!*state.client_is_processing);
+        assert!(state.message_id.is_none());
+        assert!(state.session_id.is_none());
+        assert!(state.task.is_none());
+        start_processing_message(
+            message,
+            session_id,
+            &mut state,
+            &agent,
+            &event_tx,
+            &done_tx,
+            Vec::new(),
+            &swarm,
+        )
+        .await;
+        assert!(*state.client_is_processing);
+        assert_eq!(*state.message_id, Some(id));
+
+        if id == 2 {
+            // Delayed duplicates, including errors, must not clear the new
+            // turn's handle or session and must not emit duplicate terminals.
+            let stale_owner = tokio::spawn(async {}).id();
+            done_tx.send((2, Ok(()), None, stale_owner, None)).unwrap();
+            done_tx
+                .send((
+                    2,
+                    Err(anyhow::anyhow!("late error")),
+                    None,
+                    stale_owner,
+                    None,
+                ))
+                .unwrap();
+            reconcile_processing_completions(
+                None,
+                &mut done_rx,
+                &mut state,
+                "connection",
+                &connections,
+                &swarm,
+            )
+            .await;
+            assert!(*state.client_is_processing);
+            assert_eq!(*state.message_id, Some(2));
+            assert_eq!(state.session_id.as_deref(), Some(session_id));
+            assert!(state.task.is_some());
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match recv_turn_payload(&mut event_rx).await.unwrap() {
+                    ServerEvent::Done { id: done_id } => {
+                        assert_eq!(done_id, id, "no duplicate terminal from the previous turn");
+                        break;
+                    }
+                    ServerEvent::Error { message, .. } => {
+                        panic!("new turn was rejected: {message}")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("each prompt must reach the provider and complete");
+        // Deliberately do not poll completion here. The next Message must
+        // reconcile it, rather than becoming a lost interleave.
+    }
+    reconcile_processing_completions(
+        None,
+        &mut done_rx,
+        &mut state,
+        "connection",
+        &connections,
+        &swarm,
+    )
+    .await;
+    assert!(!*state.client_is_processing);
+    let persisted = crate::session::Session::load(session_id).unwrap();
+    for expected in ["first turn", "acceptance back on laptop"] {
+        assert!(
+            persisted.messages.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text, .. } if text == expected),
+                )
+            }),
+            "prompt must be persisted as a real model turn: {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    for failed in [false, true] {
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut task = Some(tokio::spawn(async move {
+            let result = if failed {
+                Err(anyhow::anyhow!("terminal test error"))
+            } else {
+                Ok(())
+            };
+            done_tx
+                .send((7, result, None, tokio::task::id(), None))
+                .unwrap();
+            // Deterministically simulate preemption between the two sends.
+            release_rx.await.unwrap();
+            let terminal = if failed {
+                ServerEvent::Error {
+                    server_resumes: false,
+                    id: 7,
+                    message: "terminal test error".into(),
+                    retry_after_secs: Some(3),
+                }
+            } else {
+                ServerEvent::Done { id: 7 }
+            };
+            event_tx.send(terminal).unwrap();
+        }));
+        let completion = done_rx.recv().await.unwrap();
+        let mut processing = true;
+        let mut message_id = Some(7);
+        let mut session_id = Some("session_terminal_enqueue_gap".to_string());
+        let mut state = ProcessingState {
+            client_is_processing: &mut processing,
+            message_id: &mut message_id,
+            session_id: &mut session_id,
+            task: &mut task,
+        };
+        let (disconnect_tx, _) = mpsc::unbounded_channel();
+        let connections = Arc::new(RwLock::new(HashMap::from([(
+            "connection".into(),
+            ClientConnectionInfo {
+                client_id: "connection".into(),
+                session_id: "session_terminal_enqueue_gap".into(),
+                client_instance_id: None,
+                debug_client_id: None,
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+                is_processing: true,
+                current_tool_name: Some("old tool".into()),
+                terminal_env: Vec::new(),
+                disconnect_tx,
+            },
+        )])));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_tx, _) = broadcast::channel(8);
+        let swarm = SwarmStatusRefs {
+            members: &members,
+            swarms_by_id: &swarms,
+            event_history: &history,
+            event_counter: &counter,
+            event_tx: &swarm_tx,
+        };
+        {
+            let reconcile = reconcile_processing_completions(
+                Some(completion),
+                &mut done_rx,
+                &mut state,
+                "connection",
+                &connections,
+                &swarm,
+            );
+            tokio::pin!(reconcile);
+            assert!(
+                futures::poll!(&mut reconcile).is_pending(),
+                "must not retire before terminal enqueue"
+            );
+            assert!(event_rx.try_recv().is_err());
+            release_tx.send(()).unwrap();
+            reconcile.await;
+        }
+        assert!(!*state.client_is_processing);
+        assert!(state.message_id.is_none());
+        assert!(state.session_id.is_none());
+        assert!(state.task.is_none());
+        let connections = connections.read().await;
+        assert!(!connections["connection"].is_processing);
+        assert!(connections["connection"].current_tool_name.is_none());
+        let terminal = event_rx
+            .try_recv()
+            .expect("terminal is queued before new turn can start");
+        if failed {
+            assert!(matches!(
+                terminal,
+                ServerEvent::Error {
+                    id: 7,
+                    retry_after_secs: Some(3),
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(terminal, ServerEvent::Done { id: 7 }));
+        }
+        assert!(event_rx.try_recv().is_err(), "one terminal event only");
     }
 }
 
@@ -1211,7 +1225,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             provider, registry, session, None,
         )));
 
-        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
         let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
         let mut client_is_processing = false;
         let mut processing_message_id = None;
@@ -1230,6 +1244,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                server_failover: false,
             },
             session_id,
             &mut ProcessingState {
@@ -1261,7 +1276,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             "server acceptance of the exact hidden continuation should consume the durable intent"
         );
 
-        let (done_id, result, _report) =
+        let (done_id, result, _report, _, _) =
             tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                 .await
                 .expect("processing task should finish")
@@ -1270,6 +1285,121 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         result?;
         if let Some(handle) = processing_task.take() {
             handle.await.expect("processing task join");
+        }
+        client_is_processing = false;
+        processing_message_id = None;
+        processing_session_id = None;
+        while client_event_rx.try_recv().is_ok() {}
+        let message_count = agent.lock().await.message_count();
+        let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+        // A stale History continuation arriving after the final answer is a
+        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        start_processing_message(
+            ProcessingMessage {
+                id: 78,
+                content: "continue after reload".to_string(),
+                images: Vec::new(),
+                system_reminder: Some(continuation.to_string()),
+                active_skill: Some("nonexistent-replay-skill".to_string()),
+                server_failover: false,
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+        assert!(!client_is_processing);
+        assert!(processing_message_id.is_none());
+        assert!(processing_session_id.is_none());
+        assert!(processing_task.is_none());
+        assert_eq!(agent.lock().await.message_count(), message_count);
+        assert_eq!(
+            event_counter.load(std::sync::atomic::Ordering::Relaxed),
+            event_count
+        );
+        assert!(processing_done_rx.try_recv().is_err());
+        assert!(matches!(
+            client_event_rx.try_recv(),
+            Ok(ServerEvent::Done { id: 78 })
+        ));
+        assert!(client_event_rx.try_recv().is_err());
+
+        // Unrelated reminders and ordinary prompts (even the exact body) are
+        // not replays. A fresh intent in this session is accepted as well.
+        for (id, reminder) in [
+            (79, Some("ordinary reminder")),
+            (80, None),
+            (81, Some(continuation)),
+        ] {
+            if id == 81 {
+                super::super::reload_recovery::persist_intent(
+                    "reload-next",
+                    session_id,
+                    super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                    crate::tool::selfdev::ReloadRecoveryDirective {
+                        reconnect_notice: None,
+                        continuation_message: continuation.to_string(),
+                    },
+                    "next reload",
+                )?;
+            }
+            start_processing_message(
+                ProcessingMessage {
+                    id,
+                    content: continuation.to_string(),
+                    images: Vec::new(),
+                    system_reminder: reminder.map(str::to_string),
+                    active_skill: None,
+                    server_failover: false,
+                },
+                session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                Vec::new(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+            assert!(client_is_processing);
+            assert_eq!(processing_message_id, Some(id));
+            let (done_id, result, _, _, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                    .await?
+                    .expect("accepted turn completion");
+            assert_eq!(done_id, id);
+            result?;
+            processing_task.take().unwrap().await?;
+            client_is_processing = false;
+            processing_message_id = None;
+            processing_session_id = None;
         }
         Ok::<(), anyhow::Error>(())
     })?;
@@ -1330,6 +1460,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    server_failover: false,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -1395,7 +1526,8 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         forked: Arc::clone(&forked),
     });
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -1929,6 +2061,8 @@ async fn sdk_socket_workflow(response_only: bool) {
         .unwrap()
         .unwrap();
 }
+#[path = "client_lifecycle_socket_tests.rs"]
+mod socket_workflows;
 
 /// `jcode login` (and the SDK login flow) open a fresh socket and send only
 /// `notify_auth_changed`. The daemon must apply it without a Subscribe and

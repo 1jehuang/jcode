@@ -16,6 +16,147 @@ use std::collections::HashMap;
 
 pub struct TodoTool;
 
+#[path = "todo_names.rs"]
+mod names;
+
+#[cfg(test)]
+#[path = "todo_name_tests.rs"]
+mod name_tests;
+
+#[cfg(test)]
+#[path = "todo_external_blocker_tests.rs"]
+mod external_blocker_tests;
+
+#[cfg(test)]
+#[path = "todo_lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
+/// A prerequisite edit naming one member applies atomically to its entire lane.
+fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+    let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
+    let target = typed
+        .iter()
+        .find(|todo| todo.id == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown todo {id:?}"))?;
+    let lane = crate::todo::stages::lane_id(target);
+    for (raw, todo) in todos.iter_mut().zip(&typed) {
+        if crate::todo::stages::lane_id(todo) == lane {
+            raw["lane_after"] = value.clone();
+        }
+    }
+    Ok(())
+}
+
+fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
+    let now = chrono::Utc::now();
+    for todo in todos {
+        if let Some(required) = &todo.completely_blocked
+            && required.reason.trim().is_empty()
+        {
+            bail!(
+                "completely_blocked.reason must be nonempty for todo {}",
+                todo.id
+            );
+        }
+        if let Some(blocker) = &todo.external_blocker {
+            if blocker.reason.trim().is_empty() {
+                bail!(
+                    "external_blocker.reason must explain the external condition for todo {}",
+                    todo.id
+                );
+            }
+            let unchanged = previous
+                .iter()
+                .any(|old| old.id == todo.id && old.external_blocker == todo.external_blocker);
+            if !unchanged && blocker.review_at <= now {
+                bail!(
+                    "external_blocker.review_at must be a future RFC3339 deadline for todo {}",
+                    todo.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the entire replacement before touching either todo storage or
+/// background delivery. A terminal dependency remains valid but needs no wake.
+async fn prepare_background_dependencies(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    previous: &[TodoItem],
+    todos: &[TodoItem],
+) -> Result<()> {
+    let mut ids: HashMap<&str, (bool, bool)> = HashMap::new();
+    for todo in todos {
+        let prior = previous.iter().find(|old| old.id == todo.id);
+        let active = !crate::todo::todo_status_is_completed(&todo.status)
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+            && !crate::todo::todo_completely_blocked(todo);
+        for id in &todo.waiting_on {
+            // Check before the manager constructs any filesystem path.
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            {
+                bail!("Invalid waiting_on background task ID: {id}");
+            }
+            let is_new = !prior.is_some_and(|old| old.waiting_on.contains(id));
+            let entry = ids.entry(id).or_default();
+            entry.0 |= is_new;
+            entry.1 |= active;
+        }
+    }
+    let mut running = Vec::new();
+    let mut awaits = Vec::new();
+    for (id, (is_new, active)) in ids {
+        if id.starts_with(crate::todo::await_dependency::ID_PREFIX) {
+            let dependency =
+                crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id);
+            match dependency {
+                Some(dependency) => {
+                    if dependency.session_id != session_id {
+                        bail!("waiting_on await does not belong to this session: {id}");
+                    }
+                    if active && dependency.is_running() {
+                        awaits.push(id);
+                    }
+                }
+                None if is_new => bail!("Unknown waiting_on await dependency: {id}"),
+                None => {}
+            }
+            continue;
+        }
+        let Some(task) = manager.status(id).await else {
+            if is_new {
+                bail!("Unknown waiting_on background task: {id}");
+            }
+            // Cleanup can remove historical task files. Retaining that same
+            // todo's reference must not prevent unrelated or assessment writes.
+            continue;
+        };
+        if task.task_id != id {
+            bail!("Unknown waiting_on background task: {id}");
+        }
+        if task.session_id != session_id {
+            bail!("waiting_on background task does not belong to this session: {id}");
+        }
+        if active && task.status == crate::bus::BackgroundTaskStatus::Running {
+            running.push(id);
+        }
+    }
+    for id in awaits {
+        crate::server::subscribe_await_dependency(id, session_id)?;
+    }
+    for id in running {
+        // The task may finish between validation and subscription. Terminal
+        // dependencies do not block, and callers re-read current task state.
+        manager.update_delivery(id, true, true).await?;
+    }
+    Ok(())
+}
+
 impl TodoTool {
     pub fn new() -> Self {
         Self
@@ -63,7 +204,235 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
             history.push(value);
         }
         todo.confidence_history = history;
+        // `assigned_to` links a todo to the swarm worker running it. It is set
+        // by swarm dispatch, not the model (the schema does not expose it), so
+        // a model rewrite of the list must not silently unassign the worker.
+        if todo.assigned_to.is_none() {
+            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
+        }
+        // Only a new start claims local ownership. Merely rewriting an old
+        // unassigned in-progress item does not establish who is working on it.
+        if todo.assigned_to.is_none()
+            && todo.status == "in_progress"
+            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
+        {
+            todo.assigned_to = Some("@self".to_string());
+        }
     }
+}
+
+/// How a todo call wrote, for measuring whether agents use incremental edits
+/// instead of resending the list. Counted locally in
+/// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
+fn todo_write_mode(input: &Value) -> &'static str {
+    let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+    match (
+        has("todos") || has("phases"),
+        has("update") || has("add") || has("remove"),
+    ) {
+        (true, _) => "full",
+        (false, true) => "patch",
+        (false, false) if has("goals") || has("plan") => "assessment",
+        _ => "read",
+    }
+}
+
+fn record_todo_write_mode(input: &Value) {
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = COUNTER_LOCK.lock() else {
+        return;
+    };
+    let mode = todo_write_mode(input);
+    let Ok(dir) = crate::storage::jcode_dir().map(|dir| dir.join("stats")) else {
+        return;
+    };
+    let path = dir.join("todo-write-modes.json");
+    let mut counts: HashMap<String, u64> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    *counts.entry(mode.to_string()).or_default() += 1;
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::storage::write_json_fast(&path, &counts);
+}
+
+/// Turn incremental edits into a full `todos` list so every downstream rule
+/// (status validation, confidence history, gates, lane and plan sync) runs on
+/// one path. `update` changes only the given fields of todos matched by `id`;
+/// `add` appends new todos (or inserts each after its `after` id); `remove`
+/// drops ids. Full replacements and incremental edits are mutually exclusive.
+fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    names::normalize_containers(&mut input);
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
+    let named_replacement = ["phases", "todos"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(names::uses_names));
+    let stored = if patching || named_replacement {
+        stored()
+    } else {
+        json!([])
+    };
+    names::normalize_public_input(
+        &mut input,
+        stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
+    )?;
+    flatten_phases(&mut input)?;
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
+    if !patching {
+        return Ok(input);
+    }
+    if obj.get("todos").is_some_and(|value| !value.is_null()) {
+        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+    }
+    let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
+        match value {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => Ok(items),
+            Some(Value::String(raw)) if raw.trim().is_empty() => Ok(Vec::new()),
+            Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw.trim()) {
+                Ok(Value::Array(items)) => Ok(items),
+                Ok(single @ Value::Object(_)) => Ok(vec![single]),
+                _ => bail!("expected a list"),
+            },
+            Some(single @ Value::Object(_)) => Ok(vec![single]),
+            Some(other) => bail!("expected a list, got {other}"),
+        }
+    };
+    let updates = parse_list(obj.remove("update"))?;
+    let adds = parse_list(obj.remove("add"))?;
+    let removes: Vec<String> = parse_list(obj.remove("remove"))?
+        .into_iter()
+        .map(|value| match value {
+            Value::String(id) => Ok(id),
+            _ => bail!("each remove entry must be an id string"),
+        })
+        .collect::<Result<_>>()?;
+
+    let Value::Array(mut todos) = stored else {
+        bail!("stored todos are not a list");
+    };
+    let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
+
+    for update in updates {
+        let Some(fields) = update.as_object() else {
+            bail!("each update must be an object with an id");
+        };
+        let Some(id) = fields.get("id").and_then(Value::as_str) else {
+            bail!("each update needs an `id`");
+        };
+        let Some(todo) = todos
+            .iter_mut()
+            .find(|todo| id_of(todo).as_deref() == Some(id))
+        else {
+            bail!("no todo with id {id:?}; use `add` for new todos");
+        };
+        let target = todo
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("stored todo {id:?} is not an object"))?;
+        validate_membership(fields)?;
+        for (key, value) in fields {
+            if key != "id" {
+                // `phase`/`lane` are the card's words for `stage`/`group`;
+                // write the canonical key so an alias never sits beside it.
+                let key = match key.as_str() {
+                    "phase" | "wave" => "stage",
+                    "lane" => "group",
+                    other => other,
+                };
+                target.insert(key.to_string(), value.clone());
+            }
+        }
+        if let Some(value) = fields.get("lane_after") {
+            patch_lane_after(&mut todos, id, value.clone())?;
+        }
+    }
+
+    for mut add in adds {
+        let Some(fields) = add.as_object_mut() else {
+            bail!("each added todo must be an object");
+        };
+        let after = fields
+            .remove("after")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("after must be a nonempty todo id"))
+            })
+            .transpose()?;
+        validate_membership(fields)?;
+        let anchor = after
+            .as_ref()
+            .map(|id| {
+                todos
+                    .iter()
+                    .find(|todo| id_of(todo).as_ref() == Some(id))
+                    .ok_or_else(|| anyhow::anyhow!("unknown after todo {id:?}"))
+            })
+            .transpose()?;
+        for (public, canonical) in [("phase", "stage"), ("lane", "group")] {
+            if !fields.contains_key(public) && !fields.contains_key(canonical) {
+                let value = anchor
+                    .and_then(|todo| todo.get(canonical).or_else(|| todo.get(public)))
+                    .filter(|value| !value.is_null())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "added todo needs {public}, or an after todo with membership"
+                        )
+                    })?;
+                fields.insert(canonical.to_string(), value.clone());
+            }
+        }
+        for (alias, canonical) in [("phase", "stage"), ("wave", "stage"), ("lane", "group")] {
+            if let Some(value) = fields.remove(alias) {
+                fields.insert(canonical.into(), value);
+            }
+        }
+        if !fields.contains_key("lane_after")
+            && let Some(value) = todos
+                .iter()
+                .find(|todo| {
+                    todo.get("stage") == fields.get("stage")
+                        && todo.get("group") == fields.get("group")
+                })
+                .and_then(|todo| todo.get("lane_after"))
+        {
+            fields.insert("lane_after".into(), value.clone());
+        }
+        let lane_after = fields.get("lane_after").cloned();
+        let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
+        if let Some(id) = &id
+            && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
+        {
+            bail!("todo id {id:?} already exists; use `update` to change it");
+        }
+        match after.and_then(|after| {
+            todos
+                .iter()
+                .position(|t| id_of(t).as_deref() == Some(&after))
+        }) {
+            Some(index) => todos.insert(index + 1, add),
+            None => todos.push(add),
+        }
+        if let (Some(id), Some(value)) = (id, lane_after) {
+            patch_lane_after(&mut todos, &id, value)?;
+        }
+    }
+
+    if !removes.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
+    }
+
+    obj.insert("todos".to_string(), Value::Array(todos));
+    Ok(input)
 }
 
 #[derive(Deserialize)]
@@ -74,7 +443,18 @@ struct TodoInput {
 }
 
 fn parse_todo_input(input: Value) -> Result<TodoInput> {
+    let mut input = input;
+    names::normalize_public_input(&mut input, &[])?;
+    flatten_phases(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    if let Some(todos) = &params.todos {
+        let mut ids = std::collections::HashSet::new();
+        for todo in todos {
+            if !ids.insert(&todo.id) {
+                bail!("duplicate todo id {:?}", todo.id);
+            }
+        }
+    }
     if let Some(todo) = params.todos.as_ref().and_then(|todos| {
         todos
             .iter()
@@ -86,6 +466,141 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
         );
     }
     Ok(params)
+}
+
+/// Validate aliases before serde can silently select or duplicate membership.
+fn validate_membership(fields: &serde_json::Map<String, Value>) -> Result<()> {
+    if ["phases", "lanes", "items"]
+        .iter()
+        .any(|key| fields.contains_key(*key))
+    {
+        bail!("incremental items must not contain hierarchy containers");
+    }
+    for keys in [
+        ["phase", "stage", "wave"].as_slice(),
+        ["lane", "group"].as_slice(),
+    ] {
+        let values: Vec<_> = keys.iter().filter_map(|key| fields.get(*key)).collect();
+        if values.windows(2).any(|pair| pair[0] != pair[1]) {
+            bail!("conflicting membership fields: {keys:?}");
+        }
+        for value in values {
+            if keys[0] == "phase" {
+                if !value
+                    .as_u64()
+                    .is_some_and(|phase| phase > 0 && phase <= u32::MAX as u64)
+                {
+                    bail!("phase must be a positive integer");
+                }
+            } else if !value.as_str().is_some_and(|lane| !lane.trim().is_empty()) {
+                bail!("lane must be a nonempty string");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only the public boundary is hierarchical. Storage and swarm retain stage/group.
+fn flatten_phases(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    if ["todos", "update", "add", "remove"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        bail!("send phases or legacy todos or incremental edits, not both");
+    }
+    let phases = phases
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("phases must be an array"))?;
+    let mut phase_ids = std::collections::HashSet::new();
+    let mut item_ids = std::collections::HashSet::new();
+    let mut todos = Vec::new();
+    for phase in phases {
+        let phase = phase
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("phase must be an object"))?;
+        if phase
+            .keys()
+            .any(|key| !["phase", "lanes"].contains(&key.as_str()))
+        {
+            bail!("unexpected phase field");
+        }
+        let number = phase
+            .get("phase")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+            .ok_or_else(|| anyhow::anyhow!("phase must be a positive integer"))?;
+        if !phase_ids.insert(number) {
+            bail!("duplicate phase {number}");
+        }
+        let lanes = phase
+            .get("lanes")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("phase needs nonempty lanes"))?;
+        let mut lane_ids = std::collections::HashSet::new();
+        for lane in lanes {
+            let lane = lane
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
+            if lane
+                .keys()
+                .any(|key| !["lane", "items", "after"].contains(&key.as_str()))
+            {
+                bail!("unexpected lane field");
+            }
+            let name = lane
+                .get("lane")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane must be a nonempty string"))?;
+            if !lane_ids.insert(name) {
+                bail!("duplicate lane {name:?}");
+            }
+            let items = lane
+                .get("items")
+                .and_then(Value::as_array)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane needs nonempty items"))?;
+            for item in items {
+                let mut item = item
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
+                if ["phase", "lane", "stage", "group", "wave", "lane_after"]
+                    .iter()
+                    .any(|key| item.contains_key(*key))
+                {
+                    bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("item needs id"))?;
+                if id.trim().is_empty() {
+                    bail!("item needs a nonempty id");
+                }
+                if !item_ids.insert(id.to_string()) {
+                    bail!("duplicate todo id {id:?}");
+                }
+                item.insert("stage".into(), json!(number));
+                item.insert("group".into(), json!(name));
+                if let Some(after) = lane.get("after") {
+                    item.insert("lane_after".into(), after.clone());
+                }
+                todos.push(Value::Object(item));
+            }
+        }
+    }
+    obj.remove("phases");
+    obj.insert("todos".into(), Value::Array(todos));
+    Ok(())
 }
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
@@ -398,6 +913,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
     let Some(mut plan) = incoming else {
         return stored.clone();
     };
+    if plan.title.is_none() {
+        plan.title = stored.title.clone();
+    }
     if plan.user_intention.is_none() {
         plan.user_intention = stored.user_intention.clone();
     }
@@ -414,6 +932,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
 
 fn plan_change(before: &TodoPlan, after: &TodoPlan) -> Option<TodoPlanChange> {
     let mut fields = Vec::new();
+    if before.title != after.title {
+        fields.push(TodoPlanField::Title);
+    }
     if before.user_intention != after.user_intention {
         fields.push(TodoPlanField::UserIntention);
     }
@@ -576,7 +1097,7 @@ fn build_todo_output(
         .iter()
         .filter(|todo| todo.status != "completed")
         .count();
-    let mut text = serde_json::to_string_pretty(&todos)?;
+    let mut text = serde_json::to_string_pretty(&names::public_todos(&todos)?)?;
     if plan != TodoPlan::default() {
         text.push_str("\n\nPlan:\n");
         text.push_str(&serde_json::to_string_pretty(&plan)?);
@@ -728,144 +1249,249 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments. \
-         Use this tool VERY frequently, far more than feels necessary. The user watches \
-         todo progress live, so a stale list looks like stalled work. For any task with \
-         more than one step: write the full plan before starting, mark an item \
-         in_progress before working on it, mark it completed the moment it is done \
-         (never batch completions), and add newly discovered work as soon as you find it. \
-         Expect to call this after nearly every meaningful step."
+        "Use the todo tool very frequently. Read/update todos and goal assessments. \
+         Initialize with phases, then patch by unique task name. \
+         Keep status current. Phases are sequential, lanes parallel, items ordered. \
+         Block only for an indispensable action by someone else with no safe workaround: \
+         name who must do what and why you cannot proceed. Uncertainty, task size, and \
+         agent coordination are not blockers. Continue independent work. \
+         external_blocker keeps work pending/in_progress and schedules reassessment at review_at \
+         instead of a separate schedule call; null clears it. completely_blocked means no way forward."
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
-                "todos": {
+                "update": {
                     "type": "array",
-                    "description": "Todo list to save.",
+                    "description": "Patch by name; omitted fields stay unchanged.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string", "minLength": 1}},
+                        "additionalProperties": true
+                    }
+                },
+                "add": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "status", "priority", "confidence"],
+                        "additionalProperties": true
+                    }
+                },
+                "remove": {
+                    "type": "array",
+                    "description": "Delete by name; prefer cancelling.",
+                    "items": {"type": "string"}
+                },
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "status", "priority", "confidence"],
                         "properties": {
-                            "content": {
+                            "name": {
                                 "type": "string",
-                                "description": "Task."
+                                "minLength": 1,
+                                "description": "Unique task name, ideally under 40 characters."
+                            },
+                            "description": {
+                                "type": "string"
+                            },
+                            "waiting_on": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
+                            },
+                            "completely_blocked": {
+                                "type": ["object", "null"],
+                                "required": ["reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "reason": {"type": "string", "minLength": 1}
+                                }
+                            },
+                            "external_blocker": {
+                                "type": ["object", "null"],
+                                "required": ["reason", "review_at"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "reason": {"type": "string", "minLength": 1},
+                                    "review_at": {"type": "string", "format": "date-time", "description": "Future RFC3339 reassessment time, not assumed resolution."}
+                                }
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"],
-                                "description": "Status. Use completed when the task is done."
+                                "enum": ["pending", "in_progress", "completed", "cancelled"]
                             },
                             "priority": {
-                                "type": "string",
-                                "description": "Priority."
+                                "type": "string"
                             },
-                            "id": {
-                                "type": "string",
-                                "description": "ID."
+                            "lane": {
+                                "type": "string"
                             },
-                            "group": {
-                                "type": "string",
-                                "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
+                            "phase": {
+                                "type": "integer",
+                                "minimum": 1
                             },
                             "confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
+                                "description": "Evidence that the task can be completed correctly."
                             },
                             "completion_confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state behind this todo's completion. Use only for completed items."
+                                "description": "Evidence of completion; completed items only."
                             },
                         }
                     }
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Plan-level understanding of the request. Send on first write and whenever understanding changes.",
+                    "description": "Send initially and when understanding changes.",
                     "required": ["user_intention", "understands_user_intent"],
                     "properties": {
-                        "user_intention": {
+                        "title": {
                             "type": "string",
-                            "description": "What the user actually wants: underlying reason and desired end state. Omit later to retain."
+                            "description": "Session name, 2-5 specific words. Set when creating the plan."
+                        },
+                        "user_intention": {
+                            "type": "string"
                         },
                         "understands_user_intent": {
                             "type": "string",
-                            "enum": ["uncertain", "partial", "clear", "complete"],
-                            "description": "How well you understand what the user wants. Report uncertain or partial when guessing."
+                            "enum": ["uncertain", "partial", "clear", "complete"]
                         }
                     }
                 },
                 "goals": {
                     "type": "array",
-                    "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
+                    "description": "Assess honestly by group; omitted groups are retained.",
                     "items": {
                         "type": "object",
                         "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
                         "properties": {
                             "group": {
                                 "type": "string",
-                                "description": "Group label this goal describes. Omit or null for the ungrouped list."
+                                "description": "Omit/null for ungrouped."
                             },
                             "closed_feedback_loop": {
                                 "type": "string",
                                 "enum": ["absent", "weak", "usable", "strong", "closed"],
-                                "description": "How much of this goal's correctness the feedback_loop can verify on its own."
+                                "description": "How much correctness the feedback loop can verify itself."
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Requirement-to-check process: an explicit observation or check for each requirement of this goal."
+                                "description": "Concrete check for each requirement."
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
+                                "description": "indirect: inspection/proxy; synthetic: mocks/custom harness; representative: real interfaces, partial workflow; acceptance_blocked: real workflow attempted but externally blocked; acceptance_aligned: real build/test/user workflow passed, never substitutes only."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
-                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"]
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
+                                "description": "Requirements/outputs mapped to checks and observed results."
                             },
                             "delivery_state": {
                                 "type": "string",
-                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"],
-                                "description": "Completion-time: how far the result actually traveled toward the user's outcome."
+                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
                             },
                             "difficulty": {
                                 "type": "string",
-                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"],
-                                "description": "Honest intrinsic difficulty of this goal. Descriptive only."
+                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"]
                             },
                             "autonomy": {
                                 "type": "string",
-                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"],
-                                "description": "How far beyond the literal request the work went. Assess from what was completed."
+                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"]
                             },
                             "iteration_maturity": {
                                 "type": "string",
-                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"],
-                                "description": "How far the feedback loop was actually exercised, and any evidence-based reason to stop iterating."
+                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"]
                             },
                             "stopping_evidence": {
                                 "type": "string",
-                                "description": "Evidence for the reported iteration_maturity: attempts, observations, or a real budget limit."
+                                "description": "Observed evidence supporting iteration_maturity."
                             }
                         }
                     }
                 }
             }
-        })
+        });
+        // Patch additions accept the same fields as full todos, plus an
+        // insertion position. Keep their declarations in sync for providers
+        // that require every `required` entry to appear in `properties`.
+        schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
+            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Earlier-phase prerequisite task names. Updates whole lane; null restores phase barrier."
+        });
+        let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
+        add_properties["after"] = json!({
+            "type": "string",
+            "description": "Insert after this task name."
+        });
+        schema["properties"]["update"]["items"]["properties"] =
+            schema["properties"]["todos"]["items"]["properties"].clone();
+        schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
+            "type": "string", "minLength": 1,
+            "description": "New unique name; preserves identity and dependencies."
+        });
+        schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
+        schema["properties"]["add"]["items"]["properties"] = add_properties;
+        schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
+        schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
+            schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
+        schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
+            schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
+        schema["properties"]["update"]["items"]["properties"]["completely_blocked"] =
+            schema["properties"]["todos"]["items"]["properties"]["completely_blocked"].clone();
+        // The item schema is built locally above. Remove flat aliases from the
+        // hierarchical representation without assuming the JSON object shape.
+        let mut item = schema["properties"]["todos"]["items"].clone();
+        if let Some(properties) = schema["properties"].as_object_mut() {
+            properties.remove("todos");
+        }
+        if let Some(properties) = item["properties"].as_object_mut() {
+            properties.remove("phase");
+            properties.remove("lane");
+            properties.remove("lane_dependencies");
+        }
+        item["additionalProperties"] = json!(false);
+        schema["properties"]["phases"] = json!({
+            "type": "array",
+            "description": "Replace entire plan; [] clears. Prefer patches after initialization.",
+            "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
+                "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
+                    "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
+                        "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
+                            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
+                        }, "items": {"type": "array", "minItems": 1, "items": item}}
+                    }
+                }}}
+        });
+        schema["properties"]["add"]["description"] =
+            json!("Specify phase/lane or inherit from after.");
+        schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let write_mode_input = input.clone();
+        let input = apply_todo_patch(input, || {
+            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                .unwrap_or(Value::Array(Vec::new()))
+        })?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -873,6 +1499,31 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            crate::todo::store::validate_session_lane_dependencies(
+                &crate::storage::jcode_dir()?,
+                &ctx.session_id,
+                &todos,
+            )
+            .map_err(anyhow::Error::msg)?;
+            for todo in &mut todos {
+                if !crate::todo::is_incomplete_todo(todo) {
+                    todo.external_blocker = None;
+                    todo.completely_blocked = None;
+                } else if todo.completely_blocked.is_some() {
+                    // Complete blockers have no timed review. Existing task
+                    // and todo dependencies remain useful once unblocked.
+                    todo.external_blocker = None;
+                }
+            }
+            validate_external_blockers(&previous, &todos)?;
+            prepare_background_dependencies(
+                crate::background::global(),
+                &ctx.session_id,
+                &previous,
+                &todos,
+            )
+            .await?;
+            record_todo_write_mode(&write_mode_input);
             merge_confidence_history(&previous, &mut todos);
             (|| {
                 let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
@@ -919,6 +1570,35 @@ impl Tool for TodoTool {
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
                 save_todos(&ctx.session_id, &todos)?;
+                if previous
+                    .iter()
+                    .chain(&todos)
+                    .any(|todo| todo.external_blocker.is_some())
+                {
+                    if let Err(error) =
+                        crate::ambient::reconcile_stored_todo_reviews(&ctx.session_id)
+                    {
+                        // A failed durable wake must not leave silent suppression.
+                        // Keep unrelated/newer todo fields, clearing only the exact
+                        // blocker generations this write attempted to schedule.
+                        let mut current = load_todos(&ctx.session_id)?;
+                        for todo in &mut current {
+                            if todo.external_blocker.is_some()
+                                && todos.iter().any(|attempted| {
+                                    attempted.id == todo.id
+                                        && attempted.external_blocker == todo.external_blocker
+                                })
+                            {
+                                todo.external_blocker = None;
+                            }
+                        }
+                        save_todos(&ctx.session_id, &current)?;
+                        bail!(
+                            "Could not persist durable todo reviews; matching external blockers were cleared so work remains actionable: {error:#}"
+                        );
+                    }
+                    super::ambient::nudge_schedule_runner();
+                }
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
                 if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {
@@ -944,6 +1624,7 @@ impl Tool for TodoTool {
                 )
             })()
         } else {
+            record_todo_write_mode(&write_mode_input);
             (|| {
                 let todos = load_todos(&ctx.session_id)?;
                 let goals = load_goals(&ctx.session_id).unwrap_or_default();
@@ -963,1570 +1644,5 @@ impl Tool for TodoTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_is_named_todo() {
-        assert_eq!(TodoTool::new().name(), "todo");
-    }
-
-    #[test]
-    fn schema_advertises_intent_and_todos() {
-        let schema = TodoTool::new().parameters_schema();
-        let props = schema
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .expect("todo schema should have properties");
-        assert_eq!(props.len(), 4);
-        assert!(props.contains_key("intent"));
-        assert!(props.contains_key("todos"));
-        assert!(props.contains_key("plan"));
-        assert!(props.contains_key("goals"));
-
-        let item = props["todos"]
-            .get("items")
-            .and_then(|v| v.as_object())
-            .expect("todos should describe item objects");
-        let required = item
-            .get("required")
-            .and_then(|v| v.as_array())
-            .expect("todo item should advertise required fields");
-        assert!(required.iter().any(|v| v == "confidence"));
-        let item_props = item
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .expect("todo item should advertise properties");
-        assert!(item_props.contains_key("confidence"));
-        assert!(item_props.contains_key("completion_confidence"));
-        assert!(!item_props.contains_key("closed_feedback_loop"));
-        assert_eq!(
-            item_props["confidence"]["description"],
-            "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
-        );
-
-        let plan_props = props["plan"]
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .expect("plan should describe properties");
-        assert!(plan_props.contains_key("user_intention"));
-        assert!(plan_props.contains_key("understands_user_intent"));
-        assert!(!plan_props.contains_key("alignment_score"));
-        assert!(!plan_props.contains_key("user_intention_alignment"));
-        assert_eq!(plan_props.len(), 2);
-        let plan_required = props["plan"]["required"]
-            .as_array()
-            .expect("plan should advertise required fields");
-        assert!(plan_required.iter().any(|value| value == "user_intention"));
-        assert!(
-            plan_required
-                .iter()
-                .any(|value| value == "understands_user_intent")
-        );
-
-        let goal_props = props["goals"]
-            .get("items")
-            .and_then(|v| v.get("properties"))
-            .and_then(|v| v.as_object())
-            .expect("goals should describe item objects");
-        assert!(goal_props.contains_key("group"));
-        assert!(goal_props.contains_key("closed_feedback_loop"));
-        assert!(goal_props.contains_key("feedback_loop"));
-        assert!(goal_props.contains_key("feedback_loop_relevance"));
-        assert!(goal_props.contains_key("feedback_loop_coverage"));
-        assert!(goal_props.contains_key("feedback_loop_traceability"));
-        assert!(goal_props.contains_key("delivery_state"));
-        assert!(goal_props.contains_key("difficulty"));
-        assert!(goal_props.contains_key("autonomy"));
-        assert!(goal_props.contains_key("iteration_maturity"));
-        assert!(goal_props.contains_key("stopping_evidence"));
-        assert!(!goal_props.contains_key("end_to_end_ownership"));
-        // Intent lives on the plan, not per goal.
-        assert!(!goal_props.contains_key("user_intention"));
-        assert!(!goal_props.contains_key("alignment_score"));
-        assert!(!goal_props.contains_key("objective"));
-        assert_eq!(goal_props.len(), 11);
-        assert_eq!(
-            goal_props["feedback_loop_relevance"]["enum"],
-            json!([
-                "indirect",
-                "synthetic",
-                "representative",
-                "acceptance_blocked",
-                "acceptance_aligned"
-            ])
-        );
-        let relevance_description = goal_props["feedback_loop_relevance"]["description"]
-            .as_str()
-            .expect("feedback-loop relevance should explain every state");
-        for required_concept in [
-            "custom harnesses",
-            "real public interfaces",
-            "external constraint",
-            "Substitute-only validation is never acceptance_aligned",
-        ] {
-            assert!(relevance_description.contains(required_concept));
-        }
-
-        let goal_required = props["goals"]["items"]["required"]
-            .as_array()
-            .expect("goals should advertise required fields");
-        assert!(
-            goal_required
-                .iter()
-                .any(|value| value == "closed_feedback_loop")
-        );
-        assert!(goal_required.iter().any(|value| value == "feedback_loop"));
-        assert!(
-            goal_required
-                .iter()
-                .any(|value| value == "feedback_loop_relevance")
-        );
-        assert!(
-            goal_required
-                .iter()
-                .any(|value| value == "feedback_loop_coverage")
-        );
-        assert!(
-            goal_required
-                .iter()
-                .any(|value| value == "feedback_loop_traceability")
-        );
-
-        let alignment_description = plan_props["understands_user_intent"]
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("alignment score should describe representation coverage");
-        assert!(alignment_description.contains("what the user wants"));
-        assert!(alignment_description.contains("when guessing"));
-        // Deferred continuation messages are intentionally concise. Preserve
-        // their actionable guidance without requiring the legacy long rubric.
-        for required_concept in [
-            "Understand the user's intent better",
-            "Try to avoid asking the user",
-            "Make sure the todo is up to date",
-        ] {
-            assert!(
-                crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "intent gate message omitted {required_concept}"
-            );
-        }
-        let feedback_description = goal_props["feedback_loop"]
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("feedback loop should describe requirement-to-check coverage");
-        // Case-insensitive: the description opens the sentence with
-        // "Requirement-to-check", so a case-sensitive match broke when the
-        // wording moved to the front of the string (issue #730).
-        let feedback_description_lower = feedback_description.to_ascii_lowercase();
-        assert!(
-            feedback_description_lower.contains("requirement-to-check"),
-            "feedback_loop description omitted the requirement-to-check framing: {feedback_description}"
-        );
-        assert!(
-            feedback_description_lower.contains("explicit observation or check"),
-            "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
-        );
-        for required_concept in [
-            "Your feedback loop isn't good enough",
-            "Think about what feedback loops you need",
-            "Make sure the todo is up to date",
-        ] {
-            assert!(
-                crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "feedback gate message omitted {required_concept}"
-            );
-        }
-        assert!(
-            !alignment_description
-                .to_ascii_lowercase()
-                .contains("threshold")
-        );
-
-        let ownership_description = goal_props["delivery_state"]
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("delivery state should have a neutral description");
-        assert!(ownership_description.contains("toward the user's outcome"));
-        assert!(!ownership_description.contains("90"));
-        assert!(
-            !ownership_description
-                .to_ascii_lowercase()
-                .contains("threshold")
-        );
-
-        let loop_description = goal_props["closed_feedback_loop"]
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("closed feedback loop should describe the assessment neutrally");
-        assert!(!loop_description.to_ascii_lowercase().contains("threshold"));
-
-        let model_visible_schema = serde_json::to_string(&schema)
-            .expect("todo schema should serialize")
-            .to_ascii_lowercase();
-        for disclosure in [
-            "threshold",
-            "quality gate",
-            "internal quality check",
-            "not jump",
-            "test that passes",
-            "isn't high enough",
-        ] {
-            assert!(
-                !model_visible_schema.contains(disclosure),
-                "model-visible todo schema disclosed calibration wording: {disclosure}"
-            );
-        }
-        for required_guidance in [
-            "public interfaces",
-            "integration boundaries",
-            "edge cases",
-            "packaging",
-            "likely failure modes",
-        ] {
-            assert!(
-                model_visible_schema.contains(required_guidance),
-                "todo schema omitted generic validation guidance: {required_guidance}"
-            );
-        }
-        for domain_hint in [
-            "visual quality",
-            "screenshot",
-            "browser",
-            "viewport",
-            "console error",
-        ] {
-            assert!(
-                !model_visible_schema.contains(domain_hint),
-                "model-visible todo schema biased visual-work feedback: {domain_hint}"
-            );
-        }
-    }
-
-    fn parse(input: Value) -> Result<TodoInput> {
-        parse_todo_input(input)
-    }
-
-    #[test]
-    fn accepts_stringified_todos_array() {
-        let input = json!({
-            "todos": "[{\"content\":\"a\",\"status\":\"pending\",\"priority\":\"high\",\"id\":\"1\",\"confidence\":90}]"
-        });
-        let parsed = parse(input).expect("stringified todos array should parse");
-        let todos = parsed.todos.expect("todos present");
-        assert_eq!(todos.len(), 1);
-        assert_eq!(todos[0].content, "a");
-        assert_eq!(
-            todos[0].confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-    }
-
-    #[test]
-    fn accepts_stringified_todo_items_and_string_confidence() {
-        let input = json!({
-            "todos": [
-                "{\"content\":\"b\",\"status\":\"completed\",\"priority\":\"low\",\"id\":\"2\",\"confidence\":\"85\",\"completion_confidence\":\"95\"}",
-                {"content": "c", "status": "pending", "priority": "high", "id": "3", "confidence": "70"}
-            ]
-        });
-        let parsed = parse(input).expect("string-coerced items should parse");
-        let todos = parsed.todos.expect("todos present");
-        assert_eq!(todos.len(), 2);
-        assert_eq!(
-            todos[0].confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-        assert_eq!(
-            todos[0].completion_confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-        assert_eq!(
-            todos[1].confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-    }
-
-    #[test]
-    fn normalizes_natural_and_case_varied_todo_statuses() {
-        let parsed = parse(json!({
-            "todos": [
-                {"content": "a", "status": "done", "priority": "high", "id": "1", "confidence": "verified"},
-                {"content": "b", "status": " Finished ", "priority": "low", "id": "2", "confidence": "validated"},
-                {"content": "c", "status": "Canceled", "priority": "low", "id": "3", "confidence": "plausible"}
-            ]
-        }))
-        .expect("status synonyms should parse");
-        let statuses: Vec<_> = parsed
-            .todos
-            .expect("todos present")
-            .into_iter()
-            .map(|todo| todo.status)
-            .collect();
-        assert_eq!(statuses, ["completed", "completed", "cancelled"]);
-    }
-
-    #[test]
-    fn rejects_unknown_todo_statuses_with_valid_vocabulary() {
-        let error = parse(json!({
-            "todos": [
-                {"content": "a", "status": "blocked", "priority": "high", "id": "1", "confidence": "plausible"}
-            ]
-        }))
-        .err()
-        .expect("unknown status should be rejected");
-        let message = error.to_string();
-        assert!(message.contains("invalid todo status \"blocked\""));
-        assert!(message.contains("pending, in_progress, completed, cancelled"));
-    }
-
-    #[test]
-    fn accepts_float_confidence_and_empty_string_as_none() {
-        let input = json!({
-            "todos": [
-                {"content": "d", "status": "pending", "priority": "high", "id": "4", "confidence": 90.0, "completion_confidence": ""}
-            ]
-        });
-        let parsed = parse(input).expect("float confidence should parse");
-        let todos = parsed.todos.expect("todos present");
-        assert_eq!(
-            todos[0].confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-        assert_eq!(todos[0].completion_confidence, None);
-    }
-
-    #[test]
-    fn empty_string_todos_means_read() {
-        let parsed = parse(json!({"todos": ""})).expect("empty string should parse");
-        assert!(parsed.todos.is_none());
-    }
-
-    #[test]
-    fn native_input_still_parses() {
-        let input = json!({
-            "todos": [
-                {"content": "e", "status": "pending", "priority": "high", "id": "5", "confidence": 80}
-            ]
-        });
-        let parsed = parse(input).expect("native input should parse");
-        assert_eq!(
-            parsed.todos.expect("todos present")[0].confidence,
-            Some(crate::todo::ConfidenceState::Plausible)
-        );
-    }
-
-    #[test]
-    fn accepts_goals_and_plan_including_string_coercion() {
-        let input = json!({
-            "plan": {"user_intention": "make repository search feel instant", "understands_user_intent": "97"},
-            "goals": [
-                {"group": "optimize grep", "closed_feedback_loop": "95", "feedback_loop": "run the grep benchmark and compare p50"},
-                {"closed_feedback_loop": 20}
-            ]
-        });
-        let parsed = parse(input).expect("goals and plan should parse");
-        let plan = parsed.plan.expect("plan present");
-        assert_eq!(
-            plan.understands_user_intent,
-            Some(crate::todo::IntentUnderstanding::Clear)
-        );
-        assert_eq!(
-            plan.user_intention.as_deref(),
-            Some("make repository search feel instant")
-        );
-        let goals = parsed.goals.expect("goals present");
-        assert_eq!(
-            goals[0].closed_feedback_loop,
-            Some(crate::todo::FeedbackLoopState::Strong)
-        );
-        assert_eq!(
-            goals[0].feedback_loop.as_deref(),
-            Some("run the grep benchmark and compare p50")
-        );
-        // Runtime parsing remains backward-compatible with stored or older
-        // provider payloads even though the advertised schema requires the field.
-        assert_eq!(goals[1].feedback_loop, None);
-        assert_eq!(goals[1].group, None);
-    }
-
-    #[test]
-    fn stringified_plan_object_is_accepted() {
-        let parsed = parse(json!({
-            "plan": "{\"user_intention\":\"ship it\",\"understands_user_intent\":\"96\"}"
-        }))
-        .expect("stringified plan should parse");
-        let plan = parsed.plan.expect("plan present");
-        assert_eq!(plan.user_intention.as_deref(), Some("ship it"));
-        assert_eq!(
-            plan.understands_user_intent,
-            Some(crate::todo::IntentUnderstanding::Clear)
-        );
-    }
-
-    #[test]
-    fn accepts_legacy_plan_alignment_key_but_serializes_the_new_name() {
-        let parsed = parse(json!({
-            "plan": {"user_intention_alignment": "97"}
-        }))
-        .expect("legacy alignment key should remain readable");
-        let plan = parsed.plan.expect("plan present");
-        assert_eq!(
-            plan.understands_user_intent,
-            Some(crate::todo::IntentUnderstanding::Clear)
-        );
-
-        let serialized = serde_json::to_value(plan).expect("plan should serialize");
-        assert_eq!(serialized["understands_user_intent"], "clear");
-        assert!(serialized.get("user_intention_alignment").is_none());
-
-        let legacy_field: TodoPlanField = serde_json::from_str("\"user_intention_alignment\"")
-            .expect("legacy plan-change field should deserialize");
-        assert_eq!(legacy_field, TodoPlanField::UnderstandsUserIntent);
-        assert_eq!(
-            serde_json::to_string(&legacy_field).expect("plan field should serialize"),
-            "\"understands_user_intent\""
-        );
-    }
-
-    fn goal(group: Option<&str>, state: crate::todo::FeedbackLoopState) -> TodoGoal {
-        TodoGoal {
-            group: group.map(str::to_string),
-            closed_feedback_loop: Some(state),
-            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-            feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-            ..Default::default()
-        }
-    }
-
-    /// A plan whose intent assessment clears the private gate, so goal-level
-    /// tests observe only closed feedback loop behavior.
-    fn aligned_plan() -> TodoPlan {
-        TodoPlan {
-            user_intention: Some("understood".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Complete),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Complete],
-        }
-    }
-
-    fn todo_in_group(group: Option<&str>, id: &str) -> TodoItem {
-        TodoItem {
-            content: format!("task {id}"),
-            status: "pending".to_string(),
-            priority: "medium".to_string(),
-            id: id.to_string(),
-            group: group.map(str::to_string),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn todo_telemetry_derives_lifecycle_groups_and_score_summaries() {
-        let mut pending = todo_in_group(Some("build"), "pending");
-        pending.confidence = Some(crate::todo::ConfidenceState::Plausible);
-        let mut removed = todo_in_group(Some("build"), "removed");
-        removed.status = "in_progress".to_string();
-        removed.confidence = Some(crate::todo::ConfidenceState::Plausible);
-        let previous = vec![pending.clone(), removed];
-
-        pending.status = "completed".to_string();
-        pending.completion_confidence = Some(crate::todo::ConfidenceState::Validated);
-        let mut created = todo_in_group(Some("verify"), "created");
-        created.confidence = Some(crate::todo::ConfidenceState::Plausible);
-        let current = vec![pending, created];
-        let goals = vec![
-            TodoGoal {
-                group: Some("build".to_string()),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
-                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
-                ..Default::default()
-            },
-            TodoGoal {
-                group: Some("verify".to_string()),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
-                feedback_loop_relevance: Some(
-                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
-                ),
-                feedback_loop_coverage: Some(
-                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
-                ),
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
-                ..Default::default()
-            },
-        ];
-        let plan = TodoPlan {
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-            ..Default::default()
-        };
-
-        let update = todo_telemetry_update(&previous, &current, &goals, &plan);
-        assert_eq!(update.todos_created, 1);
-        assert_eq!(update.todos_completed, 1);
-        assert_eq!(update.todos_abandoned, 1);
-        assert_eq!(update.current_incomplete, 1);
-        assert_eq!(update.list_size, 2);
-        assert_eq!(update.groups_completed, 1);
-        assert_eq!(update.groups_total, 2);
-        assert_eq!(update.confidence.min, Some(80));
-        assert_eq!(update.confidence.mean, Some(80.0));
-        assert_eq!(update.confidence.count, 2);
-        assert_eq!(update.completion_confidence.min, Some(96));
-        assert_eq!(update.completion_confidence.count, 1);
-        assert_eq!(update.understands_user_intent.min, Some(80));
-        assert_eq!(update.closed_feedback_loop.min, Some(88));
-        assert_eq!(update.closed_feedback_loop.mean, Some(88.0));
-        assert_eq!(update.feedback_loop_relevance.min, Some(75));
-        assert_eq!(update.feedback_loop_relevance.count, 2);
-        assert_eq!(update.feedback_loop_coverage.min, Some(75));
-        assert_eq!(update.feedback_loop_coverage.count, 2);
-        assert_eq!(update.end_to_end_ownership.min, Some(98));
-        assert_eq!(update.end_to_end_ownership.mean, Some(98.0));
-    }
-
-    #[test]
-    fn todo_telemetry_regrouping_does_not_create_or_abandon_items() {
-        let mut completed = todo_in_group(Some("old"), "a");
-        completed.status = "completed".to_string();
-        let pending = todo_in_group(Some("old"), "b");
-        let previous = vec![completed.clone(), pending.clone()];
-
-        completed.group = Some("done".to_string());
-        let mut pending = pending;
-        pending.group = Some("remaining".to_string());
-        let current = vec![completed, pending];
-
-        let update = todo_telemetry_update(&previous, &current, &[], &TodoPlan::default());
-        assert_eq!(update.todos_created, 0);
-        assert_eq!(update.todos_completed, 0);
-        assert_eq!(update.todos_abandoned, 0);
-        assert_eq!(update.groups_completed, 1);
-        assert_eq!(update.groups_total, 2);
-    }
-
-    #[test]
-    fn todo_telemetry_zero_state_is_all_zero_and_has_no_scores() {
-        let update = todo_telemetry_update(&[], &[], &[], &TodoPlan::default());
-        assert_eq!(update, crate::telemetry::TodoTelemetryUpdate::default());
-    }
-
-    /// Issue #695: after the agent moves to a new task and replaces the todo
-    /// list, goals from the finished task must not keep showing in the panel.
-    #[test]
-    fn prune_orphaned_goals_drops_goals_without_live_todos() {
-        let goals = vec![
-            goal(Some("old task"), crate::todo::FeedbackLoopState::Weak),
-            goal(Some("new task"), crate::todo::FeedbackLoopState::Strong),
-        ];
-        let todos = vec![todo_in_group(Some("new task"), "1")];
-
-        let pruned = prune_orphaned_goals(goals, &todos);
-
-        assert_eq!(pruned.len(), 1);
-        assert_eq!(pruned[0].group.as_deref(), Some("new task"));
-    }
-
-    #[test]
-    fn prune_orphaned_goals_keeps_ungrouped_goal_for_flat_list() {
-        let goals = vec![goal(None, crate::todo::FeedbackLoopState::Usable)];
-        let todos = vec![todo_in_group(None, "1")];
-
-        assert_eq!(prune_orphaned_goals(goals, &todos).len(), 1);
-    }
-
-    #[test]
-    fn prune_orphaned_goals_keeps_everything_when_todo_list_is_empty() {
-        // A goals-only write with no stored todos must not lose assessments.
-        let goals = vec![
-            goal(Some("a"), crate::todo::FeedbackLoopState::Absent),
-            goal(None, crate::todo::FeedbackLoopState::Weak),
-        ];
-        assert_eq!(prune_orphaned_goals(goals, &[]).len(), 2);
-    }
-
-    #[test]
-    fn merge_goals_retains_unmentioned_goals() {
-        let stored = vec![
-            goal(Some("a"), crate::todo::FeedbackLoopState::Weak),
-            goal(Some("b"), crate::todo::FeedbackLoopState::Strong),
-        ];
-        // Rewrite goal 'a', leave 'b' alone.
-        let merged = merge_goals(
-            &stored,
-            Some(vec![goal(
-                Some(" a "),
-                crate::todo::FeedbackLoopState::Weak,
-            )]),
-        );
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].group.as_deref(), Some("a"));
-        assert_eq!(
-            merged[0].closed_feedback_loop,
-            Some(crate::todo::FeedbackLoopState::Weak)
-        );
-        assert_eq!(merged[1].group.as_deref(), Some("b"));
-        // No incoming goals: stored goals unchanged.
-        assert_eq!(merge_goals(&stored, None).len(), 2);
-    }
-
-    #[test]
-    fn merge_plan_retains_stored_intent_when_update_omits_fields() {
-        let stored = TodoPlan {
-            user_intention: Some("make search feel instant".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
-        };
-
-        let merged = merge_plan(
-            &stored,
-            Some(TodoPlan {
-                user_intention: None,
-                understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-                ..Default::default()
-            }),
-        );
-        assert_eq!(
-            merged.user_intention.as_deref(),
-            Some("make search feel instant")
-        );
-        assert_eq!(
-            merged.understands_user_intent,
-            Some(crate::todo::IntentUnderstanding::Partial)
-        );
-
-        // An omitted plan leaves the stored assessment untouched.
-        assert_eq!(merge_plan(&stored, None), stored);
-    }
-
-    #[test]
-    fn plan_change_reports_only_updated_intent_fields() {
-        let before = aligned_plan();
-        let after = TodoPlan {
-            user_intention: Some("understood better".to_string()),
-            ..before.clone()
-        };
-
-        let change = plan_change(&before, &after).expect("intent change should be reported");
-        assert_eq!(change.fields, vec![TodoPlanField::UserIntention]);
-        assert_eq!(change.before.as_ref(), Some(&before));
-        assert_eq!(change.after.as_ref(), Some(&after));
-        assert!(plan_change(&before, &before).is_none());
-    }
-
-    fn open_todo(group: Option<&str>) -> TodoItem {
-        TodoItem {
-            id: "t1".to_string(),
-            content: "work".to_string(),
-            status: "in_progress".to_string(),
-            priority: "high".to_string(),
-            group: group.map(str::to_string),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn ownership_gate_output_preserves_the_saved_todo_card() {
-        let todos = vec![open_todo(Some("ship"))];
-        let plan = aligned_plan();
-        let goals = vec![goal(Some("ship"), crate::todo::FeedbackLoopState::Closed)];
-        let output = build_todo_output(
-            todos.clone(),
-            plan.clone(),
-            goals.clone(),
-            None,
-            None,
-            [crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
-        )
-        .expect("ownership gate should produce a structured todo result");
-
-        assert_eq!(output.title.as_deref(), Some("1 todos"));
-        assert!(output.output.starts_with('['));
-        assert!(output.output.contains("\"status\": \"in_progress\""));
-        assert!(
-            output
-                .output
-                .contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE)
-        );
-        assert_eq!(
-            output.metadata,
-            Some(json!({"todos": todos, "plan": plan, "goals": goals}))
-        );
-    }
-
-    fn test_ctx(session_id: &str) -> ToolContext {
-        ToolContext {
-            session_id: session_id.to_string(),
-            message_id: session_id.to_string(),
-            tool_call_id: "call".to_string(),
-            working_dir: None,
-            stdin_request_tx: None,
-            graceful_shutdown_signal: None,
-            execution_mode: crate::tool::ToolExecutionMode::Direct,
-        }
-    }
-
-    /// Issue #695, the visibly-stale case. The todos panel renders the
-    /// ungrouped goal unconditionally (not only as a group header), so an
-    /// ungrouped goal left over from a previous flat todo list is exactly what
-    /// the reporter saw frozen in the panel.
-    #[tokio::test]
-    async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
-        let session = "issue-695-ungrouped";
-        let tool = TodoTool::new();
-
-        // Task one: a flat (ungrouped) list, so its goal is the ungrouped one.
-        tool.execute(
-            json!({
-                "todos": [{
-                    "content": "flat task one", "status": "in_progress",
-                    "priority": "high", "id": "t1", "confidence": 70,
-                }],
-                "plan": {"user_intention": "do task one", "understands_user_intent": 97},
-                "goals": [{"closed_feedback_loop": 97, "feedback_loop": "ran the checks"}],
-            }),
-            test_ctx(session),
-        )
-        .await
-        .expect("first write");
-        let stored = load_goals(session).expect("goals");
-        assert_eq!(stored.len(), 1);
-        assert!(
-            stored[0].group.is_none(),
-            "task one goal is the ungrouped one"
-        );
-
-        // Task two: a grouped list. The ungrouped goal now describes nothing.
-        tool.execute(
-            json!({
-                "todos": [{
-                    "content": "task two", "status": "in_progress", "priority": "high",
-                    "id": "t2", "group": "second task", "confidence": 70,
-                }],
-                "goals": [{"group": "second task", "closed_feedback_loop": 80,
-                           "feedback_loop": "run the new checks"}],
-            }),
-            test_ctx(session),
-        )
-        .await
-        .expect("second write");
-
-        let goals = load_goals(session).expect("goals");
-        assert!(
-            !goals.iter().any(|goal| goal.group.is_none()),
-            "the stale ungrouped goal must not stay in the panel: {goals:?}"
-        );
-        assert_eq!(goals.len(), 1);
-        assert_eq!(goals[0].group.as_deref(), Some("second task"));
-
-        if let Some(home) = previous_home {
-            crate::env::set_var("JCODE_HOME", home);
-        } else {
-            crate::env::remove_var("JCODE_HOME");
-        }
-    }
-
-    /// Issue #695, end to end through the real tool: finish task one, then
-    /// start task two. What the todos panel renders (stored todos + goals) must
-    /// describe task two only, with no leftovers from task one.
-    #[tokio::test]
-    async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
-        let session = "issue-695-new-task";
-        let tool = TodoTool::new();
-
-        // Task one, completed. `end_to_end_ownership` clears the completion
-        // gate so the write is actually stored.
-        tool.execute(
-            json!({
-                "todos": [{
-                    "content": "task one",
-                    "status": "completed",
-                    "priority": "high",
-                    "id": "t1",
-                    "group": "first task",
-                    "confidence": 90,
-                    "completion_confidence": 97,
-                }],
-                "plan": {"user_intention": "do task one", "understands_user_intent": 97},
-                "goals": [{
-                    "group": "first task",
-                    "closed_feedback_loop": 97,
-                    "end_to_end_ownership": 97,
-                    "feedback_loop": "ran the checks",
-                }],
-            }),
-            test_ctx(session),
-        )
-        .await
-        .expect("first task write should succeed");
-        assert_eq!(load_goals(session).expect("goals").len(), 1);
-
-        // Task two: a fresh todo list in a new group.
-        tool.execute(
-            json!({
-                "todos": [{
-                    "content": "task two",
-                    "status": "in_progress",
-                    "priority": "high",
-                    "id": "t2",
-                    "group": "second task",
-                    "confidence": 70,
-                }],
-                "goals": [{
-                    "group": "second task",
-                    "closed_feedback_loop": 80,
-                    "feedback_loop": "run the new checks",
-                }],
-            }),
-            test_ctx(session),
-        )
-        .await
-        .expect("second task write should succeed");
-
-        let todos = load_todos(session).expect("todos");
-        assert_eq!(todos.len(), 1, "panel must show only the current task");
-        assert_eq!(todos[0].group.as_deref(), Some("second task"));
-
-        let goals = load_goals(session).expect("goals");
-        assert_eq!(
-            goals.len(),
-            1,
-            "the finished task's goal must not linger in the panel: {goals:?}"
-        );
-        assert_eq!(goals[0].group.as_deref(), Some("second task"));
-
-        if let Some(home) = previous_home {
-            crate::env::set_var("JCODE_HOME", home);
-        } else {
-            crate::env::remove_var("JCODE_HOME");
-        }
-    }
-
-    /// End-to-end through the real tool, which is what the model actually sees.
-    /// A first plan write with honestly-moderate scores must come back clean:
-    /// this is the exact case that previously returned two nudges and spent the
-    /// turn re-justifying the plan instead of doing the work.
-    #[tokio::test]
-    async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
-        let session = "gate-deferral-execute";
-
-        let output = TodoTool::new()
-            .execute(
-                json!({
-                    "todos": [{
-                        "content": "make utf16 transcode faster",
-                        "status": "in_progress",
-                        "priority": "high",
-                        "id": "opt",
-                        "group": "speed",
-                        "confidence": 70,
-                    }],
-                    "plan": {
-                        "user_intention": "beat the baseline",
-                        "understands_user_intent": 82,
-                    },
-                    "goals": [{
-                        "group": "speed",
-                        "closed_feedback_loop": 80,
-                        "feedback_loop": "run ./grade and read the score",
-                        "feedback_loop_relevance": "indirect",
-                        "feedback_loop_coverage": "narrow",
-                    }],
-                }),
-                test_ctx(session),
-            )
-            .await
-            .expect("todo write should succeed");
-
-        assert!(
-            !output
-                .output
-                .contains(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE),
-            "a moderate first write must not be interrupted: {}",
-            output.output
-        );
-        assert!(
-            !output
-                .output
-                .to_ascii_lowercase()
-                .contains("not high enough"),
-            "no gate text should reach the model mid-turn: {}",
-            output.output
-        );
-
-        // The points were recorded for the turn-end digest instead.
-        let observations = crate::todo::load_gate_observations(session).expect("observations");
-        assert_eq!(observations.len(), 5);
-        assert!(
-            observations.iter().any(|observation| {
-                observation.kind == GateObservationKind::FeedbackLoopRelevance
-            })
-        );
-        assert!(
-            observations.iter().any(|observation| {
-                observation.kind == GateObservationKind::FeedbackLoopCoverage
-            })
-        );
-        assert!(observations.iter().any(|observation| {
-            observation.kind == GateObservationKind::FeedbackLoopTraceability
-        }));
-
-        // Histories are accumulating, which is what the digest reasons over.
-        let plan = load_plan(session).expect("plan");
-        assert_eq!(
-            plan.understands_user_intent_history,
-            vec![crate::todo::IntentUnderstanding::Partial]
-        );
-        let goals = load_goals(session).expect("goals");
-        assert_eq!(
-            goals[0].closed_feedback_loop_history,
-            vec![crate::todo::FeedbackLoopState::Strong]
-        );
-        assert_eq!(
-            goals[0].feedback_loop_relevance_history,
-            vec![crate::todo::FeedbackLoopRelevance::Indirect]
-        );
-        assert_eq!(
-            goals[0].feedback_loop_coverage_history,
-            vec![crate::todo::FeedbackLoopCoverage::Narrow]
-        );
-
-        // Second write at a higher score: still silent, history grows, and the
-        // digest now has the trajectory available.
-        let output = TodoTool::new()
-            .execute(
-                json!({"plan": {"understands_user_intent": 97}}),
-                test_ctx(session),
-            )
-            .await
-            .expect("second write should succeed");
-        assert!(
-            !output
-                .output
-                .to_ascii_lowercase()
-                .contains("not high enough")
-        );
-        let plan = load_plan(session).expect("plan");
-        assert_eq!(
-            plan.understands_user_intent_history,
-            vec![
-                crate::todo::IntentUnderstanding::Partial,
-                crate::todo::IntentUnderstanding::Clear
-            ]
-        );
-
-        // The climb does not erase the point. The turn began without solid
-        // understanding, so the work done before it settled still needs a
-        // re-check; the wording just reflects that it settled late.
-        let observations = crate::todo::load_gate_observations(session).expect("observations");
-        let goals = load_goals(session).expect("goals");
-        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals)
-            .expect("both recorded points should be surfaced");
-        assert!(digest.contains("started this work without understanding"));
-        assert!(digest.contains("feedback loop"));
-
-        match previous_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[tokio::test]
-    async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
-        let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
-        let session = "ownership-save-before-turn-gate";
-
-        let output = TodoTool::new()
-            .execute(
-                json!({
-                    "todos": [{
-                        "content": "ship the complete workflow",
-                        "status": "completed",
-                        "priority": "high",
-                        "id": "ship",
-                        "group": "release",
-                        "confidence": 100,
-                        "completion_confidence": 100,
-                    }],
-                    "goals": [{
-                        "group": "release",
-                        "closed_feedback_loop": 100,
-                        "feedback_loop": "run the end-to-end release check",
-                        "feedback_loop_relevance": "indirect",
-                        "feedback_loop_coverage": "narrow",
-                        "end_to_end_ownership": 95,
-                    }],
-                }),
-                test_ctx(session),
-            )
-            .await
-            .expect("low ownership must not reject the todo write");
-
-        let saved = load_todos(session).expect("completed todo should be persisted");
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].status, "completed");
-        let saved_goals = load_goals(session).expect("goal should be persisted");
-        let saved_goal = &saved_goals[0];
-        assert_eq!(
-            saved_goal.delivery_state,
-            Some(crate::todo::DeliveryState::WorkflowValidated)
-        );
-        assert_eq!(
-            saved_goal.feedback_loop_relevance,
-            Some(crate::todo::FeedbackLoopRelevance::Indirect)
-        );
-        assert_eq!(
-            saved_goal.feedback_loop_coverage,
-            Some(crate::todo::FeedbackLoopCoverage::Narrow)
-        );
-        assert!(
-            !output
-                .output
-                .contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE),
-            "ownership is enforced after the turn, not by rejecting the write: {}",
-            output.output
-        );
-
-        match previous_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn goal_changes_include_only_updated_quality_fields() {
-        let before = TodoGoal {
-            group: Some("search".to_string()),
-            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
-            feedback_loop: Some("Run one benchmark".to_string()),
-            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Indirect),
-            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::Narrow),
-            delivery_state: None,
-            ..Default::default()
-        };
-        let after = TodoGoal {
-            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
-            feedback_loop: Some("Run five benchmarks and compare p50".to_string()),
-            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-            ..before.clone()
-        };
-
-        let changes = goal_changes(std::slice::from_ref(&before), std::slice::from_ref(&after));
-
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].before.as_ref(), Some(&before));
-        assert_eq!(changes[0].after.as_ref(), Some(&after));
-        assert_eq!(
-            changes[0].fields,
-            vec![
-                TodoGoalField::ClosedFeedbackLoop,
-                TodoGoalField::FeedbackLoop,
-                TodoGoalField::FeedbackLoopRelevance,
-                TodoGoalField::FeedbackLoopCoverage,
-            ]
-        );
-    }
-
-    /// The core behavior change: a low score records an observation for the
-    /// turn-end digest instead of interrupting the write, and repeated writes
-    /// do not re-interrupt.
-    #[test]
-    fn low_open_goal_records_an_observation_without_interrupting() {
-        let todos = vec![open_todo(Some("design"))];
-        let plan = aligned_plan();
-        let goals = vec![
-            goal(Some("design"), crate::todo::FeedbackLoopState::Strong),
-            goal(Some("perf"), crate::todo::FeedbackLoopState::Closed),
-        ];
-        let (observations, nudges) = record_reframe_observations(&plan, &goals, &todos, &[]);
-
-        assert!(
-            nudges.is_empty(),
-            "a low closed feedback loop score must not interrupt the write"
-        );
-        assert_eq!(
-            observations,
-            vec![GateObservation {
-                kind: GateObservationKind::ClosedFeedbackLoop,
-                group: Some("design".to_string()),
-                state: Some("strong".to_string()),
-            }]
-        );
-        // A subsequent write still records, still does not interrupt.
-        let (again, nudges) = record_reframe_observations(&plan, &goals, &todos, &[]);
-        assert_eq!(again, observations);
-        assert!(nudges.is_empty());
-    }
-
-    #[test]
-    fn low_intent_is_plan_level_and_independent_of_goals() {
-        let todos = vec![open_todo(Some("coverage"))];
-        let plan = TodoPlan {
-            user_intention: Some("partially understood".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
-        };
-        let (observations, nudges) = record_reframe_observations(
-            &plan,
-            &[goal(
-                Some("coverage"),
-                crate::todo::FeedbackLoopState::Closed,
-            )],
-            &todos,
-            &[],
-        );
-
-        assert_eq!(
-            observations,
-            vec![GateObservation {
-                kind: GateObservationKind::IntentUnderstanding,
-                group: None,
-                state: Some("partial".to_string()),
-            }]
-        );
-        // 95 is below threshold but nowhere near severe, so exploration is
-        // given the chance to resolve it rather than being interrupted.
-        assert!(nudges.is_empty());
-    }
-
-    /// The single retained immediate nudge: the agent's first plan write says it
-    /// does not understand the task at all, and a whole turn of wrong work
-    /// cannot be undone at turn end.
-    #[test]
-    fn severely_low_first_intent_still_nudges_immediately() {
-        let todos = vec![open_todo(None)];
-        let plan = TodoPlan {
-            user_intention: Some("guessing".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Uncertain),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Uncertain],
-        };
-        let (_, nudges) = record_reframe_observations(&plan, &[], &todos, &[]);
-        assert_eq!(nudges, vec![TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE]);
-        assert!(!nudges[0].contains("40"));
-        assert!(!nudges[0].to_ascii_lowercase().contains("threshold"));
-
-        // Once the plan has a history, the same severe score is deferred to the
-        // digest rather than nudged again on every write.
-        let later = TodoPlan {
-            understands_user_intent_history: vec![
-                crate::todo::IntentUnderstanding::Uncertain,
-                crate::todo::IntentUnderstanding::Uncertain,
-            ],
-            ..plan
-        };
-        let (_, nudges) = record_reframe_observations(&later, &[], &todos, &[]);
-        assert!(nudges.is_empty());
-    }
-
-    /// Work that was already complete before this write is grandfathered: the
-    /// turn cannot go back and improve a loop over work it did not do.
-    #[test]
-    fn work_already_closed_before_this_write_records_nothing() {
-        let mut done = open_todo(None);
-        done.status = "completed".to_string();
-        let already = vec![done.clone()];
-        let (observations, nudges) = record_reframe_observations(
-            &TodoPlan::default(),
-            &[goal(None, crate::todo::FeedbackLoopState::Absent)],
-            &already,
-            &already,
-        );
-        assert!(observations.is_empty());
-        assert!(nudges.is_empty());
-    }
-
-    /// A group created and finished in one write must still be observed. This is
-    /// where a weak feedback loop hides best: declare it done in one step and no
-    /// "still open" check ever sees it.
-    #[test]
-    fn a_group_closed_by_this_write_is_still_observed() {
-        let mut done = open_todo(Some("one shot"));
-        done.status = "completed".to_string();
-        let (observations, nudges) = record_reframe_observations(
-            &aligned_plan(),
-            &[goal(Some("one shot"), crate::todo::FeedbackLoopState::Weak)],
-            &[done],
-            &[],
-        );
-        assert!(nudges.is_empty());
-        assert_eq!(
-            observations,
-            vec![GateObservation {
-                kind: GateObservationKind::ClosedFeedbackLoop,
-                group: Some("one shot".to_string()),
-                state: Some("weak".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    fn both_weak_links_are_recorded_independently() {
-        let todos = vec![open_todo(Some("coverage"))];
-        let plan = TodoPlan {
-            user_intention: Some("partially understood".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
-        };
-        let (observations, _) = record_reframe_observations(
-            &plan,
-            &[goal(
-                Some("coverage"),
-                crate::todo::FeedbackLoopState::Strong,
-            )],
-            &todos,
-            &[],
-        );
-        assert_eq!(
-            observations
-                .iter()
-                .map(|observation| observation.kind)
-                .collect::<Vec<_>>(),
-            vec![
-                GateObservationKind::IntentUnderstanding,
-                GateObservationKind::ClosedFeedbackLoop,
-            ]
-        );
-    }
-
-    #[test]
-    fn missing_quality_scores_still_record_observations() {
-        let todos = vec![open_todo(Some("coverage"))];
-        let mut goal = goal(Some("coverage"), crate::todo::FeedbackLoopState::Closed);
-        goal.closed_feedback_loop = None;
-
-        let (observations, _) =
-            record_reframe_observations(&TodoPlan::default(), &[goal], &todos, &[]);
-        assert_eq!(
-            observations
-                .iter()
-                .map(|observation| observation.kind)
-                .collect::<Vec<_>>(),
-            vec![
-                GateObservationKind::IntentUnderstanding,
-                GateObservationKind::ClosedFeedbackLoop,
-            ]
-        );
-    }
-
-    /// Groups already complete before this write are grandfathered, so a
-    /// long-lived session does not re-flag work from previous turns.
-    #[test]
-    fn observations_skip_goals_closed_in_an_earlier_write() {
-        let mut done = open_todo(Some("legacy"));
-        done.status = "completed".to_string();
-        let already = vec![done];
-        let goals = vec![goal(Some("legacy"), crate::todo::FeedbackLoopState::Absent)];
-        let (observations, _) =
-            record_reframe_observations(&aligned_plan(), &goals, &already, &already);
-        assert!(observations.is_empty());
-    }
-
-    #[test]
-    fn observations_cover_the_ungrouped_implicit_goal() {
-        let todos = vec![open_todo(None)];
-        let goals = vec![goal(None, crate::todo::FeedbackLoopState::Absent)];
-        let (observations, _) = record_reframe_observations(&aligned_plan(), &goals, &todos, &[]);
-        assert_eq!(
-            observations,
-            vec![GateObservation {
-                kind: GateObservationKind::ClosedFeedbackLoop,
-                group: None,
-                state: Some("absent".to_string()),
-            }]
-        );
-    }
-
-    /// Tool-owned histories are the substrate the turn-end digest reasons over,
-    /// so a model-supplied trail must not be able to fabricate a climb.
-    #[test]
-    fn plan_and_goal_score_histories_are_tool_maintained() {
-        let stored = TodoPlan {
-            user_intention: Some("ship it".to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
-            understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
-        };
-        let merged = merge_plan(
-            &stored,
-            Some(TodoPlan {
-                understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
-                // Forged trail: discarded in favor of the stored one.
-                understands_user_intent_history: vec![
-                    crate::todo::IntentUnderstanding::Uncertain,
-                    crate::todo::IntentUnderstanding::Uncertain,
-                    crate::todo::IntentUnderstanding::Uncertain,
-                ],
-                ..Default::default()
-            }),
-        );
-        assert_eq!(
-            merged.understands_user_intent_history,
-            vec![
-                crate::todo::IntentUnderstanding::Partial,
-                crate::todo::IntentUnderstanding::Clear
-            ]
-        );
-        assert_eq!(merged.user_intention.as_deref(), Some("ship it"));
-
-        // Re-sending the same state does not manufacture an extra step.
-        let merged = merge_plan(
-            &merged,
-            Some(TodoPlan {
-                understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
-                ..Default::default()
-            }),
-        );
-        assert_eq!(
-            merged.understands_user_intent_history,
-            vec![
-                crate::todo::IntentUnderstanding::Partial,
-                crate::todo::IntentUnderstanding::Clear
-            ]
-        );
-
-        let stored_goals = merge_goals(
-            &[],
-            Some(vec![TodoGoal {
-                group: Some("perf".to_string()),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
-                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Indirect),
-                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::Narrow),
-                ..Default::default()
-            }]),
-        );
-        assert_eq!(
-            stored_goals[0].closed_feedback_loop_history,
-            vec![crate::todo::FeedbackLoopState::Usable]
-        );
-        let merged_goals = merge_goals(
-            &stored_goals,
-            Some(vec![TodoGoal {
-                group: Some("perf".to_string()),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
-                feedback_loop_relevance: Some(
-                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
-                ),
-                feedback_loop_relevance_history: vec![
-                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
-                ],
-                feedback_loop_coverage: Some(
-                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
-                ),
-                feedback_loop_coverage_history: vec![
-                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
-                ],
-                ..Default::default()
-            }]),
-        );
-        assert_eq!(
-            merged_goals[0].closed_feedback_loop_history,
-            vec![
-                crate::todo::FeedbackLoopState::Usable,
-                crate::todo::FeedbackLoopState::Strong
-            ]
-        );
-        assert_eq!(
-            merged_goals[0].feedback_loop_relevance_history,
-            vec![
-                crate::todo::FeedbackLoopRelevance::Indirect,
-                crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
-            ]
-        );
-        assert_eq!(
-            merged_goals[0].feedback_loop_coverage_history,
-            vec![
-                crate::todo::FeedbackLoopCoverage::Narrow,
-                crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
-            ]
-        );
-    }
-
-    /// A write that revises one assessment must not erase the others, or the
-    /// digest would read a stale `None` and re-raise a resolved point.
-    #[test]
-    fn omitted_goal_fields_inherit_the_stored_assessment() {
-        let stored = merge_goals(
-            &[],
-            Some(vec![TodoGoal {
-                group: Some("perf".to_string()),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
-                feedback_loop: Some("cargo bench".to_string()),
-                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
-                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
-                ..Default::default()
-            }]),
-        );
-        let merged = merge_goals(
-            &stored,
-            Some(vec![TodoGoal {
-                group: Some("perf".to_string()),
-                ..Default::default()
-            }]),
-        );
-        assert_eq!(
-            merged[0].closed_feedback_loop,
-            Some(crate::todo::FeedbackLoopState::Closed)
-        );
-        assert_eq!(merged[0].feedback_loop.as_deref(), Some("cargo bench"));
-        assert_eq!(
-            merged[0].feedback_loop_relevance,
-            Some(crate::todo::FeedbackLoopRelevance::Representative)
-        );
-        assert_eq!(
-            merged[0].feedback_loop_coverage,
-            Some(crate::todo::FeedbackLoopCoverage::MainPaths)
-        );
-        assert_eq!(
-            merged[0].delivery_state,
-            Some(crate::todo::DeliveryState::OutcomeDelivered)
-        );
-    }
-
-    #[test]
-    fn garbage_string_still_errors() {
-        assert!(parse(json!({"todos": "not json at all"})).is_err());
-    }
-
-    /// Sessions and model calls written before the rename carry
-    /// `hill_climbability`. Those must keep loading, or resuming an old session
-    /// silently drops its goal assessments and re-raises resolved gate points.
-    #[test]
-    fn pre_rename_hill_climbability_keys_still_load() {
-        let goal: crate::todo::TodoGoal = serde_json::from_value(json!({
-            "group": "optimize grep",
-            "hill_climbability": 91,
-            "hill_climbability_history": [70, 91],
-            "feedback_loop": "cargo bench grep"
-        }))
-        .expect("the pre-rename key must still deserialize");
-        assert_eq!(
-            goal.closed_feedback_loop,
-            Some(crate::todo::FeedbackLoopState::Strong)
-        );
-        assert_eq!(
-            goal.closed_feedback_loop_history,
-            vec![
-                crate::todo::FeedbackLoopState::Usable,
-                crate::todo::FeedbackLoopState::Strong
-            ]
-        );
-
-        let goals = parse(json!({
-            "goals": [{"group": "optimize grep", "hill_climbability": "88", "feedback_loop": "bench"}]
-        }))
-        .expect("a pre-rename tool call must still parse")
-        .goals
-        .expect("goals should be present");
-        assert_eq!(
-            goals[0].closed_feedback_loop,
-            Some(crate::todo::FeedbackLoopState::Strong)
-        );
-    }
-
-    use crate::todo::ConfidenceState as CS;
-
-    fn history_todo(id: &str, confidence: Option<CS>, history: Vec<CS>) -> TodoItem {
-        TodoItem {
-            id: id.to_string(),
-            content: format!("todo {id}"),
-            status: "in_progress".to_string(),
-            priority: "high".to_string(),
-            confidence,
-            confidence_history: history,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn confidence_history_appends_changes_and_skips_repeats() {
-        let previous = vec![history_todo("1", Some(CS::Plausible), vec![CS::Plausible])];
-        // Same confidence again: no new entry.
-        let mut incoming = vec![history_todo("1", Some(CS::Plausible), Vec::new())];
-        merge_confidence_history(&previous, &mut incoming);
-        assert_eq!(incoming[0].confidence_history, vec![CS::Plausible]);
-        // Raised confidence: appended.
-        let mut incoming = vec![history_todo("1", Some(CS::Validated), Vec::new())];
-        merge_confidence_history(&previous, &mut incoming);
-        assert_eq!(
-            incoming[0].confidence_history,
-            vec![CS::Plausible, CS::Validated]
-        );
-    }
-
-    #[test]
-    fn confidence_history_records_completion_confidence() {
-        let previous = vec![history_todo("1", Some(CS::Plausible), vec![CS::Plausible])];
-        let mut done = history_todo("1", Some(CS::Verified), Vec::new());
-        done.status = "completed".to_string();
-        done.completion_confidence = Some(CS::Verified);
-        let mut incoming = vec![done];
-        merge_confidence_history(&previous, &mut incoming);
-        // 75 (planning) -> 100 (final bulk stamp): the spike stays visible.
-        assert_eq!(
-            incoming[0].confidence_history,
-            vec![CS::Plausible, CS::Verified]
-        );
-    }
-
-    #[test]
-    fn completion_write_contributes_only_one_final_confidence_observation() {
-        let previous = vec![history_todo("1", Some(CS::Plausible), vec![CS::Plausible])];
-        let mut done = history_todo("1", Some(CS::Plausible), Vec::new());
-        done.status = "completed".to_string();
-        done.completion_confidence = Some(CS::Verified);
-
-        let mut incoming = vec![done];
-        merge_confidence_history(&previous, &mut incoming);
-
-        assert_eq!(
-            incoming[0].confidence_history,
-            vec![CS::Plausible, CS::Verified]
-        );
-    }
-
-    #[test]
-    fn confidence_history_seeds_legacy_todos_before_completion() {
-        let previous = vec![history_todo("1", Some(CS::Plausible), Vec::new())];
-        let mut done = history_todo("1", Some(CS::Plausible), Vec::new());
-        done.status = "completed".to_string();
-        done.completion_confidence = Some(CS::Verified);
-
-        let mut incoming = vec![done];
-        merge_confidence_history(&previous, &mut incoming);
-
-        assert_eq!(
-            incoming[0].confidence_history,
-            vec![CS::Plausible, CS::Verified]
-        );
-    }
-
-    #[test]
-    fn confidence_history_ignores_model_supplied_history_for_new_todos() {
-        let mut incoming = vec![history_todo(
-            "9",
-            Some(CS::Plausible),
-            vec![CS::Speculative, CS::Verified],
-        )];
-        merge_confidence_history(&[], &mut incoming);
-        assert_eq!(incoming[0].confidence_history, vec![CS::Plausible]);
-    }
-}
+#[path = "todo_tests.rs"]
+mod tests;

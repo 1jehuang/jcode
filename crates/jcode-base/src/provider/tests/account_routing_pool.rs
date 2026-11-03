@@ -83,6 +83,7 @@ fn account_routing_fixture(
     }
     let labels = ["openai-otter", "openai-fox", "openai-panda"];
     crate::auth::account_pool::AccountPool {
+        priorities: Default::default(),
         members: labels
             .iter()
             .map(|label| format!("openai:{label}"))
@@ -588,5 +589,241 @@ fn timer_target_revalidation_rejects_deleted_excluded_and_cooled_accounts() {
         assert!(!MultiProvider::is_failover_route_pool_approved(
             "openai-api:gpt-5.4"
         ));
+    });
+}
+
+#[test]
+fn account_router_prompts_before_any_alternate_request_in_both_completion_modes() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            for split in [false, true] {
+                let (provider, attempts, _cleanup) =
+                    account_routing_fixture(&[("openai-otter", "429 Too Many Requests")]);
+                let runtime = provider.openai_provider().unwrap();
+                let result = if split {
+                    provider
+                        .complete_split(&[], &[], "static", "dynamic", None)
+                        .await
+                } else {
+                    provider.complete(&[], &[], "system", None).await
+                };
+                let error = result.err().expect("return pre-switch prompt");
+                let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+                assert_eq!(
+                    prompt.target_route.as_deref(),
+                    Some("openai-oauth@openai-fox:gpt-5.4")
+                );
+                assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
+                assert_eq!(
+                    auth::codex::active_account_label().as_deref(),
+                    Some("openai-otter")
+                );
+                assert!(Arc::ptr_eq(&runtime, &provider.openai_provider().unwrap()));
+                assert!(
+                    super::models::provider_unavailability_detail_for_account_label(
+                        "openai",
+                        Some("openai-otter")
+                    )
+                    .is_some()
+                );
+                assert!(
+                    super::models::provider_unavailability_detail_for_account_label(
+                        "openai",
+                        Some("openai-fox")
+                    )
+                    .is_none()
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn account_router_cached_failure_skips_spent_and_excluded_accounts_without_requests() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+            super::models::record_provider_unavailable_for_account_label(
+                "openai",
+                Some("openai-otter"),
+                "quota exhausted",
+            );
+            super::models::record_provider_unavailable_for_account_label(
+                "openai",
+                Some("openai-fox"),
+                "quota exhausted",
+            );
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .unwrap();
+            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+            assert_eq!(
+                prompt.target_route.as_deref(),
+                Some("openai-oauth@openai-panda:gpt-5.4")
+            );
+            assert!(attempts.lock().unwrap().is_empty());
+            assert!(!MultiProvider::is_failover_route_pool_approved(
+                "openai-oauth@openai-wolf:gpt-5.4"
+            ));
+            assert!(!MultiProvider::is_failover_route_pool_approved(
+                "openai-oauth@openai-fox:gpt-5.4"
+            ));
+        });
+    });
+}
+
+#[test]
+fn auto_subscription_failure_is_pinned_before_any_api_spending() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.excluded.push("openai-api".into());
+            pool.save().unwrap();
+            let original = Arc::new(BoundAccountRoutingProvider {
+                attempts: attempts.clone(),
+                failures: [("openai-otter".into(), "401 OAuth refresh rejected".into())].into(),
+                label: Mutex::new("unbound".into()),
+                mode: Mutex::new(CredentialMode::Auto),
+            });
+            *provider.openai.write().unwrap() = Some(original.clone());
+            let global_before = auth::codex::active_account_label();
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .unwrap();
+            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+            assert_eq!(
+                prompt.target_route.as_deref(),
+                Some("openai-oauth@openai-fox:gpt-5.4")
+            );
+            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
+            assert_eq!(
+                provider.oauth_account_label().as_deref(),
+                Some("openai-otter")
+            );
+            assert_eq!(
+                provider.openai_provider().unwrap().credential_mode(),
+                CredentialMode::OAuth
+            );
+            assert_eq!(original.credential_mode(), CredentialMode::Auto);
+            assert_eq!(original.oauth_account_label().as_deref(), Some("unbound"));
+            assert_eq!(auth::codex::active_account_label(), global_before);
+        });
+    });
+}
+
+#[test]
+fn pinned_account_prompts_use_session_identity_and_apply_without_global_override() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            use futures::StreamExt;
+            for split in [false, true] {
+                let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+                bind_fixture_account(
+                    &provider,
+                    &attempts,
+                    "openai-fox",
+                    &[("openai-fox", "429 quota exhausted")],
+                );
+                let sibling = provider.fork();
+                let result = if split {
+                    provider
+                        .complete_split(&[], &[], "static", "dynamic", None)
+                        .await
+                } else {
+                    provider.complete(&[], &[], "system", None).await
+                };
+                let error = result.err().unwrap();
+                let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+                let route = prompt.target_route.unwrap();
+                assert_eq!(route, "openai-oauth@openai-panda:gpt-5.4");
+                assert_eq!(*attempts.lock().unwrap(), ["openai-fox"]);
+                assert_eq!(
+                    provider.oauth_account_label().as_deref(),
+                    Some("openai-fox")
+                );
+                assert_eq!(sibling.oauth_account_label().as_deref(), Some("openai-fox"));
+                assert!(
+                    super::models::provider_unavailability_detail_for_account_label(
+                        "openai",
+                        Some("openai-fox")
+                    )
+                    .is_some()
+                );
+                assert!(
+                    super::models::provider_unavailability_detail_for_account_label(
+                        "openai",
+                        Some("openai-otter")
+                    )
+                    .is_none()
+                );
+                assert!(MultiProvider::is_failover_route_pool_approved(&route));
+                provider.set_model(&route).unwrap();
+                let mut stream = provider.complete(&[], &[], "system", None).await.unwrap();
+                assert!(stream.next().await.unwrap().is_ok());
+                assert_eq!(*attempts.lock().unwrap(), ["openai-fox", "openai-panda"]);
+                assert_eq!(
+                    provider.oauth_account_label().as_deref(),
+                    Some("openai-panda")
+                );
+                assert_eq!(sibling.oauth_account_label().as_deref(), Some("openai-fox"));
+                assert_eq!(
+                    auth::codex::active_account_label().as_deref(),
+                    Some("openai-otter")
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn pool_order_can_choose_explicit_api_before_same_vendor_oauth() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+            bind_fixture_account(
+                &provider,
+                &attempts,
+                "openai-otter",
+                &[("openai-otter", "429 quota exhausted")],
+            );
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.members.insert(1, "openai-api".into());
+            // Explicit priority may opt a metered identity ahead of subscriptions.
+            pool.set_priority("openai-api", 0);
+            pool.save().unwrap();
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .unwrap();
+            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+            let route = prompt.target_route.unwrap();
+            assert!(
+                route.starts_with("openai-api:"),
+                "exact metered identity should follow configured order: {route}"
+            );
+            assert!(MultiProvider::is_failover_route_pool_approved(&route));
+            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
+            pool.members.retain(|key| key != "openai-api");
+            pool.excluded.push("openai-api".into());
+            pool.save().unwrap();
+            assert!(!MultiProvider::is_failover_route_pool_approved(&route));
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .unwrap();
+            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
+            assert_eq!(
+                prompt.target_route.as_deref(),
+                Some("openai-oauth@openai-fox:gpt-5.4")
+            );
+            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
+        });
     });
 }

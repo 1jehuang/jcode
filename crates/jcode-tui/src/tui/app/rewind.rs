@@ -306,7 +306,6 @@ impl App {
         self.pending_queued_dispatch = false;
         self.account_change_resend_at = None;
         self.local_usage_limit_resume_attempts = 0;
-        self.current_turn_system_reminder = None;
         self.submit_input_on_startup = false;
         self.compacted_history_lazy = Default::default();
         self.pending_history_anchor = None;

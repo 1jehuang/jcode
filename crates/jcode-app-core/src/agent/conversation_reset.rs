@@ -7,7 +7,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -122,7 +121,8 @@ impl Agent {
         self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
-        new_session.mark_active();
+        // begin_concurrency_tracking below writes the presence markers.
+        new_session.mark_active_unregistered();
         new_session.model = Some(self.provider_model());
         new_session.provider_key = self.provider_key_for_new_session();
         new_session.is_canary = preserve_canary;
@@ -132,6 +132,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.provider.set_session_id(&self.session.id);
         self.begin_concurrency_tracking();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,

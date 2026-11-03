@@ -5,11 +5,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 /// state, not an append-only activity log; without a bound, repeated seed,
 /// expand, inject, and approve calls can retain and broadcast thousands of
 /// stale nodes forever. This is four times the live swarm-member cap and well
-/// above normal deep graphs while bounding server, disk, and per-client state.
+/// above normal plans while bounding server, disk, and per-client state.
 pub const MAX_PLAN_ITEMS: usize = 1024;
 
-pub mod bridge;
-pub mod dag;
 pub mod mermaid;
 
 /// A swarm plan item.
@@ -59,12 +57,6 @@ pub struct SwarmTaskProgress {
     pub heartbeat_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_count: Option<u64>,
-    /// How many times this node was re-queued because a deep-mode worker's turn
-    /// ended without a `complete_node` artifact. Deep mode gives the node one
-    /// fresh attempt, then fails it: there must be no path to "done" that skips
-    /// artifact validation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub no_artifact_requeues: Option<u32>,
     /// How many times this node's assignment was reclaimed because its assignee
     /// session was dead (failed/stopped/crashed or gone). Caps automatic
     /// re-dispatch so a node whose workers keep dying cannot spawn workers
@@ -109,42 +101,6 @@ pub struct SwarmExecutionState {
     pub items: Vec<SwarmExecutionItemState>,
 }
 
-/// Per-node task-DAG metadata, stored as a side map on `VersionedPlan` keyed by
-/// plan item id. This mirrors the `task_progress` side-map pattern so existing
-/// `PlanItem` construction sites stay unchanged while the DAG engine gains the
-/// extra structure it needs (composite/gate mechanics + typed artifacts).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeMeta {
-    /// Terminal-action kind: "explore" | "implement" | "verify" | "fix" |
-    /// "synthesize" | "critique". Defaults to a plain task when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// The composite node this was decomposed from, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-    /// True once decomposed into children (composite join/synthesis point).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub expanded: bool,
-    /// True if this node is an auto-inserted critique/verify gate.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_gate: bool,
-    /// The agent that planned this node's decomposition (composite owner). Kept
-    /// separately from `PlanItem.assigned_to` so a re-queued composite can be
-    /// auto-scheduled (assigned_to cleared) while still preferring its original
-    /// planner for the synthesis step.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planner: Option<String>,
-    /// The typed handoff artifact, present once the node completes. Serialized as
-    /// JSON text so the protocol/persistence layers need no extra types.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_json: Option<String>,
-    /// Where the node came from: "seed" | "expand" | "gap" | "gate". Powers the
-    /// growth accounting (seeded vs machinery-grown) on status surfaces. Absent
-    /// on legacy plans, which count as seeded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
-}
-
 /// Versioned shared swarm plan state.
 #[derive(Clone, Debug)]
 pub struct VersionedPlan {
@@ -154,11 +110,6 @@ pub struct VersionedPlan {
     pub participants: HashSet<String>,
     /// Durable runtime task progress keyed by plan item id.
     pub task_progress: HashMap<String, SwarmTaskProgress>,
-    /// Engine mode: "deep" (comprehensive, gated) or "light" (fan-out). Defaults
-    /// to light so legacy plans behave as before.
-    pub mode: String,
-    /// Per-node task-DAG metadata keyed by plan item id.
-    pub node_meta: HashMap<String, NodeMeta>,
 }
 
 impl VersionedPlan {
@@ -168,8 +119,6 @@ impl VersionedPlan {
             version: 0,
             participants: HashSet::new(),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         }
     }
 
@@ -186,8 +135,6 @@ impl VersionedPlan {
     pub fn prune_side_maps(&mut self) {
         let item_ids: HashSet<&str> = self.items.iter().map(|item| item.id.as_str()).collect();
         self.task_progress
-            .retain(|task_id, _| item_ids.contains(task_id.as_str()));
-        self.node_meta
             .retain(|task_id, _| item_ids.contains(task_id.as_str()));
     }
 
@@ -206,11 +153,6 @@ impl VersionedPlan {
         for progress in self.task_progress.values_mut() {
             if progress.assigned_session_id.as_deref() == Some(old_session_id) {
                 progress.assigned_session_id = Some(new_session_id.to_string());
-            }
-        }
-        for meta in self.node_meta.values_mut() {
-            if meta.planner.as_deref() == Some(old_session_id) {
-                meta.planner = Some(new_session_id.to_string());
             }
         }
     }
@@ -379,9 +321,7 @@ pub fn task_control_action_allows_status(action: TaskControlAction, status: &str
         TaskControlAction::Start | TaskControlAction::Wake => status == "queued",
         TaskControlAction::Resume => matches!(status, "queued" | "running" | "running_stale"),
         TaskControlAction::Retry => matches!(status, "failed" | "running_stale"),
-        // A completed node must never be reopened by handoff actions: deep-mode
-        // complete_node persists "completed" (not just "done"), and reassigning
-        // it would re-queue finished work and clobber its artifact.
+        // A completed task must never be reopened by handoff actions.
         TaskControlAction::Reassign | TaskControlAction::Replace | TaskControlAction::Salvage => {
             !is_completed_status(status)
         }

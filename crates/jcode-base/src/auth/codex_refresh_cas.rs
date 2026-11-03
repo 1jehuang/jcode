@@ -1,27 +1,8 @@
 //! Refresh commits share a stable sidecar lock with every Codex store writer.
 //! Never lock the JSON inode: atomic replacement changes that inode.
 use super::*;
-use std::fs::{File, OpenOptions};
-
-pub(super) fn lock_auth_file() -> Result<File> {
-    let path = jcode_auth_path()?.with_extension("lock");
-    std::fs::create_dir_all(path.parent().context("OpenAI auth lock has no directory")?)?;
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(not(unix))]
-    if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        anyhow::bail!("OpenAI auth lock must not be a symlink");
-    }
-    let file = options
-        .open(&path)
-        .context("Could not open OpenAI auth lock")?;
-    file.lock().context("Could not lock OpenAI auth store")?;
-    Ok(file)
+pub(super) fn lock_auth_file() -> Result<crate::auth::account_store::StoreLockGuard> {
+    crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")
 }
 
 // Deliberately not Debug: this snapshot contains the original refresh secret.

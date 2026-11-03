@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "repository": "1jehuang/jcode",
+  "source_sha": "001a400fa2969711d48932dc3c40707a749bc54b",
+  "ref": "refs/heads/master",
+  "run_id": "40632462506",
+  "run_attempt": "1",
+  "workflow": "Signing helper validation (native macOS)",
+  "helper_repository": "1jehuang/justrust",
+  "helper_revision": "17c344f2e83f836598b82715950497c0879aa713",
+  "unsigned_sha256": "23d1b729b0f05187fef29dcc0247887e1b31bdf0b2e2e22a9454b652e341d9a5",
+  "signed_sha256": "095213c0d300ca7dfb5a0acee2d0e81623a2974d941c27d49f6a1e2645a96950",
+  "team_id": "TAS6ARKDN7",
+  "target": "aarch64-apple-darwin",
+  "identifier": "com.jcode.cli",
+  "checks": [
+    "wrong-hash-no-output",
+    "plan-no-output",
+    "real-helper-execute",
+    "apple-chain-identifier-team",
+    "signed-native-execution",
+    "unsigned-unchanged",
+    "existing-destination-preserved"
+  ],
+  "notarized": false
+}

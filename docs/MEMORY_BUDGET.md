@@ -8,6 +8,9 @@ This document defines the current memory regression budget for jcode.
 For live server triage and cause-specific remediation, see
 [Jcode Server Memory Incident Runbook](./MEMORY_INCIDENT_RUNBOOK.md).
 
+For idle-session cache reclamation, its configuration, measured RAM indicator,
+and retained-state boundaries, see [Session Hibernation](./SESSION_HIBERNATION.md).
+
 The goal is not to freeze memory usage forever. The goal is to make memory changes:
 - measurable
 - reviewable

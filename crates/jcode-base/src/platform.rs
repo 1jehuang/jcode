@@ -244,13 +244,21 @@ pub fn raise_nofile_limit_best_effort(minimum_soft_limit: u64) {
 
 /// Check if a process is running by PID.
 ///
-/// On Unix, uses `kill(pid, 0)` to check without sending a signal.
+/// On Unix, uses `kill(pid, 0)` to check without sending a signal. Linux also
+/// excludes unreaped zombies, which still have a PID but cannot serve work.
 /// On Windows, uses OpenProcess to query the process.
 pub fn is_process_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let result = unsafe { libc::kill(pid as i32, 0) };
         if result == 0 {
+            #[cfg(target_os = "linux")]
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                && let Some((_, fields)) = stat.rsplit_once(')')
+                && matches!(fields.split_whitespace().next(), Some("Z" | "X" | "x"))
+            {
+                return false;
+            }
             return true;
         }
         let err = std::io::Error::last_os_error();

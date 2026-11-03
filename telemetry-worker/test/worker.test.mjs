@@ -392,6 +392,28 @@ test("prompt_submitted is accepted and marks meaningful daily activity", async (
   assert.equal(rollup.values[4], 1, "release prompt activity should be meaningful release activity");
 });
 
+test("bulk families go to DB_BULK while rollups and other events stay in DB", async () => {
+  const db = makeDb();
+  const bulk = makeDb();
+  const env = { DB: db, DB_BULK: bulk };
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "prompt_submitted", event_id: "prompt-bulk-1", session_id: "s", turn_index: 1,
+      build_channel: "release",
+    })),
+    env,
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.ok(bulk.executed.some(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql)), "raw row in bulk");
+  assert.ok(!db.executed.some(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql)), "no raw row in main");
+  assert.ok(db.executed.some(({ sql }) => /INSERT INTO daily_active_users/.test(sql)), "rollup in main");
+  assert.ok(!bulk.executed.some(({ sql }) => /daily_active_users/.test(sql)), "no rollup in bulk");
+
+  await worker.fetch(postRequest(makeBody({ event: "onboarding_step", event_id: "ob-1" })), env, makeCtx());
+  assert.ok(db.executed.some(({ sql, values }) => /INTO events/.test(sql) && values.includes("onboarding_step")));
+});
+
 test("telemetry_opt_out is accepted and persists only coarse metadata", async () => {
   const db = makeDb();
   const response = await worker.fetch(
@@ -1304,7 +1326,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     { waitUntil() {} },
   );
   assert.equal(response.status, 200);
-  const rollup = db.executed.filter(({ sql }) => /INSERT INTO daily_model_usage/.test(sql));
+  const rollup = db.executed.filter(({ sql }) => /INSERT INTO usage_report_ledger/.test(sql));
   assert.equal(rollup.length, 1);
   const [date, source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total] = rollup[0].values;
   assert.match(date, /^\d{4}-\d{2}-\d{2}$/);
@@ -1312,7 +1334,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     [source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total],
     ["agent", "OpenAI", "gpt-6-astra", "release", 0, 1, 1000, 200, 800, 0, 2000],
   );
-  assert.ok(/ON CONFLICT\(usage_date, source, provider, model, build_channel, is_ci\)/.test(rollup[0].sql));
+  assert.ok(rollup[0].sql.includes("ON CONFLICT(receipt_key) DO NOTHING"));
   assert.equal(
     db.executed.filter(({ sql }) => /INSERT[\s\S]*INTO events\b/.test(sql)).length,
     0,
@@ -1346,7 +1368,7 @@ test("usage_report maps provider/model/source onto firehose blobs", async () => 
   const env = {
     DB: makeDb(),
     ALLOWED_ORIGIN: "*",
-    FIREHOSE: { writeDataPoint(point) { points.push(point); } },
+    FIREHOSE_USAGE: { writeDataPoint(point) { points.push(point); } },
   };
   const response = await worker.fetch(
     new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody({ source: "compaction" })) }),

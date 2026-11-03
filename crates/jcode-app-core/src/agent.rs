@@ -1,8 +1,11 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(test)]
+mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
 mod environment;
+mod idle_hibernation;
 mod inline_tail;
 mod interrupts;
 mod messages;
@@ -11,12 +14,18 @@ mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod runtime_recovery;
 mod status;
 mod streaming;
-mod tool_markup_recovery;
+#[cfg(test)]
+mod swarm_reminder_tests;
 mod tools;
 mod turn_execution;
 mod turn_loops;
+mod turn_ownership;
+pub(crate) use turn_ownership::{
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+};
 mod turn_streaming_mpsc;
 mod utils;
 
@@ -43,7 +52,6 @@ use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
@@ -57,8 +65,6 @@ pub use jcode_agent_runtime::{
 };
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
@@ -73,63 +79,9 @@ static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitSta
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
 
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    // Hash the cache-relevant projection, not the raw Message. Raw hashing
-    // keys off non-transmitted metadata (timestamp, tool_duration_ms,
-    // ReasoningTrace blocks, cache_control markers), which triggers spurious
-    // harness:_prefix_changed KV-cache miss reports when the same message is
-    // re-serialized with backfilled metadata on the next turn.
-    crate::message::cache_relevant_message_hashes(messages)
-}
-
-fn kv_cache_request_event(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    system_static: &str,
-    ephemeral_messages: &[Message],
-) -> ServerEvent {
-    // Provider-native deferred definitions are outside the cached prefix.
-    // Late MCP discovery must not look like a harness-induced tools change
-    // when the provider reports a cache miss for some unrelated reason.
-    // Borrow definitions rather than cloning potentially large MCP schemas.
-    let eager_tools: Vec<_> = tools.iter().filter(|tool| !tool.defer_loading).collect();
-    let ephemeral_hash = if ephemeral_messages.is_empty() {
-        None
-    } else {
-        Some(stable_hash_json(ephemeral_messages))
-    };
-    ServerEvent::KvCacheRequest {
-        system_static_hash: stable_hash_str(system_static),
-        tools_hash: stable_hash_json(&eager_tools),
-        messages_hash: stable_hash_json(&crate::message::cache_relevant_messages(messages)),
-        message_hashes: message_hashes(messages),
-        message_count: messages.len(),
-        tool_count: eager_tools.len(),
-        system_static_chars: system_static.chars().count(),
-        tools_json_chars: stable_json_len(&eager_tools),
-        messages_json_chars: stable_json_len(messages),
-        ephemeral_hash,
-        ephemeral_chars: stable_json_len(ephemeral_messages),
-        ephemeral_message_count: ephemeral_messages.len(),
-    }
-}
+#[path = "agent/cache_request.rs"]
+mod cache_request;
+use cache_request::kv_cache_request_event;
 
 impl Agent {
     /// Provider identity used for cache retention lookups. Generic OpenAI is
@@ -144,6 +96,29 @@ impl Agent {
             Some(jcode_provider_core::ResolvedCredential::Oauth) => "openai-oauth".into(),
             None => name,
         }
+    }
+
+    /// OAuth account serving this request. Prompt caches are per account, so
+    /// a failover between accounts must be attributed, not reported as an
+    /// unexplained provider eviction.
+    fn kv_cache_account_identity(&self) -> Option<String> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        // An unbound runtime authenticates with the globally active account.
+        self.provider.oauth_account_label().or_else(|| {
+            match jcode_provider_core::parse_provider_hint(self.provider.name()) {
+                Some(jcode_provider_core::ActiveProvider::Claude) => {
+                    crate::auth::claude::active_account_label()
+                }
+                Some(jcode_provider_core::ActiveProvider::OpenAI) => {
+                    crate::auth::codex::active_account_label()
+                }
+                _ => None,
+            }
+        })
     }
 
     fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
@@ -166,6 +141,7 @@ impl Agent {
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
+            account: self.kv_cache_account_identity(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -186,12 +162,25 @@ impl Agent {
         cache_read: Option<u64>,
         cache_creation: Option<u64>,
     ) -> Option<ServerEvent> {
-        let effective = self.effective_context_tokens_from_usage(input, cache_read, cache_creation);
-        let miss = self
-            .kv_cache_monitor
-            .finish_request(effective, cache_read)?;
-        logging::warn(&format!(
-            "KV_CACHE_MISS session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+        let reusable = crate::compaction::reusable_cache_tokens_from_usage(
+            self.provider.name(),
+            input,
+            cache_read,
+            cache_creation,
+        );
+        let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
+        let expected_refresh = matches!(
+            miss.reason,
+            crate::kv_cache_monitor::MissReason::Compaction
+                | crate::kv_cache_monitor::MissReason::DailyRollover
+        );
+        let label = if expected_refresh {
+            "KV_CACHE_REFRESH"
+        } else {
+            "KV_CACHE_MISS"
+        };
+        let diagnostic = format!(
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -199,7 +188,13 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
-        ));
+            miss.detail,
+        );
+        if expected_refresh {
+            logging::info(&diagnostic);
+        } else {
+            logging::warn(&diagnostic);
+        }
         Some(ServerEvent::KvCacheMiss {
             reason: miss.reason.id().to_string(),
             harness_caused: miss.reason.harness_caused(),
@@ -267,6 +262,7 @@ struct RewindUndoSnapshot {
 }
 
 pub struct Agent {
+    turn_ownership: turn_ownership::TurnOwnership,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -302,9 +298,6 @@ pub struct Agent {
     pending_account_notices: Vec<(crate::provider::AccountProviderKind, String)>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -339,6 +332,9 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Before/after token counts from the last context-limit auto-recovery,
+    /// consumed when the turn loop announces the compaction to clients.
+    last_recovery_compaction: Option<(u64, u64, usize)>,
     /// Whether `locked_tools` was built for provider-native deferred MCP
     /// loading. A mid-session model/provider switch can change that
     /// capability; the snapshot must then be rebuilt, or the new provider
@@ -386,12 +382,33 @@ pub struct Agent {
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
     transcript_telemetry_sent: bool,
+    /// A provisional Agent defers the process-level telemetry session until it
+    /// commits. Reload reconnects replace it with the resumed session first, so
+    /// it never begins or ends one (that was a phantom zero-turn session plus
+    /// sync file I/O on every reconnect's accept path).
+    telemetry_session_deferred: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
 }
 
 impl Agent {
+    pub(crate) fn server_turn_observer(&self) -> TurnObserver {
+        self.turn_ownership.observer()
+    }
+
+    pub(crate) fn claim_runtime_mutation(&self) -> Result<RuntimeMutationLease> {
+        self.turn_ownership.claim_mutation()
+    }
+
+    pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
+        self.turn_ownership.claim()
+    }
+
+    pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
+        self.turn_ownership.validate(lease)
+    }
+
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self
             .session
@@ -441,10 +458,15 @@ impl Agent {
         if profile_reset_pending {
             session.provider_session_id = None;
         }
+        let t = Instant::now();
+        provider.set_session_id(&session.id);
         let skills = SkillRegistry::shared_snapshot();
+        let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let agents_md_ms = t.elapsed().as_millis();
         let initial_provider_model = provider.model();
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             &session.id,
@@ -452,6 +474,7 @@ impl Agent {
             disabled_tools.clone(),
         );
         let mut agent = Self {
+            turn_ownership: Default::default(),
             provider,
             registry,
             skills,
@@ -470,7 +493,6 @@ impl Agent {
             observed_account_pins: std::collections::BTreeMap::new(),
             pending_account_notices: Vec::new(),
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -482,6 +504,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            last_recovery_compaction: None,
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
@@ -498,9 +521,15 @@ impl Agent {
             inline_output_tap: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
+            telemetry_session_deferred: false,
             concurrency_session: None,
         };
+        let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        logging::info(&format!(
+            "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
+            t.elapsed().as_millis()
+        ));
         agent
     }
 
@@ -573,11 +602,18 @@ impl Agent {
         track_concurrency: bool,
     ) -> Self {
         let start = Instant::now();
+        let mut marks: Vec<(&'static str, u128)> = Vec::with_capacity(10);
+        let mut lap = Instant::now();
+        let mut mark = |name: &'static str, lap: &mut Instant| {
+            marks.push((name, lap.elapsed().as_millis()));
+            *lap = Instant::now();
+        };
         let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }
+        mark("session", &mut lap);
         let mut agent = Self::build_base(
             provider,
             registry,
@@ -585,25 +621,45 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
-        agent.session.mark_active();
+        mark("build_base", &mut lap);
+        // activate_concurrency_tracking writes the presence markers when the
+        // session is committed. A provisional agent replaced by a resumed
+        // session never touches the marker files.
+        agent.session.mark_active_unregistered();
+        mark("mark_active", &mut lap);
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
-        agent.session.ensure_initial_session_context_message();
+        mark("provider", &mut lap);
+        // A provisional Agent is usually replaced by a resumed session (every
+        // reconnect after a reload), so do not fork the git/hardware probes
+        // for its context message until it actually becomes the session.
+        if track_concurrency {
+            agent.session.ensure_initial_session_context_message();
+        }
+        mark("context_msg", &mut lap);
         agent.seed_compaction_from_session();
+        mark("compaction", &mut lap);
         agent.log_env_snapshot("create");
+        mark("env_snapshot", &mut lap);
         agent.fire_session_lifecycle_hook("session_start", "create");
         if track_concurrency {
             agent.activate_concurrency_tracking();
         }
+        mark("hooks_concurrency", &mut lap);
+        let breakdown = marks
+            .iter()
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        logging::info(&format!("[TIMING] agent_new breakdown: {breakdown}"));
         let setup_ms = start.elapsed().as_millis();
         let telemetry_start = Instant::now();
-        crate::telemetry::begin_session_with_parent(
-            agent.provider.name(),
-            &agent.provider.model(),
-            agent.session.parent_id.clone(),
-            false,
-        );
+        if track_concurrency {
+            agent.begin_telemetry_session();
+        } else {
+            agent.telemetry_session_deferred = true;
+        }
         logging::info(&format!(
             "[TIMING] agent_new: setup={}ms, telemetry={}ms, total={}ms",
             setup_ms,
@@ -634,7 +690,8 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
-        agent.session.mark_active();
+        // begin_concurrency_tracking below writes the presence markers.
+        agent.session.mark_active_unregistered();
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
@@ -672,6 +729,7 @@ impl Agent {
             }
         };
         manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.input_token_limit();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
@@ -773,8 +831,37 @@ impl Agent {
         let recognized = active_skill
             .as_ref()
             .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        let next = active_skill.filter(|name| skills.get(name).is_some());
+        if next != self.active_skill {
+            self.active_skill = next;
+            self.announce_active_skill();
+        }
         recognized
+    }
+
+    /// Record the newly active skill's instructions as a hidden transcript
+    /// message. The system prompt stays byte-identical across skill changes.
+    pub(crate) fn announce_active_skill(&mut self) {
+        let Some(name) = self.active_skill.clone() else {
+            return;
+        };
+        let skills = self.current_skills_snapshot();
+        let Some(skill) = skills.get(&name) else {
+            return;
+        };
+        let text = format!(
+            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+            skill.get_prompt().trim()
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(
@@ -797,7 +884,15 @@ impl Agent {
         &mut self,
         encrypted_content: String,
         compacted_count: usize,
-    ) -> Result<()> {
+    ) -> Result<(Option<u64>, Option<u64>)> {
+        // Measure the context before and after so clients can show what the
+        // compaction did. OpenAI does not report these sizes for native
+        // compaction, so jcode's own estimate is the best available figure.
+        let compaction = self.registry.compaction();
+        let pre_tokens = compaction
+            .try_read()
+            .ok()
+            .map(|manager| manager.token_estimate_with(self.session.provider_messages()) as u64);
         let encrypted_content_len = encrypted_content.len();
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
@@ -825,10 +920,12 @@ impl Agent {
         };
 
         self.session.compaction = Some(state.clone());
-        let compaction = self.registry.compaction();
+        let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_budget(self.provider.input_token_limit());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            post_tokens =
+                Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
 
         self.cache_tracker.reset();
@@ -846,7 +943,7 @@ impl Agent {
             .with_session_id(self.session.id.clone())
             .force_attribution(),
         );
-        Ok(())
+        Ok((pre_tokens, post_tokens))
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
@@ -1097,6 +1194,16 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
+            if self.session.original_working_dir.is_none()
+                && self.session.working_dir != working_dir
+                && self
+                    .session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User)
+            {
+                self.session.original_working_dir = self.session.working_dir.clone();
+            }
             self.session.working_dir = working_dir;
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();
@@ -1105,18 +1212,50 @@ impl Agent {
 
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
+        self.mark_closed_with_reason(crate::telemetry::SessionEndReason::NormalExit);
+    }
+
+    /// Close the current session because this Agent is about to adopt another
+    /// one in-process (resume after reconnect). Nothing is exiting, so lifecycle
+    /// telemetry goes to the ordered background worker instead of two bounded
+    /// blocking flushes (up to ~800ms each), which stalled every reload
+    /// reconnect's restore by 0.4-2s.
+    pub(crate) fn mark_closed_for_replacement(&mut self) {
+        if let Some(mut guard) = self.concurrency_session.take() {
+            guard.finish_background();
+        }
+        self.mark_closed_with_reason(crate::telemetry::SessionEndReason::Superseded);
+        // The adopted session continues under whatever telemetry state this
+        // Agent had. An uncommitted placeholder's never-begun session is moot.
+        self.telemetry_session_deferred = false;
+    }
+
+    fn begin_telemetry_session(&self) {
+        crate::telemetry::begin_session_with_parent(
+            self.provider.name(),
+            &self.provider.model(),
+            self.session.parent_id.clone(),
+            false,
+        );
+    }
+
+    fn mark_closed_with_reason(&mut self, end_reason: crate::telemetry::SessionEndReason) {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
         if !self.session.messages.is_empty() {
             self.persist_session_best_effort("session close state");
         }
-        self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::NormalExit);
-        crate::telemetry::end_session_with_reason(
-            self.provider.name(),
-            &self.provider.model(),
-            crate::telemetry::SessionEndReason::NormalExit,
-        );
+        self.upload_transcript_telemetry(end_reason);
+        // A deferred (never begun) session has nothing to end. Ending anyway
+        // would close whichever session currently owns the process slot.
+        if !self.telemetry_session_deferred {
+            crate::telemetry::end_session_with_reason(
+                self.provider.name(),
+                &self.provider.model(),
+                end_reason,
+            );
+        }
         self.fire_session_lifecycle_hook("session_end", "close");
     }
 
@@ -1162,6 +1301,18 @@ impl Agent {
     pub(crate) fn activate_concurrency_tracking(&mut self) {
         if self.concurrency_session.is_some() {
             return;
+        }
+        // Provisional agents defer their presence markers, telemetry session,
+        // and context message until committed.
+        if self.session.status == crate::session::SessionStatus::Active {
+            self.session.register_presence_markers();
+        }
+        if self.telemetry_session_deferred {
+            self.telemetry_session_deferred = false;
+            self.begin_telemetry_session();
+        }
+        if self.session.ensure_initial_session_context_message() {
+            self.seed_compaction_from_session();
         }
         self.concurrency_session = Some(crate::telemetry::begin_concurrency_session(
             &self.session.id,

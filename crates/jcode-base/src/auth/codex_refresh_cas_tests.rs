@@ -139,8 +139,10 @@ fn refresh_cas_cross_process_writer_child() {
     if std::env::var_os("JCODE_TEST_REFRESH_CAS_CHILD").is_none() {
         return;
     }
-    let path = jcode_auth_path().unwrap().with_extension("lock");
-    let probe = OpenOptions::new()
+    let path = jcode_auth_path()
+        .unwrap()
+        .with_file_name(".openai-auth.json.lock");
+    let probe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)

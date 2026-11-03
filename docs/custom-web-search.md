@@ -1,5 +1,7 @@
 # Custom HTTP JSON web search
 
+For the built-in Kagi backend, see [Kagi web search](kagi-web-search.md).
+
 Configure any HTTP endpoint returning JSON in `~/.jcode/config.toml`:
 
 ```toml

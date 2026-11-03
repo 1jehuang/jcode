@@ -317,7 +317,7 @@ fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flag
     assert_eq!(request["model"], serde_json::json!("gpt-5.4"));
     assert!(request.get("model_context_window").is_none());
     assert!(request.get("max_output_tokens").is_none());
-    assert!(request.get("prompt_cache_key").is_none());
+    assert_eq!(request["prompt_cache_key"], "unused");
     assert!(request.get("prompt_cache_retention").is_none());
     assert_eq!(
         request["reasoning"],
@@ -493,7 +493,7 @@ fn test_oauth_requests_never_send_api_cache_retention_controls() {
                 retention,
                 None,
             );
-            assert!(request.get("prompt_cache_key").is_none(), "{model}");
+            assert_eq!(request["prompt_cache_key"], "cache-key", "{model}");
             assert!(request.get("prompt_cache_retention").is_none(), "{model}");
             assert!(request.get("prompt_cache_options").is_none(), "{model}");
         }

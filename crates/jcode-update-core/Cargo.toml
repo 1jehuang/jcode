@@ -7,4 +7,5 @@ publish = false
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+semver = "1"
 sha2 = "0.10"

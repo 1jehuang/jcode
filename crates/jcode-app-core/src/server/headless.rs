@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Which memory store a headless session gets.
 ///
@@ -54,6 +54,7 @@ pub(super) async fn create_headless_session(
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
 ) -> Result<String> {
+    let _runtime_activity = crate::runtime_activity::global().try_enter()?;
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
 
@@ -179,6 +180,10 @@ pub(super) async fn create_headless_session(
 
     new_agent.set_debug(true);
 
+    if let Some(parent_id) = report_back_to_session_id.as_deref() {
+        crate::session_env::inherit_session_env(parent_id, &client_session_id);
+    }
+
     if selfdev_requested {
         new_agent.set_canary("self-dev");
     }
@@ -193,10 +198,9 @@ pub(super) async fn create_headless_session(
     let agent_provider = new_agent.provider_handle();
     let agent = Arc::new(Mutex::new(new_agent));
     super::client_state::register_agent_provider(&agent, agent_provider);
-    {
-        let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
-    }
+    sessions
+        .register_new(client_session_id.clone(), Arc::clone(&agent))
+        .await?;
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;
         register_session_interrupt_queue(
@@ -287,6 +291,8 @@ pub(super) async fn create_headless_session(
                     auth_method,
                     effort,
                     elapsed_secs: Some(0),
+                    activity_age_secs: None,
+                    ..Default::default()
                 },
             },
         );

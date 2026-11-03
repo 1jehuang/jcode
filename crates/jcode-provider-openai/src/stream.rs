@@ -13,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
 static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
 static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
 
 fn truncated_stream_payload_context(data: &str) -> String {
@@ -134,120 +133,6 @@ fn extract_error_with_retry(
 
     (message, retry_after)
 }
-pub fn parse_text_wrapped_tool_call(text: &str) -> Option<(String, String, String, String)> {
-    let marker = "to=functions.";
-    let marker_idx = text.find(marker)?;
-    let after_marker = &text[marker_idx + marker.len()..];
-
-    let mut tool_name_end = 0usize;
-    for (idx, ch) in after_marker.char_indices() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            tool_name_end = idx + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if tool_name_end == 0 {
-        return None;
-    }
-
-    let tool_name = after_marker[..tool_name_end].to_string();
-    let remaining = &after_marker[tool_name_end..];
-    let mut fallback: Option<(String, String, String, String)> = None;
-    for (brace_idx, ch) in remaining.char_indices() {
-        if ch != '{' {
-            continue;
-        }
-        let slice = &remaining[brace_idx..];
-        let mut stream = serde_json::Deserializer::from_str(slice).into_iter::<Value>();
-        let parsed = match stream.next() {
-            Some(Ok(value)) => value,
-            Some(Err(_)) => continue,
-            None => continue,
-        };
-        let consumed = stream.byte_offset();
-        if !parsed.is_object() {
-            continue;
-        }
-
-        let prefix = text[..marker_idx].trim_end().to_string();
-        let suffix = remaining[brace_idx + consumed..].trim().to_string();
-        let args = serde_json::to_string(&parsed).ok()?;
-        if suffix.is_empty() {
-            return Some((prefix, tool_name.clone(), args, suffix));
-        }
-        if fallback.is_none() {
-            fallback = Some((prefix, tool_name.clone(), args, suffix));
-        }
-    }
-
-    fallback
-}
-
-fn stream_text_or_recovered_tool_call(
-    text: &str,
-    pending: &mut VecDeque<StreamEvent>,
-) -> Option<StreamEvent> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if let Some((prefix, tool_name, arguments, suffix)) = parse_text_wrapped_tool_call(text) {
-        let total = RECOVERED_TEXT_WRAPPED_TOOL_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-        jcode_logging::warn(&format!(
-            "[openai] Recovered text-wrapped tool call for '{}' (total={})",
-            tool_name, total
-        ));
-        let suffix = sanitize_recovered_tool_suffix(&suffix);
-        if !prefix.is_empty() {
-            pending.push_back(StreamEvent::TextDelta(prefix));
-        }
-        let id = format!(
-            "fallback_text_call_{}",
-            FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        pending.push_back(StreamEvent::ToolUseStart {
-            id: id.clone(),
-            name: tool_name,
-        });
-        pending.push_back(StreamEvent::ToolInputDeltaFor {
-            id: id.clone(),
-            delta: arguments,
-        });
-        pending.push_back(StreamEvent::ToolUseEndFor { id });
-        if !suffix.is_empty() {
-            pending.push_back(StreamEvent::TextDelta(suffix));
-        }
-        return pending.pop_front();
-    }
-
-    Some(StreamEvent::TextDelta(text.to_string()))
-}
-
-fn sanitize_recovered_tool_suffix(suffix: &str) -> String {
-    let trimmed = suffix.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let normalized = trimmed.trim_start_matches('"');
-
-    if normalized.starts_with(",\"item_id\"")
-        || normalized.starts_with(",\"output_index\"")
-        || normalized.starts_with(",\"sequence_number\"")
-        || normalized.starts_with(",\"call_id\"")
-        || normalized.starts_with(",\"type\":\"response.")
-        || (normalized.starts_with(',')
-            && normalized.contains("\"item_id\"")
-            && (normalized.contains("\"output_index\"")
-                || normalized.contains("\"sequence_number\"")))
-    {
-        return String::new();
-    }
-
-    suffix.to_string()
-}
-
 #[derive(Deserialize, Debug)]
 struct ResponseSseEvent {
     #[serde(rename = "type")]
@@ -256,6 +141,7 @@ struct ResponseSseEvent {
     delta: Option<String>,
     item_id: Option<String>,
     output_index: Option<u64>,
+    summary_index: Option<u64>,
     call_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
@@ -506,11 +392,36 @@ pub fn parse_openai_response_event(
         }
     };
 
+    if matches!(
+        event.kind.as_str(),
+        "response.completed" | "response.incomplete"
+    ) && let Some(response) = event.response.as_ref()
+    {
+        jcode_logging::info(&format!(
+            "OPENAI_CACHE_RESPONSE: {}",
+            cache_response_evidence(response)
+        ));
+    }
+
     match event.kind.as_str() {
+        "response.created" => {
+            return event.response.as_ref().and_then(extract_service_tier);
+        }
         "response.output_text.delta" => {
             if let Some(delta) = event.delta {
                 *saw_text_delta = true;
-                return stream_text_or_recovered_tool_call(&delta, pending);
+                // Text is data, even when it quotes a tool-call example. Only
+                // structured function/custom-tool events may start a tool call.
+                return (!delta.is_empty()).then_some(StreamEvent::TextDelta(delta));
+            }
+        }
+        "response.reasoning_summary_part.added" => {
+            // Each summary part is a separate paragraph, not another token
+            // chunk. Preserve its boundary just as the item.done fallback's
+            // summary.join("\n") does, without splitting ordinary deltas or
+            // adding a leading blank line before the first part.
+            if event.summary_index.is_some_and(|index| index > 0) && *saw_thinking_delta {
+                return Some(StreamEvent::ThinkingDelta("\n".to_string()));
             }
         }
         "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
@@ -521,6 +432,13 @@ pub fn parse_openai_response_event(
         }
         "response.reasoning.done" | "response.output_item.added" => {
             if let Some(item) = &event.item {
+                if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+                    return Some(StreamEvent::ProviderNative {
+                        provider: jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI
+                            .to_string(),
+                        item: item.clone(),
+                    });
+                }
                 if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
                     return Some(StreamEvent::ThinkingStart);
                 }
@@ -630,6 +548,9 @@ pub fn parse_openai_response_event(
             return pending.pop_front();
         }
         "response.completed" => {
+            if let Some(tier) = event.response.as_ref().and_then(extract_service_tier) {
+                pending.push_back(tier);
+            }
             let stop_reason = event
                 .response
                 .as_ref()
@@ -658,6 +579,53 @@ pub fn parse_openai_response_event(
     }
 
     None
+}
+
+// Keep this explicitly allowlisted. Never log the response body: it can contain
+// user text, tool arguments, encrypted reasoning, and provider-private fields.
+fn cache_response_evidence(response: &Value) -> Value {
+    let identifier = |field: &str| {
+        response.get(field).and_then(Value::as_str).filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-._/".contains(&c))
+        })
+    };
+    let usage = response.get("usage");
+    let diagnostic = response.get("prompt_cache_diagnostics");
+    let allowed_diagnostic = |field: &str, allowed: &[&str]| {
+        diagnostic
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_str)
+            .filter(|value| allowed.contains(value))
+            .map(str::to_owned)
+    };
+    serde_json::json!({
+        "response_id_hash": response.get("id").and_then(Value::as_str)
+            .map(|id| jcode_provider_core::fingerprint::stable_hash_json(&Value::String(id.to_owned()))),
+        "model": identifier("model"),
+        "service_tier": identifier("service_tier"),
+        "input_tokens": usage.and_then(|value| value.get("input_tokens")).and_then(Value::as_u64),
+        "cached_tokens": usage.and_then(|value| extract_input_token_detail(value, "cached_tokens")),
+        "cache_write_tokens": usage.and_then(|value| extract_input_token_detail(value, "cache_write_tokens")),
+        "diagnostic_type": allowed_diagnostic("type", &["cache_hit", "cache_miss", "comparison_response_not_found", "unavailable"]),
+        "diagnostic_reason": allowed_diagnostic("reason", &[
+            "model_changed", "prompt_cache_key_changed", "service_tier_changed", "tools_changed",
+            "text_format_changed", "reasoning_effort_changed", "verbosity_changed", "context_compacted", "input_changed",
+        ]),
+        "comparison_reusable_tokens": diagnostic.and_then(|value| value.get("comparison_reusable_tokens")).and_then(Value::as_u64),
+        "cache_missed_tokens": diagnostic.and_then(|value| value.get("cache_missed_tokens")).and_then(Value::as_u64),
+    })
+}
+
+fn extract_service_tier(response: &Value) -> Option<StreamEvent> {
+    let tier = response.get("service_tier")?.as_str()?.trim();
+    (!tier.is_empty()).then(|| StreamEvent::ServiceTier {
+        tier: tier.to_string(),
+        requested: None,
+    })
 }
 
 fn extract_last_assistant_message_phase(response: &Value) -> Option<String> {
@@ -792,7 +760,7 @@ pub fn handle_openai_output_item(
                     new_text: rendered,
                 });
             }
-            return stream_text_or_recovered_tool_call(&rendered, pending);
+            return (!rendered.is_empty()).then_some(StreamEvent::TextDelta(rendered));
         }
         "reasoning" => {
             let id = item
@@ -971,6 +939,8 @@ fn handle_openai_image_generation_item(
 }
 
 pub struct OpenAIResponsesStream {
+    last_transport_activity: std::time::Instant,
+    transport_bytes: u64,
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
     /// Carries incomplete multi-byte UTF-8 sequences across chunk boundaries
@@ -986,6 +956,8 @@ pub struct OpenAIResponsesStream {
 impl OpenAIResponsesStream {
     pub fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
         Self {
+            last_transport_activity: std::time::Instant::now(),
+            transport_bytes: 0,
             inner: Box::pin(stream),
             buffer: String::new(),
             utf8: jcode_core::util::Utf8StreamDecoder::new(),
@@ -995,6 +967,15 @@ impl OpenAIResponsesStream {
             streaming_tool_calls: HashMap::new(),
             completed_tool_items: HashSet::new(),
         }
+    }
+
+    /// Includes SSE comments and status events that do not produce agent events.
+    pub fn transport_idle_for(&self) -> std::time::Duration {
+        self.last_transport_activity.elapsed()
+    }
+
+    pub fn transport_bytes(&self) -> u64 {
+        self.transport_bytes
     }
 
     fn parse_next_event(&mut self) -> Option<StreamEvent> {
@@ -1042,7 +1023,8 @@ fn extract_input_token_detail(usage: &Value, field: &str) -> Option<u64> {
         .find_map(|key| usage.get(key)?.get(field)?.as_u64())
 }
 
-fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
+/// Extract provider counters without converting inclusive OpenAI input totals.
+pub fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
     let usage = response.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
@@ -1078,6 +1060,10 @@ impl Stream for OpenAIResponsesStream {
 
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
+                    if !bytes.is_empty() {
+                        self.last_transport_activity = std::time::Instant::now();
+                        self.transport_bytes += bytes.len() as u64;
+                    }
                     let text = self.utf8.decode(&bytes);
                     self.buffer.push_str(&text);
                 }
@@ -1137,69 +1123,5 @@ mod stream_tool_tests;
 mod stream_citation_tests;
 
 #[cfg(test)]
-mod text_framing_tests {
-    use super::*;
-
-    #[test]
-    fn output_item_completion_frames_messages_not_reasoning_or_text_chunks() {
-        let mut saw_text = false;
-        let mut saw_thinking = false;
-        let mut tools = HashMap::new();
-        let mut completed = HashSet::new();
-        let mut pending = VecDeque::new();
-        let mut events = Vec::new();
-        for value in [
-            serde_json::json!({"type":"response.output_text.delta","delta":"The cause is "}),
-            serde_json::json!({"type":"response.reasoning_summary_text.delta","delta":"thinking"}),
-            serde_json::json!({"type":"response.output_text.delta","delta":"the retry loop."}),
-            serde_json::json!({"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"The cause is the retry loop."}]}}),
-            // This message has no text delta. Per-message deduplication must
-            // allow fallback output even though the preceding message streamed.
-            serde_json::json!({"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Second message"}]}}),
-            serde_json::json!({"type":"response.completed","response":{}}),
-        ] {
-            events.extend(parse_openai_response_event(
-                &value.to_string(),
-                &mut saw_text,
-                &mut saw_thinking,
-                &mut tools,
-                &mut completed,
-                &mut pending,
-            ));
-            events.extend(pending.drain(..));
-        }
-        assert!(matches!(events.as_slice(), [
-            StreamEvent::TextDelta(a), StreamEvent::ThinkingDelta(_), StreamEvent::TextDelta(b),
-            StreamEvent::TextDone, StreamEvent::TextDelta(c), StreamEvent::TextDone,
-            StreamEvent::MessageEnd { .. }
-        ] if a == "The cause is " && b == "the retry loop." && c == "Second message"));
-    }
-
-    #[test]
-    fn web_search_call_item_is_emitted_verbatim() {
-        let item = serde_json::json!({
-            "type": "web_search_call", "id": "ws_1", "status": "completed",
-            "action": {"type": "search", "query": "jcode"}
-        });
-        let mut pending = VecDeque::new();
-        let event = parse_openai_response_event(
-            &serde_json::json!({"type": "response.output_item.done", "item": item}).to_string(),
-            &mut false,
-            &mut false,
-            &mut HashMap::new(),
-            &mut HashSet::new(),
-            &mut pending,
-        );
-        match event {
-            Some(StreamEvent::ProviderNative {
-                provider,
-                item: got,
-            }) => {
-                assert_eq!(provider, "openai");
-                assert_eq!(got, item);
-            }
-            other => panic!("expected provider-native item, got {other:?}"),
-        }
-        assert!(pending.is_empty());
-    }
-}
+#[path = "text_framing_tests.rs"]
+mod text_framing_tests;

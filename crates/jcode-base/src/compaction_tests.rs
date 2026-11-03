@@ -107,6 +107,7 @@ fn test_new_message_after_restore_reenables_compaction() {
 
 #[test]
 fn test_token_estimate() {
+    let _lock = crate::storage::lock_test_env();
     let manager = CompactionManager::new();
     // 100 chars = ~25 tokens (plus 18k overhead for full budget)
     let messages = vec![make_text_message(Role::User, &"x".repeat(100))];
@@ -140,6 +141,41 @@ fn test_context_usage_prefers_observed_tokens() {
 
     assert!(manager.context_usage_with(&messages) >= 0.90);
     assert!(manager.effective_token_count_with(&messages) >= 900);
+}
+
+#[test]
+fn reactive_threshold_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+    manager.compaction_config.reactive_threshold = 0.80;
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "x"))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(199_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(200_000);
+    assert!(manager.should_compact_with(&messages));
+    assert!(!manager.should_compact_with(&messages[..1]));
+
+    manager.compaction_config.reactive_threshold_tokens = 0;
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(800_000);
+    assert!(manager.should_compact_with(&messages));
+
+    manager.compaction_config.reactive_threshold_tokens = 200_000;
+    manager.compaction_config.reactive_threshold = 0.60;
+    manager.set_budget(100_000);
+    manager.update_observed_input_tokens(59_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(60_000);
+    assert!(manager.should_compact_with(&messages));
+    manager.suppress_compaction_until_new_message = true;
+    assert!(!manager.should_compact_with(&messages));
 }
 
 #[test]
@@ -949,6 +985,7 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
 
 #[test]
 fn test_context_usage_with_both_estimate_and_observed() {
+    let _lock = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new().with_budget(200_000);
     // Build messages totalling ~50k chars = ~12.5k token estimate
     let mut messages = Vec::new();
@@ -1138,6 +1175,31 @@ fn max_context_tokens_zero_means_no_cap() {
 }
 
 #[test]
+fn proactive_floor_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.compaction_config = crate::config::CompactionConfig::default();
+    manager.turns_since_last_compact = 10;
+    manager.token_history = [100_000, 120_000, 149_999].into_iter().collect();
+    manager.update_observed_input_tokens(149_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(150_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 0;
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(400_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 150_000;
+    manager.set_budget(200_000);
+    manager.update_observed_input_tokens(79_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(80_000);
+    assert!(!manager.anti_signals_block(&[]));
+}
+
+#[test]
 fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     let _lock = crate::storage::lock_test_env();
     struct RestoreHome(Option<std::ffi::OsString>);
@@ -1176,4 +1238,32 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     cfg.save().unwrap();
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
+
+    // An override replaces the global ceiling, but never exceeds the model.
+    cfg.compaction.max_context_tokens = 10_000;
+    cfg.save().unwrap();
+    manager.set_context_cap_override(Some(200_000));
+    assert_eq!(manager.context_cap_override(), Some(200_000));
+    assert_eq!(manager.token_budget(), 128_000);
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), 200_000);
+    cfg.compaction.max_context_tokens = 5_000;
+    cfg.save().unwrap();
+    manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
+    assert_eq!(manager.token_budget(), 200_000);
+    manager.set_context_cap_override(Some(2_000));
+    assert_eq!(manager.token_budget(), 2_000);
+    manager.set_budget(1_000);
+    assert_eq!(manager.token_budget(), 1_000);
+    assert_eq!(manager.context_cap_override(), Some(2_000));
+    manager.set_budget(128_000);
+    manager.set_context_cap_override(Some(0));
+    assert_eq!(manager.context_cap_override(), None);
+    assert_eq!(manager.token_budget(), 5_000);
+    manager.set_context_cap_override(Some(30_000));
+    manager.set_context_cap_override(None);
+    assert_eq!(manager.token_budget(), 5_000);
 }
+
+#[path = "compaction_native_usage_tests.rs"]
+mod native_usage;

@@ -95,6 +95,12 @@ pub(super) type InputUndoSnapshot = (
 );
 
 impl App {
+    pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        self.ensure_input_image_markers();
+        self.input_image_markers = Default::default();
+        std::mem::take(&mut self.pending_images)
+    }
+
     pub(super) fn undo_input_change(&mut self) {
         self.terminal_reply_filter.reset();
         let depth = self.input_undo_stack.len();

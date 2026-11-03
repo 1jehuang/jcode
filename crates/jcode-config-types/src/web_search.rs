@@ -11,6 +11,8 @@ pub enum WebSearchEngine {
     Duckduckgo,
     /// Bing search. Uses the Bing API when configured, otherwise Bing HTML search.
     Bing,
+    /// Kagi Search API v1. Requires the configured API key environment variable.
+    Kagi,
     /// SearXNG metasearch instance (JSON API). Requires `searxng_url` (or the
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
@@ -30,6 +32,7 @@ impl WebSearchEngine {
         match self {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
+            Self::Kagi => "kagi",
             Self::Searxng => "searxng",
             Self::Custom => "custom",
             Self::Native => "native",
@@ -40,6 +43,7 @@ impl WebSearchEngine {
         match value.trim().to_ascii_lowercase().as_str() {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
+            "kagi" => Some(Self::Kagi),
             "searxng" | "searx" => Some(Self::Searxng),
             "custom" => Some(Self::Custom),
             "native" | "provider" => Some(Self::Native),
@@ -111,7 +115,7 @@ pub struct WebSearchConfig {
     pub custom: Option<CustomWebSearchConfig>,
     /// Preferred engine when the tool input does not specify one.
     pub engine: WebSearchEngine,
-    /// Keyless HTML engines to try after the preferred engine fails.
+    /// Local engines to try after failure or empty results. Default: keyless Bing HTML.
     pub fallback_engines: Vec<WebSearchEngine>,
     /// Optional Bing API key for primary Bing searches. Fallback Bing uses keyless HTML search.
     pub bing_api_key: Option<String>,
@@ -119,6 +123,8 @@ pub struct WebSearchConfig {
     pub bing_api_key_env: String,
     /// Bing market, e.g. "en-US" or "zh-CN".
     pub bing_market: String,
+    /// Environment variable containing the Kagi API key. No inline key is stored.
+    pub kagi_api_key_env: String,
     /// Base URL of a SearXNG instance (e.g. "https://searx.example.org"), used
     /// by the `searxng` engine. When empty, the `searxng_url_env` variable is
     /// consulted instead.
@@ -156,6 +162,7 @@ impl Default for WebSearchConfig {
             bing_api_key: None,
             bing_api_key_env: "JCODE_BING_API_KEY".to_string(),
             bing_market: "en-US".to_string(),
+            kagi_api_key_env: "KAGI_API_KEY".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
             prefer_native: true,
@@ -176,5 +183,35 @@ impl WebSearchConfig {
     /// True when provider-native search should be used where available.
     pub fn native_enabled(&self) -> bool {
         self.prefer_native || self.engine == WebSearchEngine::Native
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kagi_config_is_opt_in_and_round_trips() {
+        let defaults: WebSearchConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.engine, WebSearchEngine::Duckduckgo);
+        assert_eq!(defaults.fallback_engines, vec![WebSearchEngine::Bing]);
+        assert!(defaults.native_enabled());
+        assert_eq!(defaults.kagi_api_key_env, "KAGI_API_KEY");
+        let config: WebSearchConfig = serde_json::from_value(serde_json::json!({
+            "engine": "kagi", "prefer_native": false, "fallback_engines": [],
+            "kagi_api_key_env": "MY_KAGI_KEY"
+        }))
+        .unwrap();
+        assert_eq!(config.engine, WebSearchEngine::Kagi);
+        assert!(!config.native_enabled());
+        assert!(config.fallback_engines.is_empty());
+        assert_eq!(config.kagi_api_key_env, "MY_KAGI_KEY");
+        assert_eq!(serde_json::to_value(config).unwrap()["engine"], "kagi");
+        assert_eq!(
+            WebSearchEngine::parse(" KAGI "),
+            Some(WebSearchEngine::Kagi)
+        );
+        assert_eq!(WebSearchEngine::Kagi.as_str(), "kagi");
+        assert!(WebSearchEngine::Kagi.is_local());
     }
 }

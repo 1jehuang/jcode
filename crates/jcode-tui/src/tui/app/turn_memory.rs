@@ -15,14 +15,9 @@ impl App {
         }
 
         let skills = self.current_skills_snapshot();
-        // shortcut: local (daemon-less) turns keep the skill in the system
-        // prompt with an empty $ARGUMENTS (the arguments arrive as the user's
-        // message); move to transcript injection like the agent if local
-        // mode stays in use.
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|s| s.invocation_text("")));
+        // Announced once in the transcript on activation; never in the
+        // system prompt, so skill changes cannot invalidate the cache.
+        let skill_prompt: Option<String> = None;
         let available_skills = crate::skill_overrides::model_skill_infos(&skills);
         let (mut split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
@@ -30,11 +25,6 @@ impl App {
             self.session.is_canary,
             memory_prompt,
             None,
-        );
-        self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
-            self.provider.reasoning_effort().as_deref(),
         );
         self.context_info = context_info;
         split

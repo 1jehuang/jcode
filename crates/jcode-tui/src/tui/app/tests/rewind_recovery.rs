@@ -172,6 +172,10 @@ fn rewind_local_rejection_preserves_continuation_and_does_not_reset_provider() {
 
 fn empty_history(id: u64, session_id: &str) -> ServerEvent {
     ServerEvent::History {
+        messages_base_count: None,
+        images_unchanged: false,
+        available_service_tiers: None,
+        provider_oauth_account_label: None,
         id,
         session_id: session_id.to_string(),
         messages: Vec::new(),

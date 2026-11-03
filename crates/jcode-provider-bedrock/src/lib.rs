@@ -1,3 +1,5 @@
+mod catalog;
+
 #[cfg(feature = "aws-sdk")]
 use anyhow::Context;
 use anyhow::Result;
@@ -44,8 +46,24 @@ use tokio::sync::mpsc;
 #[cfg(feature = "aws-sdk")]
 use tokio_stream::wrappers::ReceiverStream;
 
-const DEFAULT_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+const DEFAULT_MODEL: &str = "anthropic.claude-opus-5-5";
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4096;
+
+#[cfg(feature = "aws-sdk")]
+fn bedrock_token_usage(usage: &aws_sdk_bedrockruntime::types::TokenUsage) -> StreamEvent {
+    // Bedrock input is disjoint from the cache counters. Leave normalization
+    // to the usage-report boundary, rather than folding cache tokens in here.
+    StreamEvent::TokenUsage {
+        input_tokens: u64::try_from(usage.input_tokens()).ok(),
+        output_tokens: u64::try_from(usage.output_tokens()).ok(),
+        cache_read_input_tokens: usage
+            .cache_read_input_tokens()
+            .and_then(|v| u64::try_from(v).ok()),
+        cache_creation_input_tokens: usage
+            .cache_write_input_tokens()
+            .and_then(|v| u64::try_from(v).ok()),
+    }
+}
 pub const ENV_FILE: &str = "bedrock.env";
 pub const API_KEY_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
 pub const REGION_ENV: &str = "JCODE_BEDROCK_REGION";
@@ -79,6 +97,7 @@ struct PersistedCatalog {
 
 pub struct BedrockProvider {
     model: Arc<RwLock<String>>,
+    effort: Arc<RwLock<Option<String>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
     fetched_inference_profiles: Arc<RwLock<Vec<String>>>,
     profile_required_models: Arc<RwLock<HashSet<String>>>,
@@ -97,7 +116,12 @@ impl BedrockProvider {
     /// the current model is anything other than the placeholder, so explicit
     /// user, env and session choices always win. Returns whether it switched.
     pub fn replace_placeholder_default_model(&self, model: &str) -> bool {
-        if std::env::var_os("JCODE_BEDROCK_MODEL").is_some() || model.trim().is_empty() {
+        if std::env::var_os("JCODE_BEDROCK_MODEL").is_some()
+            || model.trim().is_empty()
+            // Resolve the built-in flagship against the runtime client's actual
+            // region, not an automatically ranked global/foreign catalog route.
+            || Self::normalize_model_id(model) == DEFAULT_MODEL
+        {
             return false;
         }
         match self.model.write() {
@@ -127,6 +151,7 @@ impl BedrockProvider {
             std::env::var("JCODE_BEDROCK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let provider = Self {
             model: Arc::new(RwLock::new(model)),
+            effort: Arc::new(RwLock::new(Self::env_or_config("JCODE_BEDROCK_EFFORT"))),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             fetched_inference_profiles: Arc::new(RwLock::new(Vec::new())),
             profile_required_models: Arc::new(RwLock::new(HashSet::new())),
@@ -255,87 +280,6 @@ impl BedrockProvider {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .or_else(|| jcode_provider_env::load_env_value_from_env_or_config(name, ENV_FILE))
-    }
-
-    fn persisted_catalog_path() -> Result<std::path::PathBuf> {
-        Ok(jcode_storage::app_config_dir()?.join("bedrock_models_cache.json"))
-    }
-
-    fn load_persisted_catalog() -> Option<PersistedCatalog> {
-        let path = Self::persisted_catalog_path().ok()?;
-        jcode_storage::read_json(&path).ok()
-    }
-
-    // Only written from aws-sdk catalog refreshes, but kept ungated so cached
-    // catalogs behave identically in both build modes (and for tests).
-    #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
-    fn persist_catalog(
-        models: &[String],
-        inference_profiles: &[String],
-        profile_required_models: &HashSet<String>,
-        inference_profile_routes: &HashMap<String, String>,
-        legacy_models: &HashSet<String>,
-    ) {
-        let Ok(path) = Self::persisted_catalog_path() else {
-            return;
-        };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
-            inference_profiles: inference_profiles.to_vec(),
-            profile_required_models: profile_required_models.iter().cloned().collect(),
-            inference_profile_routes: inference_profile_routes.clone(),
-            legacy_models: legacy_models.iter().cloned().collect(),
-            region: Self::configured_region(),
-            fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
-        };
-        if let Err(err) = jcode_storage::write_json(&path, &payload) {
-            jcode_logging::warn(&format!(
-                "Failed to persist Bedrock model catalog {}: {}",
-                path.display(),
-                err
-            ));
-        }
-    }
-
-    fn seed_cached_catalog(&self) {
-        if let Some(catalog) = Self::load_persisted_catalog() {
-            let configured_region = Self::configured_region();
-            if catalog.region.as_deref() != configured_region.as_deref() {
-                jcode_logging::info(&format!(
-                    "Ignoring Bedrock model cache for region {:?}; configured region is {:?}",
-                    catalog.region, configured_region
-                ));
-                return;
-            }
-            let PersistedCatalog {
-                models: cached_models,
-                inference_profiles,
-                profile_required_models,
-                inference_profile_routes,
-                legacy_models,
-                ..
-            } = catalog;
-            let mut inference_profile_routes = inference_profile_routes;
-            Self::merge_profile_routes_from_profile_ids(
-                &mut inference_profile_routes,
-                inference_profiles.iter(),
-            );
-            if let Ok(mut guard) = self.fetched_models.write() {
-                *guard = cached_models;
-            }
-            if let Ok(mut profiles) = self.fetched_inference_profiles.write() {
-                *profiles = inference_profiles;
-            }
-            if let Ok(mut required) = self.profile_required_models.write() {
-                *required = profile_required_models.into_iter().collect();
-            }
-            if let Ok(mut routes) = self.inference_profile_routes.write() {
-                *routes = inference_profile_routes;
-            }
-            if let Ok(mut legacy) = self.legacy_models.write() {
-                *legacy = legacy_models.into_iter().collect();
-            }
-        }
     }
 
     // Pure string logic; only reachable from aws-sdk request paths and tests.
@@ -645,7 +589,23 @@ impl BedrockProvider {
     }
 
     #[cfg(feature = "aws-sdk")]
-    fn inference_config() -> Option<InferenceConfiguration> {
+    fn additional_request_fields(&self) -> Result<Option<aws_smithy_types::Document>> {
+        let Some(effort) = self.reasoning_effort() else {
+            return Ok(None);
+        };
+        let effort = effort.trim().to_ascii_lowercase();
+        if !matches!(effort.as_str(), "low" | "medium" | "high" | "xhigh" | "max") {
+            anyhow::bail!(
+                "Invalid JCODE_BEDROCK_EFFORT: expected low, medium, high, xhigh, or max"
+            );
+        }
+        Ok(Some(Self::json_to_document(
+            &json!({"output_config": {"effort": effort}}),
+        )))
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    fn inference_config(model: &str) -> Option<InferenceConfiguration> {
         let max_tokens = std::env::var("JCODE_BEDROCK_MAX_TOKENS")
             .ok()
             .and_then(|v| v.trim().parse::<i32>().ok())
@@ -668,6 +628,13 @@ impl BedrockProvider {
                     .collect::<Vec<_>>()
             })
             .filter(|v| !v.is_empty());
+        // Opus 5.5 rejects non-default sampling parameters. Omit them,
+        // including legacy environment overrides, while preserving token/stop settings.
+        let (temperature, top_p) = if Self::normalize_model_id(model) == DEFAULT_MODEL {
+            (None, None)
+        } else {
+            (temperature, top_p)
+        };
         if max_tokens.is_none()
             && temperature.is_none()
             && top_p.is_none()
@@ -685,12 +652,40 @@ impl BedrockProvider {
         )
     }
 
+    /// Resolve only the bare Opus default. Explicit profiles (including global)
+    /// and application profile ARNs are user choices and are never rewritten.
+    /// Keep this allowlist aligned with AWS's Opus 5.5 model card. Unknown and
+    /// global-only regions fail closed rather than silently exporting data.
+    // Canada is intentionally not mapped to US: that profile can leave Canada.
+    // GovCloud is also left explicit rather than assuming commercial routing.
+    #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
+    fn opus_default_route(model: &str, region: Option<&str>) -> Result<String> {
+        if model != DEFAULT_MODEL {
+            return Ok(model.to_string());
+        }
+        let prefix = match region {
+            Some("eu-west-2") => return Ok(model.to_string()),
+            Some("us-east-1" | "us-east-2" | "us-west-1" | "us-west-2") => "us",
+            Some(
+                "eu-central-1" | "eu-central-2" | "eu-north-1" | "eu-south-1" | "eu-south-2"
+                | "eu-west-1" | "eu-west-3",
+            ) => "eu",
+            Some("ap-southeast-2" | "ap-southeast-4") => "au",
+            Some("ap-northeast-1" | "ap-northeast-3") => "jp",
+            _ => anyhow::bail!(
+                "No geography-safe Claude Opus 5.5 default for Bedrock region {:?}. Choose an explicit inference profile with JCODE_BEDROCK_MODEL (global profiles allow worldwide routing), or choose a supported region.",
+                region
+            ),
+        };
+        Ok(format!("{prefix}.{DEFAULT_MODEL}"))
+    }
+
     fn normalize_model_id(model: &str) -> String {
         let mut value = model.trim().to_string();
         if let Some((_, tail)) = value.rsplit_once('/') {
             value = tail.to_string();
         }
-        for prefix in ["us.", "eu.", "apac.", "global."] {
+        for prefix in ["us.", "eu.", "au.", "jp.", "apac.", "global."] {
             if let Some(stripped) = value.strip_prefix(prefix) {
                 value = stripped.to_string();
                 break;
@@ -717,7 +712,7 @@ impl BedrockProvider {
     fn foundation_model_id_from_profile_id(profile_id: &str) -> Option<String> {
         let id = profile_id.trim();
         let id = Self::inference_profile_id_from_arn(id).unwrap_or_else(|| id.to_string());
-        for prefix in ["us.", "eu.", "apac.", "global."] {
+        for prefix in ["us.", "eu.", "au.", "jp.", "apac.", "global."] {
             if let Some(model) = id.strip_prefix(prefix)
                 && !model.is_empty()
             {
@@ -799,6 +794,11 @@ impl BedrockProvider {
             return None;
         }
 
+        // The new default must never inherit a cached global/foreign profile.
+        if model == DEFAULT_MODEL {
+            return Some(model.to_string());
+        }
+
         if let Ok(routes) = self.inference_profile_routes.read()
             && let Some(route) = routes.get(model).cloned()
         {
@@ -852,7 +852,16 @@ impl BedrockProvider {
 
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
-        if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
+        if id == DEFAULT_MODEL {
+            BedrockModelInfo {
+                context_tokens: 1_000_000,
+                max_output_tokens: 128_000,
+                supports_tools: true,
+                supports_vision: true,
+                supports_reasoning: true,
+                pricing: None,
+            }
+        } else if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
             BedrockModelInfo {
                 context_tokens: 200_000,
                 max_output_tokens: 64_000,
@@ -981,6 +990,7 @@ impl BedrockProvider {
 
     fn known_models() -> Vec<&'static str> {
         vec![
+            DEFAULT_MODEL,
             "anthropic.claude-3-5-sonnet-20241022-v2:0",
             "anthropic.claude-3-5-haiku-20241022-v1:0",
             "anthropic.claude-3-7-sonnet-20250219-v1:0",
@@ -1003,7 +1013,7 @@ impl BedrockProvider {
             .map(|guard| guard.clone())
             .unwrap_or_default();
         let should_hide_duplicate_foundation_model =
-            |model: &str| inference_profile_routes.contains_key(model);
+            |model: &str| model != DEFAULT_MODEL && inference_profile_routes.contains_key(model);
         for model in Self::known_models().into_iter().map(str::to_string) {
             if should_hide_duplicate_foundation_model(&model) {
                 continue;
@@ -1035,6 +1045,14 @@ impl BedrockProvider {
     #[cfg(feature = "aws-sdk")]
     async fn refresh_catalog(&self) -> Result<(Vec<String>, Vec<String>)> {
         let client = Self::control_client().await;
+        self.refresh_catalog_with_client(&client).await
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    async fn refresh_catalog_with_client(
+        &self,
+        client: &BedrockControlClient,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut models = Vec::new();
         let mut profile_required_models = HashSet::new();
         let mut legacy_models = HashSet::new();
@@ -1073,46 +1091,55 @@ impl BedrockProvider {
 
         let mut profiles = Vec::new();
         let mut inference_profile_routes = HashMap::new();
-        match client.list_inference_profiles().send().await {
-            Ok(resp) => {
-                for summary in resp.inference_profile_summaries() {
-                    let id = summary.inference_profile_id();
-                    if !id.is_empty() {
-                        profiles.push(id.to_string());
+        let mut profile_pages = client.list_inference_profiles().into_paginator().send();
+        let mut received_profile_page = false;
+        while let Some(page) = profile_pages.next().await {
+            let resp = match page {
+                Ok(resp) => resp,
+                Err(err) => {
+                    // Never replace a complete warm profile catalog with the
+                    // prefix of a paginated response after a later-page error.
+                    if received_profile_page {
+                        return Err(anyhow::anyhow!(Self::classify_error_message(
+                            &Self::sdk_error_message(&err)
+                        )));
                     }
-                    let arn = summary.inference_profile_arn();
-                    if !arn.is_empty() {
-                        profiles.push(arn.to_string());
-                    }
-                    if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
-                        for model in summary.models() {
-                            if let Some(model_arn) = model.model_arn()
-                                && let Some(foundation_model) =
-                                    Self::foundation_model_id_from_arn(model_arn)
-                            {
-                                Self::insert_preferred_profile_route(
-                                    &mut inference_profile_routes,
-                                    &foundation_model,
-                                    id,
-                                );
-                            }
+                    jcode_logging::info(&format!(
+                        "Bedrock inference profile discovery skipped: {}",
+                        Self::classify_error_message(&Self::sdk_error_message(&err))
+                    ));
+                    break;
+                }
+            };
+            received_profile_page = true;
+            for summary in resp.inference_profile_summaries() {
+                let id = summary.inference_profile_id();
+                if !id.is_empty() {
+                    profiles.push(id.to_string());
+                }
+                let arn = summary.inference_profile_arn();
+                if !arn.is_empty() {
+                    profiles.push(arn.to_string());
+                }
+                if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
+                    for model in summary.models() {
+                        if let Some(model_arn) = model.model_arn()
+                            && let Some(foundation_model) =
+                                Self::foundation_model_id_from_arn(model_arn)
+                        {
+                            Self::insert_preferred_profile_route(
+                                &mut inference_profile_routes,
+                                &foundation_model,
+                                id,
+                            );
                         }
                     }
                 }
-                profiles.sort();
-                profiles.dedup();
-                Self::merge_profile_routes_from_profile_ids(
-                    &mut inference_profile_routes,
-                    profiles.iter(),
-                );
-            }
-            Err(err) => {
-                jcode_logging::info(&format!(
-                    "Bedrock inference profile discovery skipped: {}",
-                    Self::classify_error_message(&Self::sdk_error_message(&err))
-                ));
             }
         }
+        profiles.sort();
+        profiles.dedup();
+        Self::merge_profile_routes_from_profile_ids(&mut inference_profile_routes, profiles.iter());
 
         if let Ok(mut guard) = self.fetched_models.write() {
             *guard = models.clone();
@@ -1157,7 +1184,11 @@ impl Provider for BedrockProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         Self::validate_credentials_if_requested().await?;
-        let model = self.model();
+        let client = Self::runtime_client().await;
+        let model = Self::opus_default_route(
+            &self.model(),
+            client.config().region().map(|region| region.as_ref()),
+        )?;
         let info = Self::model_info(&model);
         let request_messages = Self::to_bedrock_messages(messages, info.supports_vision)?;
         let tool_config = if info.supports_tools {
@@ -1165,7 +1196,8 @@ impl Provider for BedrockProvider {
         } else {
             None
         };
-        let inference_config = Self::inference_config();
+        let inference_config = Self::inference_config(&model);
+        let additional_fields = self.additional_request_fields()?;
         let system_blocks = if system.trim().is_empty() {
             None
         } else {
@@ -1210,10 +1242,10 @@ impl Provider for BedrockProvider {
         );
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(64);
         tokio::spawn(async move {
-            let client = Self::runtime_client().await;
             let mut req = client
                 .converse_stream()
                 .model_id(model.clone())
+                .set_additional_model_request_fields(additional_fields)
                 .set_messages(Some(request_messages));
             if let Some(system_blocks) = system_blocks {
                 req = req.set_system(Some(system_blocks));
@@ -1291,14 +1323,7 @@ impl Provider for BedrockProvider {
                         }
                         ConverseStreamOutput::Metadata(meta) => {
                             if let Some(usage) = meta.usage() {
-                                let _ = tx
-                                    .send(Ok(StreamEvent::TokenUsage {
-                                        input_tokens: Some(usage.input_tokens() as u64),
-                                        output_tokens: Some(usage.output_tokens() as u64),
-                                        cache_read_input_tokens: None,
-                                        cache_creation_input_tokens: None,
-                                    }))
-                                    .await;
+                                let _ = tx.send(Ok(bedrock_token_usage(usage))).await;
                             }
                         }
                         _ => {}
@@ -1338,6 +1363,34 @@ impl Provider for BedrockProvider {
 
     fn model(&self) -> String {
         self.model.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        if Self::normalize_model_id(&self.model()) != DEFAULT_MODEL {
+            return None;
+        }
+        Some(
+            self.effort
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .unwrap_or_else(|| "low".to_string()),
+        )
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let effort = effort.trim().to_ascii_lowercase();
+        if !matches!(
+            effort.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max" | "default"
+        ) {
+            anyhow::bail!(
+                "Bedrock Opus 5.5 effort must be low, medium, high, xhigh, max, or default"
+            );
+        }
+        *self.effort.write().unwrap_or_else(|p| p.into_inner()) =
+            (effort != "default").then_some(effort);
+        Ok(())
     }
 
     fn supports_image_input(&self) -> bool {
@@ -1479,6 +1532,12 @@ impl Provider for BedrockProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             model: Arc::new(RwLock::new(self.model())),
+            effort: Arc::new(RwLock::new(
+                self.effort
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
             fetched_models: self.fetched_models.clone(),
             fetched_inference_profiles: self.fetched_inference_profiles.clone(),
             profile_required_models: self.profile_required_models.clone(),

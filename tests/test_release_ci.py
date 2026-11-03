@@ -57,6 +57,114 @@ class ReleaseCITests(unittest.TestCase):
         self.assertIn("/attempts/1/jobs?", api.calls[2][0])
         self.assertTrue(api.calls[2][1])
 
+    def advisory_jobs(self, step="Check formatting"):
+        items = jobs()
+        items[0].update(conclusion="failure", steps=[
+            dict(name="Check all targets and all features", status="completed", conclusion="success"),
+            dict(name=step, status="completed", conclusion="failure"),
+        ])
+        return items
+
+    def test_preview_allows_each_explicit_advisory_but_stable_rejects(self):
+        for step in gate.PREVIEW_ADVISORY_STEPS:
+            with self.subTest(step=step):
+                items = self.advisory_jobs(step)
+                self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+                with self.assertRaises(gate.Rejected):
+                    self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items))
+
+    def test_preview_allows_platform_warning_budget_and_format_only(self):
+        items = jobs()
+        for job in items:
+            if job["name"] in gate.PREVIEW_ADVISORY_JOBS:
+                step = sorted(gate.PREVIEW_ADVISORY_JOBS[job["name"]])[0]
+                job.update(conclusion="failure", steps=[
+                    dict(name=step, status="completed", conclusion="failure")])
+        items.append(dict(name="Format", status="completed", conclusion="failure", steps=[
+            dict(name="Check formatting", status="completed", conclusion="failure")]))
+        self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+
+    def test_preview_rejects_correctness_and_unknown_failures(self):
+        for step in ("Check all targets and all features", "Run clippy with warnings denied",
+                     "Enforce Cargo.lock is up to date", "Enforce panic-prone usage ratchet",
+                     "Enforce swallowed-error usage ratchet", "new unknown check"):
+            with self.subTest(step=step), self.assertRaises(gate.Rejected):
+                self.authorize(FakeAPI(detail=run(conclusion="failure"),
+                                       job_list=self.advisory_jobs(step)), preview=True)
+        items = self.advisory_jobs()
+        items[1].update(conclusion="failure", steps=[
+            dict(name="Run tests", status="completed", conclusion="failure")])
+        with self.assertRaises(gate.Rejected):
+            self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+        items = self.advisory_jobs() + [dict(name="Security", status="completed", conclusion="failure")]
+        with self.assertRaises(gate.Rejected):
+            self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+
+    def test_preview_accepts_only_named_platform_and_cache_skips(self):
+        for name, optional in gate.PREVIEW_OPTIONAL_SKIPS.items():
+            with self.subTest(job=name):
+                items = jobs()
+                job = next(item for item in items if item["name"] == name)
+                advisory = sorted(gate.PREVIEW_ADVISORY_JOBS[name])[0]
+                job.update(conclusion="failure", steps=[
+                    dict(name=advisory, status="completed", conclusion="failure"),
+                    *[dict(name=step, status="completed", conclusion="skipped")
+                      for step in optional],
+                ])
+                self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+                with self.assertRaises(gate.Rejected):
+                    self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items))
+                for step in ("Run tests", "Run clippy with warnings denied", "unknown step"):
+                    job["steps"].append(dict(name=step, status="completed", conclusion="skipped"))
+                    with self.assertRaises(gate.Rejected):
+                        self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+                    job["steps"].pop()
+
+    def test_linux_security_cannot_be_skipped_after_advisory_failure(self):
+        items = jobs()
+        items[1].update(conclusion="failure", steps=[
+            dict(name="Enforce warning budget (Linux, macOS)", status="completed", conclusion="failure"),
+            dict(name="Security preflight (Linux)", status="completed", conclusion="skipped"),
+        ])
+        with self.assertRaises(gate.Rejected):
+            self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("name: Security preflight (Linux)\n        if: ${{ !cancelled() && runner.os == 'Linux' }}", workflow)
+
+    def test_preview_rejects_incomplete_or_malformed_step_evidence(self):
+        for evidence in (None, [], [None], [dict(name="Check formatting", status="completed",
+                                                conclusion="success")]):
+            items = self.advisory_jobs()
+            items[0]["steps"] = evidence
+            with self.subTest(evidence=evidence), self.assertRaises(gate.Rejected):
+                self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+        for state in ("skipped", "cancelled", "timed_out"):
+            items = self.advisory_jobs()
+            items[0]["steps"].append(dict(name="Run tests", status="completed", conclusion=state))
+            with self.subTest(state=state), self.assertRaises(gate.Rejected):
+                self.authorize(FakeAPI(detail=run(conclusion="failure"), job_list=items), preview=True)
+
+    def test_preview_preserves_run_identity_and_rerun_protection(self):
+        with self.assertRaisesRegex(gate.Rejected, "no failed-job evidence"):
+            self.authorize(FakeAPI(detail=run(conclusion="failure")), preview=True)
+        for changes in (dict(head_sha="b" * 40), dict(event="pull_request"),
+                        dict(conclusion="cancelled"), dict(conclusion="timed_out")):
+            with self.subTest(changes=changes), self.assertRaises(gate.Rejected):
+                self.authorize(FakeAPI(detail=run(**changes)), preview=True)
+        with self.assertRaises(gate.WaitExpired):
+            self.authorize(FakeAPI(confirmation=run(run_attempt=2)), preview=True)
+
+    def test_preview_cli_is_explicit_and_both_preview_gates_use_it(self):
+        with patch.object(gate, "authorize") as authorize:
+            self.assertEqual(gate.main([SHA, "--repo", REPO, "--preview"]), 0)
+            authorize.assert_called_once_with(REPO, SHA, 7200, 30, preview=True)
+        workflow = (ROOT / ".github/workflows/preview.yml").read_text()
+        self.assertIn('--timeout 10800 --preview', workflow)
+        publisher = (ROOT / "scripts/preview_release.py").read_text()
+        self.assertIn('authorize(repository, sha, timeout=0, preview=True)', publisher)
+        stable = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn('--preview', stable)
+
     def test_different_sha_branch_or_event_never_authorizes(self):
         for changes in (dict(head_sha="b" * 40), dict(head_branch="feature"), dict(event="pull_request")):
             with self.subTest(changes=changes), self.assertRaises(gate.WaitExpired):

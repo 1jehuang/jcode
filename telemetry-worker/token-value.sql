@@ -15,23 +15,33 @@
 --
 -- 2. `input_includes_cache_read` handles the provider split. OpenAI-compatible
 --    APIs report cached tokens as a SUBSET of prompt tokens, Anthropic reports
---    them as a disjoint bucket. Without this correction, OpenAI traffic gets
---    billed for its cached context twice, at ~10x the correct rate.
+--    them as a disjoint bucket. Without this correction, cached prompt
+--    tokens can be counted and valued twice in legacy estimates.
 --
 -- 3. These are list/rack rates. Most jcode users are on subscriptions
 --    (Claude Max, ChatGPT Pro, Copilot) or free routes, so read the result as
 --    "list-price equivalent value of tokens served", not revenue or COGS.
 --
--- 4. `unpriced_tokens` is reported next to every total. If coverage drops,
---    re-run the sync script rather than trusting the dollar figure.
+-- 4. Missing rates for used buckets make an entire row unpriced, contributing
+--    tokens but no dollars. No missing output/cache rates are guessed. Explicit
+--    zero rates are known prices. Refresh mappings and inspect coverage.
 
+-- Legacy session_end estimate only. Never add to authoritative model-usage.sql.
+-- Mixed-model sessions are attributed to the final model label.
 WITH priced AS (
     SELECT
         substr(e.created_at, 1, 10) AS day,
         e.created_at,
         e.model_end AS model,
         e.provider_end AS provider,
-        p.price_kind,
+        CASE WHEN p.price_kind IN ('catalog', 'free')
+          AND (CASE WHEN COALESCE(p.input_includes_cache_read, 0) = 1
+              THEN MAX(e.input_tokens - e.cache_read_input_tokens, 0)
+              ELSE e.input_tokens END = 0 OR p.input_usd_per_mtok IS NOT NULL)
+          AND (e.output_tokens = 0 OR p.output_usd_per_mtok IS NOT NULL)
+          AND (e.cache_read_input_tokens = 0 OR p.cache_read_usd_per_mtok IS NOT NULL)
+          AND (e.cache_creation_input_tokens = 0 OR p.cache_write_usd_per_mtok IS NOT NULL)
+          THEN p.price_kind ELSE 'unpriced' END AS price_kind,
         -- Correct the input bucket so cached tokens are never priced twice.
         CASE
             WHEN COALESCE(p.input_includes_cache_read, 0) = 1
@@ -48,7 +58,8 @@ WITH priced AS (
     FROM events e
     LEFT JOIN model_prices p ON p.model = e.model_end
     WHERE e.event = 'session_end'
-      AND e.created_at >= datetime('now', '-30 days')
+      AND e.created_at >= date('now', '-30 days')
+      AND datetime(e.created_at) >= datetime('now', '-30 days')
       AND e.is_ci = 0
 ), valued AS (
     SELECT
@@ -63,14 +74,14 @@ WITH priced AS (
         output_tokens,
         (billable_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens)
             AS total_tokens,
-        CASE WHEN input_usd_per_mtok IS NULL THEN
+        CASE WHEN price_kind = 'unpriced' THEN
             0.0
         ELSE
-            billable_input_tokens * input_usd_per_mtok / 1000000.0
+            billable_input_tokens * COALESCE(input_usd_per_mtok, 0) / 1000000.0
             + output_tokens * COALESCE(output_usd_per_mtok, 0) / 1000000.0
-            + cache_read_tokens * COALESCE(cache_read_usd_per_mtok, input_usd_per_mtok * 0.1)
+            + cache_read_tokens * COALESCE(cache_read_usd_per_mtok, 0)
                 / 1000000.0
-            + cache_write_tokens * COALESCE(cache_write_usd_per_mtok, input_usd_per_mtok * 1.25)
+            + cache_write_tokens * COALESCE(cache_write_usd_per_mtok, 0)
                 / 1000000.0
         END AS usd
     FROM priced
@@ -88,7 +99,7 @@ SELECT
     SUM(CASE WHEN price_kind IS NULL OR price_kind = 'unpriced' THEN total_tokens ELSE 0 END)
         AS unpriced_tokens,
     ROUND(
-        100.0 * SUM(CASE WHEN price_kind = 'catalog' THEN total_tokens ELSE 0 END)
+        100.0 * SUM(CASE WHEN price_kind IN ('catalog', 'free') THEN total_tokens ELSE 0 END)
             / NULLIF(SUM(total_tokens), 0),
         1
     ) AS priced_token_pct
@@ -114,7 +125,7 @@ SELECT
         AS unpriced_tokens,
     NULL AS priced_token_pct
 FROM valued
-WHERE created_at >= datetime('now', '-7 days')
+WHERE datetime(created_at) >= datetime('now', '-7 days')
 GROUP BY model, provider, price_kind
 
 UNION ALL
@@ -127,8 +138,8 @@ UNION ALL
 -- calendar-day form (`day >= date('now','-7 days')`) covers 8 partial days and
 -- overstates the run rate.
 --
--- projected_usd_per_month is 30x that mean and assumes flat usage. Volume has
--- been growing, so treat it as a floor rather than a forecast.
+-- projected_usd_per_month is 30x that mean and assumes flat usage, not a
+-- forecast or a guaranteed floor.
 SELECT
     'summary' AS panel,
     label AS bucket,
@@ -147,36 +158,36 @@ FROM (
         SUM(CASE WHEN price_kind IS NULL OR price_kind = 'unpriced' THEN total_tokens ELSE 0 END)
             AS unpriced_tokens,
         ROUND(
-            100.0 * SUM(CASE WHEN price_kind = 'catalog' THEN total_tokens ELSE 0 END)
+            100.0 * SUM(CASE WHEN price_kind IN ('catalog', 'free') THEN total_tokens ELSE 0 END)
                 / NULLIF(SUM(total_tokens), 0),
             1
         ) AS priced_token_pct
     FROM valued
     -- Rolling 24 hours, not `date('now','-1 days')`, which spans two partial
     -- calendar days and roughly doubles the figure.
-    WHERE created_at >= datetime('now', '-24 hours')
+    WHERE datetime(created_at) >= datetime('now', '-24 hours')
     UNION ALL
     SELECT
         'run_rate_usd_per_day_7d',
         ROUND(SUM(usd) / 7.0, 2),
-        SUM(total_tokens) / 7,
-        SUM(CASE WHEN price_kind IS NULL OR price_kind = 'unpriced' THEN total_tokens ELSE 0 END) / 7,
+        SUM(total_tokens) / 7.0,
+        SUM(CASE WHEN price_kind IS NULL OR price_kind = 'unpriced' THEN total_tokens ELSE 0 END) / 7.0,
         ROUND(
-            100.0 * SUM(CASE WHEN price_kind = 'catalog' THEN total_tokens ELSE 0 END)
+            100.0 * SUM(CASE WHEN price_kind IN ('catalog', 'free') THEN total_tokens ELSE 0 END)
                 / NULLIF(SUM(total_tokens), 0),
             1
         )
     FROM valued
-    WHERE created_at >= datetime('now', '-7 days')
+    WHERE datetime(created_at) >= datetime('now', '-7 days')
     UNION ALL
     SELECT
         'projected_usd_per_month_from_7d',
         ROUND(SUM(usd) / 7.0 * 30.0, 2),
-        SUM(total_tokens) / 7 * 30,
+        SUM(total_tokens) / 7.0 * 30,
         NULL,
         NULL
     FROM valued
-    WHERE created_at >= datetime('now', '-7 days')
+    WHERE datetime(created_at) >= datetime('now', '-7 days')
     UNION ALL
     SELECT
         'last_30d_total',
@@ -184,7 +195,7 @@ FROM (
         SUM(total_tokens),
         SUM(CASE WHEN price_kind IS NULL OR price_kind = 'unpriced' THEN total_tokens ELSE 0 END),
         ROUND(
-            100.0 * SUM(CASE WHEN price_kind = 'catalog' THEN total_tokens ELSE 0 END)
+            100.0 * SUM(CASE WHEN price_kind IN ('catalog', 'free') THEN total_tokens ELSE 0 END)
                 / NULLIF(SUM(total_tokens), 0),
             1
         )

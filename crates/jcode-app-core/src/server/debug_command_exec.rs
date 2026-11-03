@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 #[derive(Clone)]
 pub(super) struct DebugInterruptContext {
@@ -136,10 +136,11 @@ pub(super) async fn run_debug_message_with_timeout(
     timeout_secs: u64,
 ) -> Result<String> {
     let msg = msg.to_string();
-    let mut handle = tokio::spawn(async move {
+    let mut handle = crate::runtime_activity::spawn(async move {
         let mut agent = agent.lock().await;
         agent.run_once_capture(&msg).await
-    });
+    })
+    .ok_or_else(|| anyhow::anyhow!("Runtime is upgrading; debug message not accepted"))?;
 
     tokio::select! {
         join_result = &mut handle => {
@@ -858,6 +859,18 @@ mod tests {
         let _env_lock = lock_env();
         let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
         let _debug_control = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+
+        let repo = tempfile::tempdir().expect("repo fixture");
+        std::fs::create_dir(repo.path().join(".git")).expect("git marker");
+        std::fs::write(
+            repo.path().join("Cargo.toml"),
+            "[package]\nname = \"jcode\"\n",
+        )
+        .expect("manifest");
+        let _repo = EnvGuard::set(
+            "JCODE_REPO_DIR",
+            repo.path().to_str().expect("UTF-8 fixture"),
+        );
 
         let mut reload_rx = crate::server::subscribe_reload_signal_for_tests();
 

@@ -596,3 +596,14 @@ fn disabled_config_wins_over_install_and_migrate() {
         MacHotkeyAction::Install
     );
 }
+
+#[test]
+fn onboarding_start_choice_shown_defaults_false_and_round_trips() {
+    let legacy: SetupHintsState = serde_json::from_str(r#"{"launch_count":2}"#).unwrap();
+    assert!(!legacy.onboarding_start_choice_shown);
+    let mut state = SetupHintsState::default();
+    state.onboarding_start_choice_shown = true;
+    let json = serde_json::to_string(&state).unwrap();
+    let back: SetupHintsState = serde_json::from_str(&json).unwrap();
+    assert!(back.onboarding_start_choice_shown);
+}

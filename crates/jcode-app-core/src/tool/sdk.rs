@@ -27,6 +27,16 @@ pub(crate) struct ConnectionGuard(pub String);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
+        // Unlike general SDK restrictions, this temporary bridge has no
+        // built-in override to protect after disconnect. Keeping it would
+        // permanently block reload if its grant expires before reconnect.
+        state.overlays.retain(|_, overlay| {
+            !(overlay.owner == self.0
+                && overlay.config.enabled.is_none()
+                && overlay.config.disabled.is_empty()
+                && overlay.config.custom.len() == 1
+                && overlay.config.custom[0].name == "cloud_environment")
+        });
         for overlay in state.overlays.values_mut().filter(|o| o.owner == self.0) {
             // Retain definitions and denies, but never fall back to a built-in override.
             overlay.sender = None;
@@ -86,6 +96,19 @@ pub(crate) fn configure(
         anyhow::ensure!(valid_name(name), "Invalid tool name: {name}");
     }
     let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
+    if config.enabled.is_none() && config.disabled.is_empty() && config.custom.is_empty() {
+        if let Some(previous) = state.overlays.get(session) {
+            anyhow::ensure!(
+                previous.owner == owner,
+                "Session tools are owned by another client"
+            );
+            state.overlays.remove(session);
+            state
+                .pending
+                .retain(|_, pending| pending.session != session);
+        }
+        return Ok(());
+    }
     if let Some(previous) = state.overlays.get(session) {
         anyhow::ensure!(
             previous.owner == owner || previous.sender.is_none(),
@@ -114,6 +137,13 @@ pub(crate) fn config(session: &str) -> Option<SessionToolConfig> {
         .overlays
         .get(session)
         .map(|o| o.config.clone())
+}
+
+/// These owner-scoped callbacks and tool restrictions are intentionally not
+/// persisted. An automatic upgrade must not silently discard or broaden them.
+pub(crate) fn has_runtime_overlays() -> bool {
+    let state = STATE.read().unwrap_or_else(|e| e.into_inner());
+    !state.overlays.is_empty() || !state.pending.is_empty()
 }
 
 pub(crate) fn custom(session: &str, name: &str) -> bool {
@@ -270,6 +300,86 @@ impl Tool for CallbackTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disconnect_removes_only_temporary_cloud_overlay() {
+        let (tx, _) = mpsc::unbounded_channel();
+        configure(
+            "sdk-cloud-disconnect-test",
+            "cloud-disconnect-owner",
+            SessionToolConfig {
+                custom: vec![SessionToolDefinition {
+                    name: "cloud_environment".into(),
+                    description: "temporary".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+        configure(
+            "sdk-other-disconnect-test",
+            "cloud-disconnect-owner",
+            SessionToolConfig {
+                disabled: vec!["bash".into()],
+                ..Default::default()
+            },
+            tx,
+        )
+        .unwrap();
+        drop(ConnectionGuard("cloud-disconnect-owner".into()));
+        assert!(config("sdk-cloud-disconnect-test").is_none());
+        assert!(config("sdk-other-disconnect-test").is_some());
+        remove_session("sdk-other-disconnect-test");
+    }
+    #[tokio::test]
+    async fn owner_clear_cancels_pending_callbacks() {
+        let session = "sdk-clear-busy-test";
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        configure(
+            session,
+            "clear-owner",
+            SessionToolConfig {
+                custom: vec![SessionToolDefinition {
+                    name: "callback".into(),
+                    description: "test".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+        let task = tokio::spawn(execute(session, "callback", Value::Null));
+        let ServerEvent::ToolCall { call_id, .. } = rx.recv().await.unwrap() else {
+            unreachable!()
+        };
+        configure(session, "clear-owner", SessionToolConfig::default(), tx).unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert!(config(session).is_none());
+        assert!(complete("clear-owner", session, &call_id, "late".into(), None).is_err());
+    }
+    #[test]
+    fn empty_config_only_clears_same_owner() {
+        let session = "sdk-clear-owner-test";
+        let (tx, _) = mpsc::unbounded_channel();
+        configure(
+            session,
+            "owner",
+            SessionToolConfig {
+                disabled: vec!["bash".into()],
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+        assert!(configure(session, "other", SessionToolConfig::default(), tx.clone()).is_err());
+        drop(ConnectionGuard("owner".into()));
+        assert!(configure(session, "other", SessionToolConfig::default(), tx.clone()).is_err());
+        assert!(config(session).is_some());
+        configure(session, "owner", SessionToolConfig::default(), tx).unwrap();
+        assert!(config(session).is_none());
+    }
     #[tokio::test]
     async fn sdk_callback_timeout_removes_pending() {
         let session = "sdk-timeout-test";

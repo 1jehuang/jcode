@@ -1,6 +1,7 @@
 use crate::bus::FileOp;
 use crate::plan::VersionedPlan;
 use crate::protocol::ServerEvent;
+use crate::provider::Provider;
 use jcode_agent_runtime::{
     InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
 };
@@ -8,7 +9,7 @@ use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord, SwarmRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 
@@ -30,6 +31,13 @@ use tokio::sync::{RwLock, mpsc};
 static BACKGROUND_TOOL_SIGNALS: LazyLock<StdMutex<HashMap<String, InterruptSignal>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+// The Agent keeps its provider Arc stable across model/account/route changes.
+// Key by session rather than connection so a busy reattachment cannot accidentally
+// configure the connection's provisional provider. Only weak references: a
+// registered control must not keep an idle session alive.
+static SESSION_PROVIDERS: LazyLock<StdMutex<HashMap<String, Weak<dyn Provider>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
 /// Register (or replace) the background-tool signal for a session.
 pub(super) fn register_background_tool_signal(session_id: &str, signal: InterruptSignal) {
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
@@ -45,10 +53,15 @@ pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<Int
         .and_then(|map| map.get(session_id).cloned())
 }
 
-/// Move a session's background-tool signal registration to a new session id.
+/// Move a session's out-of-band control registrations to a new session id.
 pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id: &str) {
     if old_session_id == new_session_id {
         return;
+    }
+    if let Ok(mut map) = SESSION_PROVIDERS.lock()
+        && let Some(provider) = map.remove(old_session_id)
+    {
+        map.insert(new_session_id.to_string(), provider);
     }
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock()
         && let Some(signal) = map.remove(old_session_id)
@@ -57,8 +70,11 @@ pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id
     }
 }
 
-/// Drop a session's background-tool signal registration.
+/// Drop a session's out-of-band control registrations.
 pub(super) fn remove_background_tool_signal(session_id: &str) {
+    if let Ok(mut map) = SESSION_PROVIDERS.lock() {
+        map.remove(session_id);
+    }
     if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
         map.remove(session_id);
     }
@@ -212,7 +228,7 @@ pub struct SwarmMember {
     pub friendly_name: Option<String>,
     /// Session that should receive direct completion report-back for this member, if any.
     pub report_back_to_session_id: Option<String>,
-    /// Latest explicit completion report submitted by this member.
+    /// Latest automatically captured output tail (or a legacy explicit report).
     pub latest_completion_report: Option<String>,
     /// Role: "agent" or "coordinator"
     pub role: String,
@@ -398,6 +414,7 @@ pub(super) async fn fanout_session_event(
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
+    super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {
@@ -479,33 +496,87 @@ pub(super) async fn fanout_peer_client_event(
     delivered
 }
 
-pub(super) fn session_event_fanout_sender(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
-        }
-    });
-    tx
+/// Owns one turn's event queue. Closing or aborting the producer drains all
+/// accepted events before releasing the runtime's publication reservation.
+pub(super) struct TurnEventChannel {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
-pub(super) fn session_event_fanout_sender_with_fallback(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    fallback_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0 {
-                let _ = fallback_tx.send(event);
+impl TurnEventChannel {
+    pub(super) fn new(
+        session_id: String,
+        members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+        fallback: mpsc::UnboundedSender<ServerEvent>,
+        lease: &crate::agent::TurnLease,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (close, mut closed) = tokio::sync::oneshot::channel();
+        let publication = lease.publication_pin();
+        let identity = lease.identity().clone();
+        let task = tokio::spawn(async move {
+            let _publication = publication;
+            let started = ServerEvent::TurnStarted {
+                identity: identity.clone(),
+            };
+            if fanout_session_event(&members, &session_id, started.clone()).await == 0 {
+                let _ = fallback.send(started);
             }
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = &mut closed => { rx.close(); break; }
+                    event = rx.recv() => event,
+                };
+                let Some(event) = event else {
+                    return;
+                };
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                    let _ = fallback.send(event);
+                }
+            }
+            while let Some(event) = rx.recv().await {
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                    let _ = fallback.send(event);
+                }
+            }
+        });
+        Self {
+            tx,
+            close: Some(close),
+            task: Some(task),
         }
-    });
-    tx
+    }
+
+    pub(super) fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    pub(super) async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Turn event drain failed: {error}"));
+        }
+    }
+}
+
+impl Drop for TurnEventChannel {
+    fn drop(&mut self) {
+        // Dropping JoinHandle detaches the drain task. It must not be aborted:
+        // already queued events still own the runtime publication reservation.
+        self.close.take();
+    }
 }
 
 pub(super) fn enqueue_soft_interrupt(
@@ -571,6 +642,27 @@ pub struct SessionControlHandle {
 }
 
 impl SessionControlHandle {
+    /// The provider uses interior synchronization for request configuration.
+    /// Never use this to mutate conversation state or an already-sent request.
+    pub fn with_provider(self, provider: Arc<dyn Provider>) -> Self {
+        if let Ok(mut map) = SESSION_PROVIDERS.lock() {
+            map.retain(|_, provider| provider.strong_count() > 0);
+            map.insert(self.session_id.clone(), Arc::downgrade(&provider));
+        }
+        self
+    }
+
+    pub fn provider_handle(&self) -> Option<Arc<dyn Provider>> {
+        SESSION_PROVIDERS
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                crate::logging::warn("Recovering poisoned session provider registry");
+                poisoned.into_inner()
+            })
+            .get(&self.session_id)?
+            .upgrade()
+    }
+
     pub fn new(
         session_id: impl Into<String>,
         soft_interrupt_queue: SoftInterruptQueue,

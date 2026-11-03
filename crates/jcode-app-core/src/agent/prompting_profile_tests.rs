@@ -45,7 +45,9 @@ async fn fresh_worker_prompt_provenance_follows_global_symlinks_without_selectin
     write(cwd.join("AGENTS.md"), "LOCAL_AGENTS_78192");
     std::os::unix::fs::symlink(
         &external_base,
-        crate::storage::jcode_dir().unwrap().join("system-prompt.md"),
+        crate::storage::jcode_dir()
+            .unwrap()
+            .join("system-prompt.md"),
     )
     .unwrap();
     std::os::unix::fs::symlink(

@@ -130,7 +130,7 @@ fn test_render_swarm_await_as_compact_rail_free_summary() {
 fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     crate::tui::markdown::set_center_code_blocks(false);
     let msg = DisplayMessage::background_task(
-        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nCompletion reports:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
+        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nRecent outputs:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
             .to_string(),
     );
 

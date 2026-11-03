@@ -67,7 +67,7 @@ pub(super) async fn handle_login_completed_event(
         app.set_status_notice("Local login does not change SSH server credentials");
         return true;
     }
-    let success = login.success && login.provider != "copilot_code";
+    let success = login.success && auth_muse_helpers::is_completed_login(&login);
     let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
     let auth = auth_changed_event_for_login_provider(&login.provider);
     let prefer_strongest = success && app.onboarding_should_prefer_strongest_model();

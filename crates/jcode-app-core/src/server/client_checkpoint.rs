@@ -78,6 +78,7 @@ pub(super) struct RestoreContext<'a> {
     pub server_name: &'a str,
     pub server_icon: &'a str,
     pub pdf_panels: bool,
+    pub turn_identity: bool,
     pub members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub plans: &'a Arc<RwLock<HashMap<String, VersionedPlan>>>,
     pub events: &'a mpsc::UnboundedSender<ServerEvent>,
@@ -109,6 +110,8 @@ impl RestoreContext<'_> {
             self.server_icon,
             None,
             self.pdf_panels,
+            self.turn_identity,
+            None,
         )
         .await
     }

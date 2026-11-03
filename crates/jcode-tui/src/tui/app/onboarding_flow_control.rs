@@ -175,7 +175,8 @@ impl App {
         let Ok(dir) = crate::storage::jcode_dir() else {
             return true;
         };
-        if crate::setup_hints::SetupHintsState::load().launch_count > 5 {
+        let hints = crate::setup_hints::SetupHintsState::load();
+        if hints.onboarding_start_choice_shown || hints.launch_count > 5 {
             return false;
         }
         !Self::has_established_native_session_history(&dir)
@@ -573,21 +574,39 @@ impl App {
             let Some(review) = self.onboarding_import_review_mut() else {
                 return false;
             };
-            if let Some(level) = review.telemetry {
-                // Telemetry settings sub-page: three stacked options, most
-                // sharing first. Up/Down move, Enter commits and returns,
-                // Esc returns without changing anything.
+            if let Some(settings) = review.telemetry.as_mut() {
+                // Telemetry settings sub-page: Continue button on top
+                // (focused), then one checkbox per category. Up/Down move,
+                // Space/Enter toggle a row, Enter on Continue saves and
+                // returns, a/n set all on/off, Esc returns unchanged.
                 match code {
-                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                        review.telemetry_step(false)
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => settings.step(false),
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => settings.step(true),
+                    KeyCode::Char('a') | KeyCode::Char('A') => settings.set_all(true),
+                    KeyCode::Char('n') | KeyCode::Char('N') => settings.set_all(false),
+                    // Left = Yes, Right = No on a category row, like the
+                    // "Import less" page.
+                    KeyCode::Left
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('y')
+                    | KeyCode::Char('Y')
+                        if settings.cursor > 0 =>
+                    {
+                        settings.checked[settings.cursor - 1] = true
                     }
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                        review.telemetry_step(true)
+                    KeyCode::Right | KeyCode::Char('l') if settings.cursor > 0 => {
+                        settings.checked[settings.cursor - 1] = false
                     }
-                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => review.close_telemetry(),
+                    KeyCode::Esc => review.close_telemetry(),
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        telemetry_choice = Some(level);
-                        review.close_telemetry();
+                        if !settings.toggle() {
+                            telemetry_choice = Some(*settings);
+                            review.close_telemetry();
+                            // Saving returns focus to Continue so the next
+                            // Enter moves onboarding forward.
+                            review.summary_pill = SummaryPill::Continue;
+                            review.continue_focused = true;
+                        }
                     }
                     _ => return false,
                 }
@@ -651,7 +670,7 @@ impl App {
                 self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
             } else {
                 level.persist();
-                self.set_status_notice(level.status_label().to_string());
+                self.set_status_notice(level.status_label());
             }
             return true;
         }
@@ -807,7 +826,7 @@ impl App {
             let secs = review.seconds_remaining();
             let notice = if !review.choosing {
                 if review.telemetry.is_some() {
-                    "Telemetry settings - arrows move, Enter chooses, Esc goes back".to_string()
+                    "Telemetry settings - arrows move, Space toggles, Enter on Continue saves, Esc goes back".to_string()
                 } else {
                     format!(
                         "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
@@ -942,7 +961,26 @@ impl App {
             shown_at: Instant::now(),
         });
         self.onboarding_prefetch_recent_project();
-        self.set_status_notice("Press any key to switch, Enter to choose");
+        self.onboarding_mark_start_choice_shown();
+        self.set_status_notice("Press any key to switch, Enter or Space to choose");
+    }
+
+    /// Persist that the first-run start choice was shown so it never appears
+    /// again. Rehearsals and previews don't count as a real first run.
+    fn onboarding_mark_start_choice_shown(&self) {
+        if self.onboarding_sim_active() || self.onboarding_preview_mode {
+            return;
+        }
+        let mut hints = crate::setup_hints::SetupHintsState::load();
+        if hints.onboarding_start_choice_shown {
+            return;
+        }
+        hints.onboarding_start_choice_shown = true;
+        if let Err(err) = hints.save() {
+            crate::logging::error(&format!(
+                "Failed to persist onboarding start choice marker: {err}"
+            ));
+        }
     }
 
     /// Formatted copy shown above the two first-run actions.
@@ -1311,15 +1349,29 @@ impl App {
     async fn onboarding_run_model_validation(
         provider: std::sync::Arc<dyn crate::provider::Provider>,
     ) -> anyhow::Result<()> {
-        let reply = tokio::time::timeout(
+        let (reply, usage) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            provider.complete_simple(
+            provider.complete_simple_with_usage(
                 "Reply with exactly: OK",
                 "You are validating connectivity. Reply with exactly: OK",
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("timed out after 30s"))??;
+        .map_err(|_| anyhow::anyhow!("timed out after 30s"))?
+        .inspect_err(|error| {
+            crate::telemetry::record_simple_completion_failure_usage(
+                None,
+                crate::telemetry::UsageSource::Sidecar,
+                error,
+            );
+        })?;
+        crate::telemetry::record_simple_completion_usage(
+            None,
+            provider.name(),
+            &provider.model(),
+            crate::telemetry::UsageSource::Sidecar,
+            usage,
+        );
         if reply.trim().is_empty() {
             anyhow::bail!("empty response");
         }

@@ -6,8 +6,12 @@ fn report_reload_interaction_gap() {
         return;
     };
     crate::env::remove_var("JCODE_RELOAD_GAP_STARTED_MS");
-    let Some(started_ms) = started.parse::<u128>().ok() else {
-        return;
+    let started_ms = match started.parse::<u128>() {
+        Ok(started) => started,
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid reload interaction timestamp: {error}"));
+            return;
+        }
     };
     let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
         return;
@@ -30,6 +34,8 @@ const STATUS_SPINNER_FPS: f32 = 12.5;
 /// construction, so this mostly costs nothing; it is capped so a pathological
 /// repo never delays first paint noticeably.
 const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
+/// Tick cadence while the reload fast-start transcript is still rendering.
+const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -39,6 +45,26 @@ pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     // redundant full renders and can lock the UI into a slow-frame loop.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval
+}
+
+pub(crate) fn refresh_preview_redraw_timer(
+    state: &dyn TuiState,
+    period: &mut Duration,
+    interval: &mut tokio::time::Interval,
+) {
+    let pending = state.client_focused()
+        && state.session_picker_overlay().is_some_and(|picker| {
+            picker
+                .try_borrow()
+                .is_ok_and(|picker| picker.has_pending_preview_work())
+        });
+    if pending {
+        let desired = crate::tui::redraw_interval(state);
+        if desired < *period {
+            *period = desired;
+            *interval = redraw_timer(desired);
+        }
+    }
 }
 
 pub(super) fn status_spinner_interval() -> tokio::time::Interval {
@@ -475,6 +501,7 @@ impl StatusSpinnerRenderer {
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
         app.poll_oauth_account_telemetry();
+        app.enter_idle_hibernation(self.last_frame.as_ref());
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -539,6 +566,7 @@ impl StatusSpinnerRenderer {
             crate::tui::ui::note_idle_animation_full_repaint();
         }
         self.last_frame = Some(completed_buffer);
+        app.finish_idle_hibernation_frame();
         self.last_full_frame_at = Some(Instant::now());
         // A full frame rewrote the whole surface, so ratatui's working buffer no
         // longer matches `last_frame` outside the animated rows. Force the next
@@ -663,7 +691,11 @@ impl App {
 
         loop {
             self.sync_sleep_guard();
-            let desired_redraw = crate::tui::redraw_interval(&self);
+            let desired_redraw = if self.cloud_job.is_some() {
+                Duration::from_millis(100)
+            } else {
+                crate::tui::redraw_interval(&self)
+            };
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
                 redraw_interval = redraw_timer(redraw_period);
@@ -692,6 +724,11 @@ impl App {
                 }
             }
 
+            // Rendering can start a cold preview load. The cadence above was
+            // computed before that receiver existed, so do not wait an entire
+            // idle/spinner tick before noticing the new asynchronous work.
+            refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
+
             if self.should_quit {
                 break;
             }
@@ -711,7 +748,7 @@ impl App {
                 self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
                     .await;
                 needs_redraw = true;
-            } else if self.pending_queued_dispatch {
+            } else if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                 self.pending_queued_dispatch = false;
                 self.process_queued_messages(&mut terminal, &mut event_stream)
                     .await;
@@ -777,6 +814,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            hibernate_session: self.hibernate_exit_requested.take(),
             cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
@@ -894,7 +932,20 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
-                let desired_redraw = crate::tui::redraw_interval(&self);
+                // The reload fast-start transcript is rendered off-thread. Show
+                // it as soon as it is ready instead of on the next tick: during
+                // remote startup ticks are 1s apart, which held a ready
+                // transcript back 0.5-0.7s until server History landed anyway.
+                needs_redraw |= self.poll_pending_startup_transcript();
+                let desired_redraw = if self.pending_startup_transcript.is_some() {
+                    // Nothing wakes the loop when the transcript thread
+                    // finishes, so poll briefly until it does (~tens of ms).
+                    STARTUP_TRANSCRIPT_POLL
+                } else if self.cloud_job.is_some() {
+                    Duration::from_millis(100)
+                } else {
+                    crate::tui::redraw_interval(&self)
+                };
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
                     redraw_interval = redraw_timer(redraw_period);
@@ -938,11 +989,13 @@ impl App {
                     // pending update is coalesced into the next allowed frame.
                 }
 
+                refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
+
                 if self.should_quit {
                     break 'outer;
                 }
 
-                if self.pending_queued_dispatch {
+                if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                     self.pending_queued_dispatch = false;
                     remote::process_remote_followups(&mut self, &mut remote_conn).await;
                     needs_redraw = true;
@@ -1023,6 +1076,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            hibernate_session: self.hibernate_exit_requested.take(),
             cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {

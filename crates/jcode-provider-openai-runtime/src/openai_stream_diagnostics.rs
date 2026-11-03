@@ -7,7 +7,32 @@
 //! coarse per-stream progress counters for lifecycle logs.
 
 use jcode_message_types::StreamEvent;
+use serde_json::Value;
 use std::time::Instant;
+
+/// Keep explicit options intact. OAuth compatibility is not established, so
+/// never add an option there. A comparison is diagnostic, not conversation state.
+pub(super) fn add_cache_comparison(request: &mut Value, chatgpt: bool, baseline: &str) {
+    if chatgpt || baseline.is_empty() {
+        return;
+    }
+    let model = request["model"].as_str().unwrap_or("");
+    let canonical = jcode_provider_core::model_id::canonical(model);
+    if !jcode_base::provider::openai::uses_prompt_cache_options(&canonical) {
+        return;
+    }
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    let options = object
+        .entry("prompt_cache_options")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(options) = options.as_object_mut() {
+        options
+            .entry("comparison_response_id")
+            .or_insert_with(|| Value::String(baseline.to_owned()));
+    }
+}
 
 /// Model output (text, reasoning, tool calls), as opposed to status events.
 fn is_output_event(event: &StreamEvent) -> bool {
@@ -42,7 +67,7 @@ const MAX_HEADER_VALUE_LEN: usize = 128;
 pub(super) fn response_header_fields(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<(&'static str, String)> {
-    DIAGNOSTIC_HEADERS
+    let mut fields: Vec<_> = DIAGNOSTIC_HEADERS
         .iter()
         .filter_map(|(header, field)| {
             let value = lookup(header)?;
@@ -53,7 +78,15 @@ pub(super) fn response_header_fields(
                 .collect();
             (!value.is_empty()).then_some((*field, value))
         })
-        .collect()
+        .collect();
+    // This is an opaque routing token, not a correlation ID. Observe only its
+    // presence until turn-scoped replay semantics can be implemented safely.
+    // Contract: openai/codex da20788df913189878ebca7f4963d8a363ee6bf2,
+    // codex-rs/core/src/client.rs, ModelClientSession::turn_state.
+    if lookup("x-codex-turn-state").is_some() {
+        fields.push(("codex_turn_state_present", "true".to_owned()));
+    }
+    fields
 }
 
 pub(super) fn reqwest_header_fields(
@@ -141,6 +174,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_comparison_is_api_modern_model_only_and_preserves_options() {
+        for (model, supported) in [
+            ("gpt-5.6-sol", true),
+            ("gpt-6-astra", true),
+            ("gpt-6.1-sol", true),
+            ("gpt-5.5", false),
+            ("gpt-4.1", false),
+            ("other", false),
+        ] {
+            for chatgpt in [false, true] {
+                let mut request = serde_json::json!({"model":model, "prompt_cache_key":"stable"});
+                add_cache_comparison(&mut request, chatgpt, "resp_before");
+                assert_eq!(
+                    request.get("prompt_cache_options").is_some(),
+                    supported && !chatgpt,
+                    "{model} chatgpt={chatgpt}"
+                );
+                assert_eq!(request["prompt_cache_key"], "stable");
+            }
+        }
+        let mut request = serde_json::json!({"model":"gpt-6-astra", "prompt_cache_options":{"mode":"implicit", "comparison_response_id":"explicit"}});
+        let before = request.clone();
+        add_cache_comparison(&mut request, false, "resp_before");
+        assert_eq!(request, before);
+        request["prompt_cache_options"]
+            .as_object_mut()
+            .unwrap()
+            .remove("comparison_response_id");
+        add_cache_comparison(&mut request, false, "resp_before");
+        assert_eq!(request["prompt_cache_options"]["mode"], "implicit");
+        assert_eq!(
+            request["prompt_cache_options"]["comparison_response_id"],
+            "resp_before"
+        );
+        let mut first = serde_json::json!({"model":"gpt-6-astra"});
+        add_cache_comparison(&mut first, false, "");
+        assert!(first.get("prompt_cache_options").is_none());
+    }
+
+    #[test]
     fn header_fields_are_allowlisted_and_sanitized() {
         let fields = response_header_fields(|name| match name {
             "x-request-id" => Some("req_123\r\nInjected: yes".to_string()),
@@ -164,6 +237,14 @@ mod tests {
         let fields =
             response_header_fields(|name| (name == "x-request-id").then(|| "a".repeat(10_000)));
         assert_eq!(fields[0].1.len(), MAX_HEADER_VALUE_LEN);
+    }
+
+    #[test]
+    fn turn_state_header_value_is_never_logged() {
+        let fields = response_header_fields(|name| {
+            (name == "x-codex-turn-state").then(|| "opaque secret routing state".to_owned())
+        });
+        assert_eq!(fields, vec![("codex_turn_state_present", "true".into())]);
     }
 
     #[test]

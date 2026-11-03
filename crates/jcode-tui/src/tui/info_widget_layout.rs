@@ -703,7 +703,6 @@ fn overview_renders(kind: WidgetKind) -> bool {
     matches!(
         kind,
         WidgetKind::ModelInfo
-            | WidgetKind::Todos
             | WidgetKind::BackgroundTasks
             | WidgetKind::UsageLimits
             | WidgetKind::KvCache

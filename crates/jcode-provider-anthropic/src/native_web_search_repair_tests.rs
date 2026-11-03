@@ -134,3 +134,39 @@ fn matched_server_tool_pair_is_replayed_unchanged() {
     assert_eq!(first["content"][1]["tool_use_id"], "srvtoolu_valid");
     assert_eq!(first["content"][1]["content"], json!([]));
 }
+
+#[test]
+fn invalid_encrypted_content_error_downgrades_replayed_search_to_text() {
+    let err = r#"Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `encrypted_content` in `search_result` block"}}"#;
+    assert!(is_invalid_native_replay_error(err));
+    assert!(!is_invalid_native_replay_error(
+        "400 Bad Request: prompt is too long"
+    ));
+
+    let mut messages = vec![ApiMessage {
+        role: "assistant".to_string(),
+        content: vec![
+            ApiContentBlock::Raw(json!({
+                "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                "input": {"query": "desks"}
+            })),
+            ApiContentBlock::Raw(json!({
+                "type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                "content": [{"type": "web_search_result", "url": "https://a.example",
+                             "title": "A", "encrypted_content": "bad"}]
+            })),
+            ApiContentBlock::Text {
+                text: "answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    }];
+    assert!(downgrade_native_replay(&mut messages));
+    let json = serde_json::to_string(&messages).unwrap();
+    assert!(!json.contains("encrypted_content"), "{json}");
+    assert!(
+        json.contains("https://a.example") && json.contains("desks"),
+        "{json}"
+    );
+    assert!(!downgrade_native_replay(&mut messages));
+}

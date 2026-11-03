@@ -4,8 +4,22 @@
 
 - Jcode Desktop is in a separate repository.
 
+## TUI style
+
+- UI chrome must not wrap: startup headers, account rows, status labels, and
+  other compact UI rows should fit their available terminal-cell width or
+  truncate with an ellipsis. Count Unicode display cells, not characters.
+  Preserve one logical row per visual row, including at narrow widths.
+  Chat prose and other intentionally multiline content may wrap normally.
+- Reuse the info widget's limit-bar renderer for usage indicators instead of
+  introducing a different bar glyph, color, or used/remaining convention.
+
 ## Development Workflow
 
+- **Commit and push as you go** - Make small, scoped commits and push them to
+  the current branch's remote as meaningful work is completed, rather than
+  waiting until the end of the task. Preserve unrelated changes and never
+  force-push unless the user explicitly authorizes it.
 - **Use the user's Git identity** - Create commits with the configured
   `user.name` and `user.email`. Do not override them with `Jcode`, `Jcode agent`,
   or a fabricated agent email. Preserve existing contributor attribution when
@@ -24,6 +38,22 @@
   When the user asks you to review or integrate a PR or branch, you may inspect,
   test, and integrate that contribution regardless of author status. Do not pull
   in unrelated branches or merge a PR without user authorization.
+
+## Provider model discovery
+
+- Model arrays are offline fallbacks, not release allowlists. Providers with a
+  catalog must discover new model IDs without a Jcode release and expose them
+  through switching lists and structured model routes.
+- Implement both cached prefetch and explicit refresh. Explicit refresh must
+  bypass fresh caches. Preserve the last good catalog on network, authentication,
+  or malformed-response failures, and scope persistent caches to their endpoint.
+- Wire new providers into the shared refresh fanout and model-update publication,
+  including long-lived sessions, not only startup or login.
+- Regression tests must discover an arbitrary future model absent from all
+  fallback arrays, using the provider's actual response schema. Check picker
+  routes, forced refresh with a fresh cache, and last-good behavior on failure.
+- If a backend has no discovery API, document that limitation instead of
+  presenting a hardcoded list or a no-op refresh as live discovery.
 
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.

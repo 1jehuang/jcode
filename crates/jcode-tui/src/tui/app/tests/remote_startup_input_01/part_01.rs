@@ -16,6 +16,9 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "Keep going".to_string(),
@@ -26,6 +29,9 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -599,6 +605,47 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
 }
 
 #[test]
+fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
+    with_temp_jcode_home(|| {
+        let session_id = "session_remote_restore_swarm_delivery";
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        let body = "Detailed implementation report. ".repeat(40);
+        session.append_stored_message(crate::session::StoredMessage {
+            id: "msg_restored_dm".to_string(),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: format!("DM from hatchling: {body}"),
+                cache_control: None,
+            }],
+            display_role: Some(crate::session::StoredDisplayRole::System),
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save_prepared().expect("save persisted DM");
+
+        let _env_guard = EnvRestoreGuard::capture(["JCODE_RELOAD_FAST_START"]);
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+        let loaded = crate::session::Session::load_for_remote_startup(session_id)
+            .expect("load persisted DM");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(crate::session::render_messages(&loaded).len(), 1);
+        let app = App::new_for_remote_with_options(Some(session_id.to_string()), false);
+        let message = app.display_messages().first().expect("restored DM");
+        assert_eq!(message.role, "swarm");
+        assert_eq!(message.title.as_deref(), Some("DM from hatchling"));
+        assert_eq!(
+            crate::tui::app::remote_notifications::swarm_display_full_body(&message.content),
+            body.trim()
+        );
+        let lines =
+            crate::tui::ui::render_swarm_message(message, 100, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1, "restored DM must stay collapsed");
+    });
+}
+
+#[test]
 fn test_restore_session_restores_local_judge_processing_state() {
     with_temp_jcode_home(|| {
         let session_id = "session_local_judge_child";
@@ -811,6 +858,34 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
 }
 
 #[test]
+fn test_catalog_snapshot_invalidates_service_tiers_only_when_identity_changes() {
+    for (provider, model, should_clear) in [
+        ("openai", "gpt-6-astra", false),
+        ("openai", "gpt-6.1-sol", true),
+        ("jcode", "gpt-6-astra", true),
+    ] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-6-astra".into());
+        app.remote_available_service_tiers = Some(vec!["priority".into()]);
+
+        app.replace_remote_model_catalog_snapshot(jcode_provider_core::ModelCatalogSnapshot::new(
+            Some(provider.into()),
+            Some(model.into()),
+            vec![],
+            vec![],
+        ));
+
+        assert_eq!(
+            app.remote_available_service_tiers.is_none(),
+            should_clear,
+            "provider={provider}, model={model}"
+        );
+    }
+}
+
+#[test]
 fn test_duplicate_available_models_updated_event_is_a_no_op() {
     // Temp home: handling the event persists the remote catalog cache, which
     // must not leak into other tests that hydrate from a shared test home.
@@ -966,6 +1041,7 @@ fn test_remote_model_switch_failure_shows_actionable_guidance() {
             provider_name: Some("Copilot".to_string()),
             error: Some("credentials expired".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -1090,6 +1166,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
             provider_name: Some("Chutes".to_string()),
             error: Some("model switch failed".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -1133,61 +1210,4 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
     });
 }
 
-/// A names-only catalog (what the server sends when the fully-routed frame is
-/// oversized) leaves placeholder routes in place. The detailed catalog that
-/// follows carries the same model names, so the no-op fast path must still
-/// recognize it as a change and let the real routes land.
-#[test]
-fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-
-        app.is_remote = true;
-        app.remote_provider_name = Some("Copilot".to_string());
-
-        // Names-only frame: same model list, no route expansion.
-        app.handle_server_event(
-            crate::protocol::ServerEvent::AvailableModelsUpdated {
-                provider_name: Some("Copilot".to_string()),
-                provider_model: Some("claude-opus-4.6".to_string()),
-                available_models: vec!["claude-opus-4.6".to_string()],
-                available_model_routes: Vec::new(),
-            },
-            &mut remote,
-        );
-
-        // Detailed frame with identical model names but real routes.
-        let detailed_redraw = app.handle_server_event(
-            crate::protocol::ServerEvent::AvailableModelsUpdated {
-                provider_name: Some("Copilot".to_string()),
-                provider_model: Some("claude-opus-4.6".to_string()),
-                available_models: vec!["claude-opus-4.6".to_string()],
-                available_model_routes: vec![crate::provider::ModelRoute {
-                    catalog_metadata: None,
-                    model: "claude-opus-4.6".to_string(),
-                    provider: "Copilot".to_string(),
-                    api_method: "copilot".to_string(),
-                    available: true,
-                    detail: String::new(),
-                    usage: None,
-                    cheapness: None,
-                }],
-            },
-            &mut remote,
-        );
-
-        assert!(
-            detailed_redraw,
-            "detailed routes arriving after a names-only frame must repaint"
-        );
-        assert!(
-            app.remote_model_options
-                .iter()
-                .any(|route| route.api_method == "copilot"),
-            "detailed routes must replace the names-only placeholder state"
-        );
-    });
-}
+include!("detailed_catalog.rs");

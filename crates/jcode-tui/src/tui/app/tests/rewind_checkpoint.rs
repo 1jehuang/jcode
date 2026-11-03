@@ -388,6 +388,10 @@ fn checkpoint_rewind_remote_empty_history_replaces_transcript_before_prompt_refi
     app.dialog = Some(Dialog::rewind_loading());
     app.handle_server_event(
         ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
+            available_service_tiers: None,
+            provider_oauth_account_label: None,
             id,
             session_id: "session-first-rewind".to_string(),
             messages: Vec::new(),

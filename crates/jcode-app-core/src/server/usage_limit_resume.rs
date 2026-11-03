@@ -414,6 +414,7 @@ pub(super) async fn resume_turn_after_usage_limit_with_publication(
     swarm: &LiveTurnSwarmContext,
     on_wait: OnUsageLimitWait<'_>,
     publication: Option<&super::swarm::TurnPublication>,
+    turn_lease: Option<&crate::agent::TurnLease>,
 ) -> ResumeOutcome {
     let generation = uuid::Uuid::new_v4().to_string();
     let resume = resume_turn_after_usage_limit_inner(
@@ -428,6 +429,7 @@ pub(super) async fn resume_turn_after_usage_limit_with_publication(
         publication,
         None,
         generation.clone(),
+        turn_lease,
     );
     let outcome = match publication {
         Some(publication) => tokio::select! {
@@ -451,6 +453,7 @@ pub(super) async fn restore_turn_after_provider_wait(
     swarm: &LiveTurnSwarmContext,
     on_wait: OnUsageLimitWait<'_>,
     publication: Option<&super::swarm::TurnPublication>,
+    turn_lease: Option<&crate::agent::TurnLease>,
 ) -> ResumeOutcome {
     let session_id = state.session_id.clone();
     let generation = state.generation.clone();
@@ -467,6 +470,7 @@ pub(super) async fn restore_turn_after_provider_wait(
         publication,
         Some(state),
         generation.clone(),
+        turn_lease,
     );
     let outcome = match publication {
         Some(publication) => tokio::select! {
@@ -546,6 +550,7 @@ async fn resume_turn_after_usage_limit_inner(
     publication: Option<&super::swarm::TurnPublication>,
     restored: Option<ResumeState>,
     generation: String,
+    turn_lease: Option<&crate::agent::TurnLease>,
 ) -> ResumeOutcome {
     let mut error = error;
     let mut held = held;
@@ -739,7 +744,24 @@ async fn resume_turn_after_usage_limit_inner(
         }
         let start_message_index = guard.message_count();
         let signal = guard.graceful_shutdown_signal();
-        let turn = guard.resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone());
+        let turn = async {
+            match turn_lease {
+                Some(lease) => {
+                    guard
+                        .resume_reserved_turn_streaming_mpsc(
+                            lease,
+                            system_reminder.clone(),
+                            event_tx.clone(),
+                        )
+                        .await
+                }
+                None => {
+                    guard
+                        .resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone())
+                        .await
+                }
+            }
+        };
         let result = std::panic::AssertUnwindSafe(async {
             match publication {
                 Some(publication) => publication.run(signal, turn).await,

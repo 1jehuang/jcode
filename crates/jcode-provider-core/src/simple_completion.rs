@@ -1,4 +1,4 @@
-use super::{Provider, SimpleCompletionUsage};
+use super::{Provider, SimpleCompletionError, SimpleCompletionUsage};
 use anyhow::Result;
 use futures::StreamExt;
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent};
@@ -20,6 +20,8 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         tool_duration_ms: None,
     }];
 
+    let mut provider_name = provider.name().to_string();
+    let mut model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
     let mut usage = SimpleCompletionUsage::default();
@@ -36,14 +38,35 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 output_tokens,
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
-            }) => usage.observe(
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            ),
+            }) => {
+                model = provider.model();
+                usage.observe(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                );
+            }
+            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::Error { message, .. }) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(message),
+                }
+                .into());
+            }
             Ok(_) => {}
-            Err(err) => return Err(err),
+            Err(source) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source,
+                }
+                .into());
+            }
         }
     }
 

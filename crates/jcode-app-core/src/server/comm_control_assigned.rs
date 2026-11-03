@@ -59,8 +59,18 @@ pub(super) fn spawn_assigned_task_run(
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) -> tokio::task::JoinHandle<()> {
-    let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
+    let admission = crate::runtime_activity::global().try_enter_session(&target_session);
     tokio::spawn(async move {
+        let admission = match admission {
+            Ok(admission) => admission,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Assigned task {task_id} was not accepted: {error}"
+                ));
+                return;
+            }
+        };
+        admission.scope(async move {
         let mut initial_guard = Arc::clone(&agent_arc).lock_owned().await;
         if swarm_members
             .read()
@@ -72,6 +82,23 @@ pub(super) fn spawn_assigned_task_run(
         {
             return;
         }
+        let turn_lease = match initial_guard.claim_server_turn() {
+            Ok(lease) => lease,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Assigned task {task_id} could not reserve {target_session}: {error}"
+                ));
+                return;
+            }
+        };
+        initial_guard.set_inline_output_tap(true);
+        let (fallback, _) = mpsc::unbounded_channel();
+        let events = Arc::new(super::super::state::TurnEventChannel::new(
+            target_session.clone(),
+            Arc::clone(&swarm_members),
+            fallback,
+            &turn_lease,
+        ));
         let Some(publication) =
             begin_assigned_turn_publication(&target_session, &swarm_id, &task_id, &swarm_plans)
                 .await
@@ -219,7 +246,7 @@ pub(super) fn spawn_assigned_task_run(
                 }
             })
         };
-        let event_tx = task_progress_event_sender(
+        let progress_events = task_progress_event_sender(
             Arc::clone(&publication),
             target_session.clone(),
             swarm_id.clone(),
@@ -231,15 +258,18 @@ pub(super) fn spawn_assigned_task_run(
             Arc::clone(&event_history),
             Arc::clone(&event_counter),
             swarm_event_tx.clone(),
+            Arc::clone(&events),
+            turn_lease.publication_pin(),
         );
+        let event_tx = progress_events.sender();
         let start_message_index = initial_guard.message_count();
         let signal = initial_guard.graceful_shutdown_signal();
         let result = tokio::select! {
             biased;
             _ = publication.cancelled.cancelled() => None,
             result = publication.run(signal,
-                super::super::client_lifecycle::process_locked_message_streaming_mpsc(
-                    &mut initial_guard, &assignment_text, vec![], None, event_tx.clone(),
+                super::super::turn_failover::process_reserved_locked_message_with_server_failover(
+                    &mut initial_guard, &turn_lease, &assignment_text, vec![], None, event_tx.clone(),
                 )
             ) => result,
         };
@@ -296,7 +326,7 @@ pub(super) fn spawn_assigned_task_run(
                 );
                 match super::super::usage_limit_resume::resume_turn_after_usage_limit_with_publication(
                     Arc::clone(&agent_arc), Some(initial_guard), &target_session, error,
-                    None, &event_tx, &swarm_ctx, &on_wait, Some(&publication),
+                    None, &event_tx, &swarm_ctx, &on_wait, Some(&publication), Some(&turn_lease),
                 ).await {
                     super::super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, guard }
                     | super::super::usage_limit_resume::ResumeOutcome::Failed { error, guard, .. } => (Err(error), None, guard),
@@ -348,6 +378,16 @@ pub(super) fn spawn_assigned_task_run(
         drop(event_tx);
         let _ = heartbeat_stop_tx.send(true);
         let _ = heartbeat_task.await;
+        progress_events.finish().await;
+        let terminal = match &result {
+            Ok(()) => ServerEvent::Done { id: 0 },
+            Err(error) => ServerEvent::Error {
+                id: 0,
+                message: crate::util::format_error_chain(error),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+        };
         publication.complete(async {
             match result {
                 Ok(_) => {
@@ -355,63 +395,26 @@ pub(super) fn spawn_assigned_task_run(
                         let plans = swarm_plans.read().await;
                         plans.get(&swarm_id).map(|plan| plan.items.clone()).unwrap_or_default()
                     };
-                    let mut applied_disposition = TurnEndDisposition::LeaveAlone;
                     {
                         let now_ms = now_unix_ms();
                         let mut plans = swarm_plans.write().await;
                         if let Some(plan) = plans.get_mut(&swarm_id)
                             && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                            && item.assigned_to.as_deref() == Some(target_session.as_str()) {
-                            let expanded = plan.node_meta.get(&task_id).map(|m| m.expanded && !m.is_gate).unwrap_or(false);
-                            let is_deep = plan.mode.eq_ignore_ascii_case("deep");
-                            let prior_requeues = plan.task_progress.get(&task_id).and_then(|p| p.no_artifact_requeues).unwrap_or(0);
-                            applied_disposition = turn_end_disposition(is_deep, &item.status, expanded, prior_requeues);
-                            match applied_disposition {
-                                TurnEndDisposition::AutoComplete => {
-                                    item.status = "done".to_string();
-                                    let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                                    progress.last_heartbeat_unix_ms = Some(now_ms);
-                                    progress.last_checkpoint_unix_ms = Some(now_ms);
-                                    progress.checkpoint_summary = Some("task completed".to_string());
-                                    progress.completed_at_unix_ms = Some(now_ms);
-                                    progress.stale_since_unix_ms = None;
-                                    progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                    plan.version += 1;
-                                }
-                                TurnEndDisposition::RequeueNoArtifact => {
-                                    item.status = "queued".to_string();
-                                    item.assigned_to = None;
-                                    let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                                    progress.assigned_session_id = None;
-                                    progress.no_artifact_requeues = Some(prior_requeues + 1);
-                                    progress.last_heartbeat_unix_ms = Some(now_ms);
-                                    progress.last_checkpoint_unix_ms = Some(now_ms);
-                                    progress.checkpoint_summary = Some("requeued: deep-mode turn ended without a complete_node artifact".to_string());
-                                    progress.stale_since_unix_ms = None;
-                                    progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                    plan.version += 1;
-                                }
-                                TurnEndDisposition::FailNoArtifact => {
-                                    item.status = "failed".to_string();
-                                    let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                                    progress.last_heartbeat_unix_ms = Some(now_ms);
-                                    progress.last_checkpoint_unix_ms = Some(now_ms);
-                                    progress.checkpoint_summary = Some("failed: repeated deep-mode turns ended without a complete_node artifact".to_string());
-                                    progress.completed_at_unix_ms = Some(now_ms);
-                                    progress.stale_since_unix_ms = None;
-                                    progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                                    plan.version += 1;
-                                }
-                                TurnEndDisposition::LeaveAlone => {}
-                            }
+                            && item.assigned_to.as_deref() == Some(target_session.as_str())
+                            && turn_end_should_auto_complete(&item.status) {
+                            item.status = "done".to_string();
+                            let progress = plan.task_progress.entry(task_id.clone()).or_default();
+                            progress.last_heartbeat_unix_ms = Some(now_ms);
+                            progress.last_checkpoint_unix_ms = Some(now_ms);
+                            progress.checkpoint_summary = Some("task completed".to_string());
+                            progress.completed_at_unix_ms = Some(now_ms);
+                            progress.stale_since_unix_ms = None;
+                            progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                            plan.version += 1;
                         }
                     }
                     persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                    let reason = match applied_disposition {
-                        TurnEndDisposition::RequeueNoArtifact => "task_requeued_no_artifact",
-                        TurnEndDisposition::FailNoArtifact => "task_failed_no_artifact",
-                        _ => "task_completed",
-                    };
+                    let reason = "task_completed";
                     broadcast_swarm_plan_with_previous(&swarm_id, Some(reason.to_string()),
                         Some(&previous_items), &swarm_plans, &swarm_members, &swarms_by_id).await;
                     update_member_status_with_report(&target_session, "completed", None, completion_report,
@@ -443,6 +446,12 @@ pub(super) fn spawn_assigned_task_run(
                         &swarm_members, &swarms_by_id, Some(&event_history), Some(&event_counter), Some(&swarm_event_tx)).await;
                 }
             }
+            let _ = events.sender().send(terminal);
+        }).await;
+        let events =
+            Arc::try_unwrap(events).unwrap_or_else(|_| unreachable!("progress tap drained"));
+        events.finish().await;
+        drop(turn_lease);
         }).await;
     })
 }

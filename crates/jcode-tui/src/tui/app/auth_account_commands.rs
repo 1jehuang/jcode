@@ -102,10 +102,36 @@ pub(crate) async fn handle_account_command_remote(
     trimmed: &str,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<bool> {
+    if crate::tui::is_ssh_remote() {
+        let words: Vec<_> = trimmed.split_whitespace().collect();
+        if words.get(0..2) == Some(&["/auth", "doctor"][..]) {
+            let args = std::iter::once("doctor".to_string())
+                .chain(words[2..].iter().map(|word| word.to_string()))
+                .collect();
+            remote.runtime_command("ssh_account", args).await?;
+            return Ok(true);
+        }
+    }
     let Some(parsed) = parse_account_command(trimmed) else {
         return Ok(false);
     };
     match parsed {
+        Ok(AccountCommand::Remove { provider_id, label })
+            if crate::tui::is_ssh_remote() && label.ends_with(" confirm") =>
+        {
+            let target = label.strip_suffix(" confirm").unwrap_or(&label);
+            remote
+                .runtime_command(
+                    "ssh_account",
+                    vec![
+                        "remove".into(),
+                        provider_id,
+                        target.to_string(),
+                        "confirm".into(),
+                    ],
+                )
+                .await?;
+        }
         Ok(command) => execute_account_command_remote(app, command, remote).await?,
         Err(message) => app.push_display_message(DisplayMessage::error(message)),
     }
@@ -262,6 +288,10 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             },
             "settings" => AccountCommand::ShowSettings {
                 provider_id: provider.id.to_string(),
+            },
+            "login" if !value.is_empty() => AccountCommand::Add {
+                provider_id: provider.id.to_string(),
+                label: Some(value.to_string()),
             },
             "login" => AccountCommand::Login {
                 provider_id: provider.id.to_string(),
@@ -644,6 +674,15 @@ pub(crate) fn account_command_from_picker(
 }
 
 pub(crate) fn execute_account_command_local(app: &mut App, command: AccountCommand) {
+    if crate::tui::is_ssh_remote() {
+        match command {
+            AccountCommand::OpenOverlay { provider_filter } => {
+                app.open_remote_account_picker(provider_filter.as_deref())
+            }
+            _ => app.remote_account_management_notice(),
+        }
+        return;
+    }
     match command {
         AccountCommand::ChooseAddProvider => app.open_account_add_replace_flow(None),
         AccountCommand::OpenOverlay { provider_filter } => {
@@ -733,11 +772,72 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
     }
 }
 
+/// SSH account commands execute on the runtime host without reading laptop
+/// auth/config. Normal local shared-daemon clients keep their local behavior.
 pub(crate) async fn execute_account_command_remote(
     app: &mut App,
     command: AccountCommand,
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<()> {
+    // Ordinary shared-daemon clients run on the same host as their auth/config.
+    // is_remote means wire-connected, not SSH. Only SSH/cloud must isolate the
+    // laptop stores. Named switches remain daemon-only for every wire client.
+    if !crate::tui::is_ssh_remote()
+        && !matches!(
+            &command,
+            AccountCommand::UseInWindow { .. }
+                | AccountCommand::SetDefault { .. }
+                | AccountCommand::Unpin { .. }
+                | AccountCommand::Failover(_)
+        )
+    {
+        match command {
+            AccountCommand::SetOpenAiTransport(value) => {
+                save_openai_transport_setting_local(app, value.as_deref());
+                remote
+                    .set_transport(value.as_deref().unwrap_or("auto"))
+                    .await?;
+            }
+            AccountCommand::SetOpenAiEffort(value) => {
+                save_openai_effort_setting_local(app, value.as_deref());
+                if let Some(value) = value.as_deref() {
+                    remote.set_reasoning_effort(value).await?;
+                }
+            }
+            AccountCommand::SetOpenAiFast(enabled) => {
+                save_openai_fast_setting_local(app, enabled);
+                remote
+                    .set_service_tier(if enabled { "priority" } else { "off" })
+                    .await?;
+            }
+            other => execute_account_command_local(app, other),
+        }
+        return Ok(());
+    }
+    if crate::tui::is_ssh_remote() {
+        match &command {
+            AccountCommand::Login { provider_id }
+            | AccountCommand::Add {
+                provider_id,
+                label: None,
+            } => {
+                app.handle_ssh_login_command(&format!("/login {provider_id}"));
+                return Ok(());
+            }
+            AccountCommand::Add {
+                provider_id,
+                label: Some(label),
+            } => {
+                app.start_ssh_account_login(provider_id, label);
+                return Ok(());
+            }
+            _ => {}
+        }
+        if let Some(args) = ssh_account_runtime_args(&command) {
+            remote.runtime_command("ssh_account", args).await?;
+            return Ok(());
+        }
+    }
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
             app.open_account_center(provider_filter.as_deref());
@@ -752,27 +852,98 @@ pub(crate) async fn execute_account_command_remote(
             app.execute_window_account_command_remote(command, remote)
                 .await?
         }
-        AccountCommand::SetOpenAiTransport(value) => {
-            save_openai_transport_setting_local(app, value.as_deref());
-            remote
-                .set_transport(value.as_deref().unwrap_or("auto"))
-                .await?;
-        }
-        AccountCommand::SetOpenAiEffort(value) => {
-            save_openai_effort_setting_local(app, value.as_deref());
-            if let Some(value) = value.as_deref() {
-                remote.set_reasoning_effort(value).await?;
-            }
-        }
-        AccountCommand::SetOpenAiFast(enabled) => {
-            save_openai_fast_setting_local(app, enabled);
-            remote
-                .set_service_tier(if enabled { "priority" } else { "off" })
-                .await?;
-        }
-        other => execute_account_command_local(app, other),
+        _ => app.remote_account_management_notice(),
     }
     Ok(())
+}
+
+fn ssh_account_runtime_args(command: &AccountCommand) -> Option<Vec<String>> {
+    let args = match command {
+        AccountCommand::Doctor { provider_id } => std::iter::once("doctor".to_string())
+            .chain(provider_id.clone())
+            .collect(),
+        AccountCommand::ShowSettings { provider_id } => {
+            vec!["settings".into(), provider_id.clone()]
+        }
+        AccountCommand::Remove { provider_id, label } => {
+            vec!["remove".into(), provider_id.clone(), label.clone()]
+        }
+        AccountCommand::SetDefaultProvider(v) => vec![
+            "default-provider".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetDefaultModel(v) => vec![
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiTransport(v) => vec![
+            "openai".into(),
+            "transport".into(),
+            v.clone().unwrap_or_else(|| "auto".into()),
+        ],
+        AccountCommand::SetOpenAiEffort(v) => vec![
+            "openai".into(),
+            "effort".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiFast(v) => vec![
+            "openai".into(),
+            "fast".into(),
+            if *v { "on" } else { "off" }.into(),
+        ],
+        AccountCommand::SetCopilotPremium(v) => vec![
+            "copilot".into(),
+            "premium".into(),
+            v.clone().unwrap_or_else(|| "normal".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiBase(v) => vec![
+            "compat".into(),
+            "api-base".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatApiKeyName(v) => vec![
+            "compat".into(),
+            "api-key-name".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatEnvFile(v) => vec![
+            "compat".into(),
+            "env-file".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        AccountCommand::SetOpenAiCompatDefaultModel(v) => vec![
+            "compat".into(),
+            "default-model".into(),
+            v.clone().unwrap_or_else(|| "clear".into()),
+        ],
+        _ => return None,
+    };
+    Some(args)
+}
+
+pub(crate) async fn handle_ssh_usage_command_remote(
+    _app: &mut App,
+    input: &str,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) -> anyhow::Result<bool> {
+    if !crate::tui::is_ssh_remote() {
+        return Ok(false);
+    }
+    let mut words = input.split_whitespace();
+    let operation = match words.next() {
+        Some("/usage") => "usage",
+        Some("/reset") => "reset",
+        _ => return Ok(false),
+    };
+    remote
+        .runtime_command(
+            "ssh_account",
+            std::iter::once(operation.to_string())
+                .chain(words.map(str::to_string))
+                .collect(),
+        )
+        .await?;
+    Ok(true)
 }
 
 fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&str>) {
@@ -1127,242 +1298,105 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
     )));
 }
 
-fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
-    let status = crate::auth::AuthStatus::check();
-    let cfg = crate::config::Config::load();
-    let Some(provider) = resolve_account_provider_descriptor(provider_id) else {
-        return format!("Unknown provider {}.", provider_id);
-    };
-    let assessment = status.assessment_for_provider(provider);
-    let mut lines = vec![format!("{}\n", provider.display_name)];
-    lines.push(format!("  - Status: {:?}", assessment.state));
-    lines.push(format!(
-        "  - Auth: {} ({})",
-        provider.auth_kind.label(),
-        assessment.method_detail.as_str()
-    ));
-    lines.push(format!(
-        "  - Validation: {}",
-        assessment
-            .last_validation
-            .as_ref()
-            .map(crate::auth::validation::format_record_label)
-            .unwrap_or_else(|| "not validated".to_string())
-    ));
-    lines.push(format!(
-        "  - Login command: /accounts {} login",
-        provider.id
-    ));
-    lines.push(format!(
-        "  - Doctor command: /accounts {} doctor",
-        provider.id
-    ));
-    lines.push(String::new());
-
-    let recommended_actions = crate::auth::doctor::recommended_actions(provider, &assessment, None);
-    if !recommended_actions.is_empty() {
-        lines.push("Recommended next steps".to_string());
-        for action in recommended_actions {
-            lines.push(format!("  - {}", action));
-        }
-        lines.push(String::new());
-    }
-
-    match provider.id {
-        "claude" => {
-            lines.push(app.render_anthropic_accounts_markdown());
-            lines.push(String::new());
-            lines.push("Commands:".to_string());
-            lines.push("  - /accounts claude add".to_string());
-            lines.push("  - /accounts claude switch <label>".to_string());
-            lines.push("  - /accounts claude remove <label>".to_string());
-        }
-        "openai" => {
-            lines.push(app.render_openai_accounts_markdown());
-            lines.push(String::new());
-            lines.push("Settings".to_string());
-            lines.push(format!(
-                "  - Transport: {}",
-                cfg.provider.openai_transport.as_deref().unwrap_or("auto")
-            ));
-            lines.push(format!(
-                "  - Reasoning effort: {}",
-                cfg.provider
-                    .openai_reasoning_effort
-                    .as_deref()
-                    .unwrap_or("(provider default)")
-            ));
-            lines.push(format!(
-                "  - Fast mode: {}",
-                if cfg.provider.openai_service_tier.as_deref() == Some("priority") {
-                    "on"
-                } else {
-                    "off"
-                }
-            ));
-            lines.push("  - /accounts openai transport <auto|https|websocket>".to_string());
-            lines.push(
-                "  - /accounts openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
-                    .to_string(),
-            );
-            lines.push("  - /accounts openai fast <on|off>".to_string());
-        }
-        "copilot" => {
-            lines.push("Settings".to_string());
-            lines.push(format!(
-                "  - Premium mode: {}",
-                cfg.provider.copilot_premium.as_deref().unwrap_or("normal")
-            ));
-            lines.push("  - /accounts copilot premium <normal|one|zero>".to_string());
-        }
-        "openai-compatible" => {
-            let compat = crate::provider_catalog::resolve_openai_compatible_profile(
-                crate::provider_catalog::OPENAI_COMPAT_PROFILE,
-            );
-            lines.push("Settings".to_string());
-            lines.push("Configure custom OpenAI-compatible endpoints in this order: base URL first, then API key variable/key.".to_string());
-            lines.push(format!("  - Step 1, API base URL: {}", compat.api_base));
-            lines.push(format!(
-                "  - Step 2, API key variable: {}",
-                compat.api_key_env
-            ));
-            lines.push(format!("  - Env file: {}", compat.env_file));
-            lines.push(format!(
-                "  - Default model hint: {}",
-                compat.default_model.as_deref().unwrap_or("(unset)")
-            ));
-            lines.push("  - /accounts openai-compatible api-base <url|clear>".to_string());
-            lines.push("  - /accounts openai-compatible api-key-name <ENV_VAR|clear>".to_string());
-            lines.push("  - /accounts openai-compatible env-file <file.env|clear>".to_string());
-            lines.push("  - /accounts openai-compatible default-model <model|clear>".to_string());
-        }
-        _ => {
-            lines.push("No provider-specific settings are exposed here yet. Use /login to configure credentials.".to_string());
-        }
-    }
-
-    if provider_id != "defaults" {
-        lines.push(String::new());
-        lines.push("Global defaults".to_string());
-        lines.push(format!(
-            "  - Default provider: {}",
-            cfg.provider.default_provider.as_deref().unwrap_or("auto")
-        ));
-        lines.push(format!(
-            "  - Default model: {}",
-            cfg.provider
-                .default_model
-                .as_deref()
-                .unwrap_or("(provider default)")
-        ));
-        lines.push(
-            "  - /accounts default-provider <claude|openai|copilot|gemini|openrouter|auto>"
-                .to_string(),
-        );
-        lines.push("  - /accounts default-model <model|clear>".to_string());
-    }
-
-    lines.join("\n")
-}
-
-fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
-    let status = crate::auth::AuthStatus::check();
-    let validation = crate::auth::validation::load_all();
-    let providers = match provider_filter {
-        Some(provider_id) => match resolve_account_provider_descriptor(provider_id) {
-            Some(provider) => vec![provider],
-            None => {
-                return format!(
-                    "Unknown provider {}. Use /accounts <provider> doctor with a valid provider id.",
-                    provider_id
-                );
-            }
-        },
-        None => {
-            let configured = crate::provider_catalog::auth_status_login_providers()
-                .into_iter()
-                .filter(|provider| status.assessment_for_provider(*provider).is_configured())
-                .collect::<Vec<_>>();
-            if configured.is_empty() {
-                crate::provider_catalog::auth_status_login_providers().to_vec()
-            } else {
-                configured
-            }
-        }
-    };
-
-    let mut sections = Vec::new();
-    for provider in providers {
-        let assessment = status.assessment_for_provider(provider);
-        let validation_label = validation
-            .get(provider.id)
-            .map(crate::auth::validation::format_record_label);
-        let recommended_actions =
-            crate::auth::doctor::recommended_actions(provider, &assessment, None);
-        let diagnostics = crate::auth::doctor::diagnostics(provider, &assessment, None);
-        let needs_attention = crate::auth::doctor::needs_attention(&assessment, None);
-
-        let mut lines = vec![format!("{} ({})", provider.display_name, provider.id)];
-        lines.push(format!(
-            "  - Status: {}",
-            match assessment.state {
-                crate::auth::AuthState::Available => "ready",
-                crate::auth::AuthState::Expired => "needs attention",
-                crate::auth::AuthState::NotConfigured => "setup needed",
-            }
-        ));
-        lines.push(format!("  - Method: {}", assessment.method_detail));
-        lines.push(format!("  - Health: {}", assessment.health_summary()));
-        lines.push(format!(
-            "  - Credential source: {} ({})",
-            assessment.credential_source.label(),
-            assessment.credential_source_detail
-        ));
-        lines.push(format!(
-            "  - Refresh: {}",
-            assessment.refresh_support.label()
-        ));
-        lines.push(format!(
-            "  - Validation method: {}",
-            assessment.validation_method.label()
-        ));
-        lines.push(format!(
-            "  - Last refresh: {}",
-            assessment
-                .last_refresh
-                .as_ref()
-                .map(crate::auth::refresh_state::format_record_label)
-                .as_deref()
-                .unwrap_or("not recorded")
-        ));
-        lines.push(format!(
-            "  - Validation: {}",
-            validation_label.as_deref().unwrap_or("not validated")
-        ));
-        lines.push(format!(
-            "  - Needs attention: {}",
-            if needs_attention { "yes" } else { "no" }
-        ));
-        if !diagnostics.is_empty() {
-            lines.push(String::new());
-            lines.push("Diagnostics".to_string());
-            for diagnostic in diagnostics {
-                lines.push(format!("  - {}", diagnostic));
-            }
-        }
-        if !recommended_actions.is_empty() {
-            lines.push(String::new());
-            lines.push("Next steps".to_string());
-            for action in recommended_actions {
-                lines.push(format!("  - {}", action));
-            }
-        }
-        sections.push(lines.join("\n"));
-    }
-
-    sections.join("\n\n")
-}
-
+#[path = "auth_account_commands/diagnostics.rs"]
+mod diagnostics;
+use diagnostics::render_auth_doctor_markdown;
+use diagnostics::render_provider_settings_markdown;
 #[cfg(test)]
-#[path = "auth_account_commands_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_account_doctor_subcommands() {
+        assert!(matches!(
+            parse_account_command("/account doctor"),
+            Some(Ok(AccountCommand::Doctor { provider_id: None }))
+        ));
+        assert!(matches!(
+            parse_account_command("/account openai doctor"),
+            Some(Ok(AccountCommand::Doctor { provider_id: Some(provider_id) })) if provider_id == "openai"
+        ));
+    }
+
+    #[test]
+    fn parse_native_jcode_account_actions() {
+        assert!(matches!(
+            parse_account_command("/account jcode login"),
+            Some(Ok(AccountCommand::Login { provider_id })) if provider_id == "jcode"
+        ));
+        assert!(matches!(
+            parse_account_command("/account jcode status"),
+            Some(Ok(AccountCommand::JcodeStatus))
+        ));
+        assert!(matches!(
+            parse_account_command("/account jcode manage"),
+            Some(Ok(AccountCommand::JcodeManage))
+        ));
+        assert!(matches!(
+            parse_account_command("/account jcode logout"),
+            Some(Ok(AccountCommand::JcodeLogout))
+        ));
+    }
+
+    #[test]
+    fn parse_account_command_requires_a_token_boundary() {
+        assert!(
+            parse_account_command("/accounting").is_none(),
+            "/accounting must not be parsed as /account with label `ing`"
+        );
+        assert!(matches!(
+            parse_account_command("/accounts"),
+            Some(Ok(AccountCommand::OpenOverlay {
+                provider_filter: None
+            }))
+        ));
+    }
+
+    #[test]
+    fn named_provider_login_does_not_discard_label() {
+        assert!(
+            matches!(parse_account_command("/account openai login work team"), Some(Ok(AccountCommand::Add { provider_id, label: Some(label) })) if provider_id == "openai" && label == "work team")
+        );
+    }
+
+    #[test]
+    fn ssh_account_runtime_arguments_preserve_labels_and_clear_values() {
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Remove {
+                provider_id: "openai".into(),
+                label: "work confirm".into()
+            })
+            .unwrap(),
+            vec!["remove", "openai", "work confirm"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetDefaultModel(None)).unwrap(),
+            vec!["default-model", "clear"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetOpenAiFast(true)).unwrap(),
+            vec!["openai", "fast", "on"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::Doctor { provider_id: None }).unwrap(),
+            vec!["doctor"]
+        );
+        assert!(
+            ssh_account_runtime_args(&AccountCommand::Add {
+                provider_id: "openai".into(),
+                label: Some("work".into())
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn render_auth_doctor_markdown_includes_recovery_steps() {
+        let _guard = crate::storage::lock_test_env();
+        let markdown = render_auth_doctor_markdown(Some("openai"));
+        assert!(markdown.contains("OpenAI (openai)"));
+        assert!(markdown.contains("Next steps"));
+        assert!(markdown.contains("jcode login --provider openai"));
+        assert!(markdown.contains("Review current state: jcode auth status --json"));
+    }
+}

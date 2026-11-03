@@ -92,4 +92,11 @@ pub(crate) struct UsageInfo {
     pub(crate) cache_read_input_tokens: Option<u32>,
     pub(crate) cache_creation_input_tokens: Option<u32>,
     pub(crate) service_tier: Option<String>,
+    pub(crate) cache_creation: Option<CacheCreationUsage>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CacheCreationUsage {
+    pub(crate) ephemeral_5m_input_tokens: Option<u64>,
+    pub(crate) ephemeral_1h_input_tokens: Option<u64>,
 }

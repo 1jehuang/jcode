@@ -18,6 +18,14 @@ pub fn thread_render_count() -> u64 {
 }
 
 pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<Line<'static>> {
+    render_markdown_with_link_urls(text, max_width, config_snapshot().show_link_urls)
+}
+
+fn render_markdown_with_link_urls(
+    text: &str,
+    max_width: Option<usize>,
+    show_link_urls: bool,
+) -> Vec<Line<'static>> {
     let render_start = Instant::now();
     let text = jcode_render_core::normalize_latex_math(text);
     let text = escape_currency_dollars(&text);
@@ -233,6 +241,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             }
             Event::End(TagEnd::Link) => {
                 if let Some(url) = link_targets.pop()
+                    && show_link_urls
                     && !url.is_empty()
                 {
                     current_spans.push(Span::styled(
@@ -1077,4 +1086,40 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     }
 
     lines
+}
+
+#[cfg(test)]
+mod link_url_tests {
+    use super::*;
+
+    #[test]
+    fn full_link_urls_are_opt_in_and_preserve_labels() {
+        let markdown = "[docs](https://example.com) and [empty]()";
+        for enabled in [false, true] {
+            let lines = render_markdown_with_link_urls(markdown, Some(120), enabled);
+            let text = lines
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let expected = if enabled {
+                "docs (https://example.com) and empty"
+            } else {
+                "docs and empty"
+            };
+            assert_eq!(text.trim(), expected);
+            assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
+                span.content == "docs"
+                    && span.style.fg == Some(link_fg())
+                    && span.style.add_modifier.contains(Modifier::UNDERLINED)
+            }));
+        }
+        assert!(!MarkdownConfigSnapshot::default().show_link_urls);
+        let default_lines = render_markdown_with_width(markdown, Some(120));
+        assert!(
+            !default_lines
+                .iter()
+                .any(|line| line.to_string().contains("https://"))
+        );
+    }
 }

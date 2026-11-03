@@ -1,7 +1,7 @@
 use super::*;
 
 /// Border layout: `🧠 42 memories` top-left, status badge in the body, and
-/// the last trace on the bottom border.
+/// the last trace (or project/global scope counts) on the bottom border.
 pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let Some(info) = &data.memory_info else {
         return Framed::default();
@@ -18,7 +18,21 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
     let activity = info.activity.as_ref();
     let show_activity = info.should_show_activity();
     let title = render_memory_header_line(info, max_width);
-    let mut footer = None;
+    let footer = activity
+        .filter(|_| show_activity)
+        .and_then(|activity| render_memory_last_trace_line(activity, max_width))
+        .unwrap_or_else(|| {
+            Line::from(Span::styled(
+                truncate_with_ellipsis(
+                    &format!(
+                        "{} project · {} global",
+                        info.project_count, info.global_count
+                    ),
+                    max_width,
+                ),
+                Style::default().fg(rgb(120, 120, 130)),
+            ))
+        });
 
     if show_activity && let Some(activity) = activity {
         if lines.len() < inner.height as usize {
@@ -33,16 +47,23 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
                 lines.push(line);
             }
         }
-
-        footer = render_memory_last_trace_line(activity, max_width);
     }
 
+    if lines.is_empty() {
+        let detail = if !info.by_category.is_empty() {
+            format!("{} categories", info.by_category.len())
+        } else if info.sidecar_available {
+            "sidecar ready".into()
+        } else {
+            "sidecar offline".into()
+        };
+        lines.push(Line::from(Span::styled(
+            truncate_with_ellipsis(&detail, max_width),
+            Style::default().fg(rgb(120, 120, 130)),
+        )));
+    }
     lines.truncate(inner.height as usize);
-    let mut framed = Framed::body(lines).title(title);
-    if let Some(footer) = footer {
-        framed = framed.footer(footer);
-    }
-    framed
+    Framed::body(lines).title(title).footer(footer)
 }
 
 fn render_memory_header_line(info: &MemoryInfo, max_width: usize) -> Line<'static> {
@@ -61,6 +82,85 @@ fn memory_count_label(total_count: usize) -> String {
         "1 memory".to_string()
     } else {
         format!("{total_count} memories")
+    }
+}
+
+#[cfg(test)]
+mod substantive_footer_tests {
+    use super::*;
+
+    #[test]
+    fn memory_no_trace_uses_scope_counts_and_keeps_body() {
+        let data = InfoWidgetData {
+            memory_info: Some(MemoryInfo {
+                total_count: 7,
+                project_count: 4,
+                global_count: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_memory_widget(&data, Rect::new(0, 0, 40, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        assert_eq!(rendered.lines[0].to_string(), "sidecar offline");
+        assert_eq!(rendered.footer.unwrap().to_string(), "4 project · 3 global");
+        assert!(rendered.title.unwrap().to_string().contains("7 memories"));
+    }
+
+    #[test]
+    fn memory_active_no_trace_has_scope_footer_at_narrow_width() {
+        let data = InfoWidgetData {
+            memory_info: Some(MemoryInfo {
+                activity: Some(MemoryActivity {
+                    state: MemoryState::Embedding,
+                    state_since: std::time::Instant::now(),
+                    pipeline: None,
+                    recent_events: Vec::new(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_memory_widget(&data, Rect::new(0, 0, 12, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        let footer = rendered.footer.unwrap();
+        assert!(!footer.to_string().is_empty());
+        assert!(footer.width() <= 12);
+    }
+
+    #[test]
+    fn memory_active_keeps_last_trace_instead_of_scope_fallback() {
+        let now = std::time::Instant::now();
+        let data = InfoWidgetData {
+            memory_info: Some(MemoryInfo {
+                total_count: 7,
+                project_count: 4,
+                global_count: 3,
+                activity: Some(MemoryActivity {
+                    state: MemoryState::Embedding,
+                    state_since: now,
+                    pipeline: None,
+                    recent_events: vec![MemoryEvent {
+                        kind: MemoryEventKind::MemoryInjected {
+                            count: 2,
+                            prompt_chars: 318,
+                            age_ms: 44,
+                            preview: "prefers terse answers".into(),
+                            items: Vec::new(),
+                        },
+                        timestamp: now,
+                        detail: None,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_memory_widget(&data, Rect::new(0, 0, 60, 1));
+        assert_eq!(rendered.lines.len(), 1);
+        let footer = rendered.footer.unwrap().to_string();
+        assert!(footer.starts_with("Trace: "), "{footer}");
+        assert!(!footer.contains("4 project"));
     }
 }
 

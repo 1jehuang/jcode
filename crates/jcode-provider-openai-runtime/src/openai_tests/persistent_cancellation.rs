@@ -1,5 +1,76 @@
 // Synthetic loopback regressions. No live account, model, or transcript data.
 #[tokio::test]
+async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
+    let _env_lock = jcode_base::storage::lock_test_env();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let input = vec![
+        serde_json::json!({"role":"user","content":"original"}),
+        serde_json::json!({"role":"user","content":"next"}),
+    ];
+    let expected_input = input.clone();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let replay: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(replay.get("previous_response_id").is_none());
+        assert!(replay.get("stream").is_none());
+        assert!(replay.get("background").is_none());
+        assert_eq!(replay["input"], serde_json::json!(expected_input));
+        assert_eq!(
+            replay["metadata"],
+            serde_json::json!({"fixture":"full_request_field"})
+        );
+        for event in [
+            serde_json::json!({"type":"response.created","response":{"id":"resp_recovered"}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_recovered","status":"completed","output":[]}}),
+        ] {
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
+        }
+    });
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
+    let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
+        ws_stream,
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: None,
+        last_response_id: "resp_completed_before_cancel".into(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_response_output: vec![
+            serde_json::json!({"type":"function_call","call_id":"unseen","name":"bash","arguments":"{}"}),
+        ],
+    })));
+    let request = serde_json::json!({"model":"gpt-5.6-sol", "input":input,
+        "stream":true,"background":false,"previous_response_id":"must-not-reuse",
+        "metadata":{"fixture":"full_request_field"}});
+    let (tx, _rx) = mpsc::channel(32);
+    let result = try_persistent_ws_continuation(
+        &persistent,
+        &Arc::new(RwLock::new(prewarm_test_credentials())),
+        &request,
+        &input,
+        input.len(),
+        &tx,
+    )
+    .await;
+    assert!(matches!(result, PersistentWsResult::Success));
+    assert_eq!(
+        persistent.lock().await.as_ref().unwrap().last_response_id,
+        "resp_recovered"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn persistent_cancellation_old_keepalive_preserves_replacement() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
@@ -39,17 +110,23 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
         std::future::pending::<()>().await;
         drop(ws);
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let connected_at = Instant::now();
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at,
         last_activity_at: connected_at - Duration::from_secs(20),
         last_response_completed_at: connected_at,
         message_count: 1,
         last_input_item_count: 0,
+        last_response_output: Vec::new(),
         last_input_item_hashes: vec![],
     })));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
@@ -78,6 +155,10 @@ async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
     let provider = prewarm_test_provider().await;
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     let mut owner = provider.persistent_ws.lock().await;
     *owner = Some(state);
     let stream = provider
@@ -85,7 +166,7 @@ async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
         .await
         .unwrap();
     tokio::task::yield_now().await;
-    assert_eq!(Arc::strong_count(&provider.persistent_ws), 2);
+    assert!(Arc::strong_count(&provider.persistent_ws) >= 2);
     drop(stream);
     tokio::time::timeout(Duration::from_secs(1), async {
         while Arc::strong_count(&provider.persistent_ws) > 1 {
@@ -96,6 +177,140 @@ async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
     .expect("cancelled producer must stop even while another turn owns the mutex");
     assert_eq!(owner.as_ref().unwrap().last_response_id, "resp_test");
     server.abort();
+}
+
+#[tokio::test]
+async fn persistent_cancellation_drains_unseen_tools_and_replays_on_same_socket() {
+    let _env_lock = jcode_base::storage::lock_test_env();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let messages = vec![
+        ChatMessage::user("original"),
+        ChatMessage::assistant_text("earlier"),
+        ChatMessage::user("next"),
+    ];
+    let input = build_responses_input(&messages);
+    let expected_input = input.clone();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let first: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(first["previous_response_id"], "resp_previous");
+        ws.send(WsMessage::Text(
+            serde_json::json!({"type":"response.created",
+            "response":{"id":"resp_cancelled"}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!({"type":"response.output_text.delta",
+            "delta":"partial"})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        cancel_rx.await.unwrap();
+        // These outputs are never delivered to the caller and must not enter
+        // the next response's implicit context or become executable tools.
+        for event in [
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"function_call","id":"fc_unseen","call_id":"call_unseen",
+                    "name":"bash","arguments":"{\"command\":\"unseen\"}"}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_cancelled",
+                "status":"completed","output":[{"type":"function_call","call_id":"call_unseen",
+                    "name":"bash","arguments":"{}"}]}}),
+        ] {
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
+        }
+        // A second request must arrive on this very connection, not a fresh
+        // handshake, and contain exactly the caller's complete history.
+        let replay: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(replay.get("previous_response_id").is_none(), "{replay}");
+        assert_eq!(replay["input"], serde_json::json!(expected_input));
+        assert_eq!(replay["instructions"], first["instructions"]);
+        assert_eq!(replay["tools"], first["tools"]);
+        assert_eq!(replay["prompt_cache_key"], first["prompt_cache_key"]);
+        for event in [
+            serde_json::json!({"type":"response.created","response":{"id":"resp_recovered"}}),
+            serde_json::json!({"type":"response.output_text.delta","delta":"recovered"}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_recovered","status":"completed","output":[]}}),
+        ] {
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
+        }
+    });
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
+    let provider = OpenAIProvider::new(prewarm_test_credentials());
+    *provider.credentials.write().await = prewarm_test_credentials();
+    provider.set_model("gpt-5.6-sol").unwrap();
+    provider.set_transport("websocket").unwrap();
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
+    *provider.persistent_ws.lock().await = Some(PersistentWsState {
+        ws_stream,
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: Some(provider.cache_routing_key()),
+        last_response_id: "resp_previous".into(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+        last_response_output: Vec::new(),
+        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+    });
+    let mut stream = provider
+        .complete(&messages, &[], "fixture", None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.unwrap(), StreamEvent::TextDelta(delta) if delta == "partial") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    cancel_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut next = provider
+            .complete(&messages, &[], "fixture", None)
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(event) = next.next().await {
+            match event.unwrap() {
+                StreamEvent::TextDelta(delta) => text.push_str(&delta),
+                StreamEvent::ToolUseStart { .. } => panic!("unseen cancelled tool was forwarded"),
+                _ => {}
+            }
+        }
+        assert_eq!(text, "recovered");
+        assert_eq!(
+            provider
+                .persistent_ws
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .last_response_id,
+            "resp_recovered"
+        );
+    })
+    .await
+    .expect("cancelled response should recover its transport without a reconnect");
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -165,13 +380,19 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
     provider.set_transport("websocket").unwrap();
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
     let mut stream = provider
@@ -190,14 +411,14 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
     .expect("fixture must accept the request");
     tokio::task::yield_now().await;
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         assert!(
             provider.persistent_ws.lock().await.is_none(),
             "cancelled response must be invalidated before mutex handoff"
         );
     })
     .await
-    .expect("dropping the consumer must release the persistent lock promptly");
+    .expect("dropping the consumer must release the persistent lock after bounded recovery");
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut next = provider
             .complete(&messages, &[], "fixture", None)
@@ -239,20 +460,26 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         accepted_tx.send(()).unwrap();
         std::future::pending::<()>().await;
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let input = vec![
         serde_json::json!({"role":"user","content":"original"}),
         serde_json::json!({"role":"user","content":"next"}),
     ];
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     })));
     let (tx, _rx) = mpsc::channel(10);
@@ -282,7 +509,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
     tokio::task::yield_now().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-    tokio::time::timeout(Duration::from_secs(1), waiter)
+    tokio::time::timeout(Duration::from_secs(12), waiter)
         .await
         .unwrap()
         .unwrap();

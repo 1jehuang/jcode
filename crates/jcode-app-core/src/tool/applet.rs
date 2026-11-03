@@ -184,7 +184,12 @@ fn resolve_placement(raw: Option<&Value>, ctx: &ToolContext) -> Result<Placement
 }
 
 fn parse_view(view: Value) -> Result<View> {
-    serde_json::from_value(view).context("invalid view (see the node list in the tool description)")
+    // Tool errors are shown with `{}`, which drops `.context` causes, so the
+    // serde reason goes in the message itself. Without it the agent can only
+    // guess which node or field is wrong.
+    serde_json::from_value(view).map_err(|error| {
+        anyhow!("invalid view: {error} (see the node list in the tool description)")
+    })
 }
 
 #[async_trait]
@@ -196,7 +201,7 @@ impl Tool for AppletTool {
     fn description(&self) -> &str {
         "Show interactive native UI (an applet) in Jcode Desktop. By default the card replaces this tool call in the transcript. \
 View is a tree of nodes, each {\"type\":...}. Layout: stack{direction:vertical|horizontal,gap,padding,align,children}, grid{min_column_width,children}, scroll{max_height,children}, card{title,children} (don't nest), tabs{bind,tabs:[{id,label,children}]}, spacer, divider. \
-Content: text{text,style:body|title|heading|caption|mono,tone,max_lines}, markdown{text}, code{text,language}, image{source:{url|data|asset},alt,aspect_ratio}, icon{name}, key_value{rows:[{key,value}]}, table{columns,rows}, progress{value 0-1,label}, empty{title,detail}, error{message,retry}. \
+Content: text{text,style:body|title|heading|caption|mono,tone,max_lines}, markdown{text}, code{text,language}, image{source:{url|data|asset},alt,aspect_ratio}, icon{name}, key_value{rows:[{key,value}]}, table{columns:[string],rows:[[string]]}, progress{value 0-1,label}, empty{title,detail}, error{message,retry}. \
 Controls (always pills): button{label,variant:primary|secondary|compact|danger,on_press}, chip{label,on_press}, toggle{label,bind}, input{bind,placeholder,multiline,on_submit}, select{bind,options:[{value,label}]}, list{children:[list_item{title,subtitle,meta,badges,on_press}]}. Escape hatch: html{source,height}. \
 Spacing tokens none|xs|sm|md|lg|xl; tones default|dim|accent|success|warning|danger. Inputs/toggles/selects/tabs bind to keys in `state`. \
 Actions are {action,args}. Custom names come back to you as an `[applet action]` message with the current state (or as this tool's output with wait=true). \

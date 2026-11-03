@@ -28,6 +28,8 @@ pub use types::{
 pub struct MarkdownConfigSnapshot {
     pub diagram_mode: DiagramDisplayMode,
     pub markdown_spacing: MarkdownSpacingMode,
+    /// Append link destinations after labels. Disabled by default.
+    pub show_link_urls: bool,
     pub mermaid_enabled: bool,
     pub latex_rendering: LatexRenderingMode,
 }
@@ -37,6 +39,7 @@ impl Default for MarkdownConfigSnapshot {
         Self {
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
+            show_link_urls: false,
             mermaid_enabled: true,
             latex_rendering: LatexRenderingMode::default(),
         }
@@ -133,6 +136,9 @@ mod render_lazy;
 #[path = "markdown_render_support.rs"]
 mod render_support;
 
+mod markdown_links;
+pub use markdown_links::markdown_link_target;
+
 mod render_core_adapter;
 pub use render_core_adapter::{
     document_to_lines, render_markdown_via_core, render_markdown_via_core_wrapped,
@@ -179,6 +185,15 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 // Syntax highlighting cache - keyed by (code content hash, language)
 static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCache>> =
     LazyLock::new(|| Mutex::new(HighlightCache::new()));
+
+/// Release derived syntax-highlighted lines. Syntax definitions and themes
+/// remain available, so waking a view only needs to re-highlight its content.
+pub fn clear_highlight_cache() {
+    let mut cache = HIGHLIGHT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.release();
+}
 
 const HIGHLIGHT_CACHE_LIMIT: usize = 256;
 
@@ -453,6 +468,10 @@ impl HighlightCache {
         self.entries.get(&hash).cloned()
     }
 
+    fn release(&mut self) {
+        *self = Self::new();
+    }
+
     fn insert(&mut self, hash: u64, lines: Vec<Line<'static>>) {
         // Evict if cache is too large
         if self.entries.len() >= HIGHLIGHT_CACHE_LIMIT {
@@ -460,6 +479,24 @@ impl HighlightCache {
         }
         self.entries.insert(hash, lines);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn highlight_cache_release_drops_capacity_and_can_rebuild() {
+    let mut cache = HighlightCache::new();
+    cache.insert(1, vec![Line::from("highlighted text".repeat(100))]);
+    let retained_lines = cache.get(1).unwrap();
+    cache.release();
+    assert!(cache.entries.is_empty());
+    assert_eq!(cache.entries.capacity(), 0);
+    assert!(cache.get(1).is_none());
+    assert!(
+        !retained_lines.is_empty(),
+        "caller-owned lines remain valid"
+    );
+    cache.insert(2, vec![Line::from("rebuilt")]);
+    assert_eq!(cache.get(2).unwrap()[0].to_string(), "rebuilt");
 }
 
 fn hash_code(code: &str, lang: Option<&str>) -> u64 {
@@ -1177,22 +1214,12 @@ pub fn debug_stats_json() -> Option<serde_json::Value> {
     serde_json::to_value(debug_stats()).ok()
 }
 
-/// Render markdown with optional width constraint for tables
-pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_line(line, width, repeated_gutter_prefix)
-}
-
-pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_lines(lines, width, repeated_gutter_prefix)
-}
-
-pub fn progress_bar(progress: f32, width: usize) -> String {
-    wrap::progress_bar(progress, width)
-}
-
-pub fn progress_line(label: &str, progress: f32, width: usize) -> Line<'static> {
-    wrap::progress_line(label, progress, width)
-}
+#[path = "display_helpers.rs"]
+mod display_helpers;
+pub use display_helpers::progress_bar;
+pub use display_helpers::progress_line;
+pub use display_helpers::wrap_line;
+pub use display_helpers::wrap_lines;
 
 #[cfg(test)]
 #[path = "markdown_tests/mod.rs"]

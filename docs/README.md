@@ -13,7 +13,7 @@ Reference documentation for the jcode codebase.
 ## Key entry points
 
 - Architecture: `SERVER_ARCHITECTURE.md`, `MODULAR_ARCHITECTURE_RFC.md`, `CRATE_OWNERSHIP_BOUNDARIES.md`
-- Swarm: `SWARM_ARCHITECTURE.md`, `SWARM_TASK_GRAPH.md`
+- Swarm: `SWARM_ARCHITECTURE.md`
 - Memory: `MEMORY_ARCHITECTURE.md`, `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Refactoring and quality: `REFACTORING.md`, `plans/CODE_QUALITY_10_10_PLAN.md`
 - Desktop app: `DESKTOP_APP_ARCHITECTURE.md`, `DESKTOP_CODEBASE_ARCHITECTURE.md`

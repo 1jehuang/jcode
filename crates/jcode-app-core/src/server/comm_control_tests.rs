@@ -143,6 +143,7 @@ async fn test_agent() -> Arc<Mutex<Agent>> {
     Arc::new(Mutex::new(Agent::new(provider, registry)))
 }
 
+include!("comm_control_tests/progress_publication.rs");
 include!("comm_control_tests/assign_task.rs");
 include!("comm_control_tests/assign_blocked.rs");
 include!("comm_control_tests/assign_double.rs");
@@ -153,6 +154,7 @@ include!("comm_control_tests/task_control.rs");
 include!("comm_control_tests/assign_next_dependency.rs");
 include!("comm_control_tests/assign_next_metadata.rs");
 include!("comm_control_tests/await_late_joiners.rs");
+include!("comm_control_tests/await_dependencies.rs");
 include!("comm_control_tests/await_disconnect.rs");
 include!("comm_control_tests/await_any.rs");
 include!("comm_control_tests/await_reload_deadline.rs");
@@ -163,7 +165,6 @@ include!("comm_control_tests/await_lagged.rs");
 include!("comm_control_tests/await_resume_expired.rs");
 include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");
-include!("comm_control_tests/dag_e2e.rs");
 include!("comm_control_tests/auto_worker_filter.rs");
 include!("comm_control_tests/usage_limit_resume.rs");
 include!("comm_control_tests/resume_bookkeeping.rs");

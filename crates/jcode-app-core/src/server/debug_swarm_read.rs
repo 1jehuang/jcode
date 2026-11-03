@@ -3,15 +3,14 @@ use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmMember, SwarmState, VersionedPlan,
     git_common_dir_for, swarm_id_for_dir,
 };
-use crate::agent::Agent;
 use crate::plan::{next_runnable_item_ids, summarize_plan_graph};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 #[expect(
@@ -297,8 +296,6 @@ pub(super) async fn maybe_handle_swarm_read_command(
                 "participants": &vp.participants,
                 "items": &vp.items,
                 "task_progress": &vp.task_progress,
-                "mode": &vp.mode,
-                "node_meta": &vp.node_meta,
                 "ready_ids": summary.ready_ids,
                 "blocked_ids": summary.blocked_ids,
                 "active_ids": summary.active_ids,
@@ -329,8 +326,6 @@ pub(super) async fn maybe_handle_swarm_read_command(
                 "participants": &vp.participants,
                 "items": &vp.items,
                 "task_progress": &vp.task_progress,
-                "mode": &vp.mode,
-                "node_meta": &vp.node_meta,
                 "ready_ids": summary.ready_ids,
                 "blocked_ids": summary.blocked_ids,
                 "active_ids": summary.active_ids,

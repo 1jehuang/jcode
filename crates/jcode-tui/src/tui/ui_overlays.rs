@@ -294,7 +294,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/effort <level>",
-        "Set effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep)",
+        "Set effort (none|minimal|low|medium|high|xhigh|max|swarm)",
     ));
     lines.push(help_entry(
         "/fast [on|off|status|default ...]",
@@ -406,10 +406,6 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(help_entry(
         "/refactor resume",
         "Resume the last saved refactor loop/plan",
-    ));
-    lines.push(help_entry(
-        "/side [on|off]",
-        "Show or hide the selected side-panel page",
     ));
     lines.push(help_entry(
         "/splitview [on|off|status]",

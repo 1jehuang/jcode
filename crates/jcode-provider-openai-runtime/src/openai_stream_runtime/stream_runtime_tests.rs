@@ -1,5 +1,95 @@
 use super::*;
 
+#[test]
+fn service_tier_headers_follow_serialized_tier_on_both_transports() {
+    let client = Client::new();
+    for mode in 0..3 {
+        let oauth = mode != 0;
+        let creds = CodexCredentials {
+            access_token: "fixture-token".into(),
+            refresh_token: if mode == 1 {
+                "refresh".into()
+            } else {
+                String::new()
+            },
+            id_token: (mode == 2).then(|| "id-token".into()),
+            account_id: Some("fixture-account".into()),
+            expires_at: None,
+        };
+        for tier in [
+            None,
+            Some("default"),
+            Some("auto"),
+            Some("priority"),
+            Some("fast"),
+            Some("flex"),
+            Some("ultrafast"),
+        ] {
+            let http = response_http_request(
+                &client,
+                "https://example.test/responses",
+                &creds.access_token,
+                oauth,
+                None,
+                None,
+                Some("gpt-6.1-sol"),
+                tier,
+            )
+            .json(&serde_json::json!({"service_tier": tier}))
+            .build()
+            .unwrap();
+            let ws = openai_websocket_prewarm::websocket_request(
+                &creds,
+                &creds.access_token,
+                None,
+                Some("gpt-6.1-sol"),
+                tier,
+            )
+            .unwrap();
+            if !oauth {
+                for header in [
+                    "originator",
+                    "chatgpt-account-id",
+                    "session-id",
+                    "x-codex-routing-hint",
+                ] {
+                    assert!(!http.headers().contains_key(header));
+                    assert!(!ws.headers().contains_key(header));
+                }
+            }
+            let expected = (!oauth && tier == Some("ultrafast")).then_some("ultrafast");
+            let routing_hint = oauth.then(|| match tier {
+                Some(tier) => format!("model=gpt-6.1-sol;tier={tier}"),
+                None => "model=gpt-6.1-sol".to_string(),
+            });
+            assert_eq!(
+                http.headers()
+                    .get("x-codex-routing-hint")
+                    .map(|v| v.to_str().unwrap()),
+                routing_hint.as_deref()
+            );
+            assert_eq!(
+                ws.headers()
+                    .get("x-codex-routing-hint")
+                    .map(|v| v.to_str().unwrap()),
+                routing_hint.as_deref()
+            );
+            assert_eq!(
+                http.headers()
+                    .get("OpenAI-Service-Tier")
+                    .map(|v| v.to_str().unwrap()),
+                expected
+            );
+            assert_eq!(
+                ws.headers()
+                    .get("OpenAI-Service-Tier")
+                    .map(|v| v.to_str().unwrap()),
+                expected
+            );
+        }
+    }
+}
+
 fn dummy_credentials() -> Arc<RwLock<CodexCredentials>> {
     Arc::new(RwLock::new(CodexCredentials {
         access_token: "at_old".into(),
@@ -139,4 +229,54 @@ fn rate_limit_is_retryable() {
 fn auth_errors_remain_non_retryable() {
     assert!(!is_retryable_error("401 unauthorized"));
     assert!(!is_retryable_error("invalid api key"));
+}
+#[test]
+fn cache_affinity_https_matches_websocket_session_header() {
+    let client = Client::new();
+    let mut credentials = CodexCredentials {
+        access_token: "fixture-token".into(),
+        refresh_token: "fixture-refresh".into(),
+        id_token: None,
+        account_id: Some("fixture-account".into()),
+        expires_at: None,
+    };
+    for oauth in [true, false] {
+        if !oauth {
+            credentials.refresh_token.clear();
+        }
+        let http = response_http_request(
+            &client,
+            "https://example.test/responses",
+            &credentials.access_token,
+            oauth,
+            credentials.account_id.as_deref(),
+            Some("persisted-session"),
+            None,
+            None,
+        )
+        .json(&serde_json::json!({"prompt_cache_key":"persisted-session"}))
+        .build()
+        .unwrap();
+        let ws = openai_websocket_prewarm::websocket_request(
+            &credentials,
+            &credentials.access_token,
+            Some("persisted-session"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            http.headers().get("session-id"),
+            ws.headers().get("session-id")
+        );
+        assert_eq!(http.headers().contains_key("session-id"), oauth);
+        assert_eq!(
+            http.headers().get("chatgpt-account-id"),
+            ws.headers().get("chatgpt-account-id")
+        );
+        assert_eq!(http.headers()["authorization"], "Bearer fixture-token");
+        if oauth {
+            assert_eq!(http.headers()["session-id"], "persisted-session");
+        }
+    }
 }
