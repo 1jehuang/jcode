@@ -1,9 +1,14 @@
 //! Pure JSON-to-JSON translation between the harness API and the legacy
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
+mod control_replies;
 mod credentials;
+mod turn_identity;
+#[cfg(test)]
+mod turn_identity_tests;
 
 use crate::background_progress::parse_background_notification;
+use control_replies::SimpleKind;
 use jcode_harness_api::{
     ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
 };
@@ -118,6 +123,7 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    turn_fence: turn_identity::TurnFence,
     /// Refreshed from an authoritative source-daemon Ping before each list.
     pub user_connected_sessions: std::collections::HashSet<String>,
     pub runtime_commands_supported: bool,
@@ -303,41 +309,15 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum SimpleKind {
-    RuntimeCommand,
-    Detach,
-    Tools,
-    ToolControl,
-    Ping,
-    History,
-    Ok,
-    /// Awaiting `model_changed`, which carries its own error field.
-    Model,
-    ContextCap,
-    /// Awaiting `reasoning_effort_changed`.
-    ReasoningEffort,
-    /// Awaiting `compacted_history`.
-    Compact,
-    /// Awaiting the catalog reply that answers `list_models`.
-    Models,
-    RuntimeInfo,
-    /// Awaiting `background_tool_result`.
-    BackgroundTool,
-    /// Awaiting `soft_interrupts_cancelled`.
-    SoftInterruptCancel,
-    Credential {
-        provider: String,
-        configured: bool,
-    },
-}
-
 /// Whether translating this daemon event may perform synchronous file I/O.
 ///
 /// Keep in sync with the arms of [`BridgeState::legacy_event_to_api`] that
 /// read persisted session records or side-panel files. Everything else is
 /// pure in-memory translation and must not pay for `block_in_place`.
 pub fn legacy_event_may_block(event: &Value) -> bool {
+    if event["type"] == "turn_event" {
+        return legacy_event_may_block(&event["event"]);
+    }
     matches!(
         event["type"].as_str(),
         Some("state" | "side_panel_state" | "split_response" | "history")
@@ -534,7 +514,7 @@ impl BridgeState {
 
         match req {
             "archive_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
@@ -553,7 +533,7 @@ impl BridgeState {
                 }
             }
             "restore_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
@@ -612,6 +592,7 @@ impl BridgeState {
                     // own, so the daemon switches pool accounts and retries
                     // usage-limited turns for them, like the TUI does.
                     "supports_server_failover": true,
+                    "supports_turn_identity": true,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
@@ -725,12 +706,13 @@ impl BridgeState {
             }
             "clear" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 vec![Outbound::Legacy(json!({"type": "clear", "id": id}))]
             }
             "rewind" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::OkOnHistory));
                 vec![Outbound::Legacy(json!({
                     "type": "rewind",
                     "id": id,
@@ -747,7 +729,7 @@ impl BridgeState {
             // attaching to a session merely to read it would disturb the very
             // thing being previewed.
             "peek_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 let limit = request["limit"].as_u64().unwrap_or(PEEK_LIMIT) as usize;
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
@@ -957,7 +939,7 @@ impl BridgeState {
                 ))]
             }
             "notify_auth_changed" => {
-                let provider = request["provider"].as_str().unwrap_or_default();
+                let provider = request["provider"].as_str().unwrap_or("");
                 if provider.is_empty()
                     || provider.len() > 64
                     || !provider
@@ -977,7 +959,7 @@ impl BridgeState {
                 }))]
             }
             "invalidate_usage" => {
-                let legacy_type = match request["provider"].as_str().unwrap_or_default() {
+                let legacy_type = match request["provider"].as_str().unwrap_or("") {
                     "claude" | "anthropic" => "invalidate_anthropic_usage",
                     "openai" => "invalidate_openai_usage",
                     _ => {
@@ -1005,7 +987,7 @@ impl BridgeState {
                 }))]
             }
             "set_api_key" | "clear_api_key" => {
-                let provider = request["provider"].as_str().unwrap_or_default();
+                let provider = request["provider"].as_str().unwrap_or("");
                 let Some((provider, env_keys, file_name)) = Self::credential_binding(provider)
                 else {
                     return Self::error_reply(
@@ -1015,7 +997,7 @@ impl BridgeState {
                     );
                 };
                 let configured = req == "set_api_key";
-                let key = request["api_key"].as_str().unwrap_or_default();
+                let key = request["api_key"].as_str().unwrap_or("");
                 if configured
                     && (key.trim().is_empty()
                         || key.trim() != key
@@ -1053,8 +1035,8 @@ impl BridgeState {
                 }))]
             }
             "read_file" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let relative = request["path"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let relative = request["path"].as_str().unwrap_or("");
                 let max = request["max_bytes"]
                     .as_u64()
                     .unwrap_or(DEFAULT_FILE_BYTES)
@@ -1074,8 +1056,8 @@ impl BridgeState {
                 }
             }
             "find_files" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let query = request["query"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let query = request["query"].as_str().unwrap_or("");
                 let limit = request["limit"]
                     .as_u64()
                     .unwrap_or(DEFAULT_FIND_LIMIT as u64)
@@ -1092,8 +1074,8 @@ impl BridgeState {
                 }
             }
             "search_text" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let query = request["query"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let query = request["query"].as_str().unwrap_or("");
                 let under = request["path"].as_str();
                 let limit = request["limit"]
                     .as_u64()
@@ -1111,7 +1093,7 @@ impl BridgeState {
                 }
             }
             "get_todo_state" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 match Self::todo_home(session_id) {
                     Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
                         api_id,
@@ -1124,7 +1106,7 @@ impl BridgeState {
                 }
             }
             "ack_todo_follow_up" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
                 let effects: jcode_todo_policy::TodoEffects =
                     match serde_json::from_value(request["effects"].clone()) {
                         Ok(effects) => effects,
@@ -1146,8 +1128,8 @@ impl BridgeState {
                 }
             }
             "file_status" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                let relative = request["path"].as_str().unwrap_or_default();
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                let relative = request["path"].as_str().unwrap_or("");
                 match Self::session_file_status(session_id, relative) {
                     Ok((exists, kind, size, modified_ms)) => {
                         vec![Outbound::Reply(ServerFrame::reply(
@@ -1229,7 +1211,7 @@ impl BridgeState {
             }
             "rename_session" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut rename = json!({"type": "rename_session", "id": id});
                 // An absent title clears it and restores the generated one, so
                 // null and "" must stay distinguishable on the wire.
@@ -1244,7 +1226,7 @@ impl BridgeState {
                     .filter(|sid| !sid.is_empty())
                     .map(str::to_string)
                     .or_else(|| self.session_id.clone());
-                let instance = request["instance"].as_str().unwrap_or_default();
+                let instance = request["instance"].as_str().unwrap_or("");
                 let (Some(session_id), false) = (session_id, instance.is_empty()) else {
                     return Self::error_reply(
                         api_id,
@@ -1253,7 +1235,7 @@ impl BridgeState {
                     );
                 };
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut out = json!({
                     "type": req,
                     "id": id,
@@ -1290,14 +1272,14 @@ impl BridgeState {
                     );
                 }
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 vec![Outbound::Legacy(json!({
                     "type": "set_session_env", "id": id, "env": request["env"].clone()
                 }))]
             }
             "set_session_saved" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 let mut save = json!({
                     "type": "set_session_saved",
                     "id": id,
@@ -1310,7 +1292,8 @@ impl BridgeState {
             }
             "rewind_undo" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::OkOnHistory));
                 vec![Outbound::Legacy(json!({"type": "rewind_undo", "id": id}))]
             }
             "cancel_soft_interrupts" => {
@@ -1578,6 +1561,122 @@ impl BridgeState {
 
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
+        match event["type"].as_str().unwrap_or("") {
+            "turn_state" => {
+                if self.turn_fence.state(event) {
+                    self.observed_turn_active = self.turn_fence.active();
+                    self.activity_version += 1;
+                }
+                vec![]
+            }
+            "turn_started" => {
+                if self.turn_fence.start(&event["identity"]) {
+                    self.observed_turn_active = true;
+                    self.activity_version += 1;
+                }
+                vec![]
+            }
+            "turn_event" => {
+                if !self.turn_fence.accepts(&event["identity"])
+                    && !(event["event"]["type"] == "interrupted"
+                        && self.turn_fence.is_latest(&event["identity"]))
+                {
+                    return vec![];
+                }
+                let payload = &event["event"];
+                if matches!(
+                    payload["type"].as_str(),
+                    Some("turn_event" | "turn_started" | "turn_state")
+                ) {
+                    return vec![];
+                }
+                let frames = self.legacy_event_to_api_inner(payload);
+                if matches!(payload["type"].as_str(), Some("done" | "error")) {
+                    self.turn_fence.complete();
+                }
+                frames
+            }
+            "done" | "error" if self.turn_fence.scoped() => {
+                // Control response handlers still need their legacy terminal.
+                let id = event["id"].as_u64().unwrap_or(0);
+                if self.pending_message_id == Some(id) {
+                    if !self.turn_fence.active() {
+                        return self.legacy_event_to_api_inner(event);
+                    }
+                    if event["type"] == "error" {
+                        self.pending_message_id = None;
+                        return vec![ServerFrame::event(ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: event["message"].as_str().unwrap_or("").to_string(),
+                        })];
+                    }
+                }
+                if event["type"] == "error"
+                    && let Some(index) = self
+                        .pending_simple
+                        .iter()
+                        .position(|(pending_id, _, _)| *pending_id == id)
+                {
+                    let (_, api_id, _) = self.pending_simple.remove(index);
+                    self.pending_control_done_ids.remove(&id);
+                    self.pending_activity_snapshots.remove(&id);
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: event["message"].as_str().unwrap_or("").to_string(),
+                        },
+                    )];
+                }
+                if self.pending_control_done_ids.contains(&id)
+                    || self.pending_simple.iter().any(|(pending_id, _, kind)| {
+                        *pending_id == id && *kind == SimpleKind::OkOnDone
+                    })
+                    || self.pending_attach_subscribe_id == Some(id)
+                    || self
+                        .pending_attach_id
+                        .as_ref()
+                        .is_some_and(|(state_id, _, _)| *state_id == id)
+                {
+                    let active = self.observed_turn_active;
+                    let frames = self.legacy_event_to_api_inner(event);
+                    self.observed_turn_active = active;
+                    frames
+                } else {
+                    vec![]
+                }
+            }
+            "interrupted"
+            | "text_delta"
+            | "text_replace"
+            | "text_suffix_replace"
+            | "reasoning_delta"
+            | "reasoning_done"
+            | "tool_start"
+            | "tool_input"
+            | "tool_exec"
+            | "tool_done"
+            | "connection_phase"
+            | "status_detail"
+                if self.turn_fence.scoped() =>
+            {
+                vec![]
+            }
+            "state" if self.turn_fence.scoped() => {
+                let mut snapshot = event.clone();
+                snapshot["is_processing"] = Value::Bool(self.turn_fence.active());
+                self.legacy_event_to_api_inner(&snapshot)
+            }
+            _ => self.legacy_event_to_api_inner(event),
+        }
+    }
+
+    fn legacy_event_to_api_inner(&mut self, event: &Value) -> Vec<ServerFrame> {
+        let history_activity = if self.turn_fence.scoped() {
+            Some(self.turn_fence.active())
+        } else {
+            event["activity"]["is_processing"].as_bool()
+        };
         let kind = event["type"].as_str().unwrap_or("");
         if kind == "runtime_command_result" {
             let Some(api_id) = self.take_simple(
@@ -1963,6 +2062,10 @@ impl BridgeState {
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnDone) {
+                    self.pending_control_done_ids.remove(&id);
+                    return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
+                }
                 if let Some(api_id) = self.take_simple(id, SimpleKind::Detach) {
                     self.pending_control_done_ids.remove(&id);
                     self.session_id = None;
@@ -2130,6 +2233,9 @@ impl BridgeState {
                 // which is the only place it appears: remember it so
                 // `list_sessions` can answer with more than this connection.
                 self.note_sessions(event);
+                if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnHistory) {
+                    return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
+                }
                 if self
                     .pending_recovery_history
                     .as_ref()
@@ -2144,11 +2250,11 @@ impl BridgeState {
                     self.pending_recovery_history = None;
                     let mut frames: Vec<_> = Self::attachment_recovery(event).into_iter().collect();
                     frames.extend(Self::side_panel_frame(
-                        event["session_id"].as_str().unwrap_or_default(),
+                        event["session_id"].as_str().unwrap_or(""),
                         &event["side_panel"],
                     ));
                     frames.extend(Self::applet_frame(
-                        event["session_id"].as_str().unwrap_or_default(),
+                        event["session_id"].as_str().unwrap_or(""),
                         &event["applets"],
                     ));
                     return frames;
@@ -2199,7 +2305,7 @@ impl BridgeState {
                     .unwrap_or_default();
                 // A stored terminal-looking row can still belong to a running
                 // turn (e.g. an automatic continuation). Do not show a footer yet.
-                if event["activity"]["is_processing"].as_bool() == Some(true) {
+                if history_activity == Some(true) {
                     let start = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
                     for message in &mut messages[start..] {
                         message.response_stats = None;
@@ -2218,8 +2324,7 @@ impl BridgeState {
                 // not resurrect a completed turn or stop a newly started one.
                 let fresh_activity =
                     self.pending_activity_snapshots.remove(&id) == Some(self.activity_version);
-                if fresh_activity && let Some(active) = event["activity"]["is_processing"].as_bool()
-                {
+                if fresh_activity && let Some(active) = history_activity {
                     self.observed_turn_active = active;
                     frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                         session_id: session(self),
@@ -2484,25 +2589,9 @@ impl BridgeState {
                 }
             }
             "error" => {
-                // A rejected tool configuration/result is not a failed model
-                // turn. Preserve streaming state and correlate only its request.
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some(index) = self
-                    .pending_simple
-                    .iter()
-                    .position(|(pending_id, _, kind)| {
-                        *pending_id == id
-                            && matches!(kind, SimpleKind::Tools | SimpleKind::ToolControl)
-                    })
-                {
-                    let (_, api_id, _) = self.pending_simple.remove(index);
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::Error {
-                            code: ErrorCode::Internal,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
-                        },
-                    )];
+                if let Some(reply) = self.control_error_reply(id, event) {
+                    return vec![reply];
                 }
                 self.activity_version += 1;
                 self.observed_turn_active = false;
@@ -2526,7 +2615,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Error {
                             code,
-                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                            message: event["message"].as_str().unwrap_or("").to_string(),
                         },
                     )];
                 }
@@ -2704,7 +2793,7 @@ impl BridgeState {
                         provider: route["provider"].as_str()?.to_string(),
                         api_method: route["api_method"].as_str()?.to_string(),
                         available: route["available"].as_bool().unwrap_or(false),
-                        detail: route["detail"].as_str().unwrap_or_default().to_string(),
+                        detail: route["detail"].as_str().unwrap_or("").to_string(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })
@@ -3314,284 +3403,6 @@ impl BridgeState {
         )
     }
 
-    fn app_config_dir() -> Option<std::path::PathBuf> {
-        if let Some(home) = std::env::var_os("JCODE_HOME") {
-            return Some(std::path::Path::new(&home).join("config/jcode"));
-        }
-        #[cfg(target_os = "macos")]
-        return Some(
-            std::path::Path::new(&std::env::var_os("HOME")?)
-                .join("Library/Application Support/jcode"),
-        );
-        #[cfg(target_os = "windows")]
-        return Some(std::path::Path::new(&std::env::var_os("APPDATA")?).join("jcode"));
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        Some(
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::path::Path::new(&std::env::var_os("HOME").unwrap_or_default())
-                        .join(".config")
-                })
-                .join("jcode"),
-        )
-    }
-
-    fn session_root(session_id: &str) -> Result<std::path::PathBuf, (ErrorCode, String)> {
-        let root = Self::resolve_working_dir(session_id).ok_or((
-            ErrorCode::UnknownSession,
-            "session has no working directory".into(),
-        ))?;
-        std::fs::canonicalize(root).map_err(|error| {
-            (
-                ErrorCode::InvalidRequest,
-                format!("working directory is unavailable: {error}"),
-            )
-        })
-    }
-
-    fn safe_session_path(
-        session_id: &str,
-        relative: &str,
-    ) -> Result<std::path::PathBuf, (ErrorCode, String)> {
-        if relative.is_empty() || std::path::Path::new(relative).is_absolute() {
-            return Err((
-                ErrorCode::InvalidRequest,
-                "path must be a non-empty relative path".into(),
-            ));
-        }
-        if std::path::Path::new(relative)
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Err((
-                ErrorCode::InvalidRequest,
-                "path may not contain `..`".into(),
-            ));
-        }
-        let root = Self::session_root(session_id)?;
-        let candidate = root.join(relative);
-        if candidate.exists() {
-            let canonical = std::fs::canonicalize(&candidate)
-                .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
-            if !canonical.starts_with(&root) {
-                return Err((
-                    ErrorCode::InvalidRequest,
-                    "path escapes the session working directory".into(),
-                ));
-            }
-            return Ok(canonical);
-        }
-        // A missing final path can still be safely statted when its nearest
-        // existing ancestor remains under the canonical root.
-        let mut ancestor = candidate.as_path();
-        while !ancestor.exists() {
-            ancestor = ancestor
-                .parent()
-                .ok_or((ErrorCode::InvalidRequest, "invalid path".into()))?;
-        }
-        let canonical = std::fs::canonicalize(ancestor)
-            .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
-        if !canonical.starts_with(&root) {
-            return Err((
-                ErrorCode::InvalidRequest,
-                "path escapes the session working directory".into(),
-            ));
-        }
-        Ok(candidate)
-    }
-
-    fn read_session_file(
-        session_id: &str,
-        relative: &str,
-        max: u64,
-    ) -> Result<(String, u64, bool), (ErrorCode, String)> {
-        let path = Self::safe_session_path(session_id, relative)?;
-        let metadata = path
-            .metadata()
-            .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
-        if !metadata.is_file() {
-            return Err((
-                ErrorCode::InvalidRequest,
-                "path is not a regular file".into(),
-            ));
-        }
-        let size = metadata.len();
-        let file = std::fs::File::open(path)
-            .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
-        let mut bytes = Vec::new();
-        file.take(max.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| (ErrorCode::Internal, error.to_string()))?;
-        let truncated = bytes.len() as u64 > max;
-        bytes.truncate(max as usize);
-        let content = match std::str::from_utf8(&bytes) {
-            Ok(content) => content.to_string(),
-            Err(error) if truncated && error.error_len().is_none() => {
-                String::from_utf8(bytes[..error.valid_up_to()].to_vec())
-                    .expect("valid UTF-8 prefix")
-            }
-            Err(_) => {
-                return Err((ErrorCode::InvalidRequest, "file is not UTF-8 text".into()));
-            }
-        };
-        Ok((content, size, truncated))
-    }
-
-    fn walk_files(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
-        let mut files = Vec::new();
-        let mut pending = vec![root.to_path_buf()];
-        let mut scanned_entries = 0usize;
-        while let Some(dir) = pending.pop() {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            let mut entries: Vec<_> = entries.flatten().collect();
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                scanned_entries += 1;
-                if scanned_entries > MAX_WALK_ENTRIES {
-                    return files;
-                }
-                let name = entry.file_name();
-                if matches!(
-                    name.to_str(),
-                    Some(".git" | "node_modules" | "target" | ".next")
-                ) {
-                    continue;
-                }
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                if kind.is_symlink() {
-                    continue;
-                }
-                if kind.is_dir() {
-                    pending.push(entry.path());
-                }
-                if kind.is_file() {
-                    files.push(entry.path());
-                    if files.len() >= limit {
-                        return files;
-                    }
-                }
-            }
-        }
-        files
-    }
-
-    fn find_session_files(
-        session_id: &str,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<String>, (ErrorCode, String)> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let root = Self::session_root(session_id)?;
-        let needle = query.to_ascii_lowercase();
-        // Scan a bounded project-wide set before applying the name filter.
-        // Stopping at `limit * 10` made a query incorrectly return no results
-        // whenever the matching directory happened to sort later in a large
-        // repository.
-        Ok(Self::walk_files(&root, MAX_WALK_FILES)
-            .into_iter()
-            .filter_map(|path| {
-                let relative = path
-                    .strip_prefix(&root)
-                    .ok()?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                relative
-                    .to_ascii_lowercase()
-                    .contains(&needle)
-                    .then_some(relative)
-            })
-            .take(limit)
-            .collect())
-    }
-
-    fn search_session_text(
-        session_id: &str,
-        query: &str,
-        under: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<TextMatch>, (ErrorCode, String)> {
-        if query.is_empty() {
-            return Err((ErrorCode::InvalidRequest, "query must not be empty".into()));
-        }
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let root = Self::session_root(session_id)?;
-        let search_root = match under {
-            Some(relative) => Self::safe_session_path(session_id, relative)?,
-            None => root.clone(),
-        };
-        let files = if search_root.is_file() {
-            vec![search_root]
-        } else {
-            Self::walk_files(&search_root, MAX_WALK_FILES)
-        };
-        let mut matches = Vec::new();
-        let mut remaining_bytes = MAX_SEARCH_BYTES;
-        for path in files {
-            let Some(size) = path.metadata().ok().map(|meta| meta.len()) else {
-                continue;
-            };
-            if size > DEFAULT_FILE_BYTES || size > remaining_bytes {
-                continue;
-            }
-            remaining_bytes -= size;
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for (line_index, line) in text.lines().enumerate() {
-                for (byte_column, _) in line.match_indices(query) {
-                    matches.push(TextMatch {
-                        path: path
-                            .strip_prefix(&root)
-                            .unwrap_or(&path)
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                        line: line_index as u32 + 1,
-                        column: line[..byte_column].chars().count() as u32 + 1,
-                        preview: line.chars().take(500).collect(),
-                    });
-                    if matches.len() >= limit {
-                        return Ok(matches);
-                    }
-                }
-            }
-        }
-        Ok(matches)
-    }
-
-    fn session_file_status(session_id: &str, relative: &str) -> SessionFileStatusResult {
-        let path = Self::safe_session_path(session_id, relative)?;
-        let Ok(meta) = path.metadata() else {
-            return Ok((false, "missing".into(), None, None));
-        };
-        let kind = if meta.is_file() {
-            "file"
-        } else if meta.is_dir() {
-            "directory"
-        } else {
-            "other"
-        };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        Ok((
-            true,
-            kind.into(),
-            meta.is_file().then_some(meta.len()),
-            modified,
-        ))
-    }
-
     fn error_reply(api_id: u64, code: ErrorCode, message: &str) -> Vec<Outbound> {
         vec![Outbound::Reply(ServerFrame::reply(
             api_id,
@@ -3683,3 +3494,6 @@ mod tests;
 #[cfg(test)]
 #[path = "user_response_capability_tests.rs"]
 mod user_response_capability_tests;
+
+#[path = "translate/session_files.rs"]
+mod session_files;

@@ -3,8 +3,10 @@ name: V1 preview
 on:
   push:
     branches: [master]
+  workflow_dispatch:
 
 # A new master push cancels the sleep, CI wait, and any obsolete builds.
+# Manual retries use the same master-only gates and a fresh preview number.
 # No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
 concurrency:
   group: v1-preview-master
@@ -43,10 +45,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER"
-      - name: Require successful exact-commit source CI
+      - name: Require exact-commit source CI under preview policy
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+        run: python3 scripts/check_release_ci.py "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800 --preview
 
   build:
     needs: quiet-and-ci
@@ -235,6 +237,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist
+
+  publish-sdk:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # npm's trusted publisher is bound to the standalone SDK workflow identity.
+      # A reusable call carries this caller's identity and is rejected by npm.
+      # GITHUB_TOKEN also suppresses release events, so dispatch explicitly.
+      - name: Dispatch trusted SDK preview publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish-typescript-sdk.yml --repo "$GITHUB_REPOSITORY" --ref master -f "jcode_release_tag=$JCODE_BUILD_SEMVER"
 
   announce:
     needs: publish

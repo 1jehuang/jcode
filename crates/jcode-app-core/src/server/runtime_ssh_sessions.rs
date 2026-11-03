@@ -36,7 +36,18 @@ fn list_sessions(current: Value, command: &str, args: &[String]) -> Result<(Valu
                     && let Ok(metadata) = entry.metadata()
                     && metadata.is_file()
                 {
-                    candidates.push((metadata.modified().ok(), path));
+                    candidates.push((
+                        metadata.modified().map_or_else(
+                            |error| {
+                                crate::logging::debug(&format!(
+                                    "Remote session timestamp unavailable: {error}"
+                                ));
+                                None
+                            },
+                            Some,
+                        ),
+                        path,
+                    ));
                 }
             }
         }
@@ -46,7 +57,7 @@ fn list_sessions(current: Value, command: &str, args: &[String]) -> Result<(Valu
     candidates.sort_by(|left, right| right.0.cmp(&left.0));
     // Bound snapshot work on hosts with a large archive. The current live copy
     // is always included, even if its initial snapshot has not been written.
-    let current_id = current["id"].as_str().unwrap_or_default().to_owned();
+    let current_id = current["id"].as_str().unwrap_or("").to_owned();
     let active_ids = crate::session::active_session_ids();
     let mut sessions = vec![current];
     for (_, path) in candidates.into_iter().take(200) {
@@ -84,9 +95,9 @@ fn list_sessions(current: Value, command: &str, args: &[String]) -> Result<(Valu
         message.push_str(&format!(
             "\n{}{} [{}] {}",
             if session["saved"] == true { "★ " } else { "" },
-            session["id"].as_str().unwrap_or_default(),
-            session["status"].as_str().unwrap_or_default(),
-            session["title"].as_str().unwrap_or_default()
+            session["id"].as_str().unwrap_or(""),
+            session["status"].as_str().unwrap_or(""),
+            session["title"].as_str().unwrap_or("")
         ));
     }
     message.push_str("\n\nSwitch here with /resume <id>. /back returns to the previous session.");

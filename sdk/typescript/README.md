@@ -671,3 +671,12 @@ npm run check   # typecheck + build + tests (mock harness, no daemon needed)
 `test/schema-parity.test.ts` reads the Rust enums directly, and
 `crates/jcode-harness-api`'s `typescript_sdk_lists_every_variant` test reads
 this package. Adding a variant on either side without the other fails CI.
+
+## Preview releases
+
+Install the opt-in SDK prerelease with `npm install @1jehuang/jcode-sdk@preview`.
+The `latest` npm tag remains stable. Each runtime preview publishes a matching
+SDK prerelease and six platform runtime packages, pinned to the same SDK version.
+For example, runtime `v1.0.0-preview.30` with SDK base version `1.2.0` produces
+SDK `1.2.0-preview.30`. The Rust SDK remains source-only in `crates/jcode-sdk`
+and can be pinned to the runtime preview's Git tag.

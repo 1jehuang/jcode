@@ -14,6 +14,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let key_b = BodyCacheKey {
         width: 41,
@@ -21,6 +22,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
     };
     let different_latex = BodyCacheKey {
         latex_rendering: crate::config::LatexRenderingMode::Unicode,
+        show_link_urls: false,
         ..key_a.clone()
     };
 
@@ -89,6 +91,13 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         assert!(cache.get_exact(&compact_key).is_none());
         assert!(cache.best_incremental_base(&compact_key, 4).is_none());
         assert!(cache.take_best_incremental_base(&compact_key).is_none());
+        let link_urls_key = BodyCacheKey {
+            show_link_urls: true,
+            ..key_a.clone()
+        };
+        assert!(cache.get_exact(&link_urls_key).is_none());
+        assert!(cache.best_incremental_base(&link_urls_key, 4).is_none());
+        assert!(cache.take_best_incremental_base(&link_urls_key).is_none());
         assert!(cache.take_best_incremental_base(&key_a).is_some());
     }
 }
@@ -109,6 +118,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let resized_key = BodyCacheKey {
         messages_version: 2,
@@ -143,6 +153,7 @@ fn test_body_cache_state_evicts_oldest_entries() {
             expanded_images_version: 0,
             swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
+            show_link_urls: false,
         };
         let prepared = Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from(format!("{idx}"))],
@@ -186,6 +197,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_prepared_messages_with_content_bytes(3 * 1024 * 1024, "body-large-");
 
@@ -217,6 +229,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-");
 
@@ -249,6 +262,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let key_b = BodyCacheKey {
         width: 139,
@@ -288,6 +302,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-base-");
 
@@ -565,6 +580,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {
@@ -573,6 +589,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     };
     let different_latex = FullPrepCacheKey {
         latex_rendering: crate::config::LatexRenderingMode::Unicode,
+        show_link_urls: false,
         ..key_a.clone()
     };
 
@@ -637,6 +654,11 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         }
         assert!(cache.get_exact(&key_a).is_some());
         assert!(cache.get_exact(&compact_key).is_none());
+        let link_urls_key = FullPrepCacheKey {
+            show_link_urls: true,
+            ..key_a.clone()
+        };
+        assert!(cache.get_exact(&link_urls_key).is_none());
         assert!(cache.get_exact(&key_a).is_some());
     }
 }
@@ -661,6 +683,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let resized_key = FullPrepCacheKey {
         mermaid_aspect_bucket: Some(2500),
@@ -696,6 +719,7 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             expanded_images_version: 0,
             swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
+            show_link_urls: false,
             inline_images_visible: true,
         };
         let prepared = make_prepared_chat_frame(Arc::new(PreparedMessages {
@@ -743,6 +767,7 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let prepared = make_prepared_chat_frame_with_content_bytes(3 * 1024 * 1024, "full-large-");
@@ -777,6 +802,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let prepared = make_oversized_prepared_chat_frame("full-oversized-");
@@ -813,6 +839,7 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {

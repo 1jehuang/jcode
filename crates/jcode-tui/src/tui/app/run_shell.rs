@@ -6,8 +6,12 @@ fn report_reload_interaction_gap() {
         return;
     };
     crate::env::remove_var("JCODE_RELOAD_GAP_STARTED_MS");
-    let Some(started_ms) = started.parse::<u128>().ok() else {
-        return;
+    let started_ms = match started.parse::<u128>() {
+        Ok(started) => started,
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid reload interaction timestamp: {error}"));
+            return;
+        }
     };
     let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
         return;
@@ -41,6 +45,26 @@ pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     // redundant full renders and can lock the UI into a slow-frame loop.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval
+}
+
+pub(crate) fn refresh_preview_redraw_timer(
+    state: &dyn TuiState,
+    period: &mut Duration,
+    interval: &mut tokio::time::Interval,
+) {
+    let pending = state.client_focused()
+        && state.session_picker_overlay().is_some_and(|picker| {
+            picker
+                .try_borrow()
+                .is_ok_and(|picker| picker.has_pending_preview_work())
+        });
+    if pending {
+        let desired = crate::tui::redraw_interval(state);
+        if desired < *period {
+            *period = desired;
+            *interval = redraw_timer(desired);
+        }
+    }
 }
 
 pub(super) fn status_spinner_interval() -> tokio::time::Interval {
@@ -700,6 +724,11 @@ impl App {
                 }
             }
 
+            // Rendering can start a cold preview load. The cadence above was
+            // computed before that receiver existed, so do not wait an entire
+            // idle/spinner tick before noticing the new asynchronous work.
+            refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
+
             if self.should_quit {
                 break;
             }
@@ -947,6 +976,8 @@ impl App {
                     // When unfocused and throttled, leave needs_redraw set so the
                     // pending update is coalesced into the next allowed frame.
                 }
+
+                refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
 
                 if self.should_quit {
                     break 'outer;

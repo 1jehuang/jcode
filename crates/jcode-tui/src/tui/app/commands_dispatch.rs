@@ -14,7 +14,7 @@ use super::App;
 /// display preferences intentionally stay on the client, never on the VM.
 pub(super) fn ssh_presentation_command(input: &str) -> bool {
     matches!(
-        input.split_whitespace().next().unwrap_or_default(),
+        input.split_whitespace().next().unwrap_or(""),
         "/cancel"
             | "/stop"
             | "/help"
@@ -103,7 +103,7 @@ pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> boo
 /// against the laptop. Wire-backed commands are handled before local dispatch.
 pub(super) fn ssh_unsupported_command(input: &str) -> bool {
     let mut words = input.split_whitespace();
-    let command = words.next().unwrap_or_default();
+    let command = words.next().unwrap_or("");
     if command.starts_with('!') {
         return true;
     }
