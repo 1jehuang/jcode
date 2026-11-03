@@ -33,9 +33,10 @@ use super::SessionAgents;
 #[path = "assignment_targets.rs"]
 mod assignment_targets;
 use assignment_targets::{
-    filter_swarm_agent_candidates, is_drivable_auto_worker, member_has_active_assignment,
-    release_auto_assign_claim, select_and_claim_auto_target,
+    filter_swarm_agent_candidates, release_auto_assign_claim, select_and_claim_auto_target,
 };
+#[cfg(test)]
+use assignment_targets::{is_drivable_auto_worker, member_has_active_assignment};
 
 /// A double-assignment conflict: the task is already assigned and its
 /// assignee shows recent activity.
