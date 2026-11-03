@@ -108,6 +108,31 @@ fn legacy_history_without_metadata_remains_restorable() {
     assert_eq!(restore("legacy", &cp.id).unwrap(), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_checkpointed_delete_preserves_contents_and_rewind() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("keep.txt");
+    fs::write(&path, b"keep these bytes").unwrap();
+    let cp = checkpoint("failed-delete", 0, "before deletion").unwrap();
+    let permissions = fs::metadata(work.path()).unwrap().permissions();
+    fs::set_permissions(work.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = tracked_remove("failed-delete", &path).await;
+
+    fs::set_permissions(work.path(), permissions).unwrap();
+    assert!(result.is_err(), "deletion must report the permission error");
+    assert_eq!(fs::read(&path).unwrap(), b"keep these bytes");
+    assert!(checkpoints("failed-delete").unwrap()[0].can_restore_files);
+    assert_eq!(restore("failed-delete", &cp.id).unwrap(), 0);
+}
+
 #[cfg(target_os = "macos")]
 fn set_macos_test_xattr(path: &Path, name: &str, value: &[u8]) {
     let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();

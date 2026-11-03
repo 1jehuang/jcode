@@ -149,6 +149,7 @@ handle_failure() {
     }
     printf 'Install failed; restoring the previous channels from %s.\n' "$BACKUP_DIR" >&2
     if restore_channels; then
+      flock -u 8
       if [[ "$HAS_ATTEMPTED_RELOAD" == 1 && -x "$PREVIOUS_SERVER" ]]; then
         if ! reload_server "$PREVIOUS_SERVER"; then
           printf 'WARNING: old channels restored, but server handoff was not confirmed. Do not kill it; inspect server status.\n' >&2
@@ -187,6 +188,7 @@ rollback_install() {
     fail "Channels changed since this install; refusing to overwrite newer state."
   PREVIOUS_SERVER="$(cat "$BACKUP_DIR/previous-server")"
   restore_channels
+  flock -u 8
   if [[ -x "$PREVIOUS_SERVER" ]]; then
     reload_server "$PREVIOUS_SERVER" ||
       fail "Channels restored, but old server handoff was not confirmed; inspect status without killing it."
