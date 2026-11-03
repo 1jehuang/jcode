@@ -1459,6 +1459,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         && !app.is_processing
         && let Some(prepared) = app.pending_prompt_after_model_switch.take()
     {
+        app.pending_skill_arguments = app.pending_skill_arguments_after_model_switch.take();
         if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to submit prompt after model switch: {}",

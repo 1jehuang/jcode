@@ -36,8 +36,14 @@ pub fn split_words(input: &str) -> Vec<String> {
         match quote {
             Some(q) if ch == q => quote = None,
             Some('"') if ch == '\\' => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
+                // Like a POSIX shell, only `"`, `\`, `$` and backtick are
+                // escapable inside double quotes; other backslashes stay.
+                match chars.clone().next() {
+                    Some(next @ ('"' | '\\' | '$' | '`')) => {
+                        chars.next();
+                        current.push(next);
+                    }
+                    _ => current.push('\\'),
                 }
             }
             Some(_) => current.push(ch),
@@ -200,6 +206,15 @@ mod tests {
                 project_dir: Some(Path::new("/work/proj")),
             },
         )
+    }
+
+    #[test]
+    fn double_quoted_backslashes_are_kept_unless_escaping() {
+        assert_eq!(
+            split_words(r#""\d+" "a\"b" "c\\d""#),
+            vec![r"\d+", "a\"b", r"c\d"]
+        );
+        assert_eq!(run("$0", r#""C:\dir""#, &[]), r"C:\dir");
     }
 
     #[test]

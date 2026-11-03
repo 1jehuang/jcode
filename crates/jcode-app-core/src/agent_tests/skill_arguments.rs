@@ -107,3 +107,39 @@ fn empty_arguments_replace_old_ones_and_rewind_allows_reannouncing() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+#[test]
+fn skill_is_reannounced_after_compaction_drops_the_announcement() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let skill_dir = project.path().join(".jcode/skills/triage");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: triage\ndescription: Triage\n---\nHandle: $ARGUMENTS\n",
+    )
+    .expect("write skill");
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut session = Session::create(None, None);
+    session.working_dir = Some(project.path().display().to_string());
+    let mut agent = Agent::new_with_session(provider, Registry::empty(), session, None);
+
+    assert!(agent.set_remote_active_skill(Some("triage".into()), Some("issue 42".into())));
+    assert_eq!(skill_texts(&agent).len(), 1);
+
+    // Compaction may drop the announcement; the identical invocation must
+    // then add the instructions back instead of hitting the duplicate check.
+    agent.note_compaction_applied();
+    assert!(agent.set_remote_active_skill(Some("triage".into()), Some("issue 42".into())));
+    assert_eq!(skill_texts(&agent).len(), 2);
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

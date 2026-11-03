@@ -124,6 +124,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
 ) -> Result<()> {
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
         app.pending_prompt_after_model_switch = Some(prepared);
+        // Arguments travel with the prompt: a replacement prompt takes over
+        // (or clears) the previous invocation's arguments.
+        app.pending_skill_arguments_after_model_switch = app.pending_skill_arguments.take();
         app.set_status_notice(if app.auth_catalog_refresh_pending {
             "Prompt queued until model setup completes"
         } else {

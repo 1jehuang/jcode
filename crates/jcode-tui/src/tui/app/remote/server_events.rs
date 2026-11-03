@@ -2599,6 +2599,7 @@ fn handle_server_event_inner(
             let automatic_route = app.pending_automatic_failover_route.take();
             if let Some(err) = error {
                 let account_switch_failed = app.pending_account_switch_target.take().is_some();
+                app.pending_skill_arguments_after_model_switch = None;
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
                     super::input_dispatch::restore_prepared_remote_input(app, prepared);
                 }

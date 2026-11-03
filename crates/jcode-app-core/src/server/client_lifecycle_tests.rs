@@ -937,6 +937,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            skill_arguments: None,
             server_failover: false,
         },
         session_id,
