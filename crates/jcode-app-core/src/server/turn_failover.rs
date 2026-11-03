@@ -170,7 +170,7 @@ pub(super) async fn process_message_with_server_failover(
         images,
         system_reminder,
         event_tx,
-        enabled,
+        (enabled, None),
     )
     .await
 }
@@ -183,10 +183,13 @@ pub(super) async fn process_reserved_message_with_server_failover(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
-    enabled: bool,
+    (enabled, origin): (bool, Option<String>),
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
+    // Declared under the agent lock right before this request's hook runs, so
+    // a concurrent client on the same session cannot overwrite it.
+    crate::hooks::set_pending_prompt_origin_named(guard.session_id(), origin.as_deref());
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         &mut guard,
         lease,
@@ -436,6 +439,64 @@ mod tests {
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
+    }
+
+    #[test]
+    fn declared_origin_is_set_under_the_agent_lock_for_its_own_request() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev_home = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                let provider_dyn: Arc<dyn Provider> = Arc::new(TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(true)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                });
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_origin_per_request".into(),
+                    None,
+                    None,
+                );
+                let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                    provider_dyn,
+                    registry,
+                    session,
+                    None,
+                )));
+                let lease = agent.lock().await.claim_server_turn().unwrap();
+                // Another client on the same session declared a different origin
+                // earlier. This request's own origin must win when its turn starts.
+                crate::hooks::set_pending_prompt_origin(
+                    "session_origin_per_request",
+                    crate::hooks::PromptOrigin::User,
+                );
+                let (tx, _rx) = mpsc::unbounded_channel();
+                process_reserved_message_with_server_failover(
+                    Arc::clone(&agent),
+                    &lease,
+                    "hello",
+                    Vec::new(),
+                    None,
+                    tx,
+                    (true, Some("sdk".to_string())),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    crate::hooks::current_prompt_origin("session_origin_per_request"),
+                    Some(crate::hooks::PromptOrigin::Sdk)
+                );
+                crate::hooks::forget_prompt_origin("session_origin_per_request");
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            });
     }
 
     #[test]

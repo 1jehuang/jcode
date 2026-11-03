@@ -1347,6 +1347,18 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                     .await
                     .unwrap(),
             }
+            if mode != "ndjson" {
+                // Only the person's first message is `user`; generated pokes are not.
+                assert_eq!(
+                    crate::hooks::current_prompt_origin(agent.session_id()),
+                    Some(if enabled {
+                        crate::hooks::PromptOrigin::Auto
+                    } else {
+                        crate::hooks::PromptOrigin::User
+                    }),
+                    "{mode}, enabled={enabled}"
+                );
+            }
             let session = crate::session::Session::load(agent.session_id()).unwrap();
             let followups = session
                 .messages

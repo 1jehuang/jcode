@@ -242,3 +242,42 @@ async fn prompt_hook_fails_open_on_timeout_and_odd_exit() {
         assert!(!request_text(&calls.lock().unwrap()).contains("ignored"));
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_notices_reach_the_client_but_not_the_model() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let hook = script(
+        home.path(),
+        "hook.sh",
+        "#!/bin/sh\necho '{\"systemMessage\":\"notice-for-the-user\"}'\nexit 0\n",
+    );
+    let _env = EnvGuard::set(&[
+        ("JCODE_HOME", home.path().display().to_string()),
+        ("JCODE_HOOK_USER_PROMPT_SUBMIT", hook),
+    ]);
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = new_agent(&calls);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("hello", Vec::new(), None, tx)
+        .await
+        .unwrap();
+    let mut notices = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::protocol::ServerEvent::Notification { message, .. } = event {
+            notices.push(message);
+        }
+    }
+    assert_eq!(notices, vec!["notice-for-the-user".to_string()]);
+    assert!(!request_text(&calls.lock().unwrap()).contains("notice-for-the-user"));
+
+    // Context-only messages hand their notices back for the server to send.
+    let notices = agent
+        .append_user_context_message("remember", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(notices, vec!["notice-for-the-user".to_string()]);
+}

@@ -408,6 +408,8 @@ pub(super) async fn run_reserved_followups(
         };
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
+        // A server-owned continuation is generated work, never a person's prompt.
+        crate::hooks::set_pending_prompt_origin(&session_id, crate::hooks::PromptOrigin::Auto);
         let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
             agent,
             lease,
