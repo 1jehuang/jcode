@@ -326,6 +326,52 @@ pub(super) async fn dispatch_swarm_await_completion(
     }
 }
 
+/// Completion is actionable even without an explicit await. Keep the UI card
+/// emitted by the status transition, but deliver the full report to the model.
+pub(super) async fn dispatch_swarm_worker_report(
+    event: &crate::bus::SwarmWorkerReported,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm: LiveTurnSwarmContext,
+) {
+    // Do not revive a coordinator that the user explicitly stopped.
+    if swarm
+        .members
+        .read()
+        .await
+        .get(&event.session_id)
+        .is_none_or(|member| matches!(member.status.as_str(), "stopped" | "crashed" | "failed"))
+    {
+        return;
+    }
+    if emit_external_wake(
+        &event.session_id,
+        "swarm_worker_reported",
+        &event.notification,
+        &swarm.members,
+    )
+    .await
+    {
+        return;
+    }
+    if !run_live_turn_if_idle(
+        &event.session_id,
+        &event.notification,
+        Some("A worker has reported back. Integrate its result and check the remaining todo plan. Reassign available workers to actionable work, or explicitly stop them if no work remains. Do not end coordination with an unfinished actionable plan just because this worker finished its chunk. Respect user cancellation and genuine external blockers.".to_string()),
+        sessions,
+        swarm,
+    ).await {
+        let _ = queue_soft_interrupt_for_session(
+            &event.session_id,
+            format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        ).await;
+    }
+}
+
 pub(super) async fn dispatch_background_task_progress(
     task: &crate::bus::BackgroundTaskProgressEvent,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,

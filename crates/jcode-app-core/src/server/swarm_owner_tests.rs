@@ -1,6 +1,66 @@
 use super::*;
 
 #[tokio::test]
+async fn worker_report_publishes_one_owner_wake_without_explicit_await() {
+    let mut bus = crate::bus::Bus::global().subscribe();
+    let owner_id = "report-wake-owner";
+    let worker_id = "report-wake-worker";
+    let (mut owner, _owner_rx) = swarm_member(owner_id, "coordinator", false);
+    owner.status = "ready".into();
+    let (mut worker, _worker_rx) = swarm_member(worker_id, "agent", true);
+    worker.status = "running".into();
+    worker.report_back_to_session_id = Some(owner_id.into());
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (owner_id.into(), owner),
+        (worker_id.into(), worker),
+    ])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-1".into(),
+        HashSet::from([owner_id.into(), worker_id.into()]),
+    )])));
+    for _ in 0..2 {
+        update_member_status_with_report(
+            worker_id,
+            "ready",
+            None,
+            Some("Executable tests added.".into()),
+            &members,
+            &swarms,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+    let mut reports = Vec::new();
+    while let Ok(event) = bus.try_recv() {
+        if let crate::bus::BusEvent::SwarmWorkerReported(report) = event {
+            if report.worker_session_id == worker_id {
+                reports.push(report);
+            }
+        }
+    }
+    assert_eq!(
+        reports.len(),
+        1,
+        "unchanged ready status must not generate wake loops"
+    );
+    assert_eq!(reports[0].session_id, owner_id);
+    assert!(reports[0].notification.contains("Executable tests added."));
+    members.write().await.get_mut(worker_id).unwrap().status = "running".into();
+    update_member_status(
+        worker_id, "stopped", None, &members, &swarms, None, None, None,
+    )
+    .await;
+    while let Ok(event) = bus.try_recv() {
+        assert!(
+            !matches!(event, crate::bus::BusEvent::SwarmWorkerReported(report) if report.worker_session_id == worker_id),
+            "cancellation must not restart coordination"
+        );
+    }
+}
+
+#[tokio::test]
 async fn owner_is_notified_once_of_idle_headless_workers_stopped_by_restart() {
     // Issue #1651: an idle headless worker loads as stopped after a restart
     // and has no re-attach path. Its owner must hear about it once.

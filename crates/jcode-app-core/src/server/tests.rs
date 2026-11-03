@@ -369,7 +369,121 @@ fn persisted_headless_member(
 }
 
 #[tokio::test]
+async fn swarm_worker_report_wakes_idle_root_and_queues_for_busy_root() {
+    let _env_lock = crate::storage::lock_test_env();
+    for busy in [false, true] {
+        let provider = Arc::new(StreamingMockProvider::default());
+        provider.queue_response(vec![
+            StreamEvent::TextDelta("Assigning the next chunk.".into()),
+            StreamEvent::MessageEnd { stop_reason: None },
+        ]);
+        let agent = test_agent(provider).await;
+        let session_id = agent.lock().await.session_id().to_string();
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(session_id.clone(), agent.clone())]),
+        ));
+        let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let members = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            attached_swarm_member(&session_id, tx),
+        )])));
+        let (swarms, history, counter, events) = empty_swarm_status_state();
+        let report = crate::bus::SwarmWorkerReported {
+            session_id: session_id.clone(),
+            worker_session_id: "finished-worker".into(),
+            notification: "Worker finished parser tests and is ready for more.".into(),
+        };
+        let reservation = if busy { Some(agent.lock().await) } else { None };
+        let queue = if let Some(guard) = reservation.as_ref() {
+            let queue = guard.soft_interrupt_queue();
+            queues
+                .write()
+                .await
+                .insert(session_id.clone(), queue.clone());
+            Some(queue)
+        } else {
+            None
+        };
+        super::background_tasks::dispatch_swarm_worker_report(
+            &report,
+            &sessions,
+            &queues,
+            super::live_turn::LiveTurnSwarmContext::new(
+                &members, &swarms, &history, &counter, &events,
+            ),
+        )
+        .await;
+        if let Some(queue) = queue {
+            assert_eq!(
+                queue.lock().unwrap().len(),
+                1,
+                "busy root must receive the report without a new turn"
+            );
+        } else {
+            timeout(Duration::from_secs(3), async {
+                loop {
+                    if matches!(
+                        rx.recv().await.map(unwrap_test_turn_event),
+                        Some(ServerEvent::Done { .. })
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("idle root should wake and finish a real tracked turn");
+            let guard = agent.lock().await;
+            assert!(guard.messages().iter().any(|message| {
+                message.content.iter().any(|block| matches!(block,
+                    crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification)))
+            }), "worker report must reach model context, not just UI");
+        }
+    }
+}
+
+#[tokio::test]
+async fn swarm_worker_report_does_not_revive_cancelled_root() {
+    let _env_lock = crate::storage::lock_test_env();
+    let provider = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut member = attached_swarm_member(&session_id, tx);
+    member.status = "stopped".into();
+    let members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+    let (swarms, history, counter, events) = empty_swarm_status_state();
+    super::background_tasks::dispatch_swarm_worker_report(
+        &crate::bus::SwarmWorkerReported {
+            session_id: session_id.clone(),
+            worker_session_id: "worker".into(),
+            notification: "done".into(),
+        },
+        &sessions,
+        &queues,
+        super::live_turn::LiveTurnSwarmContext::new(&members, &swarms, &history, &counter, &events),
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
+    assert!(
+        agent
+            .lock()
+            .await
+            .soft_interrupt_queue()
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(members.read().await[&session_id].status, "stopped");
+}
+
+#[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Build result processed.".to_string()),
