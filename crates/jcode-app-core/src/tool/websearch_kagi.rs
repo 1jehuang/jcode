@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 const ENDPOINT: &str = "https://kagi.com/api/v1/search";
 
+#[cfg(test)]
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -41,15 +42,19 @@ fn request(
         .map_err(|_| anyhow!("Kagi search request construction failed"))
 }
 
-pub(super) async fn search(query: &str, count: usize, key_env: &str) -> Result<Vec<SearchResult>> {
+pub(super) async fn search(
+    client: &reqwest::Client,
+    query: &str,
+    count: usize,
+    key_env: &str,
+) -> Result<Vec<SearchResult>> {
     if count == 0 {
         return Ok(Vec::new());
     }
-    let client = client()?;
-    let request = request(&client, ENDPOINT, query, count, key_env, |name| {
+    let request = request(client, ENDPOINT, query, count, key_env, |name| {
         std::env::var(name).ok()
     })?;
-    execute(&client, request, count).await
+    execute(client, request, count).await
 }
 
 async fn execute(

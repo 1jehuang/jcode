@@ -1,4 +1,90 @@
 #[test]
+fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for remote_client in [false, true] {
+        for status in [
+            BackgroundTaskStatus::Completed,
+            BackgroundTaskStatus::Failed,
+        ] {
+            let succeeded = status == BackgroundTaskStatus::Completed;
+            let mut app = create_test_app();
+            let initial_message_count = app.session.messages.len();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let started = "**Background task started** `silent-task` · `silent work`";
+            let notification = |message: String| crate::protocol::ServerEvent::Notification {
+                from_session: "background_task".into(),
+                from_name: None,
+                notification_type: crate::protocol::NotificationType::Message {
+                    scope: Some("background_activity".into()),
+                    channel: None,
+                    tldr: None,
+                },
+                message,
+            };
+            if remote_client {
+                app.handle_server_event(notification(started.into()), &mut remote);
+            } else {
+                let session_id = app.session.id.clone();
+                super::local::handle_bus_event(
+                    &mut app,
+                    Ok(BusEvent::UiActivity(crate::bus::UiActivity::background(
+                        Some(session_id),
+                        started,
+                        None::<String>,
+                    ))),
+                );
+            }
+            assert_eq!(app.background_task_rows_ref().len(), 1);
+            assert_eq!(
+                app.background_task_rows_ref()[0].status,
+                crate::tui::BackgroundTaskRowStatus::Running
+            );
+            let task = BackgroundTaskCompleted {
+                task_id: "silent-task".into(),
+                tool_name: "bash".into(),
+                display_name: Some("silent work".into()),
+                session_id: app.session.id.clone(),
+                status,
+                exit_code: Some(0),
+                output_preview: "done".into(),
+                output_file: std::env::temp_dir().join("silent-task.output"),
+                duration_secs: 1.0,
+                notify: false,
+                wake: false,
+            };
+            if remote_client {
+                app.handle_server_event(
+                    notification(
+                        crate::message::format_background_task_notification_markdown(&task),
+                    ),
+                    &mut remote,
+                );
+            } else {
+                super::local::handle_bus_event(
+                    &mut app,
+                    Ok(BusEvent::BackgroundTaskCompleted(task)),
+                );
+            }
+            let row = &app.background_task_rows_ref()[0];
+            assert_eq!(
+                row.status,
+                if succeeded {
+                    crate::tui::BackgroundTaskRowStatus::Completed
+                } else {
+                    crate::tui::BackgroundTaskRowStatus::Failed
+                }
+            );
+            assert_eq!(row.completed_at.is_some(), succeeded);
+            assert!(app.display_messages().is_empty());
+            assert_eq!(app.session.messages.len(), initial_message_count);
+            assert!(!app.pending_turn);
+            assert!(!app.is_processing());
+        }
+    }
+}
+
+#[test]
 fn test_handle_background_task_completed_retains_row_without_transcript_card() {
     let mut app = create_test_app();
     let event = BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {

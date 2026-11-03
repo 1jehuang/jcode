@@ -106,11 +106,9 @@ impl BackgroundTaskManager {
         tool_name: &str,
         display_name: Option<&str>,
         session_id: &str,
-        notify: bool,
+        _notify: bool,
     ) {
-        if !notify {
-            return;
-        }
+        // Lifecycle visibility is independent of transcript delivery and agent wake.
         let label = crate::message::background_task_display_label(tool_name, display_name);
         let safe_label = label.replace('`', "'");
         Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::background(

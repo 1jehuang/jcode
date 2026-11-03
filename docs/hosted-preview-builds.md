@@ -7,6 +7,20 @@ Optimization remains level 3, incremental compilation remains disabled, and
 exact-source CI, quiet-period, complete-asset and publication checks remain in
 place. Hosted failures must fail the build rather than silently compile locally.
 
+After a transient runner or hosted-service outage is resolved, start a fresh
+preview run without creating an empty source commit:
+
+```sh
+gh workflow run preview.yml --ref master
+```
+
+Manual retries remain restricted to `master` and retain the 15-minute quiet
+period, exact-commit push-CI authorization, six-platform builds, runtime checks,
+and final current-head checks. A new run receives a fresh preview number, so it
+does not reuse an interrupted attempt's tag or draft. Do not dispatch the stable
+release workflow or disable correctness checks to recover a preview. Hosted
+maintenance requires the service operator to restore normal tenant admission.
+
 The CI API key is passed only to the hosted build step. It is not embedded in
 release metadata or artifacts. Native builds use the checksum-verified published
 `v0.1.0-alpha.17` client. Even published `v0.1.0-alpha.19` does not yet

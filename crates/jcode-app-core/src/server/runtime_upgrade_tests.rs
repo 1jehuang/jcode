@@ -119,15 +119,19 @@ fn busy_agent_checkpoint_never_waits_and_idle_index_stays_reserved() {
         .block_on(async {
             let _home = TestHome::new();
             let agent = Arc::new(Mutex::new(idle_agent()));
-            let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::from([
-                ("idle".into(), agent.clone()),
-            ])));
+            let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+                std::collections::HashMap::from([("idle".into(), agent.clone())]),
+            ));
             let busy = agent.lock().await;
             assert!(checkpoint_sessions(&sessions).is_err());
             drop(busy);
             let checkpoint = checkpoint_sessions(&sessions).unwrap();
             assert!(agent.try_lock().is_err());
-            assert!(sessions.try_write().is_err());
+            {
+                let write = sessions.write_for_test();
+                tokio::pin!(write);
+                assert!(futures::poll!(&mut write).is_pending());
+            }
             drop(checkpoint);
             assert!(agent.try_lock().is_ok());
         });
@@ -269,7 +273,9 @@ async fn invalid_native_upgrade_returns_status_without_exec_or_agent() {
     use tokio::io::AsyncBufReadExt;
     let (client, server) = crate::transport::stream_pair().unwrap();
     let (_, write) = server.into_split();
-    let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        std::collections::HashMap::new(),
+    ));
     handle(7, "relative-jcode", &Arc::new(Mutex::new(write)), &sessions)
         .await
         .unwrap();

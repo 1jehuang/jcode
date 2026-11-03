@@ -2,6 +2,105 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
+async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, mut writer) = peer.into_split();
+    let (ready, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let Request::Ping { id } = serde_json::from_str(&line).unwrap() else {
+            panic!("readiness must precede Subscribe");
+        };
+        released.await.unwrap();
+        writer
+            .write_all(
+                format!(
+                    "{{\"type\":\"pong\",\"id\":{id},\"native_ssh_protocol\":1}}\nnext-event\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    {
+        let readiness = remote.verify_ssh_ready(Duration::from_secs(1));
+        tokio::pin!(readiness);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut readiness)
+                .await
+                .is_err()
+        );
+        ready.send(()).unwrap();
+        readiness.await.unwrap();
+    }
+    assert!(remote.session_id.is_none());
+    let mut next = String::new();
+    remote.reader.read_line(&mut next).await.unwrap();
+    assert_eq!(next, "next-event\n");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_readiness_rejects_locally_accepted_but_closed_adapter() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        // Simulate the adapter discovering a failed ProxyCommand handshake.
+    });
+    assert!(
+        remote
+            .verify_ssh_ready(Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_readiness_times_out_without_remote_reply() {
+    let mut remote = RemoteConnection::dummy();
+    let _peer = remote.take_dummy_peer().unwrap();
+    let error = remote
+        .verify_ssh_ready(Duration::from_millis(10))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn ssh_readiness_rejects_wrong_id_old_protocol_and_oversized_reply() {
+    for reply in [
+        "{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n".to_string(),
+        "{\"type\":\"pong\",\"id\":42}\n".to_string(),
+        "x".repeat(8193),
+    ] {
+        let mut remote = RemoteConnection::dummy();
+        remote.next_request_id = 42;
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, mut writer) = peer.into_split();
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            writer.write_all(reply.as_bytes()).await.unwrap();
+        });
+        assert!(
+            remote
+                .verify_ssh_ready(Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn runtime_command_writes_control_request_without_prompt() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();

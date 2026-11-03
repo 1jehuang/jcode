@@ -720,10 +720,9 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            session_id.clone(),
-            agent.clone(),
-        )])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(session_id.clone(), agent.clone())]),
+        ));
         let current = Arc::new(RwLock::new(String::new()));
 
         let (resolved_id, resolved_agent) =
@@ -742,10 +741,9 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            session_id.clone(),
-            agent.clone(),
-        )])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(session_id.clone(), agent.clone())]),
+        ));
         let current = Arc::new(RwLock::new(session_id.clone()));
 
         let (resolved_id, resolved_agent) = resolve_debug_session(&sessions, &current, None)
@@ -763,10 +761,9 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            session_id.clone(),
-            agent.clone(),
-        )])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(session_id.clone(), agent.clone())]),
+        ));
         let current = Arc::new(RwLock::new(String::new()));
 
         let (resolved_id, _) = resolve_debug_session(&sessions, &current, None)
@@ -785,10 +782,9 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            live_id.clone(),
-            agent.clone(),
-        )])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(live_id.clone(), agent.clone())]),
+        ));
         let current = Arc::new(RwLock::new("session_ox_dead".to_string()));
 
         let (resolved_id, resolved_agent) = resolve_debug_session(&sessions, &current, None)
@@ -802,7 +798,10 @@ mod debug_execution_tests {
             let agent = other.lock().await;
             agent.session_id().to_string()
         };
-        sessions.write().await.insert(other_id.clone(), other);
+        sessions
+            .register_new(other_id.clone(), other)
+            .await
+            .unwrap();
         let err = match resolve_debug_session(&sessions, &current, None).await {
             Ok((id, _)) => panic!("ambiguous default resolved to {id}"),
             Err(err) => err.to_string(),
@@ -824,10 +823,9 @@ mod debug_execution_tests {
             agent.session_id().to_string()
         };
 
-        let sessions = Arc::new(RwLock::new(HashMap::from([
-            (id_a.clone(), agent_a),
-            (id_b.clone(), agent_b),
-        ])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(id_a.clone(), agent_a), (id_b.clone(), agent_b)]),
+        ));
         let current = Arc::new(RwLock::new(String::new()));
 
         let unknown = resolve_debug_session(&sessions, &current, Some("missing".to_string())).await;

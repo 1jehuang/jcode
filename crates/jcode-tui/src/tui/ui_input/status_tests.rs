@@ -1,6 +1,62 @@
 use super::*;
 use ratatui::style::Modifier;
 
+fn background_row(
+    label: &str,
+    status: crate::tui::BackgroundTaskRowStatus,
+) -> crate::tui::BackgroundTaskRow {
+    crate::tui::BackgroundTaskRow {
+        task_id: label.into(),
+        label: label.into(),
+        percent: None,
+        status,
+        completed_at: None,
+    }
+}
+
+#[test]
+fn background_status_keeps_all_running_intents_after_launch_returns() {
+    use crate::tui::BackgroundTaskRowStatus::*;
+    let tasks = [
+        background_row("Run tests", Running),
+        background_row("Build app", Running),
+        background_row("Already done", Completed),
+        background_row("Old failure", Failed),
+    ];
+    let text = status_with_background_tasks(Line::from("thinking…"), &tasks, 120, true).to_string();
+    assert_eq!(text, "thinking… · bg 2: Run tests · Build app");
+    let idle = status_with_background_tasks(Line::from("idle tip"), &tasks, 120, false).to_string();
+    assert_eq!(idle, "bg 2: Run tests · Build app");
+    assert_eq!(
+        status_with_background_tasks(Line::from("thinking…"), &tasks[2..], 120, true).to_string(),
+        "thinking…"
+    );
+}
+
+#[test]
+fn background_status_fits_unicode_cells_and_keeps_background_visible() {
+    let tasks = [background_row(
+        "Run 界\n tests\tand more",
+        crate::tui::BackgroundTaskRowStatus::Running,
+    )];
+    for width in 0..120 {
+        for processing in [false, true] {
+            let line = status_with_background_tasks(
+                Line::from("foreground 界 intent ".repeat(10)),
+                &tasks,
+                width,
+                processing,
+            );
+            assert!(line.width() <= width, "width={width}: {line}");
+            let text = line.to_string();
+            assert!(!text.contains('\n') && !text.contains('\t'), "{text}");
+            if width >= 24 {
+                assert!(text.contains("bg 1:"), "width={width}: {text}");
+            }
+        }
+    }
+}
+
 #[test]
 fn overscroll_directory_transition_only_shows_real_moves() {
     assert_eq!(

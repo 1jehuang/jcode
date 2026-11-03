@@ -44,6 +44,13 @@ pub(super) fn debug_memory_profile(picker: &SessionPicker) -> serde_json::Value 
         .as_ref()
         .map(estimate_resume_target_bytes)
         .unwrap_or(0);
+    let retained_preview_bytes = picker.preview_reuse.retained_bytes();
+    let active_preview_bytes = picker
+        .preview_cache
+        .as_ref()
+        .map_or(0, |cache| cache.estimated_bytes());
+    let preview_fingerprint_bytes = picker.preview_fingerprints.borrow().capacity()
+        * std::mem::size_of::<(super::SessionRef, u64)>();
     let total_estimate_bytes = items_estimate_bytes
         + visible_sessions_estimate_bytes
         + all_sessions_estimate_bytes
@@ -54,7 +61,10 @@ pub(super) fn debug_memory_profile(picker: &SessionPicker) -> serde_json::Value 
         + selected_session_ids_estimate_bytes
         + search_query_bytes
         + loading_message_bytes
-        + pending_claude_takeover_bytes;
+        + pending_claude_takeover_bytes
+        + retained_preview_bytes
+        + active_preview_bytes
+        + preview_fingerprint_bytes;
 
     serde_json::json!({
         "items_count": picker.items.len(),
@@ -67,6 +77,9 @@ pub(super) fn debug_memory_profile(picker: &SessionPicker) -> serde_json::Value 
         "search_query_bytes": search_query_bytes,
         "loading_message_bytes": loading_message_bytes,
         "pending_claude_takeover_bytes": pending_claude_takeover_bytes,
+        "retained_preview_bytes": retained_preview_bytes,
+        "active_preview_bytes": active_preview_bytes,
+        "preview_fingerprint_bytes": preview_fingerprint_bytes,
         "items_estimate_bytes": items_estimate_bytes,
         "visible_sessions_estimate_bytes": visible_sessions_estimate_bytes,
         "all_sessions_estimate_bytes": all_sessions_estimate_bytes,
