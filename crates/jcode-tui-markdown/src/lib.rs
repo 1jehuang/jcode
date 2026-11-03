@@ -1214,22 +1214,12 @@ pub fn debug_stats_json() -> Option<serde_json::Value> {
     serde_json::to_value(debug_stats()).ok()
 }
 
-/// Render markdown with optional width constraint for tables
-pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_line(line, width, repeated_gutter_prefix)
-}
-
-pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_lines(lines, width, repeated_gutter_prefix)
-}
-
-pub fn progress_bar(progress: f32, width: usize) -> String {
-    wrap::progress_bar(progress, width)
-}
-
-pub fn progress_line(label: &str, progress: f32, width: usize) -> Line<'static> {
-    wrap::progress_line(label, progress, width)
-}
+#[path = "display_helpers.rs"]
+mod display_helpers;
+pub use display_helpers::progress_bar;
+pub use display_helpers::progress_line;
+pub use display_helpers::wrap_line;
+pub use display_helpers::wrap_lines;
 
 #[cfg(test)]
 #[path = "markdown_tests/mod.rs"]

@@ -54,6 +54,7 @@ impl SessionPicker {
         ]))
     }
 
+    #[cfg(test)]
     pub(super) fn format_estimated_tokens(tokens: usize) -> String {
         if tokens < 1_000 {
             return format!("~{} tok", tokens);

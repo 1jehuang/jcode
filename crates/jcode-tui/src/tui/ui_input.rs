@@ -1513,6 +1513,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
 
 /// Render only the supplied session facts. Unlike the live adapter this never
 /// falls back to the current App, process directory, SSH host or credentials.
+#[cfg(test)]
 pub(crate) fn preview_overscroll_line(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,

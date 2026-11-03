@@ -1,5 +1,4 @@
 //! Selected-workspace facts. All filesystem and SSH work runs in the preview loader.
-use super::*;
 use crate::tui::info_widget::InfoWidgetData;
 
 #[derive(Clone)]

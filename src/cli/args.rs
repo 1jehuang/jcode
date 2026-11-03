@@ -968,22 +968,9 @@ pub(crate) struct CloudMoveTarget {
 mod cloud_sessions;
 pub(crate) use cloud_sessions::*;
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum RestartCommand {
-    /// Save a reboot snapshot of currently active jcode windows
-    Save {
-        /// Restore this reboot snapshot automatically the next time plain `jcode` starts
-        #[arg(long)]
-        auto_restore: bool,
-    },
-    /// Restore the most recently saved reboot snapshot
-    Restore,
-    /// Show the currently saved reboot snapshot
-    Status,
-    /// Remove the currently saved reboot snapshot
-    Clear,
-}
-
+#[path = "args/restart.rs"]
+mod restart;
+pub(crate) use restart::RestartCommand;
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelCommand {
     /// List model names you can pass to -m/--model

@@ -52,37 +52,8 @@ fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
     });
 }
 
-#[test]
-fn test_remote_debug_frame_commands_request_a_fresh_draw() {
-    for command in [
-        "frame",
-        "frame-normalized",
-        "screen",
-        "screen-json",
-        "screen-json-normalized",
-        "layout",
-        "margins",
-        "widgets",
-        "info-widgets",
-        "render-stats",
-        "render-order",
-        "anomalies",
-        "theme",
-    ] {
-        assert!(
-            remote::debug_command_needs_current_frame(command),
-            "{command} should capture the current frame"
-        );
-    }
-
-    for command in ["state", "picker", "memory", "draw-stats", "overlay:on"] {
-        assert!(
-            !remote::debug_command_needs_current_frame(command),
-            "{command} should not force a draw"
-        );
-    }
-}
-
+#[path = "remote_events_reload_04/debug_frames.rs"]
+mod debug_frames;
 #[test]
 fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut app = create_test_app();
@@ -486,36 +457,6 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 }
 
 include!("remote_failover_routes.rs");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
