@@ -38,28 +38,69 @@ pub(crate) fn copy_via_clipboard_helper(program: &str, args: &[&str], text: &str
         return false;
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    let deadline = std::time::Instant::now() + EARLY_FAILURE_WINDOW;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return true,
-            // Exited nonzero (e.g. xclip with no DISPLAY): let the next
-            // fallback try.
-            Ok(Some(_)) => return false,
+            Ok(Some(status)) => return status.success(),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    // Still running: the helper became the selection owner,
-                    // which is the success case.
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
-                    return true;
+                    break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => return false,
         }
     }
+
+    // The early window expired with the child still running, and "still
+    // running" is NOT proof that it took ownership. A helper that is going to
+    // fail has to actually be scheduled before it can exit, and on a loaded
+    // machine it may not have been yet: `false` does not need 150 ms to exit,
+    // but a runner at load 50 can take that long to run it at all. Treating
+    // that as ownership reports a successful copy that never happened, which is
+    // exactly how `helper_that_exits_nonzero_falls_through` failed on master CI
+    // (run 41547128038, job 125625340312):
+    //
+    //   assertion failed: !copy_via_clipboard_helper("false", &[], "hello")
+    //
+    // So keep waiting for a bounded grace period and let the real exit status
+    // decide. Only a child that survives BOTH windows is treated as resident.
+    //
+    // The tradeoff is deliberate: a genuinely resident helper now costs up to
+    // RESIDENT_GRACE extra before the copy is reported, whereas before it was
+    // reported at the end of the early window. A silent false "copied" is worse
+    // than a bounded stall, and this only delays in the ambiguous case - a
+    // helper that fails still returns as soon as it actually exits.
+    let grace_deadline = std::time::Instant::now() + RESIDENT_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= grace_deadline {
+                    break;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => return false,
+        }
+    }
+
+    // Alive across both windows: it became the selection owner.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    true
 }
+
+/// How long to poll for an early failure before the answer becomes ambiguous.
+const EARLY_FAILURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Extra grace once the poll expires, so a starved-but-doomed child still
+/// reports its real status rather than being mistaken for a resident owner.
+const RESIDENT_GRACE: std::time::Duration = std::time::Duration::from_millis(850);
+
+/// Poll cadence while waiting.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Tests for the external clipboard-helper spawn path (issue #684). They use
 /// ordinary coreutils instead of real clipboard tools so they pass on headless
