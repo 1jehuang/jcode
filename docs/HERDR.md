@@ -8,6 +8,27 @@ This covers visible swarm spawns, resume-in-new-terminal, self-development launc
 
 Inside a Herdr pane, the TUI also reports `idle`/`working`, the session id, and its `jcode --resume` command through `"$HERDR_BIN_PATH" pane report-agent`, and releases the pane on quit (`crates/jcode-tui/src/tui/herdr.rs`). Herdr older than 0.9.2 rejects the `--` resume separator as a usage error (exit 2) and drops the whole report. On that specific error Jcode retries once without the resume command and keeps reporting state only for the rest of the process.
 
+## herdr-core and the Herdr app
+
+herdr-core, the runtime behind the Herdr app, does not expose an agent-status
+socket method. A pane's status comes only from OSC 7501 reports written by the
+program that owns the pane pty. Jcode's TUI client therefore emits `idle`,
+`working`, `done`, and `error` directly to its stdout on state changes
+(`crates/jcode-tui/src/tui/program_status.rs`), tagged with `app=jcode`.
+`done` follows a successful turn, `error` a failed turn or a guardrail stop,
+and an interrupt reports `idle`. Terminals that do not understand OSC 7501
+ignore the report.
+
+Lifecycle hooks cannot provide this. Observer hooks run in the shared daemon
+with stdout and stderr on `/dev/null`, and the daemon has no controlling
+terminal. The TUI client owns the pane, so it is the process that writes the
+report. This is the same channel any other agent uses with herdr-core, which
+has no equivalent of the older TUI's `pane.report_agent` method.
+
+To give the pane a name and icon in the app, add a `jcode` entry to
+`~/.config/herdr-app/programs.json` with `match: ["jcode"]` and, optionally,
+`run: ["jcode"]` so it also appears when starting an agent.
+
 ## Current compatibility
 
 Jcode already:
@@ -16,6 +37,7 @@ Jcode already:
 - recognizes Herdr as a masking terminal multiplexer for Mermaid graphics capability detection;
 - exports stable lifecycle observer hooks for `session_start`, `session_end`, `turn_start`, and `turn_end`;
 - exports `JCODE_HOOK_SESSION_ID`, `JCODE_HOOK_CWD`, event fields, and a JSON `JCODE_HOOK_PAYLOAD`;
+- reports herdr-core status over OSC 7501 as `app=jcode`;
 - resumes a native session with `jcode --resume <session-id>`.
 
 ## Recommended first Herdr integration
