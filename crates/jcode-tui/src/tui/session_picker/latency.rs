@@ -106,10 +106,10 @@ impl Latency {
         duration: std::time::Duration,
     ) {
         self.render.push(duration.as_secs_f64() * 1000.0);
-        if self.initial {
-            if let Some(id) = id.as_ref() {
-                self.begin(id.clone(), self.opened);
-            }
+        if self.initial
+            && let Some(id) = id.as_ref()
+        {
+            self.begin(id.clone(), self.opened);
         }
         let Some(s) = self.active.as_mut().filter(|s| Some(&s.id) == id.as_ref()) else {
             return;

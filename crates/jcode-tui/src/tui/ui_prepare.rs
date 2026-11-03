@@ -1200,10 +1200,9 @@ pub(crate) fn prepare_history_preview_for_viewport(
         wide_width,
         diff_mode,
         Some(max_body_rows),
-    ) {
-        if wide.wrapped_lines.len() <= max_body_rows {
-            return (wide, false);
-        }
+    ) && wide.wrapped_lines.len() <= max_body_rows
+    {
+        return (wide, false);
     }
     (
         prepare_history_preview(messages, hidden_prompts, narrow_width, diff_mode),
