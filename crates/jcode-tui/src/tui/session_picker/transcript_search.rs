@@ -134,6 +134,35 @@ struct Candidate {
     missing_tokens: Vec<String>,
     exact_field: bool,
     opening_prompt: String,
+    intent_text: String,
+}
+
+/// Rank in memory before publishing results or opening transcripts. Keep this
+/// on the debounced worker, not the render thread. Stable sorting preserves
+/// the incoming order for equally promising candidates.
+fn prioritize_candidates(
+    candidates: Vec<Candidate>,
+    query: &str,
+    tokens: &[String],
+    cancel: &AtomicBool,
+) -> Vec<(Candidate, SearchRank)> {
+    let mut ranked = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
+            .with_exact_field(candidate.exact_field);
+        rank.opening_prompt = opening_prompt_rank(&candidate.opening_prompt, query);
+        let intent = lowercase_field(&candidate.intent_text);
+        rank.intent_terms = tokens
+            .iter()
+            .filter(|token| intent.contains(token.as_str()))
+            .count();
+        ranked.push((candidate, rank));
+    }
+    ranked.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+    ranked
 }
 
 // A retyped request is stronger evidence than words scattered throughout a
@@ -243,6 +272,12 @@ impl TranscriptSearch {
                 missing_tokens,
                 exact_field: exact_metadata_field(session, query),
                 opening_prompt: session.first_user_prompt.clone().unwrap_or_default(),
+                intent_text: format!(
+                    "{}\n{}\n{}",
+                    session.title,
+                    session.save_label.as_deref().unwrap_or_default(),
+                    session.first_user_prompt.as_deref().unwrap_or_default(),
+                ),
             });
         }
         if !self.candidates.is_empty() {
@@ -292,14 +327,16 @@ impl TranscriptSearch {
                     // transcripts. Neither DP matching nor disk scans belong
                     // on the keystroke/render thread.
                     let mut fuzzy_candidates = Vec::new();
-                    for mut candidate in candidates {
+                    for (mut candidate, priority) in
+                        prioritize_candidates(candidates, &query, &tokens, &cancel)
+                    {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        let opening_prompt = opening_prompt_rank(&candidate.opening_prompt, &query);
-                        if opening_prompt > 0 {
+                        if priority.opening_prompt > 0 {
                             let mut rank = fuzzy_metadata_rank(&candidate.search_index, &tokens);
-                            rank.opening_prompt = opening_prompt;
+                            rank.opening_prompt = priority.opening_prompt;
+                            rank.intent_terms = priority.intent_terms;
                             if sender.send((candidate.id.clone(), rank)).is_err() {
                                 return;
                             }
@@ -315,16 +352,18 @@ impl TranscriptSearch {
                             }
                             continue;
                         }
-                        fuzzy_candidates.push(candidate);
+                        fuzzy_candidates.push((candidate, priority));
                     }
                     let mut transcripts = Vec::new();
-                    for mut candidate in fuzzy_candidates {
+                    for (mut candidate, priority) in fuzzy_candidates {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
                         let mut fuzzy_missing = candidate.missing_tokens.clone();
-                        let rank = fuzzy_metadata_rank(&candidate.search_index, &tokens)
+                        let mut rank = fuzzy_metadata_rank(&candidate.search_index, &tokens)
                             .with_exact_field(candidate.exact_field);
+                        rank.opening_prompt = priority.opening_prompt;
+                        rank.intent_terms = priority.intent_terms;
                         fuzzy_missing.retain(|token| {
                             !jcode_fuzzy::PreparedTokenQuery::new(token)
                                 .matches_search_text(&candidate.search_index)
@@ -339,6 +378,9 @@ impl TranscriptSearch {
                             transcripts.push((candidate, fuzzy_missing, rank));
                         }
                     }
+                    // Fuzzy scoring adds evidence unavailable to the cheap
+                    // pass. Use it to schedule disk reads, too.
+                    transcripts.sort_by_key(|(_, _, rank)| std::cmp::Reverse(*rank));
                     let mut fuzzy_transcripts = Vec::new();
                     for (candidate, fuzzy_missing, rank) in transcripts {
                         if cancel.load(Ordering::Relaxed) {

@@ -54,6 +54,78 @@ fn wait_for_search(picker: &mut SessionPicker) {
 }
 
 #[test]
+fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
+    let query = "repair the broken search";
+    let candidate = |id: &str, intent: &str, opening: &str| Candidate {
+        id: id.into(),
+        paths: Vec::new(),
+        search_index: query.into(),
+        missing_tokens: Vec::new(),
+        exact_field: false,
+        opening_prompt: opening.into(),
+        intent_text: intent.into(),
+    };
+    let candidates = vec![
+        candidate("weak-first", "unrelated", ""),
+        candidate("weak-second", "unrelated", ""),
+        candidate("intent", "Repair Search", ""),
+        candidate("opening", query, query),
+    ];
+    let ranked = prioritize_candidates(
+        candidates,
+        query,
+        &search_query_tokens(query),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        ranked
+            .iter()
+            .map(|(candidate, _)| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        ["opening", "intent", "weak-first", "weak-second"]
+    );
+}
+
+#[test]
+fn progressive_search_publishes_best_opening_in_first_batch_and_keeps_weak_matches() {
+    let query = "repair the broken search";
+    let mut sessions: Vec<_> = (0..130)
+        .map(|index| {
+            let mut session = external_session(&format!("weak-{index}"), Path::new("unused"));
+            session.search_index = query.into();
+            session.first_user_prompt = Some("unrelated opening request".into());
+            session
+        })
+        .collect();
+    let mut best = external_session("best", Path::new("unused"));
+    best.search_index = query.into();
+    best.first_user_prompt = Some(query.into());
+    sessions.push(best);
+    let mut search = TranscriptSearch::default();
+    search.reset(query, sessions.iter());
+    search.started_at = Some(Instant::now() - DEBOUNCE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search.ranks.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "search did not publish a first batch"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        search.contains("best"),
+        "strongest opening must arrive in the first batch"
+    );
+    while search.pending() {
+        assert!(Instant::now() < deadline, "search did not finish");
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(search.ranks.len(), sessions.len());
+}
+
+#[test]
 fn transcript_search_tolerates_transposed_query_words() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("session.json");
