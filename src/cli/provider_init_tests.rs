@@ -24,6 +24,11 @@ struct EnvLock {
 
 impl Drop for EnvLock {
     fn drop(&mut self) {
+        for (key, _) in std::env::vars_os()
+            .filter(|(key, _)| key.to_str().is_some_and(is_session_provider_selection))
+        {
+            crate::env::remove_var(key);
+        }
         for (key, value) in &self.inherited {
             crate::env::set_var(key, value);
         }
@@ -39,6 +44,73 @@ fn is_session_provider_selection(key: &str) -> bool {
             | "JCODE_PROVIDER_PROFILE_ACTIVE"
             | "JCODE_PROVIDER_PROFILE_NAME"
     ) || key.starts_with("JCODE_OPENROUTER_")
+        || key.starts_with("JCODE_ANTHROPIC_")
+}
+
+#[test]
+fn named_anthropic_profiles_only_check_their_selected_credentials() {
+    let _guard = lock_env();
+    struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => crate::env::set_var(key, value),
+                    None => crate::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let _restore = Restore(
+        ["JCODE_HOME", "ANTHROPIC_API_KEY", "PROFILE_TEST_KEY"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("ANTHROPIC_API_KEY");
+    let path = auth::external::ExternalAuthSource::OpenCode.path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"anthropic":{"type":"api","key":"unapproved-key"}}"#,
+    )
+    .unwrap();
+    assert!(
+        auth::external::preferred_unconsented_api_key_source_for_env("ANTHROPIC_API_KEY").is_some()
+    );
+    assert!(ensure_anthropic_api_auth_allowed_for_explicit_choice().is_err());
+
+    let config: crate::config::Config = toml::from_str(
+        r#"
+        [providers.private]
+        type = "anthropic-compatible"
+        base_url = "http://localhost:12345/v1"
+        api_key_env = "PROFILE_TEST_KEY"
+        [providers.local]
+        type = "anthropic-compatible"
+        base_url = "http://localhost:12346/v1"
+        auth = "none"
+        [providers.standard]
+        type = "anthropic-compatible"
+        base_url = "https://api.anthropic.com/v1"
+        api_key_env = "ANTHROPIC_API_KEY"
+    "#,
+    )
+    .unwrap();
+    crate::env::set_var("PROFILE_TEST_KEY", "profile-key");
+    provider_catalog::apply_named_provider_profile_env_from_config("private", &config).unwrap();
+    ensure_anthropic_api_auth_allowed_for_explicit_choice().unwrap();
+    assert_eq!(
+        provider::anthropic::load_anthropic_api_key().unwrap(),
+        "profile-key"
+    );
+    provider_catalog::apply_named_provider_profile_env_from_config("local", &config).unwrap();
+    ensure_anthropic_api_auth_allowed_for_explicit_choice().unwrap();
+    assert_eq!(provider::anthropic::load_anthropic_api_key().unwrap(), "");
+    provider_catalog::apply_named_provider_profile_env_from_config("standard", &config).unwrap();
+    assert!(ensure_anthropic_api_auth_allowed_for_explicit_choice().is_err());
 }
 
 fn lock_env() -> EnvLock {

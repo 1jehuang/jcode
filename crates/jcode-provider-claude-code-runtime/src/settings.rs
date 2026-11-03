@@ -36,6 +36,22 @@ pub fn normalize_permission_mode(raw: &str) -> &'static str {
         .unwrap_or("default")
 }
 
+/// Instance arguments override the global mode for both startup and tool replies.
+pub fn effective_permission_mode(configured: &str, args: &[String]) -> &'static str {
+    let mut mode = normalize_permission_mode(configured);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--permission-mode" {
+            mode = normalize_permission_mode(args.next().map(String::as_str).unwrap_or(""));
+        } else if let Some(value) = arg.strip_prefix("--permission-mode=") {
+            mode = normalize_permission_mode(value);
+        } else if arg == "--dangerously-skip-permissions" {
+            mode = "bypassPermissions";
+        }
+    }
+    mode
+}
+
 /// Map a jcode reasoning effort onto a `--effort` level. `None` means "do not
 /// pass the flag" (CLI default).
 pub fn map_effort(effort: &str) -> Option<&'static str> {

@@ -7,9 +7,65 @@ pub fn replace_account_if_unchanged(
     expected_identity: Option<&str>,
     replacement: AnthropicAccount,
 ) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     replace_saved_login(&mut auth, label, expected_identity, replacement)?;
     save_auth_file(&auth)
+}
+
+pub(in crate::auth) fn capture_refresh_account(
+    label: &str,
+    refresh_token: &str,
+) -> Result<AnthropicAccount> {
+    load_auth_file()?
+        .anthropic_accounts
+        .into_iter()
+        .find(|account| {
+            account.label == label && !refresh_token.is_empty() && account.refresh == refresh_token
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Claude login changed before token refresh; retry with the current login"
+            )
+        })
+}
+
+pub(in crate::auth) fn commit_refresh_account(
+    expected: &AnthropicAccount,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    let mut matches = auth.anthropic_accounts.iter_mut().filter(|account| {
+        account.refresh == expected.refresh
+            && account_identity(account) == account_identity(expected)
+    });
+    let account = matches.next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Claude login changed while token refresh was pending; refreshed tokens were not saved"
+        )
+    })?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "Claude refresh login is ambiguous; refreshed tokens were not saved"
+    );
+    let label = account.label.clone();
+    let previous_access = account.access.clone();
+    account.access = tokens.access_token.clone();
+    account.refresh = tokens.refresh_token.clone();
+    account.expires = tokens.expires_at;
+    if !tokens.scopes.is_empty() {
+        account.scopes = tokens.scopes.clone();
+    }
+    save_auth_file(&auth)?;
+    crate::usage::carry_anthropic_usage_across_token_refresh(
+        &label,
+        &previous_access,
+        &tokens.access_token,
+    );
+    Ok(())
 }
 
 pub(super) fn replace_saved_login(

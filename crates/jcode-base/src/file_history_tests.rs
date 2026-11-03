@@ -248,7 +248,7 @@ fn macos_edit_and_rewind_preserve_xattrs_and_detect_external_conflicts() {
 #[cfg(target_os = "linux")]
 #[test]
 fn new_file_group_uses_effective_group_unless_parent_is_setgid() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let _env = crate::storage::lock_test_env();
     let (_home, work) = fixture();
     let regular_dir = work.path().join("regular");
@@ -285,6 +285,75 @@ fn unsupported_xattr_errors_are_distinguished_from_other_failures() {
     assert!(!xattrs_unsupported(&std::io::Error::from_raw_os_error(
         libc::EIO
     )));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_edit_and_rewind_preserve_posix_access_acl() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("acl");
+    fs::write(&path, b"before").unwrap();
+    let mut acl = 2u32.to_le_bytes().to_vec();
+    for (tag, permissions, id) in [
+        (1u16, 6u16, u32::MAX),
+        (2, 4, unsafe { libc::geteuid() }.wrapping_add(1)),
+        (4, 0, u32::MAX),
+        (16, 4, u32::MAX),
+        (32, 0, u32::MAX),
+    ] {
+        acl.extend(tag.to_le_bytes());
+        acl.extend(permissions.to_le_bytes());
+        acl.extend(id.to_le_bytes());
+    }
+    write_xattrs(
+        &path,
+        &BTreeMap::from([("system.posix_acl_access".into(), acl.clone())]),
+    )
+    .unwrap();
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    let cp = checkpoint("acl", 0, "edit").unwrap();
+    mutate("acl", &path, Some(b"after")).unwrap();
+    assert_eq!(read_xattrs(&path).unwrap()["system.posix_acl_access"], acl);
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode(), mode);
+    restore("acl", &cp.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(read_xattrs(&path).unwrap()["system.posix_acl_access"], acl);
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode(), mode);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unwriteable_security_metadata_leaves_the_original_file_untouched() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("security");
+    fs::write(&path, b"before").unwrap();
+    let dir = directory("security").unwrap();
+    let before = state(&dir, &path).unwrap();
+    let mut after = before.clone();
+    after.blob = Some(store_blob(&dir, b"after").unwrap());
+    after
+        .metadata
+        .as_mut()
+        .unwrap()
+        .xattrs
+        .insert("security.jcode-invalid".into(), vec![1]);
+    assert!(
+        apply(
+            &dir,
+            &Change {
+                path: path.clone(),
+                before,
+                after
+            },
+            false
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(fs::read_dir(work.path()).unwrap().count(), 1);
 }
 
 #[cfg(target_os = "linux")]

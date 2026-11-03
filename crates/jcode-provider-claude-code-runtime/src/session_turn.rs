@@ -103,14 +103,13 @@ impl ClaudeCodeProvider {
             };
             let turn_uuid = uuid::Uuid::new_v4().to_string();
             let user_line = prompt::user_line(&input, transcript.as_deref(), &turn_uuid);
-            let permission_mode = self.settings().permission_mode;
 
             let outcome = turn::drive_turn(TurnRequest {
                 child: &child,
                 user_line,
                 turn_uuid,
                 tools: &tools,
-                permission_mode: &permission_mode,
+                permission_mode: &child.launch.spec.permission_mode,
                 login_hint: login_hint.clone(),
                 out: &out,
                 results: &mut results,

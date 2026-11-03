@@ -302,11 +302,15 @@ fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         }
         return Err(error).context("Could not read file extended attribute names");
     }
+    ensure!(
+        got as usize <= names.len(),
+        "File extended attributes changed during capture"
+    );
     names.truncate(got as usize);
     let mut attrs = BTreeMap::new();
     for name in names
         .split(|byte| *byte == 0)
-        .filter(|name| name.starts_with(b"user."))
+        .filter(|name| !name.is_empty())
     {
         let name_c = std::ffi::CString::new(name)?;
         let size =
@@ -322,6 +326,10 @@ fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             )
         };
         ensure!(got >= 0, "Could not read extended attribute");
+        ensure!(
+            got as usize <= value.len(),
+            "File extended attribute changed during capture"
+        );
         value.truncate(got as usize);
         attrs.insert(String::from_utf8(name.to_vec())?, value);
     }
@@ -330,7 +338,7 @@ fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
 
 #[cfg(target_os = "linux")]
 fn xattrs_unsupported(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP))
+    error.raw_os_error() == Some(libc::ENOTSUP)
 }
 
 #[cfg(unix)]
@@ -442,7 +450,18 @@ fn read_xattrs(_path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
 fn write_xattrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    for (name, value) in attrs.iter().filter(|(name, _)| name.starts_with("user.")) {
+    // A staged inode can inherit a parent ACL or security label of its own.
+    for name in read_xattrs(path)?
+        .keys()
+        .filter(|name| !attrs.contains_key(*name))
+    {
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        if unsafe { libc::lremovexattr(c_path.as_ptr(), name.as_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Could not remove inherited extended attribute");
+        }
+    }
+    for (name, value) in attrs {
         let name = std::ffi::CString::new(name.as_bytes())?;
         let result = unsafe {
             libc::lsetxattr(
@@ -455,9 +474,6 @@ fn write_xattrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
         };
         if result != 0 {
             let error = std::io::Error::last_os_error();
-            if xattrs_unsupported(&error) {
-                return Ok(());
-            }
             return Err(error).context("Could not restore extended attribute");
         }
     }
@@ -558,12 +574,17 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
                 let result = unsafe { libc::chown(c_path.as_ptr(), metadata.uid, metadata.gid) };
                 ensure!(result == 0, "Could not preserve file owner and group");
             }
-            write_xattrs(&temporary, &metadata.xattrs)?;
         }
         #[cfg(unix)]
         if let Some(mode) = desired.mode {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        // chown/chmod can clear capabilities or alter ACL masks. Restore access
+        // attributes last, and leave the original untouched if any cannot be set.
+        #[cfg(unix)]
+        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
+            write_xattrs(&temporary, &metadata.xattrs)?;
         }
         #[cfg(not(unix))]
         if let Some(mode) = desired.mode {

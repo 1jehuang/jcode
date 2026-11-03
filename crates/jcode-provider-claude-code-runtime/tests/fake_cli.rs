@@ -340,6 +340,31 @@ async fn permission_request_is_answered_by_mode() {
     provider.shutdown().await;
 }
 
+#[tokio::test]
+async fn instance_permission_arguments_control_native_tool_replies() {
+    for args in [
+        "--permission-mode=default",
+        "--permission-mode plan",
+        "--permission-mode=acceptEdits",
+        "--permission-mode=dontAsk",
+        "--permission-mode=invalid",
+        "--permission-mode",
+    ] {
+        let fake = Fake::new();
+        let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+            instances: vec![ClaudeCodeInstance {
+                id: "restricted".into(),
+                launch_args: Some(args.into()),
+                ..Default::default()
+            }],
+            ..fake.settings()
+        });
+        let events = run_turn(&provider, &[Message::user("perm Bash")], None).await;
+        assert_eq!(text(&events), "permission:deny", "{args}");
+        provider.shutdown().await;
+    }
+}
+
 async fn native_permission_behavior(mode: &str, tool_name: &str) -> String {
     let fake = Fake::new();
     let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
