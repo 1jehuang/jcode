@@ -100,6 +100,8 @@ struct SessionUiState {
     provider_name: Option<String>,
     model: Option<String>,
     available_models: Vec<String>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+    selected_route: Option<crate::provider::RouteSelection>,
     reasoning_effort: Option<String>,
 }
 
@@ -170,18 +172,88 @@ fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     response
 }
 
+fn apply_model_catalog(
+    state: &mut SessionUiState,
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    available_models: Vec<String>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+    reasoning_effort: Option<String>,
+) {
+    if provider_model
+        .as_ref()
+        .is_some_and(|model| state.model.as_ref() != Some(model))
+        || provider_name
+            .as_ref()
+            .is_some_and(|provider| state.provider_name.as_ref() != Some(provider))
+    {
+        state.selected_route = None;
+    }
+    if provider_name.is_some() {
+        state.provider_name = provider_name;
+    }
+    if provider_model.is_some() {
+        state.model = provider_model;
+    }
+    state.available_models = available_models;
+    state.available_model_routes = available_model_routes;
+    if reasoning_effort.is_some() {
+        state.reasoning_effort = reasoning_effort;
+    }
+}
+
 impl SessionUiState {
+    fn apply_model_event(&mut self, event: &ServerEvent) -> bool {
+        match event {
+            ServerEvent::AvailableModelsUpdated {
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+            } => {
+                apply_model_catalog(
+                    self,
+                    provider_name.clone(),
+                    provider_model.clone(),
+                    available_models.clone(),
+                    available_model_routes.clone(),
+                    None,
+                );
+                true
+            }
+            ServerEvent::ModelChanged {
+                model,
+                provider_name,
+                error: None,
+                reasoning_effort,
+                ..
+            } => {
+                self.selected_route = None;
+                self.model = Some(model.clone());
+                if provider_name.is_some() {
+                    self.provider_name = provider_name.clone();
+                }
+                self.reasoning_effort = reasoning_effort.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn from_history_fields(
         provider_name: Option<String>,
         provider_model: Option<String>,
         available_models: Vec<String>,
+        available_model_routes: Vec<crate::provider::ModelRoute>,
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
             provider_name,
             model: provider_model,
             available_models,
+            available_model_routes,
             reasoning_effort,
+            ..Default::default()
         }
     }
 
@@ -639,15 +711,7 @@ impl AcpRuntime {
 
         let request_id = session.next_id();
         let apply_result = match config_id.as_str() {
-            CONFIG_ID_MODEL => {
-                session
-                    .send(&Request::SetModel {
-                        id: request_id,
-                        model: value.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(&session, request_id).await
-            }
+            CONFIG_ID_MODEL => set_session_model(&session, request_id, &value).await,
             CONFIG_ID_EFFORT => {
                 session
                     .send(&Request::SetReasoningEffort {
@@ -785,12 +849,14 @@ impl AcpRuntime {
             .await?;
         wait_for_done(&session, subscribe_id).await?;
         let history = request_history(&session).await?;
-        let (session_id, ui_state) = match history {
+        let catalog = request_model_catalog(&session).await?;
+        let (session_id, mut ui_state) = match history {
             ServerEvent::History {
                 session_id,
                 provider_name,
                 provider_model,
                 available_models,
+                available_model_routes,
                 reasoning_effort,
                 ..
             } => (
@@ -799,11 +865,30 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
                     reasoning_effort,
                 ),
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+                reasoning_effort,
+            );
+        }
         Ok(DaemonSession::new(
             session_id,
             session.reader.into_inner().into_inner(),
@@ -855,6 +940,7 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
                     reasoning_effort,
                     ..
                 } => {
@@ -863,6 +949,7 @@ impl AcpRuntime {
                         provider_name,
                         provider_model,
                         available_models,
+                        available_model_routes,
                         reasoning_effort,
                     );
                     if replay_history {
@@ -880,6 +967,26 @@ impl AcpRuntime {
                     }
                 }
             }
+        }
+
+        let catalog = request_model_catalog(&session).await?;
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+                reasoning_effort,
+            );
         }
 
         Ok(DaemonSession::new(
@@ -1028,36 +1135,11 @@ impl AcpRuntime {
                     )
                     .await?;
                 }
-                ServerEvent::ModelChanged {
-                    model,
-                    provider_name,
-                    error,
-                    ..
-                } => {
-                    // Mid-prompt model changes happen on provider failover;
-                    // keep the selector in sync.
-                    if error.is_none() {
-                        let config_options = {
-                            let mut state = session.ui_state.lock().await;
-                            state.model = Some(model);
-                            if provider_name.is_some() {
-                                state.provider_name = provider_name;
-                            }
-                            session_config_options(&state)
-                        };
-                        if !config_options.is_empty() {
-                            self.write_notification(
-                                "session/update",
-                                json!({
-                                    "sessionId": session.session_id,
-                                    "update": {
-                                        "sessionUpdate": "config_option_update",
-                                        "configOptions": config_options,
-                                    }
-                                }),
-                            )
-                            .await?;
-                        }
+                event @ (ServerEvent::ModelChanged { .. }
+                | ServerEvent::AvailableModelsUpdated { .. }) => {
+                    let changed = session.ui_state.lock().await.apply_model_event(&event);
+                    if changed {
+                        self.write_config_option_update(&session).await?;
                     }
                 }
                 other => {
@@ -1096,13 +1178,7 @@ impl AcpRuntime {
             }
             AcpSlashCommand::Model(Some(model)) => {
                 let id = session.next_id();
-                session
-                    .send(&Request::SetModel {
-                        id,
-                        model: model.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(session, id).await?;
+                set_session_model(session, id, &model).await?;
                 self.write_config_option_update(session).await?;
                 let selected = session.ui_state.lock().await.model.clone().unwrap_or(model);
                 Ok(format!("Switched model to `{selected}`."))
@@ -1113,24 +1189,39 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
+                    reasoning_effort,
                     ..
                 } = event
                 else {
                     unreachable!("request_model_catalog only returns history")
                 };
-                let (current, models) = {
+                let models = {
                     let mut state = session.ui_state.lock().await;
-                    if provider_name.is_some() {
-                        state.provider_name = provider_name;
-                    }
-                    if provider_model.is_some() {
-                        state.model = provider_model;
-                    }
-                    state.available_models = available_models;
-                    (state.model.clone(), state.available_models.clone())
+                    apply_model_catalog(
+                        &mut state,
+                        provider_name,
+                        provider_model,
+                        available_models,
+                        available_model_routes,
+                        reasoning_effort,
+                    );
+                    let current = state.current_model_id();
+                    state
+                        .model_choices()
+                        .into_iter()
+                        .map(|(id, name)| {
+                            let selected = if current.as_ref() == Some(&id) {
+                                " (current)"
+                            } else {
+                                ""
+                            };
+                            format!("{id} {name}{selected}")
+                        })
+                        .collect::<Vec<_>>()
                 };
                 self.write_config_option_update(session).await?;
-                Ok(format_model_catalog(current.as_deref(), &models))
+                Ok(format_model_catalog(None, &models))
             }
             AcpSlashCommand::Effort(None) => {
                 let state = session.ui_state.lock().await;
@@ -1278,7 +1369,9 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
                 message,
                 ..
             } if event_id == id => anyhow::bail!(message),
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1302,7 +1395,9 @@ async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
                 message,
                 ..
             } if event_id == id => anyhow::bail!(message),
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1310,31 +1405,41 @@ async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
 mod session_configuration;
 use session_configuration::*;
 
+async fn set_session_model(session: &DaemonSession, id: u64, value: &str) -> Result<()> {
+    let request = session.ui_state.lock().await.model_request(id, value)?;
+    let selection = match &request {
+        Request::SetRoute { selection, .. } => Some(selection.clone()),
+        _ => None,
+    };
+    session.send(&request).await?;
+    wait_for_model_changed(session, id).await?;
+    session.ui_state.lock().await.selected_route = selection;
+    Ok(())
+}
+
 async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}
+            event @ ServerEvent::ModelChanged {
+                id, error: None, ..
+            } if id == request_id => {
+                session.ui_state.lock().await.apply_model_event(&event);
+                return Ok(());
+            }
             ServerEvent::ModelChanged {
                 id,
-                model,
-                provider_name,
-                error,
+                error: Some(error),
                 ..
             } if id == request_id => {
-                if let Some(error) = error {
-                    anyhow::bail!(error);
-                }
-                let mut state = session.ui_state.lock().await;
-                state.model = Some(model);
-                if provider_name.is_some() {
-                    state.provider_name = provider_name;
-                }
-                return Ok(());
+                anyhow::bail!(error);
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {
                 anyhow::bail!(message)
             }
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1354,7 +1459,9 @@ async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Re
             ServerEvent::Error { id, message, .. } if id == request_id => {
                 anyhow::bail!(message)
             }
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -2010,6 +2117,7 @@ mod tests {
             model: Some("gpt-5.2".to_string()),
             available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
             reasoning_effort: Some("high".to_string()),
+            ..Default::default()
         };
         let options = session_config_options(&state);
         assert_eq!(options.len(), 2);
@@ -2039,12 +2147,209 @@ mod tests {
     }
 
     #[test]
+    fn route_catalog_distinguishes_duplicate_models_by_provider() {
+        let routes = ["OpenAI", "Other Gateway"].map(|provider| {
+            serde_json::from_value::<crate::provider::ModelRoute>(json!({
+                "model": "shared-model", "provider": provider,
+                "api_method": "openai-compatible", "available": true, "detail": ""
+            }))
+            .unwrap()
+        });
+        let state = SessionUiState {
+            provider_name: Some("OpenAI".into()),
+            model: Some("shared-model".into()),
+            available_models: vec!["shared-model".into()],
+            available_model_routes: routes.to_vec(),
+            ..Default::default()
+        };
+        let models = session_models(&state).unwrap();
+        let choices = models["availableModels"].as_array().unwrap();
+        assert_eq!(choices.len(), 2);
+        assert_ne!(choices[0]["modelId"], choices[1]["modelId"]);
+        assert!(choices[0]["name"].as_str().unwrap().contains("OpenAI"));
+        assert!(
+            choices[1]["name"]
+                .as_str()
+                .unwrap()
+                .contains("Other Gateway")
+        );
+        assert_eq!(models["currentModelId"], choices[0]["modelId"]);
+        assert_eq!(
+            session_config_options(&state)[0]["currentValue"],
+            models["currentModelId"]
+        );
+        for (choice, route) in choices.iter().zip(&routes) {
+            let id = choice["modelId"].as_str().unwrap();
+            assert!(id.len() <= 128);
+            let Request::SetRoute {
+                id: request_id,
+                selection,
+                automatic_failover,
+            } = state.model_request(42, id).unwrap()
+            else {
+                panic!("expected exact route")
+            };
+            assert_eq!(request_id, 42);
+            assert!(!automatic_failover);
+            assert_eq!(
+                selection,
+                crate::provider::RouteSelection::from_model_route(route)
+            );
+        }
+        let mut refreshed = state.clone();
+        refreshed.available_model_routes.reverse();
+        refreshed.available_model_routes[0].detail = "updated quota".into();
+        assert_eq!(
+            session_models(&refreshed).unwrap()["availableModels"][0]["modelId"],
+            choices[1]["modelId"]
+        );
+        assert!(state.model_request(1, "jcode-route:unknown").is_err());
+        assert!(
+            matches!(state.model_request(1, "legacy-model").unwrap(), Request::SetModel { model, .. } if model == "legacy-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn route_switch_preserves_selection_on_daemon_failure() {
+        let routes: Vec<crate::provider::ModelRoute> = ["first", "second"]
+            .map(|provider| {
+                serde_json::from_value(json!({ "model": "shared", "provider": provider,
+                "api_method": "openai-compatible", "available": true, "detail": "" }))
+                .unwrap()
+            })
+            .to_vec();
+        let initial = SessionUiState::from_history_fields(
+            Some("first".into()),
+            Some("shared".into()),
+            vec!["shared".into()],
+            routes.clone(),
+            None,
+        );
+        let choices = initial.model_choices();
+        let target = choices[1].0.clone();
+        let (client, server) = crate::transport::stream_pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let session = DaemonSession::new("test".into(), reader, writer, 1).with_ui_state(initial);
+        let expected = crate::provider::RouteSelection::from_model_route(&routes[1]);
+        let daemon = tokio::spawn(async move {
+            let (reader, mut writer) = server.into_split();
+            let mut reader = BufReader::new(reader);
+            for (id, error) in [
+                (1, None),
+                (2, Some("route unavailable")),
+                (3, Some("rejected")),
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Request = serde_json::from_str(&line).unwrap();
+                assert!(
+                    matches!(request, Request::SetRoute { selection, automatic_failover: false, .. } if selection == expected)
+                );
+                let event = if id == 3 {
+                    json!({"type": "error", "id": id, "message": error.unwrap()})
+                } else {
+                    json!({"type": "model_changed", "id": id, "model": "shared",
+                        "provider_name": "second", "error": error, "reasoning_effort": null})
+                };
+                writer
+                    .write_all(format!("{event}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        set_session_model(&session, 1, &target).await.unwrap();
+        let selected = session_config_options(&*session.ui_state.lock().await);
+        assert_eq!(selected[0]["currentValue"], target);
+        assert!(set_session_model(&session, 2, &target).await.is_err());
+        assert_eq!(
+            session_config_options(&*session.ui_state.lock().await),
+            selected
+        );
+        assert!(set_session_model(&session, 3, &target).await.is_err());
+        assert_eq!(
+            session_config_options(&*session.ui_state.lock().await),
+            selected
+        );
+        daemon.await.unwrap();
+    }
+
+    #[test]
+    fn route_catalog_restore_and_push_do_not_guess_ambiguous_runtime() {
+        let routes: Vec<crate::provider::ModelRoute> = ["openai-oauth", "openai-api"]
+            .map(|method| {
+                serde_json::from_value(json!({ "model": "shared", "provider": "OpenAI",
+                "api_method": method, "available": true, "detail": "" }))
+                .unwrap()
+            })
+            .to_vec();
+        let mut state = SessionUiState::from_history_fields(
+            Some("OpenAI".into()),
+            Some("shared".into()),
+            vec!["shared".into()],
+            routes.clone(),
+            None,
+        );
+        let choices = state.model_choices();
+        assert_eq!(state.current_model_id().as_deref(), Some("shared"));
+        assert_eq!(choices.len(), 3);
+        assert_ne!(choices[1].0, choices[2].0);
+        let pinned = crate::provider::RouteSelection::from_model_route(&routes[1]);
+        state.model = Some(pinned.routed_model_spec());
+        let pinned_id = state.current_model_id().unwrap();
+        assert_eq!(pinned_id, choices[2].0);
+        state.selected_route = Some(pinned);
+        let mut unavailable = routes.clone();
+        unavailable[0].available = false;
+        let event = ServerEvent::AvailableModelsUpdated {
+            provider_name: None,
+            provider_model: None,
+            available_models: vec!["shared".into()],
+            available_model_routes: unavailable,
+        };
+        assert!(state.apply_model_event(&event));
+        assert_eq!(state.current_model_id().unwrap(), pinned_id);
+        assert_eq!(state.model_choices().len(), 1);
+        assert!(state.model_request(1, &choices[1].0).is_err());
+        let changed: ServerEvent = serde_json::from_value(json!({
+            "type": "model_changed", "id": 99, "model": "shared", "provider_name": "OpenAI",
+            "reasoning_effort": null
+        }))
+        .unwrap();
+        assert!(state.apply_model_event(&changed));
+        assert!(state.selected_route.is_none());
+        assert_eq!(state.current_model_id().as_deref(), Some("shared"));
+        apply_model_catalog(
+            &mut state,
+            Some("OpenAI".into()),
+            Some("shared".into()),
+            vec!["shared".into()],
+            vec![routes[1].clone()],
+            None,
+        );
+        assert_eq!(state.current_model_id().unwrap(), pinned_id);
+        apply_model_catalog(
+            &mut state,
+            None,
+            None,
+            vec!["shared".into()],
+            Vec::new(),
+            None,
+        );
+        assert_eq!(state.current_model_id().as_deref(), Some("shared"));
+        assert!(matches!(
+            state.model_request(1, "shared").unwrap(),
+            Request::SetModel { .. }
+        ));
+    }
+
+    #[test]
     fn config_options_current_model_prepended_when_not_listed() {
         let state = SessionUiState {
             provider_name: Some("anthropic".to_string()),
             model: Some("claude-opus-4-6".to_string()),
             available_models: vec!["claude-sonnet-4-5".to_string()],
             reasoning_effort: None,
+            ..Default::default()
         };
         let options = session_config_options(&state);
         let model_values: Vec<&str> = options[0]["options"]
@@ -2064,6 +2369,7 @@ mod tests {
             model: Some("deepseek-v4-flash".to_string()),
             available_models: vec!["deepseek-v4-pro".to_string()],
             reasoning_effort: Some("high".to_string()),
+            ..Default::default()
         };
         let mut result = json!({"sessionId": "s1"});
         insert_session_configuration(&mut result, &state);
@@ -2080,6 +2386,31 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_refreshes_available_models_without_erasing_missing_state() {
+        let mut state = SessionUiState {
+            provider_name: Some("opencode-openference".to_string()),
+            model: Some("GLM-5.3".to_string()),
+            available_models: vec!["GLM-5.3".to_string()],
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        };
+
+        apply_model_catalog(
+            &mut state,
+            None,
+            None,
+            vec!["GLM-5.3".to_string(), "GLM-5.2".to_string()],
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(state.provider_name.as_deref(), Some("opencode-openference"));
+        assert_eq!(state.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(state.available_models, ["GLM-5.3", "GLM-5.2"]);
+        assert_eq!(state.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
     fn config_options_empty_without_model_state() {
         let options = session_config_options(&SessionUiState::default());
         assert!(options.is_empty());
@@ -2092,6 +2423,7 @@ mod tests {
             model: Some("mystery-model-9000".to_string()),
             available_models: Vec::new(),
             reasoning_effort: None,
+            ..Default::default()
         };
         assert_eq!(
             state.context_limit(),
