@@ -17,6 +17,7 @@ mod profile_sources;
 
 #[path = "cases/file_routing.rs"]
 mod file_routing;
+mod history_continuity;
 #[path = "cases/rewind.rs"]
 mod rewind;
 
@@ -473,8 +474,12 @@ async fn rejected_rate_limit_stops_the_turn_with_retry_after() {
     assert_eq!(errs.len(), 1, "{events:?}");
     assert!(errs[0].0.contains("5-hour limit"), "{errs:?}");
     assert!(errs[0].1.unwrap() > 3600);
-    // The child survived the interrupt and serves the next turn.
-    let events = run_turn(&provider, &[Message::user("text")], None).await;
+    let events = run_turn(
+        &provider,
+        &[Message::user("ratelimit"), Message::user("text")],
+        None,
+    )
+    .await;
     assert_eq!(text(&events), "Hello from fake claude");
     assert_eq!(fake.launches().len(), 1);
     provider.shutdown().await;
@@ -519,7 +524,16 @@ async fn crash_restarts_with_resume_once() {
     assert!(session.starts_with("session:new:"), "{session}");
     let session_id = session.trim_start_matches("session:new:").to_string();
 
-    let events = run_turn(&provider, &[Message::user("crash")], None).await;
+    let events = run_turn(
+        &provider,
+        &[
+            Message::user("session"),
+            Message::assistant_text(&session),
+            Message::user("crash"),
+        ],
+        None,
+    )
+    .await;
     assert_eq!(text(&events), "recovered after crash", "{events:?}");
     let launches = fake.launches();
     assert_eq!(launches.len(), 2);
@@ -577,32 +591,14 @@ async fn dropping_the_stream_interrupts_and_keeps_the_child() {
         .unwrap();
     assert!(first.is_some());
     drop(stream);
-    let events = run_turn(&provider, &[Message::user("text")], None).await;
+    let events = run_turn(
+        &provider,
+        &[Message::user("slow"), Message::user("text")],
+        None,
+    )
+    .await;
     assert_eq!(text(&events), "Hello from fake claude");
     assert_eq!(fake.launches().len(), 1, "interrupt keeps the child alive");
-    provider.shutdown().await;
-}
-
-#[tokio::test]
-async fn history_from_another_provider_is_seeded_once() {
-    let fake = Fake::new();
-    let provider = fake.provider();
-    let history = [
-        Message::user("what is 2+2"),
-        Message::assistant_text("4"),
-        Message::user("echo-prompt"),
-    ];
-    let events = run_turn(&provider, &history, None).await;
-    let sent = text(&events);
-    assert!(sent.contains("previous_conversation"), "{sent}");
-    assert!(sent.contains("User: what is 2+2"), "{sent}");
-    assert!(sent.contains("Assistant: 4"), "{sent}");
-
-    let mut more = history.to_vec();
-    more.push(Message::assistant_text(&sent));
-    more.push(Message::user("echo-prompt"));
-    let events = run_turn(&provider, &more, None).await;
-    assert!(!text(&events).contains("previous_conversation"));
     provider.shutdown().await;
 }
 
@@ -624,9 +620,12 @@ async fn model_switch_uses_set_model_and_instance_switch_restarts() {
         ],
         ..fake.settings()
     });
-    run_turn(&provider, &[Message::user("text")], None).await;
+    let mut history = vec![Message::user("text")];
+    let first = run_turn(&provider, &history, None).await;
+    history.push(Message::assistant_text(&text(&first)));
+    history.push(Message::user("model"));
     provider.set_model("claude-code:claude-sonnet-5").unwrap();
-    let events = run_turn(&provider, &[Message::user("model")], None).await;
+    let events = run_turn(&provider, &history, None).await;
     assert_eq!(text(&events), "model:claude-sonnet-5");
     assert_eq!(fake.launches().len(), 1, "set_model is a control request");
 
@@ -644,7 +643,9 @@ async fn model_switch_uses_set_model_and_instance_switch_restarts() {
             )
             .is_err()
     );
-    let events = run_turn(&provider, &[Message::user("session")], None).await;
+    history.push(Message::assistant_text(&text(&events)));
+    history.push(Message::user("session"));
+    let events = run_turn(&provider, &history, None).await;
     assert!(
         text(&events).starts_with("session:new:"),
         "another account starts a new Claude session"
@@ -667,7 +668,8 @@ async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume
     let fake = Fake::new();
     let provider = fake.provider();
     let french = "Answer in French.";
-    let events = run_turn_with_system(&provider, french, &[Message::user("system")], None).await;
+    let mut history = vec![Message::user("system")];
+    let events = run_turn_with_system(&provider, french, &history, None).await;
     let reply = text(&events);
     assert!(
         reply.starts_with("system:You are running inside jcode"),
@@ -675,20 +677,18 @@ async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume
     );
     assert!(reply.ends_with("\n\nAnswer in French."), "{reply}");
 
-    run_turn_with_system(&provider, french, &[Message::user("text")], None).await;
+    history.push(Message::assistant_text(&reply));
+    history.push(Message::user("text"));
+    let second = run_turn_with_system(&provider, french, &history, None).await;
     assert_eq!(
         fake.launches().len(),
         1,
         "same instructions reuse the child"
     );
 
-    let events = run_turn_with_system(
-        &provider,
-        "Answer in German.",
-        &[Message::user("system")],
-        None,
-    )
-    .await;
+    history.push(Message::assistant_text(&text(&second)));
+    history.push(Message::user("system"));
+    let events = run_turn_with_system(&provider, "Answer in German.", &history, None).await;
     assert!(
         text(&events).ends_with("\n\nAnswer in German."),
         "{events:?}"

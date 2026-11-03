@@ -20,13 +20,6 @@ fn test_openai_supports_codex_models() {
     jcode_base::auth::codex::set_active_account_override(Some(
         "openai-supports-codex-models".to_string(),
     ));
-    jcode_base::provider::populate_account_models(vec![
-        "gpt-5.6-sol".to_string(),
-        "gpt-5.1-codex".to_string(),
-        "gpt-5.1-codex-mini".to_string(),
-        "gpt-5.2-codex".to_string(),
-    ]);
-
     let creds = CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),
@@ -36,6 +29,18 @@ fn test_openai_supports_codex_models() {
     };
 
     let provider = OpenAIProvider::new(creds);
+    // These credentials are API-key shaped, so validation reads the
+    // credential's own catalog scope, which other tests sharing the same
+    // fixture token also populate. Seed that scope, not the OAuth account one.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec![
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.1-codex".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+            "gpt-5.2-codex".to_string(),
+        ],
+    );
     assert!(provider.available_models().contains(&"gpt-5.2-codex"));
     assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
     assert!(provider.available_models().contains(&"gpt-5.6-sol"));
@@ -85,7 +90,6 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     let home = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
     jcode_base::auth::codex::set_active_account_override(Some("web-model-test".to_string()));
-    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
     let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
 
     let provider = OpenAIProvider::new(CodexCredentials {
@@ -95,6 +99,10 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
         account_id: None,
         expires_at: None,
     });
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
     assert_eq!(provider.transport().as_deref(), Some("browser"));
@@ -144,8 +152,9 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
 fn test_chatgpt_web_context_window_and_efforts_follow_the_catalog_level() {
     let _guard = jcode_base::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
     // A catalog snapshot in the shape `jcode browser chatgpt-login` stores.
+    // Write it before JCODE_HOME points here: the browser catalog memoizes per
+    // path, so a lookup in that window would pin an empty snapshot.
     let option = |value: &str, label: &str, upstream: &str, ctx: usize| serde_json::json!({"value":value,"label":label,"available":true,"upstream":upstream,"context_tokens":ctx});
     let snapshot = serde_json::json!({
         "version": 1,
@@ -165,6 +174,7 @@ fn test_chatgpt_web_context_window_and_efforts_follow_the_catalog_level() {
         snapshot.to_string(),
     )
     .unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
 
     let provider = OpenAIProvider::new_browser_only();
     provider.set_model("gpt-6[web]").unwrap();
@@ -634,7 +644,10 @@ fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
     let api_scope = api.catalog_scope();
     let oauth_scope = oauth.catalog_scope();
     assert_ne!(api_scope, oauth_scope);
-    assert!(!api_scope.contains("sk-split-scope-test"), "raw key leaked into scope");
+    assert!(
+        !api_scope.contains("sk-split-scope-test"),
+        "raw key leaked into scope"
+    );
 
     // API-key refresh lists an API-only model, then an OAuth refresh lands.
     jcode_base::provider::populate_account_models_for_scope(
@@ -648,13 +661,19 @@ fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
 
     api.set_model("gpt-split-api-only")
         .expect("API-key runtime must validate against its own catalog");
-    let err = api.set_model("gpt-split-oauth-only").unwrap_err().to_string();
+    let err = api
+        .set_model("gpt-split-oauth-only")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Unsupported OpenAI model"), "{err}");
 
     oauth
         .set_model("gpt-split-oauth-only")
         .expect("OAuth runtime must validate against its own catalog");
-    let err = oauth.set_model("gpt-split-api-only").unwrap_err().to_string();
+    let err = oauth
+        .set_model("gpt-split-api-only")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Unsupported OpenAI model"), "{err}");
 
     // A runtime unavailability marker on one route must not hide the model on
@@ -670,5 +689,8 @@ fn openai_api_key_scope_is_per_key() {
     let a = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-a"));
     let b = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-b"));
     assert_ne!(a, b);
-    assert_eq!(a, OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a ")));
+    assert_eq!(
+        a,
+        OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a "))
+    );
 }

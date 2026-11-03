@@ -9,6 +9,7 @@ impl super::input::PreparedInput {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> super::input::PreparedInput {
+    app.terminal_reply_filter.reset();
     // Implicit restore markers must not change the user's command intent.
     let mut routing_input =
         super::input::expand_paste_placeholders_with(&app.pasted_contents, &app.input);
@@ -95,6 +96,7 @@ pub(super) type InputUndoSnapshot = (
 
 impl App {
     pub(super) fn undo_input_change(&mut self) {
+        self.terminal_reply_filter.reset();
         let depth = self.input_undo_stack.len();
         self.input_selection_anchor = None;
         self.input_typing_undo = None;
@@ -155,6 +157,7 @@ impl App {
     }
 
     pub(super) fn restore_input_draft(&mut self, draft: InputUndoSnapshot) {
+        self.terminal_reply_filter.reset();
         let (text, cursor, images, markers, pasted_contents) = draft;
         self.input = text;
         self.cursor_pos = cursor.min(self.input.len());

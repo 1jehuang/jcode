@@ -8,6 +8,23 @@ fn prewarm_test_credentials() -> CodexCredentials {
     }
 }
 
+/// Provider on the API-key fixture credential with its catalog scope seeded.
+///
+/// Without a known catalog, `complete()` starts a background `/models` refresh
+/// against `JCODE_OPENAI_API_BASE`, which points at the test's loopback
+/// websocket listener. That plain HTTP request can take the accept the fixture
+/// expects for its websocket upgrade, so whether a test passed depended on an
+/// earlier test having already populated this process-global scope.
+async fn prewarm_test_provider() -> OpenAIProvider {
+    let provider = OpenAIProvider::new(prewarm_test_credentials());
+    *provider.credentials.write().await = prewarm_test_credentials();
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
+    provider
+}
+
 fn prewarm_test_tool() -> ToolDefinition {
     ToolDefinition {
         name: "lookup".to_string(),
@@ -129,12 +146,16 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         assert!(input.iter().any(|item| item["type"] == "reasoning"
             && item["id"] == "rs_history"
             && item["encrypted_content"] == "encrypted-history"));
-        assert!(input
-            .iter()
-            .any(|item| item.to_string().contains("first user turn")));
-        assert!(input
-            .iter()
-            .any(|item| item.to_string().contains("current user turn")));
+        assert!(
+            input
+                .iter()
+                .any(|item| item.to_string().contains("first user turn"))
+        );
+        assert!(
+            input
+                .iter()
+                .any(|item| item.to_string().contains("current user turn"))
+        );
 
         socket
             .send(WsMessage::Text(
@@ -153,8 +174,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         )).await.expect("send generated completed");
     });
 
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    let provider = prewarm_test_provider().await;
     provider
         .set_transport("websocket")
         .expect("force local websocket transport");

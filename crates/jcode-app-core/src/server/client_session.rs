@@ -536,27 +536,8 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
     });
 }
 
-/// Apply to the bound agent, not the connection's temporary registry. Like
-/// working-dir updates, a busy live target must not block client attachment.
-pub(super) async fn apply_or_defer_desktop_response_capability(
-    agent: &Arc<Mutex<Agent>>,
-    supports_user_response: bool,
-) {
-    if let Ok(mut guard) = agent.try_lock() {
-        guard
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-        return;
-    }
-    let agent = Arc::clone(agent);
-    tokio::spawn(async move {
-        agent
-            .lock()
-            .await
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-    });
-}
+#[path = "client_response_capability.rs"]
+pub(super) mod response_capability;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_subscribe(

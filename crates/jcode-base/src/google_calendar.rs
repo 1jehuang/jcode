@@ -12,6 +12,7 @@ const API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 
 pub struct CalendarClient {
     http: reqwest::Client,
+    loopback: Option<(String, String)>,
 }
 
 impl Default for CalendarClient {
@@ -90,11 +91,38 @@ impl CalendarClient {
     pub fn new() -> Self {
         Self {
             http: crate::provider::shared_http_client(),
+            loopback: None,
         }
     }
 
+    /// Isolated HTTP transport for offline integration tests. Never reads saved
+    /// credentials, uses no proxy, and cannot redirect the synthetic token.
+    #[doc(hidden)]
+    pub fn for_loopback_tests(endpoint: &str, synthetic_token: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(endpoint)?;
+        anyhow::ensure!(
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "Test endpoint must be an HTTP loopback URL"
+        );
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
+            loopback: Some((
+                endpoint.trim_end_matches('/').into(),
+                synthetic_token.into(),
+            )),
+        })
+    }
+
     pub fn is_configured(&self) -> bool {
-        google::has_service(GoogleService::Calendar)
+        self.loopback.is_some() || google::has_service(GoogleService::Calendar)
     }
 
     pub fn not_configured_message(&self) -> String {
@@ -124,8 +152,11 @@ impl CalendarClient {
         query: &[(&str, String)],
         body: Option<Value>,
     ) -> Result<Value> {
-        let token = google::get_valid_token().await?;
-        let url = format!("{}{}", API_BASE, path);
+        let (base, token) = match &self.loopback {
+            Some((base, token)) => (base.as_str(), token.clone()),
+            None => (API_BASE, google::get_valid_token().await?),
+        };
+        let url = format!("{base}{path}");
         let mut req = self
             .http
             .request(method, &url)
@@ -193,6 +224,8 @@ impl CalendarClient {
             .ok_or_else(|| anyhow::anyhow!("Calendar '{}' has no time zone", calendar_id))
     }
 
+    /// Return every matching event. `max_results` controls Google's page size,
+    /// not the total result count; even short/empty pages may have a next token.
     pub async fn list_events(
         &self,
         calendar_id: &str,
@@ -215,15 +248,31 @@ impl CalendarClient {
         if let Some(q) = query {
             params.push(("q", q.to_string()));
         }
-        let resp = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/calendars/{}/events", enc(calendar_id)),
-                &params,
-                None,
-            )
-            .await?;
-        Ok(items(resp))
+        let mut events = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let resp = self
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/calendars/{}/events", enc(calendar_id)),
+                    &params,
+                    None,
+                )
+                .await?;
+            let next = resp
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned);
+            events.extend(items(resp));
+            let Some(next) = next else { return Ok(events) };
+            anyhow::ensure!(
+                seen.insert(next.clone()),
+                "Calendar pagination repeated a page token"
+            );
+            params.retain(|(key, _)| *key != "pageToken");
+            params.push(("pageToken", next));
+        }
     }
 
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Value> {

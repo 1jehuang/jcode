@@ -15,6 +15,7 @@ impl SessionPicker {
     }
 
     pub fn next(&mut self) {
+        self.user_selection_intent = true;
         // Onboarding actions form a short list above the resumable sessions.
         if self.onboarding_review_recent_project_highlighted() {
             self.onboarding_action = Some(OnboardingAction::StartNewSession);
@@ -40,6 +41,7 @@ impl SessionPicker {
     }
 
     pub fn previous(&mut self) {
+        self.user_selection_intent = true;
         // Onboarding: already on the first action -> nothing above it.
         if self.onboarding_review_recent_project_highlighted() {
             return;

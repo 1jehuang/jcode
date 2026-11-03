@@ -140,6 +140,10 @@ pub fn prune_old_versions() {
         return;
     };
     let mut protected = protected_versions();
+    let Ok(rollback) = crate::prune::ghe_backup_versions(&dir.join("versions")) else {
+        return;
+    };
+    protected.extend(rollback);
     protected.extend(running_versions());
     if let Ok(entries) = std::fs::read_dir(dir.join("versions")) {
         for entry in entries.flatten() {
@@ -312,6 +316,38 @@ mod tests {
             );
             assert!(versions.join("oldest").is_dir());
             assert!(!builds.join(PRUNE_MARKER).exists());
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_prune_keeps_ghe_backup_targets() {
+        crate::tests::with_temp_jcode_home(|| {
+            let builds = builds_dir().unwrap();
+            let versions = builds.join("versions");
+            make_version(&versions, "rollback", DAY * 10);
+            make_version(&versions, "unreferenced", DAY * 9);
+            for index in 0..10 {
+                make_version(&versions, &format!("recent-{index}"), DAY * 2);
+            }
+            let backup = builds.join("ghe-install-backups/fixture");
+            fs::create_dir_all(&backup).unwrap();
+            fs::write(
+                backup.join("target-0"),
+                versions.join("rollback/jcode").to_str().unwrap(),
+            )
+            .unwrap();
+            let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+            prune_old_versions();
+            if let Some(previous_keep) = previous_keep {
+                jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+            } else {
+                jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+            }
+            assert!(versions.join("rollback/jcode").is_file());
+            assert!(!versions.join("unreferenced").exists());
+            assert!(builds.join(PRUNE_MARKER).is_file());
         });
     }
 

@@ -59,6 +59,7 @@ async fn restore_for_concurrency_test(
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));

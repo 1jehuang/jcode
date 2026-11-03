@@ -221,6 +221,9 @@ fn referenced_versions(versions_dir: &Path) -> Result<BTreeMap<String, BTreeSet<
         label_in(&canonical_versions, &launcher_binary_path()?),
         "launcher",
     );
+    for version in ghe_backup_versions(versions_dir)? {
+        protect(Some(version), "GHE rollback");
+    }
     let manifest = BuildManifest::load()?;
     protect(manifest.stable, "manifest");
     protect(manifest.canary, "manifest");
@@ -230,6 +233,54 @@ fn referenced_versions(versions_dir: &Path) -> Result<BTreeMap<String, BTreeSet<
         protect(pending.previous_shared_server_version, "pending activation");
     }
     Ok(reasons)
+}
+
+/// Installer backups outlive channel promotion. Both pruning paths must retain
+/// their resolved targets, and fail closed if backup metadata is unreadable.
+pub(crate) fn ghe_backup_versions(versions_dir: &Path) -> Result<HashSet<String>> {
+    let mut protected = HashSet::new();
+    let backups = versions_dir
+        .parent()
+        .unwrap_or(versions_dir)
+        .join("ghe-install-backups");
+    let entries = match std::fs::read_dir(backups) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
+        Err(error) => return Err(error.into()),
+    };
+    let canonical_versions = std::fs::canonicalize(versions_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let backup = entry.path();
+        // Original backups stored channel links and markers only. Keep those
+        // too, so upgrading the installer does not invalidate existing rollback.
+        for name in ["0", "1", "4"] {
+            protected.extend(label_in(&canonical_versions, &backup.join(name)));
+        }
+        for name in [
+            "2",
+            "3",
+            "target-0",
+            "target-1",
+            "target-4",
+            "previous-server",
+        ] {
+            let contents = match std::fs::read_to_string(backup.join(name)) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if matches!(name, "2" | "3") {
+                protected.insert(contents.trim().to_string());
+            } else {
+                protected.extend(label_in(&canonical_versions, Path::new(contents.trim())));
+            }
+        }
+    }
+    Ok(protected)
 }
 
 /// Version label of `path` when it resolves into `canonical_versions`. A link
@@ -524,6 +575,43 @@ mod tests {
         with_temp_jcode_home(|| {
             let report = prune_versions(1, false, &HashSet::new(), None).unwrap();
             assert!(report.removed.is_empty() && report.kept.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prune_keeps_ghe_backup_targets_until_backup_is_removed() {
+        with_temp_jcode_home(|| {
+            let direct = install("old-direct", 500);
+            let indirect = install("old-launcher", 400);
+            install("old-marker", 300);
+            install("unreferenced", 200);
+            let backup = builds_dir().unwrap().join("ghe-install-backups/fixture");
+            std::fs::create_dir_all(&backup).unwrap();
+            std::os::unix::fs::symlink(direct, backup.join("0")).unwrap();
+            std::fs::write(backup.join("target-4"), indirect.to_str().unwrap()).unwrap();
+            std::fs::write(backup.join("3"), "old-marker\n").unwrap();
+
+            let report = prune_versions(0, false, &HashSet::new(), None).unwrap();
+            assert_eq!(report.removed, vec!["unreferenced"]);
+            assert_eq!(
+                remaining(),
+                vec!["old-direct", "old-launcher", "old-marker"]
+            );
+            std::fs::remove_dir_all(backup).unwrap();
+            prune_versions(0, false, &HashSet::new(), None).unwrap();
+            assert!(remaining().is_empty());
+        });
+    }
+
+    #[test]
+    fn prune_fails_closed_on_unreadable_ghe_backup_metadata() {
+        with_temp_jcode_home(|| {
+            install("old", 500);
+            let backup = builds_dir().unwrap().join("ghe-install-backups/fixture");
+            std::fs::create_dir_all(backup.join("target-0")).unwrap();
+            assert!(prune_versions(0, false, &HashSet::new(), None).is_err());
+            assert_eq!(remaining(), vec!["old"]);
         });
     }
 
