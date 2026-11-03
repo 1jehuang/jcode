@@ -522,9 +522,6 @@ fn unsent_cases() -> Vec<UnsentCase> {
             app.queued_messages.push("queued prompt".into())
         }),
         ("command", |app| app.queued_commands.push("/compact".into())),
-        ("hidden", |app| {
-            app.hidden_queued_system_messages.push("reminder".into())
-        }),
         ("attachment", |app| {
             app.pending_images.push(("image/png".into(), "data".into()))
         }),
@@ -552,14 +549,13 @@ fn unsent_cases() -> Vec<UnsentCase> {
 fn handoff_error_identifies_blocking_queue_without_its_contents() {
     let mut app = crate::tui::app::tests::create_test_app();
     let session = super::super::commands::active_session_id(&app);
-    app.hidden_queued_system_messages
-        .push("private reminder".into());
+    app.queued_messages.push("private prompt".into());
     handle_cloud_command(&mut app, "/cloud", &session);
     let error = &app.display_messages.last().unwrap().content;
-    assert!(error.contains("queued system reminders would be lost"));
-    assert!(!error.contains("private reminder"));
+    assert!(error.contains("queued messages would be lost"));
+    assert!(!error.contains("private prompt"));
 
-    app.hidden_queued_system_messages.clear();
+    app.queued_messages.clear();
     app.pending_cloud_handoff = Some(pending(CloudCommand::Return, &session));
     app.pending_soft_interrupt_requests
         .push((1, "private interrupt".into()));
@@ -1164,4 +1160,26 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Cancel)
     );
     assert_eq!(parse_cloud_command("/cloudy"), None);
+}
+
+#[test]
+fn queued_system_reminders_reach_agent_before_handoff() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = super::super::commands::active_session_id(&app);
+    app.hidden_queued_system_messages.push("bg task done".into());
+    handle_cloud_command(&mut app, "/local", &session);
+    assert!(app.pending_cloud_handoff.is_some());
+    // Reminders still dispatch while the handoff waits.
+    assert!(!app.cloud_handoff_blocks_work());
+    assert!(app.poll_cloud_job());
+    assert!(app.pending_queued_dispatch);
+    assert!(app.cloud_job.is_none());
+    assert_eq!(app.hidden_queued_system_messages, vec!["bg task done".to_string()]);
+    assert!(app.pending_cloud_handoff.is_some());
+
+    // Once delivered, the handoff proceeds and blocks new work again.
+    app.pending_queued_dispatch = false;
+    app.hidden_queued_system_messages.clear();
+    assert!(app.cloud_handoff_blocks_work());
+    assert!(app.take_ready_cloud_handoff().is_some());
 }
