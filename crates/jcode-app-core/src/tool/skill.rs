@@ -88,7 +88,10 @@ impl Tool for SkillTool {
                     .await
             }
             "list" => self.list_skills(ctx.working_dir.as_deref()).await,
-            "reload" => self.reload_skill(params.name).await,
+            "reload" => {
+                self.reload_skill(params.name, ctx.working_dir.as_deref())
+                    .await
+            }
             "reload_all" => self.reload_all_skills(ctx.working_dir.as_deref()).await,
             "read" => {
                 self.read_skill(params.name, ctx.working_dir.as_deref())
@@ -210,8 +213,21 @@ impl SkillTool {
         Ok(ToolOutput::new(output).with_title("Skills: List"))
     }
 
-    async fn reload_skill(&self, name: Option<String>) -> Result<ToolOutput> {
+    async fn reload_skill(
+        &self,
+        name: Option<String>,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<ToolOutput> {
         let name = normalize_skill_name(name, "reload")?;
+
+        // A project skill can shadow a global one with the same name. Check the
+        // session's effective skill so a manual-only project skill is refused
+        // instead of reloading and describing the shadowed global copy.
+        if let Some(skill) = self.effective_registry(working_dir).await.get(&name)
+            && skill.disable_model_invocation
+        {
+            return Err(model_invocation_disabled(&skill.name));
+        }
 
         let mut registry = self.registry.write().await;
 
@@ -850,6 +866,43 @@ mod tests {
         assert!(!error.contains("Manual only skill"), "{error}");
         assert!(
             !error.contains(&repo.path().display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_refuses_project_manual_only_skill_that_shadows_global_skill() {
+        let global_root = tempfile::tempdir().unwrap();
+        let global_dir = global_root.path().join(".jcode/skills/shared-skill");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("SKILL.md"),
+            "---\nname: shared-skill\ndescription: Global shared skill\n---\n\nGlobal body.",
+        )
+        .unwrap();
+        let tool = SkillTool::new(Arc::new(RwLock::new(
+            SkillRegistry::load_for_working_dir(Some(global_root.path())).unwrap(),
+        )));
+        let repo = tempfile::tempdir().unwrap();
+        write_manual_only_project_skill(repo.path(), "shared-skill");
+
+        let error = match tool
+            .execute(
+                json!({"action": "reload", "name": "shared-skill"}),
+                context_with_working_dir(repo.path()),
+            )
+            .await
+        {
+            Ok(output) => panic!(
+                "reload must refuse the session's disable-model-invocation skill, got: {}",
+                output.output
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("/shared-skill"), "{error}");
+        assert!(!error.contains("Global shared skill"), "{error}");
+        assert!(
+            !error.contains(&global_root.path().display().to_string()),
             "{error}"
         );
     }
