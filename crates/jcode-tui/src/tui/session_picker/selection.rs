@@ -8,6 +8,7 @@ impl SessionPicker {
             return;
         };
         self.user_selection_intent = true;
+        self.search_selection.stop();
         if !self.selected_session_ids.insert(session_id.clone()) {
             self.selected_session_ids.remove(&session_id);
         }

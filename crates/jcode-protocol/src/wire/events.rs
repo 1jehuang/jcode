@@ -2,6 +2,71 @@
 
 use super::*;
 
+/// Credential-free usage attributed to an OAuth account on the daemon host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageSnapshot {
+    pub label: String,
+    pub email: Option<String>,
+    pub exhausted: bool,
+    pub primary_label: Option<String>,
+    pub five_hour_ratio: Option<f32>,
+    pub secondary_label: Option<String>,
+    pub seven_day_ratio: Option<f32>,
+    pub resets_at: Option<String>,
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod account_usage_tests {
+    use super::*;
+
+    #[test]
+    fn account_usage_roundtrips_as_lightweight_control() {
+        let request = Request::AccountUsage { id: 71 };
+        assert!(request.is_lightweight_control_request());
+        assert_eq!(request.id(), 71);
+        let decoded: Request =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert!(matches!(decoded, Request::AccountUsage { id: 71 }));
+        let snapshot = AccountUsageSnapshot {
+            label: "remote-account".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.35),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        let event = ServerEvent::AccountUsage {
+            id: 71,
+            anthropic: vec![snapshot.clone()],
+            openai: Vec::new(),
+        };
+        let decoded: ServerEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        let ServerEvent::AccountUsage {
+            id,
+            anthropic,
+            openai,
+        } = decoded
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(id, 71);
+        assert_eq!(anthropic, vec![snapshot]);
+        assert!(openai.is_empty());
+    }
+}
+
+/// Identity of a turn within one runtime incarnation. Request IDs are not turn IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnIdentity {
+    pub runtime_generation: String,
+    pub turn_id: u64,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10,6 +75,32 @@ use super::*;
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    /// Authoritative attachment boundary, sent before the corresponding History.
+    #[serde(rename = "turn_state")]
+    TurnState {
+        session_id: String,
+        runtime_generation: String,
+        turn_id: Option<u64>,
+        latest_turn_id: u64,
+    },
+    /// Published before any output from an accepted server turn.
+    #[serde(rename = "turn_started")]
+    TurnStarted { identity: TurnIdentity },
+    /// All events owned by a turn, including its terminal, share this scope.
+    #[serde(rename = "turn_event")]
+    TurnEvent {
+        identity: TurnIdentity,
+        event: Box<ServerEvent>,
+    },
+    /// Serialized todo card snapshot containing todos, plan, and goals.
+    #[serde(rename = "todos")]
+    Todos { session_id: String, payload: String },
+    #[serde(rename = "account_usage")]
+    AccountUsage {
+        id: u64,
+        anthropic: Vec<AccountUsageSnapshot>,
+        openai: Vec<AccountUsageSnapshot>,
+    },
     #[serde(rename = "runtime_command_result")]
     RuntimeCommandResult {
         id: u64,
@@ -95,9 +186,8 @@ pub enum ServerEvent {
         duration_secs: Option<f64>,
     },
 
-    /// Replace the current turn's streamed text content
-    /// Used when text-wrapped tool calls are recovered: the garbled text
-    /// shown during streaming is replaced with the clean prefix text.
+    /// Replace the current turn's streamed text content, for example when a
+    /// provider retry rolls back a partial response.
     #[serde(rename = "text_replace")]
     TextReplace { text: String },
 
@@ -167,6 +257,9 @@ pub enum ServerEvent {
         cache_read_input: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
+        /// Authoritative session context budget after applying its override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_budget: Option<usize>,
     },
 
     /// Prompt-shape signature for the API request that will later report token
@@ -223,6 +316,13 @@ pub enum ServerEvent {
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },
+
+    /// Effective tier reported for a request, alongside its configured tier.
+    #[serde(rename = "service_tier_reported")]
+    ServiceTierReported {
+        requested: Option<String>,
+        tier: String,
+    },
 
     /// Provider has finished the visible assistant message, but the turn may still be
     /// finalizing bookkeeping such as session IDs or completion trailers.
@@ -506,6 +606,15 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         messages: Vec<HistoryMessage>,
+        /// When set, `messages` holds only the messages after the first
+        /// `messages_base_count` messages, which the client already has (it
+        /// sent a matching `history_base`). Absent means a full transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages_base_count: Option<usize>,
+        /// `images` was omitted because it matches the client's advertised
+        /// `history_base.images_fingerprint`; keep the local image set.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        images_unchanged: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<jcode_session_types::RenderedImage>,
         /// Provider name (e.g. "anthropic", "openai")
@@ -520,6 +629,9 @@ pub enum ServerEvent {
         /// Route metadata for available models
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_model_routes: Vec<jcode_provider_core::ModelRoute>,
+        /// Authoritative service tiers from the live provider, including an empty unsupported list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_service_tiers: Option<Vec<String>>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
@@ -578,6 +690,10 @@ pub enum ServerEvent {
         /// only while daemon usage telemetry is enabled. Never a credential.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
@@ -661,6 +777,16 @@ pub enum ServerEvent {
         output: Option<String>,
     },
 
+    /// Session context cap changed, including the authoritative budget.
+    #[serde(rename = "context_cap_changed")]
+    ContextCapChanged {
+        id: u64,
+        session_id: String,
+        /// Normalized override, null when cleared.
+        max_context_tokens: Option<usize>,
+        effective_budget: usize,
+    },
+
     /// Model changed (response to cycle_model)
     #[serde(rename = "model_changed")]
     ModelChanged {
@@ -689,6 +815,10 @@ pub enum ServerEvent {
         /// Effective OAuth identity for the selected model-provider account.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Effort the switched-to model runs with. A switch can clear an
         /// effort the new model does not advertise, so clients must not keep
         /// showing the old one. Always serialized (`null` = no effort) so a
@@ -711,6 +841,9 @@ pub enum ServerEvent {
     #[serde(rename = "service_tier_changed")]
     ServiceTierChanged {
         id: u64,
+        /// Accepted but waiting for access to session configuration, not applied.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pending: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

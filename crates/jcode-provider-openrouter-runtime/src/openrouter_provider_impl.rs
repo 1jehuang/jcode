@@ -42,6 +42,11 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if self.profile_id.as_deref() == Some("muse-subscription") {
+            jcode_base::auth::muse::ensure_enabled()?;
+            let client = jcode_base::auth::muse::http_client()?;
+            jcode_base::auth::muse::refresh_if_needed(&client).await?;
+        }
         if self.builtin_azure {
             return self.complete_azure_responses(messages, tools, system).await;
         }
@@ -386,15 +391,7 @@ impl Provider for OpenRouterProvider {
             {
                 return;
             }
-            let Some((
-                snapshot,
-                system_text,
-                allow_reasoning,
-                include_reasoning_content,
-                allow_image_input,
-                profile_for_retry,
-            )) = astra_retry
-            else {
+            let Some((snapshot, _, _, _, _, _)) = astra_retry else {
                 let auth = match (auth_factory)() {
                     Ok(auth) => auth,
                     Err(_) => return,
@@ -745,7 +742,7 @@ impl Provider for OpenRouterProvider {
                 .collect();
             jcode_provider_core::sort_reasoning_efforts(&mut efforts);
             efforts.dedup();
-            efforts.extend(["swarm", "swarm-deep"]);
+            efforts.push("swarm");
             return efforts;
         }
         if self.supports_deepseek_reasoning_effort() {
@@ -1040,8 +1037,7 @@ impl Provider for OpenRouterProvider {
         // allowing an explicit model/profile setting above to override it.
         if self.profile_id.as_deref().is_some_and(|id| {
             id.eq_ignore_ascii_case("vsllm") || id.eq_ignore_ascii_case("vsllm-api")
-        })
-        {
+        }) {
             return 32_768;
         }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
@@ -1223,7 +1219,7 @@ impl OpenRouterProvider {
     /// Standard/direct OpenRouter and built-in profiles keep the existing
     /// env-var-driven `cache_path()` semantics.
     pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
-        self.is_user_named_profile()
+        (self.is_user_named_profile() || self.profile_id.as_deref() == Some("grok-build"))
             .then(|| self.profile_id.clone())
             .flatten()
     }

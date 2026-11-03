@@ -639,14 +639,15 @@ fn test_link_strike_and_image_render() {
     let lines = render_markdown(md);
     let rendered = lines_to_string(&lines);
     assert!(rendered.contains("old"));
-    assert!(rendered.contains("docs (https://example.com)"));
+    assert!(rendered.contains("docs"));
+    assert!(!rendered.contains("https://example.com"));
     assert!(rendered.contains("[image: chart] (https://img.example/chart.png)"));
 }
 
 #[test]
 fn native_search_source_links_render_in_full_and_lazy_paths() {
     let markdown = "许可 🦀. [macOS license](<https://www.apple.com/legal/sla/docs/macOSTahoe.pdf>)";
-    let expected = "许可 🦀. macOS license (https://www.apple.com/legal/sla/docs/macOSTahoe.pdf)";
+    let expected = "许可 🦀. macOS license";
     for lines in [
         render_markdown_with_width(markdown, Some(120)),
         render_markdown_lazy(markdown, Some(120), 0..100),

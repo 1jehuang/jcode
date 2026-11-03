@@ -42,7 +42,7 @@ enum Command {
 /// Nonblocking, bounded enqueue. No identity is created while opted out.
 /// Repeated calls are safe, including after deferred network failures.
 pub fn enqueue_oauth_account(provider: &str, email: &str) -> bool {
-    if !super::is_enabled() {
+    if !super::TelemetryCategory::Accounts.enabled() {
         return false;
     }
     let email = canonical_email(email);

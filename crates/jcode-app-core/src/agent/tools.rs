@@ -157,14 +157,6 @@ pub(super) fn print_tool_summary(tool: &ToolCall) {
                 println!("'{}'", pattern);
             }
         }
-        "ls" => {
-            let path = tool
-                .input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            println!("{}", path);
-        }
         _ => {}
     }
 }

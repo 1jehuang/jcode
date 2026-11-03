@@ -221,6 +221,8 @@ mod cache_render;
 mod content_render;
 #[path = "mermaid_inline.rs"]
 mod inline_image;
+#[path = "mermaid_kitty_classic.rs"]
+mod kitty_classic;
 #[path = "mermaid_runtime.rs"]
 mod runtime;
 #[path = "mermaid_viewport.rs"]
@@ -251,12 +253,16 @@ pub use inline_image::{
     inline_image_dims, inline_image_id, inline_image_is_materialized, materialize_inline_image,
     materialize_inline_image_by_id, rediscover_inline_image,
 };
+pub use kitty_classic::{
+    begin_terminal_image_frame, finish_terminal_image_frame, with_image_frame_offset,
+};
 pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
     is_video_export_mode, native_image_protocol_available, protocol_type,
     rediscover_external_image, register_external_image, register_inline_image,
-    set_video_export_mode, uses_text_image_fallback, with_image_protocol_override,
+    register_markdown_image, set_video_export_mode, uses_text_image_fallback,
+    with_image_protocol_override,
 };
 pub use viewport_render::{
     InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,
@@ -522,47 +528,8 @@ pub fn register_inline_level_geometries(hash: u64, geometries: [(u16, u16); 3]) 
 }
 
 #[cfg(test)]
-mod distinct_level_tests {
-    use super::*;
-
-    #[test]
-    fn skips_duplicate_levels_in_two_size_cycle() {
-        let hash = 0xd157_1ac7;
-        register_inline_level_geometries(hash, [(10, 20), (20, 40), (20, 40)]);
-        assert_eq!(next_distinct_mermaid_inline_level(hash, 0), 1);
-        assert_eq!(next_distinct_mermaid_inline_level(hash, 1), 0);
-    }
-
-    #[test]
-    fn preserves_three_distinct_levels_and_collapses_one_size_cycle() {
-        let three = 0xd157_1ac8;
-        register_inline_level_geometries(three, [(10, 20), (20, 40), (30, 60)]);
-        assert_eq!(next_distinct_mermaid_inline_level(three, 0), 1);
-        assert_eq!(next_distinct_mermaid_inline_level(three, 1), 2);
-        assert_eq!(next_distinct_mermaid_inline_level(three, 2), 0);
-
-        let one = 0xd157_1ac9;
-        register_inline_level_geometries(one, [(10, 20); 3]);
-        assert_eq!(next_distinct_mermaid_inline_level(one, 0), 0);
-    }
-
-    #[test]
-    fn zoom_steps_skip_duplicates_and_stop_at_ends() {
-        let unknown = 0xd157_1aca;
-        assert_eq!(step_distinct_mermaid_inline_level(unknown, 0, 1), 1);
-        assert_eq!(step_distinct_mermaid_inline_level(unknown, 2, 1), 2);
-        assert_eq!(step_distinct_mermaid_inline_level(unknown, 0, -1), 0);
-
-        let two = 0xd157_1acb;
-        register_inline_level_geometries(two, [(10, 20), (10, 20), (30, 60)]);
-        assert_eq!(step_distinct_mermaid_inline_level(two, 0, 1), 2);
-        assert_eq!(step_distinct_mermaid_inline_level(two, 2, -1), 0);
-
-        let one = 0xd157_1acc;
-        register_inline_level_geometries(one, [(10, 20); 3]);
-        assert_eq!(step_distinct_mermaid_inline_level(one, 0, 1), 0);
-    }
-}
+#[path = "distinct_level_tests.rs"]
+mod distinct_level_tests;
 
 pub(crate) fn mermaid_inline_expand_level(hash: u64) -> u8 {
     MERMAID_INLINE_EXPAND_LEVEL
@@ -928,6 +895,7 @@ struct KittyViewportState {
     unique_id: u32,
     full_cols: u16,
     full_rows: u16,
+    pixel_size: (u32, u32),
     pending_transmit: Option<String>,
     /// Exact bytes currently held by `pending_transmit`. Stored explicitly so
     /// cache accounting remains cheap and tests can exercise budget eviction
@@ -1029,13 +997,26 @@ impl KittyViewportCache {
 
     #[cfg(feature = "renderer")]
     fn remove(&mut self, hash: &u64) {
-        if let Some(state) = self.entries.remove(hash) {
-            self.total_pending_transmit_bytes = self
-                .total_pending_transmit_bytes
-                .saturating_sub(state.pending_transmit_bytes);
-            queue_kitty_delete_if_transmitted(&state);
+        let variants = if runtime::use_classic_kitty() {
+            self.entries
+                .iter()
+                .filter_map(|(key, state)| {
+                    (kitty_classic::state_hash(*hash, state.fit_target, state.font_size) == *key)
+                        .then_some(*key)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![*hash]
+        };
+        for hash in variants {
+            if let Some(state) = self.entries.remove(&hash) {
+                self.total_pending_transmit_bytes = self
+                    .total_pending_transmit_bytes
+                    .saturating_sub(state.pending_transmit_bytes);
+                queue_kitty_delete_if_transmitted(&state);
+            }
+            self.recency.remove(&hash);
         }
-        self.recency.remove(hash);
     }
 
     fn clear(&mut self) {
@@ -1596,6 +1577,7 @@ pub fn evict_old_cache() {
 
 /// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
+    kitty_classic::clear_placements();
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
     }
@@ -1617,7 +1599,9 @@ pub fn clear_image_state() {
 /// from the in-process caches. Exposed for TUI teardown, where there may be no
 /// later frame in which an image widget can carry the deferred cleanup.
 pub fn take_terminal_image_cleanup_payload() -> String {
-    viewport_render::take_kitty_delete_payloads()
+    let mut payload = kitty_classic::take_placement_cleanup();
+    payload.push_str(&viewport_render::take_kitty_delete_payloads());
+    payload
 }
 
 /// Attach pending Kitty deletion commands to the first cell of an ordinary TUI

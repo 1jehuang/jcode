@@ -143,7 +143,7 @@ pub fn provider_native_display(provider: &str, item: &Value) -> Option<ProviderN
                 id: str_field(item, "id").unwrap_or_default().to_string(),
                 name: PROVIDER_NATIVE_WEB_SEARCH_TOOL.to_string(),
                 input: Some(serde_json::json!({ "query": query })),
-                output: Some(output),
+                output: (!matches!(status, "in_progress" | "searching")).then_some(output),
                 is_error,
             })
         }
@@ -263,6 +263,17 @@ pub struct ProviderNativeItems {
 impl ProviderNativeItems {
     /// Record an item that arrived after `text_len` bytes of response text.
     pub fn push(&mut self, text_len: usize, provider: String, item: Value) {
+        // OpenAI's added snapshot is a live timing signal, not a replayable
+        // output item. Only persist the authoritative completed snapshot.
+        if provider == PROVIDER_NATIVE_OPENAI
+            && str_field(&item, "type") == Some("web_search_call")
+            && matches!(
+                str_field(&item, "status"),
+                Some("in_progress" | "searching")
+            )
+        {
+            return;
+        }
         self.items.push((text_len, provider, item));
     }
 
@@ -472,6 +483,51 @@ mod tests {
         assert_eq!(display.id, "ws_1");
         assert_eq!(display.input, Some(json!({"query": "jcode"})));
         assert_eq!(display.output.as_deref(), Some("Searched: jcode"));
+    }
+
+    #[test]
+    fn openai_search_lifecycle_handles_concurrent_failure_and_rollback() {
+        let mut tracker = ProviderNativeTracker::default();
+        let mut items = ProviderNativeItems::default();
+        for (id, status) in [("ws_a", "in_progress"), ("ws_b", "searching")] {
+            let item = json!({"type":"web_search_call", "id":id, "status":status});
+            assert!(matches!(tracker.observe("openai", &item),
+                Some(ProviderNativeToolEvent::Started { id: got, .. }) if got == id));
+            assert!(provider_native_text_fallback("openai", &item, None).is_none());
+            items.push(0, "openai".into(), item);
+        }
+        assert!(items.is_empty());
+        let failed = json!({"type":"web_search_call", "id":"ws_b", "status":"failed"});
+        assert!(matches!(tracker.observe("openai", &failed),
+            Some(ProviderNativeToolEvent::Completed { id, is_error: true, output, .. })
+            if id == "ws_b" && output == "Web search failed"));
+        assert!(tracker.is_started("ws_a"));
+        assert!(!tracker.is_started("ws_b"));
+        items.push(0, "openai".into(), failed.clone());
+        assert!(matches!(items.interleave("").as_slice(),
+            [crate::ContentBlock::ProviderNative { item, .. }] if item == &failed));
+        tracker.clear();
+        assert!(!tracker.is_started("ws_a"));
+    }
+
+    #[test]
+    fn openai_completed_only_search_still_finishes_with_query_and_sources() {
+        for status in [Some("completed"), None] {
+            let mut item = json!({"type":"web_search_call", "id":"ws_legacy",
+                "action":{"type":"search", "queries":["one", "two"],
+                    "sources":[{"title":"Source", "url":"https://example.test"}]}});
+            if let Some(status) = status {
+                item["status"] = status.into();
+            }
+            let mut tracker = ProviderNativeTracker::default();
+            assert!(matches!(tracker.observe("openai", &item),
+                Some(ProviderNativeToolEvent::Completed { input, output, is_error: false, .. })
+                if input["query"] == "one, two" && output.contains("https://example.test")));
+            let mut items = ProviderNativeItems::default();
+            items.push(0, "openai".into(), item.clone());
+            assert!(matches!(items.interleave("").as_slice(),
+                [crate::ContentBlock::ProviderNative { item: saved, .. }] if saved == &item));
+        }
     }
 
     #[test]

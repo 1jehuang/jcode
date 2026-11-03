@@ -148,6 +148,36 @@ class PublicReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "provenance"):
                     self.verify()
 
+    def test_draft_lookup_lists_releases_instead_of_tag_endpoint(self):
+        draft = dict(metadata(), draft=True)
+        calls = []
+
+        def fake_check_output(args):
+            calls.append(args)
+            if "releases/tags/" in args[-1]:
+                raise AssertionError("tag endpoint 404s for drafts")
+            page = int(args[-1].rsplit("page=", 1)[1])
+            if page == 1:
+                return json.dumps([{"tag_name": f"v0.0.{i}"} for i in range(100)]).encode()
+            return json.dumps([draft]).encode()
+
+        original = verifier.subprocess.check_output
+        verifier.subprocess.check_output = fake_check_output
+        self.addCleanup(setattr, verifier.subprocess, "check_output", original)
+        found = verifier.fetch_release_metadata("o/r", TAG, allow_draft=True)
+        self.assertEqual(found, draft)
+        self.assertEqual(len(calls), 2)
+
+    def test_draft_lookup_rejects_missing_or_duplicate_tag(self):
+        original = verifier.subprocess.check_output
+        self.addCleanup(setattr, verifier.subprocess, "check_output", original)
+        for releases, message in (([], "No release"),
+                                  ([{"tag_name": TAG}, {"tag_name": TAG}], "Multiple")):
+            with self.subTest(message=message):
+                verifier.subprocess.check_output = lambda args, r=releases: json.dumps(r).encode()
+                with self.assertRaisesRegex(ValueError, message):
+                    verifier.fetch_release_metadata("o/r", TAG, allow_draft=True)
+
 
 if __name__ == "__main__":
     unittest.main()

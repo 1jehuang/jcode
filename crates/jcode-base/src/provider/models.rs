@@ -5,8 +5,20 @@ use crate::provider::cursor;
 mod catalog;
 #[cfg(any(test, feature = "test-support"))]
 pub use catalog::{OpenAICatalogTestEndpoint, openai_catalog_test_endpoint};
+#[path = "model_catalog_refresh.rs"]
+mod catalog_refresh;
 #[path = "model_catalog_service.rs"]
 mod catalog_service;
+use catalog_refresh::note_openai_model_catalog_refresh_attempt_for_scope;
+pub use catalog_refresh::{
+    begin_anthropic_model_catalog_refresh, begin_anthropic_model_catalog_refresh_for_scope,
+    begin_forced_anthropic_model_catalog_refresh_for_scope, begin_openai_model_catalog_refresh,
+    begin_openai_model_catalog_refresh_for_scope, finish_anthropic_model_catalog_refresh_for_scope,
+    finish_openai_model_catalog_refresh, finish_openai_model_catalog_refresh_for_scope,
+    note_openai_model_catalog_refresh_attempt, should_refresh_anthropic_model_catalog,
+    should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
+    should_refresh_openai_model_catalog_for_scope,
+};
 
 use anyhow::Result;
 #[cfg(test)]
@@ -43,6 +55,8 @@ struct PersistedModelCatalogScope {
     context_limits: HashMap<String, usize>,
     #[serde(default)]
     reasoning_efforts: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    service_tiers: HashMap<String, Vec<String>>,
     observed_at_unix_secs: u64,
 }
 
@@ -469,6 +483,7 @@ fn persist_scoped_model_catalog(
     models: &[String],
     context_limits: &HashMap<String, usize>,
     reasoning_efforts: &HashMap<String, Vec<String>>,
+    service_tiers: &HashMap<String, Vec<String>>,
     observed_at: SystemTime,
 ) {
     if models.is_empty() {
@@ -488,6 +503,7 @@ fn persist_scoped_model_catalog(
             models: models.to_vec(),
             context_limits: context_limits.clone(),
             reasoning_efforts: reasoning_efforts.clone(),
+            service_tiers: service_tiers.clone(),
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
@@ -565,6 +581,13 @@ pub fn cached_openai_reasoning_efforts_for_scope(
     (!efforts.is_empty()).then_some(efforts)
 }
 
+/// Return the account-scoped service tier snapshot. Missing model entries are
+/// unknown, but present empty vectors are authoritative capability denials.
+pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<String, Vec<String>>> {
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    Some(store.scopes.get(scope)?.service_tiers.clone())
+}
+
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
 /// services are statics shared by every test in the process; a test that
 /// hydrates a scope (directly or via `persist_*` + `cached_*`) otherwise leaks
@@ -586,6 +609,7 @@ pub fn persist_openai_model_catalog_for_scope(scope: &str, catalog: &OpenAIModel
         &catalog.available_models,
         &catalog.context_limits,
         &catalog.reasoning_efforts,
+        &catalog.service_tiers,
         SystemTime::now(),
     );
 }
@@ -600,6 +624,7 @@ pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &Anthropi
         scope,
         &catalog.available_models,
         &catalog.context_limits,
+        &HashMap::new(),
         &HashMap::new(),
         SystemTime::now(),
     );
@@ -904,84 +929,6 @@ fn finish_known_openai_model_ids(mut models: Vec<String>) -> Vec<String> {
     models
 }
 
-pub fn note_openai_model_catalog_refresh_attempt() {
-    OPENAI_MODEL_CATALOG_SERVICE.note_attempt(&current_openai_account_scope());
-}
-
-fn note_openai_model_catalog_refresh_attempt_for_scope(scope: &str) {
-    OPENAI_MODEL_CATALOG_SERVICE.note_attempt(scope);
-}
-
-fn anthropic_model_catalog_refresh_throttled(scope: &str) -> bool {
-    ANTHROPIC_MODEL_CATALOG_SERVICE.refresh_throttled(scope)
-}
-
-pub fn should_refresh_openai_model_catalog() -> bool {
-    should_refresh_openai_model_catalog_for_scope(&current_openai_account_scope())
-}
-
-pub fn should_refresh_openai_model_catalog_for_scope(scope: &str) -> bool {
-    if OPENAI_MODEL_CATALOG_SERVICE.is_fresh(scope) {
-        return false;
-    }
-    if OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(scope) {
-        return false;
-    }
-    OPENAI_MODEL_CATALOG_SERVICE.should_refresh(scope)
-}
-
-pub fn should_refresh_anthropic_model_catalog() -> bool {
-    let scope = current_anthropic_catalog_scope();
-    should_refresh_anthropic_model_catalog_for_scope(&scope)
-}
-
-pub fn should_refresh_anthropic_model_catalog_for_scope(scope: &str) -> bool {
-    let _ = cached_anthropic_model_ids_for_scope(scope);
-    if anthropic_model_cache_is_fresh(scope) {
-        return false;
-    }
-    if anthropic_model_catalog_refresh_throttled(scope) {
-        return false;
-    }
-    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(scope)
-}
-
-pub fn begin_openai_model_catalog_refresh() -> bool {
-    begin_openai_model_catalog_refresh_for_scope(&current_openai_account_scope())
-}
-
-pub fn begin_openai_model_catalog_refresh_for_scope(scope: &str) -> bool {
-    OPENAI_MODEL_CATALOG_SERVICE.begin_refresh(scope)
-}
-
-pub fn begin_anthropic_model_catalog_refresh() -> Option<String> {
-    let scope = current_anthropic_catalog_scope();
-    begin_anthropic_model_catalog_refresh_for_scope(&scope).then_some(scope)
-}
-
-pub fn begin_anthropic_model_catalog_refresh_for_scope(scope: &str) -> bool {
-    // Hydrate before checking TTL so a fresh disk snapshot avoids a request,
-    // while a stale snapshot remains visible during background revalidation.
-    let _ = cached_anthropic_model_ids_for_scope(scope);
-    ANTHROPIC_MODEL_CATALOG_SERVICE.begin_refresh(scope)
-}
-
-pub fn finish_openai_model_catalog_refresh() {
-    OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(&current_openai_account_scope());
-}
-
-pub fn finish_openai_model_catalog_refresh_for_scope(scope: &str) {
-    OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(scope);
-}
-
-pub fn finish_anthropic_model_catalog_refresh_for_scope(scope: &str) {
-    ANTHROPIC_MODEL_CATALOG_SERVICE.finish_refresh(scope);
-}
-
-fn anthropic_model_cache_is_fresh(scope: &str) -> bool {
-    ANTHROPIC_MODEL_CATALOG_SERVICE.is_fresh(scope)
-}
-
 fn runtime_model_unavailability(scope: &str, model: &str) -> Option<RuntimeModelUnavailability> {
     let model = normalize_model_id(model);
     if model.is_empty() {
@@ -1117,8 +1064,9 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
     if model.is_empty() {
         return;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model);
-    super::bump_catalog_generation();
+    if OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model) {
+        super::bump_catalog_generation();
+    }
 }
 
 #[path = "model_provider_availability.rs"]

@@ -127,9 +127,10 @@ impl Transport for UnixTransport {
         }
         #[cfg(windows)]
         {
-            // Closing the reader and writer handles interrupts named-pipe I/O.
-            // They are owned by the client and dropped during shutdown.
-            None
+            let pipe = self.0.try_clone().ok()?;
+            Some(Arc::new(move || {
+                let _ = pipe.shutdown(std::net::Shutdown::Both);
+            }))
         }
     }
 
@@ -1043,12 +1044,10 @@ impl JcodeClient {
         command: jcode_harness_api::RuntimeCommand,
         args: Vec<String>,
     ) -> Result<jcode_harness_api::RuntimeCommandOutput> {
-        if !self.supports("runtime_commands") {
-            return Err(Error::new(
-                ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownRequest),
-                "This runtime does not support structured commands. Update and restart the daemon and bridge.",
-            ));
-        }
+        // Hello capabilities describe a point-in-time probe. A busy daemon may
+        // omit this capability temporarily, and an updated bridge can recheck
+        // it without disturbing the attached session. Send the typed request
+        // once and let the bridge enforce support before forwarding it.
         match self
             .request_ok(ApiRequest::RuntimeCommand {
                 session_id: session_id.into(),
@@ -1369,6 +1368,27 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Override the context budget. None or zero clears it. Returns the
+    /// authoritative effective budget after applying the override.
+    pub fn set_context_cap(
+        &self,
+        session_id: &str,
+        max_context_tokens: Option<usize>,
+    ) -> Result<usize> {
+        match self
+            .request_ok(ApiRequest::SetContextCap {
+                session_id: session_id.to_string(),
+                max_context_tokens,
+            })?
+            .event
+        {
+            ApiEvent::ContextCapChanged {
+                effective_budget, ..
+            } => Ok(effective_budget),
+            other => Err(unexpected("context_cap_changed", &other)),
+        }
+    }
+
     /// Set how much the model deliberates before answering. The accepted set
     /// is per-provider, so this takes a string rather than a union that would
     /// go stale.
@@ -1399,6 +1419,19 @@ impl JcodeClient {
         self.request_ok(ApiRequest::RenameSession {
             session_id: session_id.to_string(),
             title,
+        })
+        .map(drop)
+    }
+
+    /// Replace the session's process-local environment overlay. Empty clears it.
+    pub fn set_session_env(
+        &self,
+        session_id: &str,
+        env: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionEnv {
+            session_id: session_id.to_string(),
+            env,
         })
         .map(drop)
     }
@@ -1575,6 +1608,7 @@ impl JcodeClient {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    effective_budget,
                     ..
                 } => {
                     result.usage = Some(Usage {
@@ -1582,6 +1616,7 @@ impl JcodeClient {
                         output,
                         cache_read_input,
                         cache_creation_input,
+                        effective_budget,
                     })
                 }
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
@@ -1660,162 +1695,9 @@ impl TextCollector {
     }
 }
 
-fn discover_global_sessions(
-    parent: JcodeClient,
-    control: Arc<GlobalEventControl>,
-    interval: Duration,
-) {
-    loop {
-        if control.stopped.load(Ordering::Acquire) {
-            return;
-        }
-        let sessions = match parent
-            .request_ok(ApiRequest::ListSessions {
-                include_archived: true,
-                limit: None,
-            })
-            .and_then(|frame| match frame.event {
-                ApiEvent::Sessions { sessions } => Ok(sessions),
-                other => Err(unexpected("sessions", &other)),
-            }) {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                stop_global_stream(&control, Some(error));
-                return;
-            }
-        };
-
-        for session in sessions {
-            if control.stopped.load(Ordering::Acquire) {
-                return;
-            }
-            start_global_child(&parent, &control, session.session_id);
-        }
-
-        if interval.is_zero() {
-            return;
-        }
-        let Ok(guard) = control.wake_lock.lock() else {
-            stop_global_stream(
-                &control,
-                Some(Error::new(
-                    ErrorKind::Transport,
-                    "global event lock poisoned",
-                )),
-            );
-            return;
-        };
-        let _ = control.wake.wait_timeout(guard, interval);
-    }
-}
-
-fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, session_id: String) {
-    if control
-        .children
-        .lock()
-        .map(|children| children.contains_key(&session_id))
-        .unwrap_or(true)
-    {
-        return;
-    }
-
-    let connection = if let Some(options) = &parent.ssh_options {
-        let mut options = options.clone();
-        options.client_name = format!("{}/global-events", parent.inner.client_name);
-        #[cfg(unix)]
-        let shared = parent.shared_ssh_transport();
-        #[cfg(unix)]
-        if let Some(shared) = shared {
-            shared.connect()
-        } else if parent
-            .inner
-            .ssh_process
-            .as_ref()
-            .is_some_and(|process| process.was_shared)
-        {
-            Err(Error::new(
-                ErrorKind::Disconnected,
-                "shared SSH parent channel is closed",
-            ))
-        } else {
-            JcodeClient::connect_ssh(options)
-        }
-        #[cfg(not(unix))]
-        JcodeClient::connect_ssh(options)
-    } else {
-        JcodeClient::connect(ConnectOptions {
-            supports_user_response: false,
-            socket_path: Some(parent.inner.socket_path.clone()),
-            client_name: format!("{}/global-events", parent.inner.client_name),
-            request_timeout: parent.inner.request_timeout,
-            ensure_runtime: false,
-        })
-    };
-    let child = match connection {
-        Ok(child) => child,
-        Err(error) => {
-            stop_global_stream(control, Some(error));
-            return;
-        }
-    };
-    let stream = child.events(Some(&session_id));
-    if let Err(error) = child.attach_session(&session_id) {
-        if !matches!(
-            error.kind,
-            ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownSession)
-        ) {
-            stop_global_stream(control, Some(error));
-        }
-        return;
-    }
-    if control.stopped.load(Ordering::Acquire) {
-        return;
-    }
-    if let Ok(mut children) = control.children.lock() {
-        children.insert(session_id.clone(), child);
-    } else {
-        stop_global_stream(
-            control,
-            Some(Error::new(
-                ErrorKind::Transport,
-                "global event lock poisoned",
-            )),
-        );
-        return;
-    }
-
-    let pump_control = Arc::clone(control);
-    std::thread::spawn(move || {
-        while let Some(event) = stream.next() {
-            if pump_control.stopped.load(Ordering::Acquire) {
-                break;
-            }
-            match pump_control.tx.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    stop_global_stream(
-                        &pump_control,
-                        Some(Error::new(
-                            ErrorKind::EventBufferOverflow,
-                            format!(
-                                "global_events consumer fell behind {} buffered events",
-                                pump_control.max_buffered_events
-                            ),
-                        )),
-                    );
-                    break;
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    stop_global_stream(&pump_control, None);
-                    break;
-                }
-            }
-        }
-        if let Ok(mut children) = pump_control.children.lock() {
-            children.remove(&session_id);
-        }
-    });
-}
+#[path = "client/global_session_workers.rs"]
+mod global_session_workers;
+use global_session_workers::discover_global_sessions;
 
 /// The reader thread: correlates replies, fans stream events out.
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
@@ -1888,6 +1770,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | ContextCapChanged { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
         | SoftInterruptInjected { session_id, .. }

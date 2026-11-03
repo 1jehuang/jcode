@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -33,52 +33,9 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
-fn build_input_shell_command(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
-fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut output = String::new();
-
-    if !stdout.is_empty() {
-        output.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("[stderr]\n");
-        output.push_str(&stderr);
-    }
-
-    let truncated = if output.len() > INPUT_SHELL_MAX_OUTPUT_LEN {
-        output = truncate_str(&output, INPUT_SHELL_MAX_OUTPUT_LEN).to_string();
-        if !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("… output truncated");
-        true
-    } else {
-        false
-    };
-
-    (output, truncated)
-}
-
+#[path = "input_shell_output.rs"]
+mod input_shell_output;
+use input_shell_output::{build_input_shell_command, combine_input_shell_output};
 pub(super) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
     pub soft_interrupt_queues: &'a SessionInterruptQueues,
@@ -246,7 +203,7 @@ pub(super) fn handle_input_shell(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let cwd = {
             let agent_guard = agent.lock().await;
             agent_guard.working_dir().map(|dir| dir.to_string())
@@ -359,7 +316,7 @@ pub(super) fn handle_run_subagent(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
         let tool_name = "subagent".to_string();
@@ -426,13 +383,16 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
-        let result = match tokio::spawn(async move {
+        let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -858,6 +818,11 @@ fn clone_split_session_with_feedback(
     child.agent_profile = parent.agent_profile.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    // Keep the same provider account. Replayed provider-native blocks (Anthropic
+    // web search `encrypted_content`) are bound to the account that produced
+    // them, and another account rejects the whole request with a 400.
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     crate::session_accounts::AccountInheritance::from_session(&parent).apply_to_session(&mut child);
     if let Some(role) = feedback_role {
         let (target, one_shot) = match role {
@@ -895,6 +860,7 @@ fn clone_split_session_with_feedback(
     child.append_fork_notice(parent_session_id, parent.display_name());
     child.save()?;
 
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     let name = child.display_name().to_string();
     Ok((child.id.clone(), name))
 }
@@ -916,7 +882,12 @@ fn create_transfer_child_session(
     parent: &Session,
     compaction: Option<crate::session::StoredCompactionState>,
 ) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut todos = crate::todo::load_todos(parent_session_id)?;
+    // Background tasks belong to the source session. A fresh session must
+    // reassess those results, not inherit foreign task IDs or their wakes.
+    for todo in &mut todos {
+        todo.waiting_on.clear();
+    }
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
@@ -937,6 +908,7 @@ fn create_transfer_child_session(
     child.status = crate::session::SessionStatus::Closed;
     child.save()?;
     crate::todo::save_todos(&child.id, &todos)?;
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 
@@ -1261,7 +1233,7 @@ pub(super) fn handle_compact(
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();
@@ -1316,6 +1288,25 @@ pub(super) async fn handle_agent_task(
     agent: &Arc<Mutex<Agent>>,
     ctx: &AgentTaskContext<'_>,
 ) {
+    let mut agent = agent.lock().await;
+    let lease = match agent.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                server_resumes: false,
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let events = super::state::TurnEventChannel::new(
+        client_session_id.into(),
+        Arc::clone(ctx.swarm_members),
+        ctx.client_event_tx.clone(),
+        &lease,
+    );
     update_member_status(
         client_session_id,
         "running",
@@ -1328,12 +1319,13 @@ pub(super) async fn handle_agent_task(
     )
     .await;
 
-    let result = process_message_streaming_mpsc(
-        Arc::clone(agent),
+    let result = process_reserved_message_streaming_mpsc(
+        &mut agent,
+        &lease,
         &task,
         vec![],
         None,
-        ctx.client_event_tx.clone(),
+        events.sender(),
     )
     .await;
     match result {
@@ -1349,7 +1341,7 @@ pub(super) async fn handle_agent_task(
                 Some(ctx.swarm_event_tx),
             )
             .await;
-            let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+            let _ = events.sender().send(ServerEvent::Done { id });
         }
         Err(e) => {
             update_member_status(
@@ -1364,7 +1356,7 @@ pub(super) async fn handle_agent_task(
             )
             .await;
             let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+            let _ = events.sender().send(ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(&e),
                 retry_after_secs,
@@ -1372,4 +1364,6 @@ pub(super) async fn handle_agent_task(
             });
         }
     }
+    drop(agent);
+    events.finish().await;
 }

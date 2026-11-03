@@ -1,4 +1,8 @@
 -- Reliable concurrency, last 30 days by SERVER RECEIPT time (UTC).
+-- db: jcode-telemetry-bulk
+-- session_concurrency rows live in the bulk DB since the 2026-10 split.
+-- session_start/end concurrency rows stay in jcode-telemetry, so the
+-- coverage_by_source panel here shows session_concurrency only.
 -- Run: npm run concurrency [-- --json]. Requires migration 0026.
 -- Installations are not people. A runtime incarnation is one Agent lifetime,
 -- including children and idle sessions, within a shared JCODE_HOME on one host.

@@ -28,9 +28,13 @@ tokio = { version = "1", features = ["sync", "time", "rt", "net", "io-util", "pr
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 dirs = "5"
+# permessage-deflate WebSocket connector: same TLS stack tokio-tungstenite
+# already pulls in, used directly so a compression layer can sit above TLS.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-native-certs = "0.8"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 
 [dev-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 # The migrated openai tests use jcode-base's test-env sandbox.
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"

@@ -32,12 +32,12 @@ from PIL import Image, ImageDraw
 
 # --- Design tokens (must mirror Sources/JCodeMobile/Theme.swift) -------------
 TOKENS = {
-    "background": 0x0F0F14,
-    "surface": 0x1A1A1F,
-    "surfaceElevated": 0x242429,
-    "mint": 0x4DD9A6,
-    "warning": 0xF59E0B,
-    "error": 0xD94D59,
+    "background": 0x25221F,      # Theme.surface: the chat page (Desktop PANEL_BG)
+    "surface": 0x1C1A18,         # Theme.background: canvas (Desktop BG)
+    "surfaceElevated": 0x302B27, # Desktop HEADER_BG / USER_BG
+    "mint": 0xB6A08A,            # key kept for scorer compat: Theme.accent (sandstone)
+    "warning": 0xD0B17D,
+    "error": 0xE18C85,
 }
 
 # iPhone status bar / home indicator are OS chrome, not our UI. Trim them so we

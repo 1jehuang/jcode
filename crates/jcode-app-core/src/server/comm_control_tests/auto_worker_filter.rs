@@ -98,119 +98,22 @@ async fn auto_candidate_filter_excludes_foreign_client_attached_session() {
     );
 }
 
-// ----- composite-aware turn completion -----
+// ----- turn-end completion -----
 
 use super::turn_end_should_auto_complete;
 
 #[test]
-fn atomic_turn_auto_completes() {
-    // A plain running atomic node that the worker just ran should be
-    // auto-marked done. `running_stale` (revived after a reload) counts too.
-    assert!(turn_end_should_auto_complete("running", false));
-    assert!(turn_end_should_auto_complete("running_stale", false));
+fn running_turn_auto_completes() {
+    // `running_stale` (revived after a reload) counts too.
+    assert!(turn_end_should_auto_complete("running"));
+    assert!(turn_end_should_auto_complete("running_stale"));
 }
 
 #[test]
-fn requeued_node_does_not_auto_complete() {
-    // A node that is `queued` at turn end was re-queued mid-turn by someone
-    // else: a gate that called inject_gap (re-queued behind its gap nodes), or
-    // a reassign/requeue. Force-closing it would bypass gate artifact
-    // validation and strand the injected gap nodes.
-    assert!(!turn_end_should_auto_complete("queued", false));
-}
-
-#[test]
-fn expanded_composite_turn_does_not_auto_complete() {
-    // The worker decomposed the node; it must stay open to synthesize later, even
-    // though its own turn ended. This is the bug that stranded composite subtrees.
-    assert!(!turn_end_should_auto_complete("running", true));
-    assert!(!turn_end_should_auto_complete("queued", true));
-}
-
-#[test]
-fn already_terminal_turn_is_not_reclosed() {
-    // If the worker already completed/failed the node itself, the turn end must
-    // not stomp that status.
-    assert!(!turn_end_should_auto_complete("completed", false));
-    assert!(!turn_end_should_auto_complete("done", false));
-    assert!(!turn_end_should_auto_complete("failed", false));
-    assert!(!turn_end_should_auto_complete("stopped", false));
-}
-
-// ----- deep mode: artifact-or-nothing at turn end -----
-
-use super::{TurnEndDisposition, turn_end_disposition};
-
-#[test]
-fn deep_turn_without_artifact_requeues_then_fails() {
-    // Deep mode never auto-completes: the typed-artifact contract is only real
-    // if there is no path to "done" that skips complete_node. First offense is
-    // a requeue to a fresh worker; a repeat fails the node loudly.
-    assert_eq!(
-        turn_end_disposition(true, "running", false, 0),
-        TurnEndDisposition::RequeueNoArtifact
-    );
-    assert_eq!(
-        turn_end_disposition(true, "running_stale", false, 0),
-        TurnEndDisposition::RequeueNoArtifact
-    );
-    assert_eq!(
-        turn_end_disposition(true, "running", false, 1),
-        TurnEndDisposition::FailNoArtifact
-    );
-    // A re-woken composite synthesis that never synthesized is equally guilty.
-    assert_eq!(
-        turn_end_disposition(true, "running", true, 0),
-        TurnEndDisposition::RequeueNoArtifact
-    );
-}
-
-#[test]
-fn deep_turn_leaves_non_running_nodes_alone() {
-    // Terminal states were set by complete_node/fail; queued means the node was
-    // re-queued mid-turn (expand_node or inject_gap). None are this turn's
-    // responsibility.
+fn non_running_task_is_left_alone() {
+    // Queued means re-queued mid-turn by someone else; terminal states were set
+    // explicitly and must not be stomped.
     for status in ["queued", "completed", "done", "failed", "stopped"] {
-        assert_eq!(
-            turn_end_disposition(true, status, false, 0),
-            TurnEndDisposition::LeaveAlone,
-            "status {status}"
-        );
+        assert!(!turn_end_should_auto_complete(status), "status {status}");
     }
-}
-
-#[test]
-fn light_turn_disposition_matches_legacy_auto_complete() {
-    assert_eq!(
-        turn_end_disposition(false, "running", false, 0),
-        TurnEndDisposition::AutoComplete
-    );
-    assert_eq!(
-        turn_end_disposition(false, "running", true, 0),
-        TurnEndDisposition::LeaveAlone
-    );
-    assert_eq!(
-        turn_end_disposition(false, "queued", false, 0),
-        TurnEndDisposition::LeaveAlone
-    );
-}
-
-// ----- composite synthesis assignment content -----
-
-use super::composite_synthesis_content;
-
-#[test]
-fn composite_synthesis_content_injects_complete_node_instruction() {
-    let out = composite_synthesis_content("root", "explore the thing", true);
-    assert!(out.contains("Synthesis turn for composite node 'root'"));
-    assert!(out.contains("complete_node"));
-    assert!(out.contains("Do NOT"));
-    // The original brief is preserved for context.
-    assert!(out.contains("explore the thing"));
-}
-
-#[test]
-fn non_composite_content_is_verbatim() {
-    let out = composite_synthesis_content("leaf", "just do this", false);
-    assert_eq!(out, "just do this");
 }

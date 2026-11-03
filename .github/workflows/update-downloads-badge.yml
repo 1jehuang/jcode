@@ -1,0 +1,40 @@
+name: Update downloads badge
+
+env:
+  JCODE_CI: "1"
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-downloads-badge
+  cancel-in-progress: true
+
+jobs:
+  update:
+    if: github.repository == '1jehuang/jcode'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count downloads across all releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/generate_downloads_badge.py
+      - name: Commit updated badge
+        run: |
+          if git diff --quiet -- docs/badges/downloads.json; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/badges/downloads.json
+          git commit -m "docs: update downloads badge"
+          git pull --rebase
+          git push

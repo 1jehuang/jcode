@@ -6,10 +6,9 @@ async fn assign_task_rejects_explicit_blocked_task() {
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        worker.to_string(),
-        worker_agent,
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(worker.to_string(), worker_agent)]),
+    ));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
@@ -34,8 +33,6 @@ async fn assign_task_rejects_explicit_blocked_task() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(

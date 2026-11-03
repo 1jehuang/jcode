@@ -277,24 +277,17 @@ fn load_key_from_file(path: &PathBuf) -> Result<String> {
 /// Helper: create a mock state.vscdb with the given key/value pairs.
 fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf {
     let db_path = dir.join("state.vscdb");
-    let status = std::process::Command::new("sqlite3")
-        .arg(&db_path)
-        .arg("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
-        .status()
-        .expect("sqlite3 must be installed for these tests");
-    assert!(status.success(), "Failed to create mock vscdb");
-
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
+        .unwrap();
     for (key, value) in entries {
-        let sql = format!(
-            "INSERT INTO ItemTable (key, value) VALUES ('{}', '{}');",
-            key, value
-        );
-        let status = std::process::Command::new("sqlite3")
-            .arg(&db_path)
-            .arg(&sql)
-            .status()
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                (key, value),
+            )
             .unwrap();
-        assert!(status.success(), "Failed to insert into mock vscdb");
     }
     db_path
 }
@@ -384,12 +377,11 @@ fn vscdb_multiple_keys() {
 fn vscdb_wrong_table_name() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("state.vscdb");
-    let status = std::process::Command::new("sqlite3")
-        .arg(&db_path)
-        .arg("CREATE TABLE WrongTable (key TEXT, value BLOB);")
-        .status()
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE WrongTable (key TEXT, value BLOB);")
         .unwrap();
-    assert!(status.success());
+    drop(connection);
     let result = read_vscdb_key(&db_path, "cursorAuth/accessToken");
     assert!(result.is_err());
 }

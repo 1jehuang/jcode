@@ -24,6 +24,41 @@ const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 32;
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Backoff for failed SSH reconnects. Without it a client that retries
+/// promptly (e.g. during a DNS outage) spawns SSH several times a second and
+/// floods the log with identical errors.
+#[derive(Default)]
+struct ReconnectBackoff {
+    failures: u32,
+    retry_after: Option<std::time::Instant>,
+}
+
+impl ReconnectBackoff {
+    fn delay(failures: u32) -> Duration {
+        let secs = 1u64 << failures.saturating_sub(1).min(5);
+        Duration::from_secs(secs).min(RECONNECT_BACKOFF_MAX)
+    }
+    fn blocked(&self, now: std::time::Instant) -> bool {
+        self.retry_after.is_some_and(|at| now < at)
+    }
+    fn should_defer(&self, now: std::time::Instant, user_requested_retry: bool) -> bool {
+        !user_requested_retry && self.blocked(now)
+    }
+    /// Record a failure. Returns true when it should be logged (first failure,
+    /// then every power of two) so long outages produce a handful of lines.
+    fn fail(&mut self, now: std::time::Instant) -> bool {
+        self.failures = self.failures.saturating_add(1);
+        self.retry_after = Some(now + Self::delay(self.failures));
+        self.failures.is_power_of_two()
+    }
+    fn succeed(&mut self) -> Option<u32> {
+        let previous = std::mem::take(&mut self.failures);
+        self.retry_after = None;
+        (previous > 0).then_some(previous)
+    }
+}
 
 fn private_directory() -> Result<tempfile::TempDir> {
     use std::os::unix::fs::PermissionsExt;
@@ -193,6 +228,17 @@ impl SshOptions {
 
     fn command(&self) -> Command {
         let mut command = Command::new("ssh");
+        if let Some(id) = super::cloud_ephemeral::host_id(&self.host) {
+            // The caller validates/prepares this private config before connecting.
+            // Never fall through to the persistent host's SSH identity.
+            if let Ok(path) = super::cloud_ephemeral::ssh_config_path(id) {
+                command.arg("-F").arg(path);
+            }
+        } else if super::cloud_managed::is_managed(&self.host)
+            && let Ok(args) = super::cloud_managed::ssh_args()
+        {
+            command.args(args);
+        }
         command.args([
             "-T",
             "-o",
@@ -448,6 +494,7 @@ async fn accept_connections(
     mut stopped: watch::Receiver<bool>,
 ) {
     let mut connections = JoinSet::new();
+    let backoff = Arc::new(Mutex::new(ReconnectBackoff::default()));
     loop {
         tokio::select! {
             biased;
@@ -456,12 +503,22 @@ async fn accept_connections(
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { break; };
                 if connections.len() >= MAX_CONNECTIONS { continue; }
+                let user_requested_retry = crate::tui::take_immediate_ssh_reconnect_request();
+                if backoff.lock().map(|b| b.should_defer(std::time::Instant::now(), user_requested_retry)).unwrap_or(false) {
+                    // Drop the stream: the client sees a closed connection and retries later.
+                    continue;
+                }
+                let backoff = backoff.clone();
                 let options = options.clone();
                 let mut stopped = stopped.clone();
                 connections.spawn(async move {
                     let mut ssh = match SshConnection::spawn_process(options.command()) {
                         Ok(ssh) => ssh,
-                        Err(error) => { crate::logging::warn(&format!("Native SSH reconnect failed: {error:#}")); return; }
+                        Err(error) => {
+                            let (log, failures) = record_reconnect_failure(&backoff);
+                            if log { crate::logging::warn(&format!("Native SSH reconnect failed (attempt {failures}, backing off): {error:#}")); }
+                            return;
+                        }
                     };
                     let connected = tokio::select! {
                         biased;
@@ -471,9 +528,15 @@ async fn accept_connections(
                     if !matches!(connected, Some(Ok(()))) {
                         ssh.shutdown().await;
                         if let Some(Err(error)) = connected {
-                            crate::logging::warn(&format!("Native SSH reconnect failed: {error:#}; {}", ssh.diagnostic()));
+                            let (log, failures) = record_reconnect_failure(&backoff);
+                            if log {
+                                crate::logging::warn(&format!("Native SSH reconnect failed (attempt {failures}, backing off): {error:#}; {}", ssh.diagnostic()));
+                            }
                         }
                         return;
+                    }
+                    if let Some(previous) = backoff.lock().ok().and_then(|mut b| b.succeed()) {
+                        crate::logging::info(&format!("Native SSH reconnected after {previous} failed attempts"));
                     }
                     let (mut read, mut write) = stream.into_split();
                     let outcome = tokio::select! {
@@ -493,6 +556,16 @@ async fn accept_connections(
     drop(listener);
     // Guard drop wakes all children, which explicitly kill and reap SSH.
     while connections.join_next().await.is_some() {}
+}
+
+fn record_reconnect_failure(backoff: &Mutex<ReconnectBackoff>) -> (bool, u32) {
+    match backoff.lock() {
+        Ok(mut b) => {
+            let log = b.fail(std::time::Instant::now());
+            (log, b.failures)
+        }
+        Err(_) => (true, 0),
+    }
 }
 
 /// CLI-only stdin/stdout bridge to an already-running persistent native server.
@@ -567,6 +640,35 @@ async fn bridge_stream<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn reconnect_backoff_grows_caps_and_throttles_logs() {
+        let now = std::time::Instant::now();
+        let mut b = ReconnectBackoff::default();
+        assert!(!b.blocked(now));
+        let logged: Vec<bool> = (0..8).map(|_| b.fail(now)).collect();
+        assert_eq!(logged, [true, true, false, true, false, false, false, true]);
+        assert!(b.blocked(now + Duration::from_secs(29)));
+        assert!(!b.blocked(now + Duration::from_secs(31)));
+        assert_eq!(ReconnectBackoff::delay(1), Duration::from_secs(1));
+        assert_eq!(ReconnectBackoff::delay(100), RECONNECT_BACKOFF_MAX);
+        assert_eq!(b.succeed(), Some(8));
+        assert!(!b.blocked(now));
+        assert_eq!(b.succeed(), None);
+    }
+
+    #[test]
+    fn reconnect_backoff_user_submission_bypasses_only_one_attempt() {
+        let now = std::time::Instant::now();
+        let mut backoff = ReconnectBackoff::default();
+        for _ in 0..8 {
+            backoff.fail(now);
+        }
+        assert!(backoff.should_defer(now, false));
+        assert!(!backoff.should_defer(now, true));
+        assert!(backoff.should_defer(now, false));
+        assert_eq!(backoff.failures, 8);
+    }
+
     fn hello() -> String {
         serde_json::to_string(&NativeHandshake {
             kind: "jcode-native-stdio".into(),
@@ -604,6 +706,25 @@ mod tests {
         for binary in ["", "--help", "jcode\nfalse"] {
             assert!(SshOptions::new("host", binary).is_err());
         }
+    }
+
+    #[test]
+    fn ephemeral_command_uses_its_own_config_and_pinned_binary() {
+        let host = "jcode-ephemeral-cm_0123456789abcdef0123456789abcdef";
+        let options = SshOptions::new(host, "/home/ec2-user/bench/jcode").unwrap();
+        let command = options.command();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let config = args.windows(2).find(|pair| pair[0] == "-F").unwrap();
+        assert!(
+            config[1].ends_with("cloud/ephemeral/cm_0123456789abcdef0123456789abcdef/ssh_config")
+        );
+        assert_eq!(args[args.len() - 2], host);
+        assert!(args.last().unwrap().contains("/home/ec2-user/bench/jcode"));
+        assert!(!args.iter().any(|arg| arg == "jcode-cloud"));
     }
 
     #[test]
@@ -845,6 +966,109 @@ mod tests {
             .unwrap();
         // client_write deliberately remains open: daemon EOF must still exit.
         drop(client_write);
+    }
+
+    #[tokio::test]
+    async fn bridge_forwards_background_tool_before_busy_tool_completes() {
+        use crate::protocol::{Request, ServerEvent};
+
+        // Exercise the production remote stdio bridge, not a JSON echo. The
+        // mock daemon deliberately keeps its tool unfinished until the client
+        // receives the background acknowledgement. Waiting for tool completion
+        // (or EOF) before forwarding either direction therefore deadlocks.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (client, bridge) = tokio::io::duplex(4096);
+            let (input, output) = tokio::io::split(bridge);
+            let bridge_task = tokio::spawn(bridge_stream(input, output, socket));
+            let (finished, finish_tool) = tokio::sync::oneshot::channel();
+
+            let daemon = async {
+                let (daemon, _) = listener.accept().await.unwrap();
+                let (read, mut write) = daemon.into_split();
+                let mut read = BufReader::new(read);
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::Ping { id: 0 }
+                ));
+                write
+                    .write_all(b"{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n")
+                    .await
+                    .unwrap();
+                let event = ServerEvent::ToolExec {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+
+                // No ToolDone or further output: the download copy is pending
+                // while the upload must still deliver the control request.
+                line.clear();
+                assert!(read.read_line(&mut line).await.unwrap() > 0);
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::BackgroundTool { id: 73 }
+                ));
+                let event = ServerEvent::BackgroundToolResult {
+                    id: 73,
+                    moved: true,
+                    tool_call_id: Some("busy-tool".into()),
+                    tool_name: Some("bash".into()),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                finish_tool.await.unwrap();
+                let event = ServerEvent::ToolDone {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                    output: "finished after background acknowledgement".into(),
+                    error: None,
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+            };
+            let client = async {
+                let (read, mut write) = tokio::io::split(client);
+                let mut read = BufReader::new(read);
+                read_handshake(&mut read).await.unwrap();
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolExec { id, .. } if id == "busy-tool"
+                ));
+                let frame =
+                    serde_json::to_string(&Request::BackgroundTool { id: 73 }).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                // Keep stdin open throughout: interactive requests cannot rely
+                // on EOF to flush, and the tool is still blocked on our signal.
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::BackgroundToolResult {
+                        id: 73, moved: true, tool_call_id: Some(id), tool_name: Some(name)
+                    } if id == "busy-tool" && name == "bash"
+                ));
+                finished.send(()).unwrap();
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolDone { id, .. } if id == "busy-tool"
+                ));
+                bridge_task.await.unwrap().unwrap();
+                drop(write);
+            };
+            tokio::join!(daemon, client);
+        })
+        .await
+        .expect("native SSH must forward BackgroundTool and its reply while the tool is busy");
     }
 
     #[tokio::test]

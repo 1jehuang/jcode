@@ -61,7 +61,7 @@ pub(in crate::tui::app) fn chatgpt_web_reasoning_efforts(model: &str) -> Vec<&'s
     if efforts.len() < 2 {
         return Vec::new();
     }
-    efforts.extend(["swarm", "swarm-deep"]);
+    efforts.push("swarm");
     efforts
 }
 

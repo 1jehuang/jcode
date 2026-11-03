@@ -49,21 +49,159 @@ pub(super) fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
         .collect()
 }
 
+// Compare the fields retained by build_responses_input, not transport metadata
+// such as item id, status, phase, annotations, or argument JSON whitespace.
+fn replay_identity(item: &Value) -> Value {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message")
+            if item.get("role").and_then(Value::as_str) == Some("assistant")
+                && item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        !parts.is_empty()
+                            && parts.iter().all(|part| {
+                                part.get("type").and_then(Value::as_str) == Some("output_text")
+                                    && part.get("text").and_then(Value::as_str).is_some()
+                            })
+                    }) =>
+        {
+            let text: String = item
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect();
+            serde_json::json!({"type":"message", "role":"assistant", "text":text})
+        }
+        Some("function_call" | "custom_tool_call") => {
+            let arguments = item
+                .get("arguments")
+                .or_else(|| item.get("input"))
+                .map(|value| match value.as_str() {
+                    Some(raw) if raw.trim().is_empty() || raw.trim() == "null" => {
+                        serde_json::json!({})
+                    }
+                    Some(raw) => {
+                        serde_json::from_str::<Value>(raw).unwrap_or_else(|_| value.clone())
+                    }
+                    None => value.clone(),
+                })
+                .unwrap_or_else(|| serde_json::json!({}));
+            // The stream parser accepts both wire types, but the transcript
+            // reconstructs every tool use as a function_call. Compare their
+            // semantic payload, not the provider's transport representation.
+            serde_json::json!({"type":"function_call", "call_id":item["call_id"], "name":item["name"], "arguments":arguments})
+        }
+        _ => item.clone(),
+    }
+}
+
+/// Explain replay failures without logging tool names, arguments or content.
+pub(super) fn log_ws_replayed_calls(items: &[Value], previous_output: &[Value]) {
+    for item in items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+    {
+        let previous = previous_output.iter().find(|output| {
+            item.get("call_id").is_some() && output.get("call_id") == item.get("call_id")
+        });
+        let identity = replay_identity(item);
+        let previous_identity = previous.map(replay_identity);
+        jcode_base::logging::info(&format!(
+            "WS_REPLAY_CALL: previous_output_items={} previous_call_present={} previous_type={} name_matches={} arguments_match={}",
+            previous_output.len(),
+            previous.is_some(),
+            match previous
+                .and_then(|output| output.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some("function_call") => "function_call",
+                Some("custom_tool_call") => "custom_tool_call",
+                Some(_) => "other",
+                None => "missing",
+            },
+            previous_identity
+                .as_ref()
+                .is_some_and(|previous| previous["name"] == identity["name"]),
+            previous_identity
+                .as_ref()
+                .is_some_and(|previous| previous["arguments"] == identity["arguments"]),
+        ));
+    }
+}
+
+/// Keep completed output when response.completed omits it or sends an empty
+/// array. ChatGPT can send output_item.done followed by output:[] even for a
+/// successful tool response. Erasing those items replays the assistant's calls
+/// on the next previous_response_id continuation and disrupts cache reuse.
+/// A nonempty final array remains authoritative.
+pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
+    // Token deltas dominate the stream. Only completed output events need a
+    // second parse for response-chain bookkeeping.
+    if !text.contains("response.output_item.done") && !text.contains("response.completed") {
+        return;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_item.done") => {
+            if let Some(item) = event.get("item") {
+                output.push(item.clone());
+            }
+        }
+        Some("response.completed") => {
+            let completed_output = event.pointer("/response/output").and_then(Value::as_array);
+            if completed_output.is_none_or(|items| items.is_empty()) && !output.is_empty() {
+                jcode_base::logging::info(&format!(
+                    "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
+                    completed_output.is_some(),
+                    completed_output.map_or(0, Vec::len),
+                    output.len(),
+                    output
+                        .iter()
+                        .filter(|item| matches!(
+                            item.get("type").and_then(Value::as_str),
+                            Some("function_call" | "custom_tool_call")
+                        ))
+                        .count(),
+                ));
+            }
+            if let Some(items) = completed_output.filter(|items| !items.is_empty()) {
+                *output = items.clone();
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn persistent_ws_incremental_items(
     input: &[Value],
     start_index: usize,
+    previous_output: &[Value],
 ) -> (Vec<Value>, usize) {
-    let mut skipped_reasoning_items = 0usize;
+    let mut skipped_items = 0usize;
+    // Consume matches once, so an additional identical client-injected message
+    // is not lost. Never remove unrelated assistant messages or tool calls.
+    let mut remaining: Vec<Value> = previous_output.iter().map(replay_identity).collect();
     let incremental_items = input[start_index..]
         .iter()
         .filter_map(|item| {
-            if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
-                skipped_reasoning_items += 1;
+            let identity = replay_identity(item);
+            if let Some(index) = remaining.iter().position(|output| *output == identity) {
+                remaining.remove(index);
+                skipped_items += 1;
+                None
+            } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                // Reasoning store items are already owned by previous_response_id.
+                skipped_items += 1;
                 None
             } else {
                 Some(item.clone())
             }
         })
         .collect();
-    (incremental_items, skipped_reasoning_items)
+    (incremental_items, skipped_items)
 }

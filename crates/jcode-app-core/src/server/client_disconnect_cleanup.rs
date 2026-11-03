@@ -4,15 +4,16 @@ use super::{
     remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, unregister_session_event_sender, update_member_status,
 };
+#[cfg(test)]
 use crate::agent::Agent;
 use anyhow::Result;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
@@ -69,6 +70,26 @@ fn disconnected_while_processing(
     processing_task
         .map(|handle| !handle.is_finished())
         .unwrap_or(client_is_processing)
+}
+
+/// Capture EOF before agent cleanup, including turns retained after disconnect.
+/// Explicit protocol Detach does not call this. Serializes with resume claims,
+/// and removing the connection makes repeated cleanup idempotent.
+pub(super) async fn record_transport_closed(
+    session_id: &str,
+    connection_id: &str,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+) {
+    let mut connections = client_connections.write().await;
+    let removed = connections.remove(connection_id);
+    if removed.is_some_and(|info| info.session_id == session_id)
+        && !connections
+            .values()
+            .any(|info| info.session_id == session_id)
+        && !crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE)
+    {
+        crate::session::record_window_closed(session_id);
+    }
 }
 
 /// Release transport-owned state without changing the live session or turn.
@@ -132,6 +153,8 @@ pub(super) async fn cleanup_client_connection(
         false
     };
     let originally_registered = swarm_members.read().await.contains_key(client_session_id);
+
+    record_transport_closed(client_session_id, client_connection_id, client_connections).await;
 
     detach_client_attachment(
         client_session_id,
@@ -338,6 +361,7 @@ pub(super) async fn cleanup_client_connection(
             }
         };
         crate::session_metrics::forget(client_session_id);
+        super::live_status::forget(client_session_id);
         crate::session_effort::forget_session_effort(client_session_id);
 
         if let Some(ref swarm_id) = swarm_id {
@@ -383,6 +407,10 @@ pub(super) async fn cleanup_client_connection(
     event_handle.abort();
     Ok(None)
 }
+
+#[cfg(test)]
+#[path = "window_closure_tests.rs"]
+mod window_closure_tests;
 
 #[cfg(test)]
 #[path = "client_disconnect_grace_tests.rs"]

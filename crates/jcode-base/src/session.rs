@@ -7,32 +7,14 @@ pub use crate::storage::{
 };
 use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
 
-/// RAII guard that marks a session as actively streaming for its lifetime.
-///
-/// Wraps the on-disk streaming marker from `jcode-storage` (cleared on every
-/// exit path so presence UIs never show a phantom streaming session) and
-/// additionally holds a macOS power assertion so the system does not
-/// idle-sleep in the middle of a streaming model response.
-pub struct StreamingGuard {
-    _marker: crate::storage::StreamingGuard,
-    #[allow(dead_code)]
-    sleep_assertion: crate::platform::PowerAssertion,
-}
-
-impl StreamingGuard {
-    pub fn new(session_id: impl Into<String>) -> Self {
-        Self {
-            _marker: crate::storage::StreamingGuard::new(session_id),
-            sleep_assertion: crate::platform::PowerAssertion::prevent_user_idle_system_sleep(
-                "Jcode streaming model response",
-            ),
-        }
-    }
-}
+mod streaming;
+mod window_closures;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+pub use streaming::StreamingGuard;
+pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
 pub use jcode_provider_core::AccountPin;
 mod agent_models;
@@ -43,7 +25,9 @@ mod load_telemetry;
 mod maintenance;
 mod memory_profile;
 mod model;
+mod parallel_messages;
 mod persistence;
+pub mod prewarm;
 mod render;
 mod rewind;
 mod storage_paths;
@@ -70,6 +54,7 @@ pub use render::{
     render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
+pub(crate) mod resume_cache;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
@@ -125,6 +110,7 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +152,9 @@ pub struct Session {
     /// Preferred pin to return to after an automatic failover move.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub account_failover_home: BTreeMap<String, AccountPin>,
+    /// Per-session context ceiling. Missing values follow the global cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_cap: Option<usize>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -190,6 +179,9 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// First session directory, retained when the session moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_working_dir: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -273,6 +265,7 @@ struct SessionStartupStub {
     account_failover: Option<bool>,
     #[serde(default)]
     account_failover_home: BTreeMap<String, AccountPin>,
+    context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
@@ -289,6 +282,8 @@ struct SessionStartupStub {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -397,6 +392,7 @@ impl Session {
         session.account_pins = stub.account_pins;
         session.account_failover = stub.account_failover;
         session.account_failover_home = stub.account_failover_home;
+        session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
         session.improve_mode = stub.improve_mode;
@@ -405,6 +401,7 @@ impl Session {
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
+        session.original_working_dir = stub.original_working_dir;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -440,6 +437,7 @@ impl Session {
         session.account_pins = snapshot.account_pins;
         session.account_failover = snapshot.account_failover;
         session.account_failover_home = snapshot.account_failover_home;
+        session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
         session.improve_mode = snapshot.improve_mode;
@@ -448,6 +446,7 @@ impl Session {
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
+        session.original_working_dir = snapshot.original_working_dir;
         session.short_name = snapshot.short_name;
         session.status = snapshot.status;
         session.last_pid = snapshot.last_pid;
@@ -576,14 +575,18 @@ impl Session {
             agent_profile: self.agent_profile.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            compaction_unchanged: false,
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
+            route_api_method: self.route_api_method.clone(),
+            route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             account_pins: self.account_pins.clone(),
             account_failover: self.account_failover,
             account_failover_home: self.account_failover_home.clone(),
+            context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
             improve_mode: self.improve_mode,
@@ -592,6 +595,7 @@ impl Session {
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
+            original_working_dir: self.original_working_dir.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -761,10 +765,6 @@ impl Session {
         }
     }
 
-    fn mark_env_snapshots_full_dirty(&mut self) {
-        self.persist_state.env_snapshots_mode = PersistVectorMode::Full;
-    }
-
     fn mark_memory_injections_append_dirty(&mut self) {
         if self.persist_state.memory_injections_mode != PersistVectorMode::Full {
             self.persist_state.memory_injections_mode = PersistVectorMode::Append;
@@ -784,15 +784,21 @@ impl Session {
         self.system_prompt = meta.system_prompt;
         self.agent_profile = meta.agent_profile;
         self.updated_at = meta.updated_at;
-        self.compaction = meta.compaction;
+        if !meta.compaction_unchanged {
+            self.compaction = meta.compaction;
+        }
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
+        if meta.route_api_method_present {
+            self.route_api_method = meta.route_api_method;
+        }
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
         self.account_pins = meta.account_pins;
         self.account_failover = meta.account_failover;
         self.account_failover_home = meta.account_failover_home;
+        self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
         self.improve_mode = meta.improve_mode;
@@ -801,6 +807,7 @@ impl Session {
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
+        self.original_working_dir = meta.original_working_dir;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -840,6 +847,7 @@ impl Session {
             account_pins: BTreeMap::new(),
             account_failover: None,
             account_failover_home: BTreeMap::new(),
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -848,6 +856,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -902,6 +911,7 @@ impl Session {
             account_pins: BTreeMap::new(),
             account_failover: None,
             account_failover_home: BTreeMap::new(),
+            context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
@@ -910,6 +920,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            original_working_dir: None,
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1006,13 +1017,19 @@ impl Session {
         self.memory_profile_cache.env_snapshots_count += 1;
         self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
         self.env_snapshots.push(snapshot);
+        // Trimming here would force a full snapshot rewrite (seconds on large
+        // transcripts) on every resume. Append instead and trim only when a
+        // checkpoint rewrites the snapshot anyway (see `trim_env_snapshots`).
+        self.mark_env_snapshots_append_dirty();
+    }
+
+    /// Drop all but the newest `MAX_ENV_SNAPSHOTS`. Only call right before a
+    /// full snapshot write, because it shrinks an append-tracked vector.
+    pub(crate) fn trim_env_snapshots(&mut self) {
         if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
             let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
             self.env_snapshots.drain(0..excess);
             self.mark_memory_profile_dirty();
-            self.mark_env_snapshots_full_dirty();
-        } else {
-            self.mark_env_snapshots_append_dirty();
         }
     }
 
@@ -1171,10 +1188,26 @@ request in this new forked session, using the inherited conversation only as con
 
     /// Mark session as active (e.g., when resuming)
     pub fn mark_active(&mut self) {
+        self.mark_active_unregistered();
+        self.register_presence_markers();
+    }
+
+    /// Mark active in memory only, without writing presence markers.
+    ///
+    /// Reload reconnects build a provisional session that is replaced by the
+    /// resumed one almost immediately. Writing and then deleting its
+    /// `active_pids`/`internal_pids` markers costs filesystem work on every
+    /// reconnect of a storm, so callers defer that to
+    /// [`Self::register_presence_markers`] once the session is committed.
+    pub fn mark_active_unregistered(&mut self) {
         self.status = SessionStatus::Active;
-        let pid = std::process::id();
-        self.last_pid = Some(pid);
+        self.last_pid = Some(std::process::id());
         self.last_active_at = Some(Utc::now());
+    }
+
+    /// Write this session's on-disk presence markers for its owning PID.
+    pub fn register_presence_markers(&self) {
+        let pid = self.last_pid.unwrap_or_else(std::process::id);
         register_active_pid(&self.id, pid);
         self.sync_internal_presence_flag();
     }
@@ -1719,44 +1752,9 @@ request in this new forked session, using the inherited conversation only as con
     }
 }
 
-fn redact_json_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(s) => {
-            *s = crate::message::redact_secrets(s);
-        }
-        serde_json::Value::Array(values) => {
-            for entry in values {
-                redact_json_value(entry);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (key, entry) in map.iter_mut() {
-                if is_sensitive_json_key(key) {
-                    *entry = serde_json::Value::String("[REDACTED_SECRET]".to_string());
-                } else {
-                    redact_json_value(entry);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_json_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    normalized.contains("apikey")
-        || normalized.ends_with("token")
-        || normalized.ends_with("secret")
-        || normalized.contains("password")
-        || matches!(
-            normalized.as_str(),
-            "authorization" | "cookie" | "setcookie" | "privatekey" | "clientsecret"
-        )
-}
+#[path = "session_redaction.rs"]
+mod redaction;
+use redaction::redact_json_value;
 
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
@@ -1773,7 +1771,7 @@ struct RemoteStartupSessionSnapshot {
     agent_profile: Option<crate::agent_profile::AgentProfile>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
@@ -1793,6 +1791,7 @@ struct RemoteStartupSessionSnapshot {
     account_failover: Option<bool>,
     #[serde(default)]
     account_failover_home: BTreeMap<String, AccountPin>,
+    context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
@@ -1809,6 +1808,8 @@ struct RemoteStartupSessionSnapshot {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    original_working_dir: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]

@@ -191,6 +191,7 @@ async fn communicate_assign_next_assigns_next_runnable_task() {
     let worker_session = spawn_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
@@ -198,6 +199,29 @@ async fn communicate_assign_next_assigns_next_runnable_task() {
     wait_for_member_presence(&mut watcher, &watcher_session, &worker_session)
         .await
         .expect("spawned worker should appear in swarm");
+
+    // A hand spawn always owns a lane: the coordinator gains it, tagged with
+    // the worker, and the worker's own todo list is exactly that lane.
+    assert_eq!(
+        spawn_output
+            .metadata
+            .as_ref()
+            .and_then(|m| m["lane"].as_str()),
+        Some("lane::next-task worker")
+    );
+    let coordinator_todos = crate::todo::load_todos(&watcher_session).unwrap();
+    let lane: Vec<_> = coordinator_todos
+        .iter()
+        .filter(|t| t.group.as_deref() == Some("next-task worker"))
+        .collect();
+    assert_eq!(lane.len(), 1, "{coordinator_todos:?}");
+    assert_eq!(
+        lane[0].assigned_to.as_deref(),
+        Some(worker_session.as_str())
+    );
+    let worker_todos = crate::todo::load_todos(&worker_session).unwrap();
+    assert_eq!(worker_todos.len(), 1);
+    assert_eq!(worker_todos[0].group.as_deref(), Some("next-task worker"));
 
     tool.execute(
         json!({
@@ -298,6 +322,7 @@ async fn communicate_assign_next_can_prefer_fresh_spawn_server_side() {
     let existing_worker = existing_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
@@ -597,6 +622,7 @@ async fn communicate_assign_task_can_prefer_fresh_spawn_over_reuse() {
     let existing_worker = existing_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();

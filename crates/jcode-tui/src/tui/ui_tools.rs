@@ -4,7 +4,7 @@ use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width
 use ratatui::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(super) use jcode_tui_tool_display::concise_tool_error_summary;
+pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,
     tool_output_looks_failed,
@@ -127,71 +127,12 @@ pub(super) use batch::parse_batch_sub_outputs;
 pub(crate) use batch::{batch_subcall_intent, batch_subcall_params};
 pub(super) use batch::{parse_batch_completion_counts, parse_batch_sub_outputs_by_index};
 
-pub(super) fn summarize_unified_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("--- ")
-            .or_else(|| line.strip_prefix("+++ "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if path.is_empty() || path == "/dev/null" {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
-
-pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if path.is_empty() {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
+#[path = "ui_tools/patch_summary.rs"]
+mod patch_summary;
+pub(crate) use patch_summary::{
+    extract_apply_patch_primary_file, extract_unified_patch_primary_file,
+};
+pub(super) use patch_summary::{summarize_apply_patch_input, summarize_unified_patch_input};
 
 fn parse_agentgrep_smart_subject_relation(
     input: &serde_json::Value,
@@ -228,48 +169,6 @@ fn parse_agentgrep_smart_subject_relation(
     }
 
     (subject, relation)
-}
-
-pub(crate) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if !path.is_empty() {
-            return Some(path.to_string());
-        }
-    }
-
-    None
-}
-
-pub(crate) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("+++ ")
-            .or_else(|| line.strip_prefix("--- "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if !path.is_empty() && path != "/dev/null" {
-            return Some(path.to_string());
-        }
-    }
-
-    None
 }
 
 fn display_prefix_by_width(s: &str, max_width: usize) -> &str {
@@ -417,7 +316,7 @@ fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize
     truncate_end_display(summary.as_str(), bounded(42))
 }
 
-fn truncate_path_display(path: &str, max_width: usize) -> String {
+pub(super) fn truncate_path_display(path: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(path) <= max_width {
         return path.to_string();
     }
@@ -831,11 +730,14 @@ fn truncate_identifier_display(value: &str, max_width: usize) -> String {
 }
 
 pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
-    id.strip_prefix("batch-")?
-        .split('-')
-        .next()?
-        .parse::<usize>()
-        .ok()
+    let index = id.strip_prefix("batch-")?.split('-').next()?;
+    match index.parse::<usize>() {
+        Ok(index) => Some(index),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid batch subcall index: {error}"));
+            None
+        }
+    }
 }
 
 pub(super) fn is_memory_store_tool(tc: &ToolCall) -> bool {
@@ -1572,6 +1474,54 @@ pub(super) fn get_tool_summary_with_budget(
     }
 }
 
+/// Keep timing and token usage together as one compact metadata group.
+/// Older transcript entries can lack timing; never invent a duration for them.
+pub(super) fn tool_usage_label(tokens: &str, seconds: Option<f32>, output: &str) -> String {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output))
+        .map(|seconds| {
+            crate::message::Message::format_duration((seconds as f64 * 1000.0).round() as u64)
+        });
+    match duration {
+        Some(duration) => format!("{duration}, {tokens}"),
+        None => tokens.to_owned(),
+    }
+}
+
+/// Style elapsed time independently from output token volume.
+pub(super) fn tool_usage_spans(
+    label: String,
+    token_color: Color,
+    seconds: Option<f32>,
+    output: &str,
+) -> Vec<Span<'static>> {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output));
+    let Some(seconds) = duration else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let Some((duration_label, tokens)) = label.split_once(", ") else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let duration_color = if seconds >= 60.0 {
+        rgb(224, 118, 118)
+    } else if seconds >= 10.0 {
+        rgb(214, 184, 92)
+    } else {
+        rgb(118, 118, 118)
+    };
+    vec![
+        Span::styled(
+            duration_label.to_owned(),
+            Style::default().fg(duration_color),
+        ),
+        Span::styled(", ", Style::default().fg(dim_color())),
+        Span::styled(tokens.to_owned(), Style::default().fg(token_color)),
+    ]
+}
+
 pub(super) fn render_batch_subcall_line(
     tool: &ToolCall,
     icon: &str,
@@ -1588,7 +1538,14 @@ pub(super) fn render_batch_subcall_line(
             crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
             crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
         };
-        (crate::util::format_approx_token_count(tokens), color)
+        (
+            tool_usage_label(
+                &crate::util::format_approx_token_count(tokens),
+                None,
+                content,
+            ),
+            color,
+        )
     });
     let intent = tool
         .intent
@@ -1610,10 +1567,7 @@ pub(super) fn render_batch_subcall_line(
             UnicodeWidthStr::width(format!(" · {label}").as_str())
         });
     let summary_budget = max_width.map(|w| w.saturating_sub(reserved));
-    let error_summary = output_content.and_then(concise_tool_error_summary);
-    let is_error = error_summary.is_some();
-    let summary = error_summary
-        .unwrap_or_else(|| get_tool_summary_with_budget(tool, bash_max_chars, summary_budget));
+    let summary = get_tool_summary_with_budget(tool, bash_max_chars, summary_budget);
 
     let mut spans = vec![
         Span::styled(format!("    {} ", icon), Style::default().fg(icon_color)),
@@ -1625,9 +1579,7 @@ pub(super) fn render_batch_subcall_line(
             intent.clone(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = show_tool_call_details() || is_error;
+        let show_detail = show_tool_call_details();
         if show_detail && !summary.is_empty() && summary != intent {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
             spans.push(Span::styled(summary, Style::default().fg(dim_color())));
@@ -1639,10 +1591,14 @@ pub(super) fn render_batch_subcall_line(
         ));
     }
     let token_suffix = token_badge.map(|(label, color)| {
-        Line::from(vec![
-            Span::styled(" · ", Style::default().fg(dim_color())),
-            Span::styled(label, Style::default().fg(color)),
-        ])
+        let mut spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+        spans.extend(tool_usage_spans(
+            label,
+            color,
+            None,
+            output_content.unwrap_or_default(),
+        ));
+        Line::from(spans)
     });
 
     if let (Some(max_width), Some(token_suffix)) = (max_width, token_suffix.as_ref()) {

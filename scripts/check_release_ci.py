@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Authorize normal releases using only successful exact-commit push CI.
+"""Authorize releases using exact-commit push CI.
+
+Stable releases require successful CI. Explicit --preview mode tolerates only
+named formatting, warning-budget, size and dependency-hygiene step failures.
+It still requires all other steps and jobs to succeed, including Clippy, tests,
+safety ratchets and lockfile checks. Missing evidence is never a waiver.
 
 Requires gh on PATH and an inherited GH_TOKEN with Actions read permission.
 Exit 0: authorized, 1: rejected/API error, 2: wait expired or invalid CLI input.
@@ -21,6 +26,78 @@ MANDATORY_JOBS = (
     "Windows ARM64 Release Configuration",
 )
 PENDING = {"queued", "in_progress", "waiting", "pending", "requested"}
+
+# Preview-only maintenance debt. Compilation, Clippy, lockfile consistency,
+# safety ratchets, SDK parity and tests deliberately remain release-blocking.
+PREVIEW_ADVISORY_STEPS = frozenset({
+    "Check formatting",
+    "Enforce warning budget",
+    "Enforce oversized-file ratchet",
+    "Enforce oversized-test ratchet",
+    "Enforce wildcard re-export ratchet",
+    "Enforce no unused dependencies",
+})
+PREVIEW_ADVISORY_JOBS = {
+    "Quality Guardrails": PREVIEW_ADVISORY_STEPS,
+    "Format": frozenset({"Check formatting"}),
+    "Build & Test (ubuntu-latest)": frozenset({"Enforce warning budget (Linux, macOS)"}),
+    "Build & Test (macos-latest)": frozenset({"Enforce warning budget (Linux, macOS)"}),
+}
+
+# A failed advisory job still contains platform-inapplicable steps and a cache
+# save that GitHub skips on failure. Neither is missing correctness evidence.
+# All other skipped steps, including tests and security checks, remain fatal.
+PREVIEW_OPTIONAL_SKIPS = {
+    "Quality Guardrails": frozenset({"Post Run Swatinem/rust-cache@v2"}),
+    "Build & Test (ubuntu-latest)": frozenset({
+        "Check PowerShell script syntax (Windows)",
+        "Post Run Swatinem/rust-cache@v2",
+    }),
+    "Build & Test (macos-latest)": frozenset({
+        "Install mold linker (Linux)",
+        "Run automatic model discovery regressions (Linux only)",
+        "Run embedding numeric-stability cohort (Linux only)",
+        "Run TUI library tests (Linux only)",
+        "Check PowerShell script syntax (Windows)",
+        "Security preflight (Linux)",
+        "Post Run Swatinem/rust-cache@v2",
+    }),
+}
+
+
+def preview_job_status(job, label):
+    if (job.get("name") not in PREVIEW_ADVISORY_JOBS
+            or job.get("status") != "completed" or job.get("conclusion") != "failure"):
+        return status_reason(job, label)
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise Rejected(f"{label} lacks step evidence for advisory failures")
+    failures = []
+    for step in steps:
+        if not isinstance(step, dict):
+            raise Rejected(f"{label} has malformed step evidence")
+        if (step.get("status") == "completed" and step.get("conclusion") == "skipped"
+                and step.get("name") in PREVIEW_OPTIONAL_SKIPS.get(job["name"], ())):
+            continue
+        if (step.get("status") == "completed" and step.get("conclusion") == "failure"
+                and step.get("name") in PREVIEW_ADVISORY_JOBS[job["name"]]):
+            failures.append(step["name"])
+        else:
+            # Correctness skips, cancellations and timeouts are not waivers.
+            reason = status_reason(step, f"{label}: {step.get('name')}")
+            if reason:
+                raise Rejected(f"{label} has incomplete step evidence")
+    if not failures:
+        raise Rejected(f"{label} failed without an allowlisted advisory failure")
+    print(f"ADVISORY (preview only): {label}: {', '.join(failures)}")
+    return None
+
+
+def preview_run_status(run, label):
+    # Job evidence below must account for the failed workflow before authorizing.
+    if run.get("status") == "completed" and run.get("conclusion") == "failure":
+        return None
+    return status_reason(run, label)
 
 
 class Rejected(RuntimeError):
@@ -93,7 +170,7 @@ def status_reason(item, label):
     raise Rejected(f"{label} has invalid status/conclusion")
 
 
-def check_once(repository, sha, api):
+def check_once(repository, sha, api, preview=False):
     base = f"repos/{repository}/actions"
     runs = objects(api, f"{base}/workflows/ci.yml/runs?head_sha={sha}&event=push&per_page=100", "workflow_runs")
     # Reject different-SHA green evidence rather than trusting API query filtering.
@@ -110,7 +187,8 @@ def check_once(repository, sha, api):
     run_identity(run, sha)
     if run["id"] != latest["id"] or run["run_attempt"] < latest["run_attempt"]:
         raise Rejected("CI run detail does not match latest run/attempt")
-    reason = status_reason(run, f"CI run {run['id']} attempt {run['run_attempt']}")
+    run_status = preview_run_status if preview else status_reason
+    reason = run_status(run, f"CI run {run['id']} attempt {run['run_attempt']}")
     jobs = objects(api, f"{base}/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs")
     pending = []
     for name in MANDATORY_JOBS:
@@ -130,9 +208,19 @@ def check_once(repository, sha, api):
         if (("run_id" in job and job["run_id"] != run["id"])
                 or ("head_sha" in job and job["head_sha"] != sha)):
             raise Rejected(f"Wrong run/SHA for mandatory job: {name}")
-        job_reason = status_reason(job, name)
+        job_reason = preview_job_status(job, name) if preview else status_reason(job, name)
         if job_reason:
             pending.append(job_reason)
+    if preview:
+        if run.get("conclusion") == "failure" and not any(
+                job.get("conclusion") == "failure" for job in jobs):
+            raise Rejected("Failed CI run has no failed-job evidence")
+        # Do not hide unrelated workflow failures behind an advisory quality job.
+        for job in jobs:
+            if job.get("name") not in MANDATORY_JOBS:
+                job_reason = preview_job_status(job, job.get("name", "unnamed job"))
+                if job_reason:
+                    pending.append(job_reason)
     if reason or pending:
         return "; ".join(([reason] if reason else []) + pending)
     # A concurrent rerun must not allow stale attempt success to authorize.
@@ -142,21 +230,22 @@ def check_once(repository, sha, api):
     run_identity(current, sha)
     if current["id"] != run["id"]:
         raise Rejected("CI run changed identity")
-    confirmation = status_reason(current, "CI run confirmation")
+    confirmation = run_status(current, "CI run confirmation")
     if current["run_attempt"] != run["run_attempt"]:
         return "CI run attempt changed during verification"
     return confirmation
 
 
 def authorize(repository, sha, timeout=7200, poll_interval=30, api=gh_api,
-              clock=time.monotonic, sleep=time.sleep, emit=print):
+              clock=time.monotonic, sleep=time.sleep, emit=print, preview=False):
     validate_inputs(repository, sha, timeout, poll_interval)
     sha = sha.lower()
     deadline = clock() + timeout
     while True:
-        reason = check_once(repository, sha, api)
+        reason = check_once(repository, sha, api, preview=preview)
         if reason is None:
-            emit(f"AUTHORIZED: exact-SHA main push CI and mandatory jobs succeeded for {sha}")
+            policy = "preview policy satisfied" if preview else "mandatory jobs succeeded"
+            emit(f"AUTHORIZED: exact-SHA main push CI and {policy} for {sha}")
             return
         remaining = deadline - clock()
         if remaining <= 0:
@@ -172,11 +261,14 @@ def main(argv=None):
     parser.add_argument("--sha", help="full tag commit SHA (alternative to positional SHA)")
     parser.add_argument("--timeout", type=float, default=7200)
     parser.add_argument("--poll-interval", type=float, default=30)
+    parser.add_argument("--preview", action="store_true",
+                        help="Allow explicitly named maintenance failures for previews only")
     args = parser.parse_args(argv)
     if bool(args.sha) == bool(args.tag_sha):
         parser.error("provide exactly one positional SHA or --sha")
     try:
-        authorize(args.repository, args.sha or args.tag_sha, args.timeout, args.poll_interval)
+        options = {"preview": True} if args.preview else {}
+        authorize(args.repository, args.sha or args.tag_sha, args.timeout, args.poll_interval, **options)
     except (ValueError, WaitExpired) as exc:
         print(str(exc), file=sys.stderr)
         return 2

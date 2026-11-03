@@ -9,7 +9,6 @@
 
 use std::sync::OnceLock;
 
-#[cfg(test)]
 #[path = "../build_inputs.rs"]
 mod build_inputs;
 
@@ -39,15 +38,7 @@ static RUNTIME_GIT_DATE: OnceLock<Option<String>> = OnceLock::new();
 static RUNTIME_GIT_TAG: OnceLock<Option<String>> = OnceLock::new();
 
 fn parse_release_semver(value: &str) -> Option<String> {
-    let value = value.trim().trim_start_matches('v');
-    let mut parts = value.split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts.next()?.parse::<u32>().ok()?;
-    let patch = parts.next()?.parse::<u32>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(format!("{major}.{minor}.{patch}"))
+    build_inputs::release_semver(value)
 }
 
 /// Optional release semver supplied by the fast-release wrapper at process start.
@@ -132,9 +123,33 @@ mod tests {
     use super::parse_release_semver;
 
     #[test]
+    fn release_build_display_preserves_comparison_identity() {
+        if option_env!("JCODE_RELEASE_BUILD").is_some() {
+            assert!(super::VERSION.starts_with(&format!("v{} (", super::SEMVER)));
+            assert_eq!(super::UPDATE_SEMVER, super::SEMVER);
+        }
+        assert_eq!(
+            parse_release_semver("v1.0.0-preview.42").as_deref(),
+            Some("1.0.0-preview.42")
+        );
+    }
+
+    #[test]
+    fn explicit_build_override_preserves_release_identity() {
+        if let Some(expected) = option_env!("JCODE_BUILD_SEMVER").and_then(parse_release_semver) {
+            assert_eq!(super::SEMVER, expected);
+            assert_eq!(super::UPDATE_SEMVER, expected);
+        }
+    }
+
+    #[test]
     fn runtime_release_semver_accepts_only_three_numeric_components() {
         assert_eq!(parse_release_semver("v1.2.3").as_deref(), Some("1.2.3"));
         assert_eq!(parse_release_semver(" 1.2.3 ").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            parse_release_semver("v1.2.3-rc.1").as_deref(),
+            Some("1.2.3-rc.1")
+        );
         assert_eq!(parse_release_semver("1.2"), None);
         assert_eq!(parse_release_semver("1.2.3.4"), None);
         assert_eq!(parse_release_semver("1.2.beta"), None);

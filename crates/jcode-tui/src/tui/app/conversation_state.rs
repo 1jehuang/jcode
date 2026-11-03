@@ -90,43 +90,36 @@ impl App {
         context_limit: u64,
         strategy: &str,
     ) -> String {
-        let usage = |tokens: u64| match context_limit {
-            limit if limit > 0 => format!(
-                "~{} tokens ({:.1}%)",
-                Self::format_compaction_number(tokens),
-                tokens as f64 / context_limit as f64 * 100.0,
-            ),
-            _ => format!("~{} tokens", Self::format_compaction_number(tokens)),
+        let usage = |tokens: u64| {
+            if context_limit > 0 {
+                format!(
+                    "~{} tokens ({:.1}%)",
+                    Self::format_compaction_number(tokens),
+                    tokens as f64 / context_limit as f64 * 100.0,
+                )
+            } else {
+                format!("~{} tokens", Self::format_compaction_number(tokens))
+            }
         };
-        // Native automatic compaction can report an encrypted state without
-        // either token total. Response input usage is not a before/after pair.
-        // Keep any supplied measurement, otherwise describe the known work.
+        // Show whatever is known. Never print "unavailable": a missing side is
+        // simply omitted, and with no counts at all the message count is used.
         match (event.pre_tokens, event.post_tokens) {
-            (Some(before), Some(after)) => format!(
-                "📦 Compacted ({strategy}): {} → {}",
-                usage(before),
-                usage(after),
-            ),
-            (Some(before), None) => format!(
-                "📦 Compacted ({strategy}): before {}; after unavailable",
-                usage(before),
-            ),
-            (None, Some(after)) => format!(
-                "📦 Compacted ({strategy}): after {}; before unavailable",
-                usage(after),
-            ),
-            (None, None) => match (event.messages_compacted, event.messages_dropped) {
-                (Some(count), _) => format!(
-                    "📦 Compacted {} {} ({strategy})",
+            (Some(pre), Some(post)) => {
+                format!(
+                    "📦 Compacted ({strategy}): {} → {}",
+                    usage(pre),
+                    usage(post)
+                )
+            }
+            (Some(pre), None) => format!("📦 Compacted ({strategy}): from {}", usage(pre)),
+            (None, Some(post)) => format!("📦 Compacted ({strategy}): now {}", usage(post)),
+            (None, None) => match event.messages_compacted.filter(|count| *count > 0) {
+                Some(count) => format!(
+                    "📦 Compacted ({strategy}): {} older message{} summarized",
                     Self::format_compaction_number(count as u64),
-                    if count == 1 { "message" } else { "messages" },
+                    if count == 1 { "" } else { "s" },
                 ),
-                (None, Some(count)) => format!(
-                    "📦 Context compacted ({strategy}): {} {} dropped",
-                    Self::format_compaction_number(count as u64),
-                    if count == 1 { "message" } else { "messages" },
-                ),
-                (None, None) => format!("📦 Context compacted ({strategy})"),
+                None => format!("📦 Compacted ({strategy})"),
             },
         }
     }
@@ -321,6 +314,7 @@ impl App {
     }
 
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
         if let Err(err) = self.session.save() {
             crate::logging::warn(&format!(
@@ -346,6 +340,7 @@ impl App {
         // pre-compaction request that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
+        self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -901,7 +896,23 @@ mod tests {
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted 100 messages (emergency)"
+            "📦 Compacted (emergency): 100 older messages summarized"
+        );
+        event.messages_compacted = None;
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency)"
+        );
+        event.post_tokens = Some(40_000);
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): now ~40,000 tokens (20.0%)"
+        );
+        event.pre_tokens = Some(180_000);
+        event.post_tokens = None;
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): from ~180,000 tokens (90.0%)"
         );
         event.pre_tokens = Some(0);
         event.post_tokens = Some(0);

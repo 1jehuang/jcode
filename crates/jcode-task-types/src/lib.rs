@@ -430,6 +430,34 @@ semantic_state! {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoExternalBlocker {
+    /// Concrete external condition preventing useful work. Not a completion.
+    pub reason: String,
+    /// Finite deadline to reassess the blocker, not permission to assume it resolved.
+    pub review_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// No way forward.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoCompleteBlocker {
+    #[serde(deserialize_with = "deserialize_nonempty_blocker_reason")]
+    pub reason: String,
+}
+
+fn deserialize_nonempty_blocker_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "completely blocked reason must be nonempty",
+        ));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: String,
@@ -438,8 +466,14 @@ pub struct TodoItem {
     /// Optional group label. Todos that share a group are displayed together
     /// under a single header. Use one group per coherent goal; when work is
     /// steered into a new area, start a new group instead of renaming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepted as `lane`: the lane this todo belongs to.
+    #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Explicit prerequisite todo IDs for this lane. `None` retains the default
+    /// phase barrier. All lane members carry the same nonempty list, referring
+    /// only to todos in earlier phases by first appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_after: Option<Vec<String>>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
     /// closest state on load.
@@ -458,8 +492,85 @@ pub struct TodoItem {
     pub confidence_history: Vec<ConfidenceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
+    /// Existing background task or durable swarm await IDs in this session.
+    /// Dependencies block only while pending, never after completion or timeout.
+    /// An empty array or null clears dependencies.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_waiting_on",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub waiting_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_blocker: Option<TodoExternalBlocker>,
+    /// No way forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completely_blocked: Option<TodoCompleteBlocker>,
+    /// Worker session ID, or reserved `@self` for an explicit start by this
+    /// todo list's agent. Absence means ownership is unknown, not local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
+    /// Optional execution stage. Stages run in order: stage 2 starts only
+    /// after every todo in stage 1 is done. Inside a stage, todos that share a
+    /// `group` form one lane that runs in list order, and different lanes run
+    /// in parallel. `None` means "sequential in list order". Deliberately a
+    /// plain number. Optional `lane_after` narrows the default phase barrier
+    /// to explicit earlier-phase prerequisites. Older sessions stored this as `wave`.
+    #[serde(
+        default,
+        alias = "wave",
+        alias = "phase",
+        deserialize_with = "deserialize_optional_stage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stage: Option<u32>,
+    /// Optional longer brief: file paths, acceptance criteria, context. Never
+    /// drawn on the todo card (which shows only the short `content` title),
+    /// but appended to a swarm worker's assignment so short titles do not
+    /// starve workers of context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+fn deserialize_waiting_on<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<Vec<String>>::deserialize(deserializer)? {
+        Some(dependencies) => Ok(dependencies),
+        // Null explicitly clears dependency references, just like an empty list.
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Accept `2`, `2.0`, `"2"`, `"stage 2"`, `""`, or `null` for a todo stage.
+/// Zero and unparseable values read as absent rather than failing the whole
+/// todo write, so a sloppy stage can never cost the model its plan.
+fn deserialize_optional_stage<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| parse_stage_value(&value)))
+}
+
+pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
+    let stage = match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f.round() as u64)),
+        serde_json::Value::String(s) => {
+            let digits: String = s
+                .trim()
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse::<u64>().ok()
+        }
+        _ => None,
+    }?;
+    u32::try_from(stage).ok().filter(|stage| *stage > 0)
 }
 
 /// Plan-level understanding of what the user actually wants, covering the
@@ -470,6 +581,10 @@ pub struct TodoItem {
 /// faithfully the plan and its feedback loops represent that.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoPlan {
+    /// Short session name (a few words) chosen by the agent. Used as the
+    /// session title in pickers ahead of lane names and generated titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The user's underlying reason and desired outcome for this work, kept
     /// distinct from the agent's steps and validation loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +614,7 @@ pub struct TodoPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoPlanField {
+    Title,
     UserIntention,
     #[serde(alias = "alignment_score", alias = "user_intention_alignment")]
     UnderstandsUserIntent,
@@ -665,6 +781,46 @@ pub struct CatchupBrief {
 #[cfg(test)]
 mod semantic_state_tests {
     use super::*;
+
+    #[test]
+    fn todo_waiting_on_is_backward_compatible_and_nullable() {
+        let old =
+            serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
+        let todo: TodoItem = serde_json::from_value(old.clone()).unwrap();
+        assert!(todo.waiting_on.is_empty());
+        assert!(
+            serde_json::to_value(&todo)
+                .unwrap()
+                .get("waiting_on")
+                .is_none()
+        );
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(["task-a"]),
+        ] {
+            let mut payload = old.clone();
+            payload["waiting_on"] = value.clone();
+            let todo: TodoItem = serde_json::from_value(payload).unwrap();
+            assert_eq!(
+                todo.waiting_on,
+                if value.is_null() {
+                    vec![]
+                } else {
+                    serde_json::from_value::<Vec<String>>(value).unwrap()
+                }
+            );
+        }
+        for invalid in [
+            serde_json::json!(42),
+            serde_json::json!([null]),
+            serde_json::json!({"task": "a"}),
+        ] {
+            let mut payload = old.clone();
+            payload["waiting_on"] = invalid;
+            assert!(serde_json::from_value::<TodoItem>(payload).is_err());
+        }
+    }
 
     #[test]
     fn states_serialize_as_snake_case_strings() {

@@ -45,8 +45,8 @@ struct BgInput {
     #[serde(default)]
     action: Option<String>,
     /// Short display label describing why this tool call is being made.
-    #[serde(default)]
-    intent: Option<String>,
+    #[serde(deserialize_with = "deserialize_intent")]
+    intent: String,
     /// Task ID (for single-task actions)
     #[serde(default)]
     task_id: Option<String>,
@@ -101,6 +101,18 @@ struct BgInput {
     graceful_timeout_ms: Option<u64>,
 }
 
+fn deserialize_intent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let intent = String::deserialize(deserializer)?;
+    if intent.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "bg intent must be a nonblank string",
+        ));
+    }
+    Ok(intent)
+}
+
 fn infer_action_from_intent(intent: Option<&str>) -> Option<&'static str> {
     let intent = intent?.trim().to_ascii_lowercase();
     if intent.is_empty() {
@@ -136,7 +148,7 @@ fn resolve_action(params: &BgInput) -> Result<String> {
         return Ok(action.to_ascii_lowercase());
     }
 
-    if let Some(action) = infer_action_from_intent(params.intent.as_deref()) {
+    if let Some(action) = infer_action_from_intent(Some(&params.intent)) {
         return Ok(action.to_string());
     }
 
@@ -407,6 +419,7 @@ async fn resolve_task_ids(
 
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
+    session_id: &str,
     task_ids: &[String],
     max_wait: Duration,
     return_on_progress: bool,
@@ -414,6 +427,7 @@ async fn wait_many_polling(
 ) -> Result<(String, Vec<background::TaskStatusFile>)> {
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
+    let mut wait_guard = None;
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
             last_progress.insert(task_id.clone(), task.progress.clone());
@@ -456,6 +470,9 @@ async fn wait_many_polling(
         for task in &tasks {
             last_progress.insert(task.task_id.clone(), task.progress.clone());
         }
+        wait_guard.get_or_insert_with(|| {
+            crate::wait_registry::register(session_id, "Waiting for background tasks")
+        });
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -471,11 +488,14 @@ impl Tool for BgTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        let mut intent_schema = super::intent_schema_property();
+        intent_schema["minLength"] = json!(1);
+        intent_schema["pattern"] = json!("\\S");
         json!({
             "type": "object",
-            "required": ["action"],
+            "required": ["action", "intent"],
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema,
                 "action": {
                     "type": "string",
                     "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
@@ -709,6 +729,12 @@ impl Tool for BgTool {
                 let requested_wait = params.max_wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
                 let capped_wait = requested_wait.min(MAX_WAIT_SECONDS);
                 let wait_duration = Duration::from_secs(capped_wait);
+                // watch/delivery only updates notification settings and does not
+                // block. Only the actual wait action owns foreground metadata.
+                let wait_reason = format!(
+                    "Waiting for background task{}",
+                    if task_ids.len() > 1 { "s" } else { "" }
+                );
 
                 if task_ids.len() > 1 {
                     let mode = params.wait_mode.as_deref().unwrap_or("any");
@@ -719,6 +745,7 @@ impl Tool for BgTool {
                     };
                     let (reason, tasks) = wait_many_polling(
                         manager,
+                        &ctx.session_id,
                         &task_ids,
                         wait_duration,
                         params
@@ -754,7 +781,17 @@ impl Tool for BgTool {
                         "Missing task_id; provide a task_id or use latest=true"
                     ));
                 };
-                match manager
+                let blocking = if capped_wait > 0 {
+                    manager
+                        .status(&task_id)
+                        .await
+                        .is_some_and(|task| !is_terminal(&task.status))
+                } else {
+                    false
+                };
+                let wait_guard =
+                    blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
+                let wait_result = manager
                     .wait(
                         &task_id,
                         wait_duration,
@@ -762,8 +799,9 @@ impl Tool for BgTool {
                             .return_on_progress
                             .unwrap_or_else(default_wait_return_on_progress),
                     )
-                    .await
-                {
+                    .await;
+                drop(wait_guard);
+                match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
                         let reason = wait_result.reason;
@@ -862,6 +900,52 @@ mod tests {
     use super::*;
     use anyhow::{Result, anyhow};
 
+    #[tokio::test]
+    async fn multi_wait_metadata_tracks_only_blocking_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_multi_wait_metadata";
+        let task = manager
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let ids = vec![task.task_id.clone()];
+        let result = wait_many_polling(&manager, sid, &ids, Duration::ZERO, false, "all")
+            .await
+            .unwrap();
+        assert_eq!(result.0, "timeout");
+        assert_eq!(crate::wait_registry::current(sid), None);
+
+        let mut future = Box::pin(wait_many_polling(
+            &manager,
+            sid,
+            &ids,
+            Duration::from_secs(30),
+            false,
+            "all",
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut future => panic!("unexpected completion: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                        if crate::wait_registry::current(sid).is_some() { break; }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::wait_registry::current(sid).map(|(reason, _)| reason),
+            Some("Waiting for background tasks".into())
+        );
+        drop(future);
+        assert_eq!(crate::wait_registry::current(sid), None);
+        manager.cancel(&task.task_id).await.unwrap();
+    }
+
     #[test]
     fn status_filter_schema_any_of_branches_have_types() -> Result<()> {
         let schema = BgTool::new().parameters_schema();
@@ -873,6 +957,63 @@ mod tests {
         assert_eq!(branches[1]["type"], json!("array"));
         assert_eq!(branches[1]["items"]["type"], json!("string"));
         Ok(())
+    }
+
+    #[test]
+    fn bg_intent_is_required_and_nonblank() {
+        for action in [
+            "list",
+            "status",
+            "output",
+            "tail",
+            "cancel",
+            "cleanup",
+            "watch",
+            "delivery",
+            "subscribe",
+            "wait",
+        ] {
+            assert!(serde_json::from_value::<BgInput>(json!({"action": action})).is_err());
+            for intent in [
+                Value::Null,
+                json!(""),
+                json!(" \t\n"),
+                json!("\u{2003}"),
+                json!(7),
+                json!(false),
+                json!([]),
+                json!({}),
+            ] {
+                assert!(
+                    serde_json::from_value::<BgInput>(json!({"action": action, "intent": intent}))
+                        .is_err(),
+                    "accepted invalid intent for {action}"
+                );
+            }
+            let params: BgInput = serde_json::from_value(
+                json!({"action": action, "intent": " Inspect background work "}),
+            )
+            .unwrap();
+            assert_eq!(resolve_action(&params).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn bg_schema_requires_nonblank_intent() {
+        for schema in [
+            BgTool::new().parameters_schema(),
+            BgTool::new().to_definition().input_schema,
+        ] {
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("intent"))
+            );
+            assert_eq!(schema["properties"]["intent"]["type"], "string");
+            assert_eq!(schema["properties"]["intent"]["minLength"], 1);
+            assert_eq!(schema["properties"]["intent"]["pattern"], "\\S");
+        }
     }
 
     #[test]

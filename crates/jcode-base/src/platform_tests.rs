@@ -1,5 +1,36 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn is_process_running_excludes_unreaped_zombies() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    assert!(is_process_running(std::process::id()));
+    let mut child = Command::new("sh")
+        .args(["-c", "exit 0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn short-lived child");
+    let pid = child.id();
+    // Do not call try_wait: that would reap the zombie and miss the regression.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while is_process_running(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let reported_running = is_process_running(pid);
+    let pid_still_exists = unsafe { libc::kill(pid as i32, 0) == 0 };
+    let status = child.wait().expect("reap test child");
+    assert!(status.success());
+    assert!(
+        pid_still_exists,
+        "the assertion must exercise an unreaped PID"
+    );
+    assert!(!reported_running, "an exited zombie cannot serve requests");
+}
+
 #[test]
 fn desired_nofile_soft_limit_only_raises_when_possible() {
     assert_eq!(desired_nofile_soft_limit(1024, 524_288, 8192), Some(8192));

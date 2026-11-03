@@ -69,11 +69,7 @@ fn overview_lines(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     overview.memory_info = None;
     overview.diagrams.clear();
     let mut lines = identity_lines(data, inner.width);
-    lines.extend(render_sections(
-        &overview,
-        inner,
-        Some(InfoPageKind::TodosExpanded),
-    ));
+    lines.extend(render_sections(&overview, inner, None));
     lines
 }
 

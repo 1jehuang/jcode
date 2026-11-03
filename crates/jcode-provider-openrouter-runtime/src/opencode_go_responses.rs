@@ -30,6 +30,12 @@ pub(crate) fn model_uses_responses_api(
     profile_id: Option<&str>,
     model: &str,
 ) -> bool {
+    // Native Muse uses the same Responses wire as the official host. This is
+    // separate from the OpenCode Go allowlist and never switches other Meta
+    // profiles away from their configured Chat Completions transport.
+    if profile_id == Some("muse-subscription") {
+        return api_base.trim_end_matches('/') == "https://api.meta.ai/v1";
+    }
     let is_go_profile = profile_id.is_some_and(|id| id.eq_ignore_ascii_case("opencode-go"));
     let is_go_endpoint = api_base
         .to_ascii_lowercase()
@@ -176,7 +182,9 @@ struct ToolState {
 
 pub(crate) struct ResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+    // Retain raw bytes until a complete SSE frame arrives: transport chunks
+    // can split a UTF-8 character at any byte.
+    buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
@@ -189,7 +197,7 @@ impl ResponsesStream {
     ) -> Self {
         Self {
             inner: Box::pin(stream),
-            buffer: String::new(),
+            buffer: Vec::new(),
             pending: Vec::new(),
             tools: HashMap::new(),
             thinking: false,
@@ -292,6 +300,11 @@ impl ResponsesStream {
                     }
                 }
             }
+            "response.subscription_usage" => {
+                if let Some(detail) = subscription_usage_detail(&value) {
+                    self.pending.push(StreamEvent::StatusDetail { detail });
+                }
+            }
             "response.completed" | "response.incomplete" => {
                 if self.thinking {
                     self.pending.push(StreamEvent::ThinkingEnd);
@@ -371,15 +384,21 @@ impl ResponsesStream {
             return Some(event);
         }
         while let Some((pos, separator_len)) = [
-            self.buffer.find("\n\n").map(|pos| (pos, 2)),
-            self.buffer.find("\r\n\r\n").map(|pos| (pos, 4)),
+            self.buffer
+                .windows(2)
+                .position(|bytes| bytes == b"\n\n")
+                .map(|pos| (pos, 2)),
+            self.buffer
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .map(|pos| (pos, 4)),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|(pos, _)| *pos)
         {
-            let raw = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + separator_len..].to_string();
+            let raw = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
+            self.buffer.drain(..pos + separator_len);
             let data = raw
                 .lines()
                 .filter_map(|line| line.strip_prefix("data:"))
@@ -399,6 +418,46 @@ impl ResponsesStream {
     }
 }
 
+/// Only display measured percentages. A missing/invalid window is unknown,
+/// never zero usage, and quota percentages are not a dollar-cost estimate.
+fn subscription_usage_detail(value: &Value) -> Option<String> {
+    let usage = value
+        .get("usage")
+        .or_else(|| value.get("subscription_usage"))
+        .unwrap_or(value);
+    let mut windows = Vec::new();
+    for (key, label) in [("window", "window"), ("weekly", "weekly")] {
+        let Some(window) = usage.get(key) else {
+            continue;
+        };
+        let Some(percent) = window
+            .get("used_percent")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        else {
+            continue;
+        };
+        let label = if key == "window" {
+            window
+                .get("window_duration_mins")
+                .and_then(Value::as_u64)
+                .filter(|minutes| *minutes > 0 && *minutes <= 10_080)
+                .map(|minutes| format!("{minutes}min"))
+                .unwrap_or_else(|| label.to_string())
+        } else {
+            label.to_string()
+        };
+        let reset = window
+            .get("resets_at")
+            .and_then(Value::as_u64)
+            .filter(|timestamp| *timestamp > 0)
+            .map(|timestamp| format!(" (resets at Unix {timestamp})"))
+            .unwrap_or_default();
+        windows.push(format!("{label} {percent:.1}% used{reset}"));
+    }
+    (!windows.is_empty()).then(|| format!("Muse quota: {}", windows.join(", ")))
+}
+
 impl Stream for ResponsesStream {
     type Item = anyhow::Result<StreamEvent>;
 
@@ -412,15 +471,15 @@ impl Stream for ResponsesStream {
             }
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(error))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {error}"))));
                 }
                 Poll::Ready(None) => {
-                    if !self.buffer.trim().is_empty() {
+                    if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
-                        self.parse_event(tail.trim());
+                        self.parse_event(String::from_utf8_lossy(&tail).trim());
                         if let Some(event) = self.pending.first().cloned() {
                             self.pending.remove(0);
                             return Poll::Ready(Some(Ok(event)));
@@ -480,6 +539,58 @@ mod tests {
     }
 
     #[test]
+    fn native_muse_responses_route_is_scoped_to_its_official_endpoint() {
+        assert!(model_uses_responses_api(
+            "https://api.meta.ai/v1",
+            Some("muse-subscription"),
+            "muse-wonder-1.0"
+        ));
+        assert!(!model_uses_responses_api(
+            "https://api.meta.ai/v1",
+            Some("meta-muse"),
+            "muse-wonder-1.0"
+        ));
+        assert!(!model_uses_responses_api(
+            "https://example.com/v1",
+            Some("muse-subscription"),
+            "muse-wonder-1.0"
+        ));
+    }
+
+    #[test]
+    fn subscription_usage_requires_valid_measured_windows() {
+        let value = serde_json::json!({"usage": {
+            "window": {"used_percent": 42.5, "window_duration_mins": 300, "resets_at": 1792320000u64},
+            "weekly": {"used_percent": 12}
+        }});
+        let detail = subscription_usage_detail(&value).unwrap();
+        assert!(detail.contains("300min 42.5% used"));
+        assert!(detail.contains("weekly 12.0% used"));
+        assert!(detail.contains("1792320000"));
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"window": {"used_percent": -1}}),
+            serde_json::json!({"window": {"used_percent": 101}}),
+            serde_json::json!({"window": {"used_percent": "secret"}}),
+        ] {
+            assert!(subscription_usage_detail(&invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn subscription_usage_stream_event_reaches_status_display() {
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        stream.parse_event(
+            r#"{"type":"response.subscription_usage","usage":{"window":{"used_percent":0}}}"#,
+        );
+        assert!(
+            matches!(stream.next_event(), Some(StreamEvent::StatusDetail { detail }) if detail.contains("0.0% used"))
+        );
+        stream.parse_event(r#"{"type":"response.subscription_usage","usage":{}}"#);
+        assert!(stream.next_event().is_none());
+    }
+
+    #[test]
     fn request_uses_responses_input_and_instructions() {
         let request = build_request(
             &[Message::user("hello")],
@@ -495,6 +606,106 @@ mod tests {
         assert_eq!(request["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(request["reasoning"]["effort"], "high");
         assert_eq!(request["max_output_tokens"], 128);
+    }
+
+    #[test]
+    fn native_muse_request_retains_history_system_and_jcode_tools() {
+        let messages = [
+            Message::user("Earlier context: project is in /work/project"),
+            Message::assistant_text("I will use that workspace"),
+            Message::user("Now inspect its files"),
+        ];
+        let tool = ToolDefinition::new(
+            "read",
+            "Read a file using Jcode workspace policy",
+            serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        );
+        let request = build_request(
+            &messages,
+            &[tool],
+            "Use only Jcode-approved tools in /work/project",
+            "muse-wonder-1.0",
+            Some("high"),
+            None,
+            Value::clone,
+        );
+        assert_eq!(request["input"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            request["input"][0]["content"][0]["text"],
+            "Earlier context: project is in /work/project"
+        );
+        assert_eq!(
+            request["input"][2]["content"][0]["text"],
+            "Now inspect its files"
+        );
+        assert_eq!(request["tools"][0]["name"], "read");
+        assert_eq!(
+            request["instructions"],
+            "Use only Jcode-approved tools in /work/project"
+        );
+        assert_eq!(request["model"], "muse-wonder-1.0");
+    }
+
+    #[test]
+    fn responses_stream_preserves_unicode_at_every_byte_split() {
+        let text = "café 中文 🦀 e\u{301}";
+        let arguments = serde_json::json!({"query": text}).to_string();
+        let events = [
+            serde_json::json!({"type": "response.output_text.delta", "delta": text}),
+            serde_json::json!({"type": "response.output_item.added", "item": {
+                "type": "function_call", "id": "item_1", "call_id": "call_1", "name": "search"
+            }}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "item_id": "item_1", "delta": arguments}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "item_id": "item_1"}),
+            serde_json::json!({"type": "response.completed", "response": {}}),
+        ];
+        for newline in ["\n", "\r\n"] {
+            let payload = events
+                .iter()
+                .map(|event| format!("data: {event}{newline}{newline}"))
+                .collect::<String>()
+                .into_bytes();
+            // Include empty chunks at either end, every two-chunk split, and
+            // one-byte chunks that split all multibyte characters repeatedly.
+            let chunkings = (0..=payload.len())
+                .map(|split| {
+                    vec![
+                        Bytes::copy_from_slice(&payload[..split]),
+                        Bytes::copy_from_slice(&payload[split..]),
+                    ]
+                })
+                .chain(std::iter::once(
+                    payload
+                        .iter()
+                        .map(|byte| Bytes::copy_from_slice(&[*byte]))
+                        .collect(),
+                ));
+            for (split, chunks) in chunkings.enumerate() {
+                let actual = futures::executor::block_on(
+                    ResponsesStream::new(futures::stream::iter(chunks.into_iter().map(Ok)))
+                        .collect::<Vec<_>>(),
+                )
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()
+                .expect("response events");
+                assert_eq!(actual.len(), 5, "newline {newline:?}, split {split}");
+                assert!(
+                    matches!(&actual[0], StreamEvent::TextDelta(value) if value == text),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[0]
+                );
+                assert!(
+                    matches!(&actual[1], StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "search")
+                );
+                assert!(
+                    matches!(&actual[2], StreamEvent::ToolInputDelta(value) if value == &arguments),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[2]
+                );
+                assert!(matches!(actual[3], StreamEvent::ToolUseEnd));
+                assert!(matches!(actual[4], StreamEvent::MessageEnd { .. }));
+            }
+        }
     }
 
     #[test]

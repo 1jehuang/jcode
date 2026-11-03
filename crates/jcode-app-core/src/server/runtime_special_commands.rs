@@ -229,6 +229,18 @@ fn logout(args: &[String]) -> Result<(Value, String)> {
             crate::auth::azure::API_KEY_ENV,
             crate::auth::azure::ENV_FILE,
         ),
+        LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "muse-subscription" => {
+            let had_login = crate::auth::muse::credentials_path()
+                .map(|path| path.exists())
+                .unwrap_or(false);
+            match crate::auth::muse::clear_credentials() {
+                Ok(()) => {
+                    cleared_api_key = had_login;
+                    removed_oauth_accounts = usize::from(had_login);
+                }
+                Err(error) => errors.push(format!("Muse device-login removal failed: {error}")),
+            }
+        }
         LoginProviderTarget::OpenAiCompatible(profile) => {
             let profile = crate::provider_catalog::resolve_openai_compatible_profile(profile);
             clear_key(&profile.api_key_env, &profile.env_file);

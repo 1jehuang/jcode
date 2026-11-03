@@ -1,5 +1,44 @@
-use super::{SwarmPanelAction, swarm_panel_action_for_key};
+use super::{SwarmPanelAction, swarm_agent_shortcut_index, swarm_panel_action_for_key};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+#[test]
+fn agent_badge_chords_decode_only_alt_digits() {
+    for (index, digit) in "1234567890".chars().enumerate() {
+        assert_eq!(
+            swarm_agent_shortcut_index(KeyCode::Char(digit), KeyModifiers::ALT),
+            Some(index)
+        );
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ] {
+            assert_eq!(
+                swarm_agent_shortcut_index(KeyCode::Char(digit), modifiers),
+                None
+            );
+        }
+    }
+    assert_eq!(
+        swarm_agent_shortcut_index(KeyCode::Char('o'), KeyModifiers::ALT),
+        None
+    );
+}
+
+#[test]
+fn direct_swarm_shortcuts_work_without_panel_focus_and_empty_swarm_is_safe() {
+    let mut app = crate::tui::app::App::new_for_remote(None);
+    assert!(!app.handle_swarm_agent_shortcut(KeyCode::Char('1'), KeyModifiers::ALT));
+    assert!(!app.handle_swarm_agent_shortcut(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert!(
+        !app.handle_swarm_agent_shortcut(
+            KeyCode::Char('p'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT
+        )
+    );
+    assert!(app.handle_swarm_agent_shortcut(KeyCode::Char('p'), KeyModifiers::ALT));
+}
 
 /// Plain typing (letters, space, enter, arrows without alt) must pass
 /// through so the user can keep writing into the chat input while the

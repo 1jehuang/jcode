@@ -7,13 +7,6 @@ impl Agent {
     /// appropriate once an actual turn starts. Late MCP registration or user
     /// customization can therefore still change the foreground tool snapshot;
     /// the provider is responsible for discarding an incompatible warmup.
-    pub(crate) async fn prewarm_provider_idle(&self) {
-        let tools = self.tool_definitions_for_debug().await;
-        let split_prompt = self.build_system_prompt_split(None);
-        self.provider
-            .prewarm(&tools, &split_prompt.static_part)
-            .await;
-    }
 
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
@@ -239,6 +232,30 @@ impl Agent {
         let mut manager = compaction.write().await;
         manager.set_mode(mode);
         Ok(())
+    }
+
+    /// Resolve the current model window and live global/session ceiling.
+    pub async fn effective_context_budget(&self) -> usize {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        manager.set_budget(self.provider.context_window());
+        manager.token_budget()
+    }
+
+    /// Set this session's compaction ceiling without changing daemon config.
+    pub async fn set_context_cap(&mut self, max_context_tokens: Option<usize>) -> Result<usize> {
+        let cap = max_context_tokens.filter(|cap| *cap > 0);
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        let previous = self.session.context_cap;
+        self.session.context_cap = cap;
+        if let Err(error) = self.persist_session_now() {
+            self.session.context_cap = previous;
+            return Err(error);
+        }
+        manager.set_context_cap_override(cap);
+        manager.set_budget(self.provider.context_window());
+        Ok(manager.token_budget())
     }
 
     fn refresh_compaction_budget(&self) {
@@ -666,6 +683,12 @@ impl Agent {
         self.session.provider_key = provider_key;
     }
 
+    /// Persist the session immediately, including a fresh one with no
+    /// messages, so other processes can load it by id.
+    pub fn persist_session_now(&mut self) -> Result<()> {
+        self.session.save_prepared()
+    }
+
     /// Bookmark or unbookmark the session, returning the effective label.
     pub fn set_session_saved(
         &mut self,
@@ -718,6 +741,15 @@ impl Agent {
     pub fn set_working_dir(&mut self, dir: &str) {
         if self.session.working_dir.as_deref() == Some(dir) {
             return;
+        }
+        if self.session.original_working_dir.is_none()
+            && self
+                .session
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User)
+        {
+            self.session.original_working_dir = self.session.working_dir.clone();
         }
         self.session.working_dir = Some(dir.to_string());
         self.refresh_agents_md_snapshot();

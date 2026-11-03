@@ -7,6 +7,7 @@ use crate::tui::ui::{
     truncate_line_for_copy_badge,
 };
 
+include!("basic/reload_render.rs");
 include!("basic/frame_flicker.rs");
 include!("basic/interaction_links.rs");
 include!("basic/body_cache.rs");

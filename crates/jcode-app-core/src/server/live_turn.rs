@@ -21,10 +21,10 @@ mod headless_live_turn_tests;
 #[path = "headless_durable_recovery_tests.rs"]
 mod headless_durable_recovery_tests;
 
-use super::client_lifecycle::process_locked_message_streaming_mpsc;
+use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::usage_limit_resume::ResumeOutcome;
 use super::{
-    SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
+    SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
 use crate::agent::Agent;
@@ -33,9 +33,9 @@ use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
@@ -164,7 +164,7 @@ pub(super) async fn spawn_tracked_live_turn(
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
-) {
+) -> bool {
     // Direct callers can explicitly replace a waiting turn. Automatic wake
     // callers have already refused sessions whose provider wait still owns it.
     super::usage_limit_resume::cancel_pending_resume(session_id);
@@ -179,7 +179,7 @@ pub(super) async fn spawn_tracked_live_turn(
         swarm,
         publication,
     )
-    .await;
+    .await
 }
 
 #[expect(
@@ -195,7 +195,22 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
     publication: Arc<super::swarm::TurnPublication>,
-) {
+) -> bool {
+    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
+        return false;
+    };
+    let Ok(turn_lease) = agent.claim_server_turn() else {
+        return false;
+    };
+    if swarm
+        .members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|member| member.report_back_to_session_id.is_some())
+    {
+        agent.set_inline_output_tap(true);
+    }
     let mut accepted = false;
     publication
         .publish_start(async {
@@ -224,13 +239,20 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         })
         .await;
     if !accepted {
-        return;
+        return false;
     }
 
-    let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
+    let (fallback, _) = mpsc::unbounded_channel();
+    let events = super::state::TurnEventChannel::new(
+        session_id.to_string(),
+        Arc::clone(&swarm.members),
+        fallback,
+        &turn_lease,
+    );
+    let event_tx = events.sender();
     let session_id = session_id.to_string();
     let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let resume_reminder = system_reminder.clone();
         let pending_queue = agent.soft_interrupt_queue();
@@ -240,7 +262,8 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
                 .run(signal, async {
                     if let Some(display_role) = display_role {
                         agent
-                            .run_once_streaming_mpsc_with_display_role(
+                            .run_reserved_streaming_mpsc(
+                                &turn_lease,
                                 &message,
                                 vec![],
                                 system_reminder,
@@ -249,8 +272,9 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
                             )
                             .await
                     } else {
-                        process_locked_message_streaming_mpsc(
+                        process_reserved_locked_message_with_server_failover(
                             &mut agent,
+                            &turn_lease,
                             &message,
                             vec![],
                             system_reminder,
@@ -282,6 +306,7 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
                     &swarm,
                     &|plan| swarm.on_wait(plan),
                     Some(&publication),
+                    Some(&turn_lease),
                 )
                 .await
                 {
@@ -326,7 +351,10 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         )
         .await;
         drop(reservation);
+        events.finish().await;
+        drop(turn_lease);
     });
+    true
 }
 
 #[allow(clippy::too_many_arguments)]

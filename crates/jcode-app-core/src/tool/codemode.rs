@@ -26,25 +26,10 @@ const EXCLUDED: &[&str] = &["codemode", "batch"];
 /// Maximum characters of the final report returned to the model.
 const MAX_REPORT_CHARS: usize = 60_000;
 
-const DESCRIPTION: &str = r#"Run a JavaScript program in a sandbox that can call any of your other tools, including MCP tools. Use it to chain, loop over, filter, or parallelize many tool calls in one step, so intermediate results never enter the conversation. Only what you `return` (plus console output) comes back.
-
-The code is the body of an async function: use `await` and `return`.
-- `await tools.<name>(args)` calls a tool with the same arguments it normally takes. JSON output is parsed into objects, other output is a string. Failures throw an Error.
-- `await callTool(name, args)` does the same for names that are not valid identifiers.
-- `listTools(filter?)` returns `[{name, description}]`. `describeTool(name)` returns the full description and input_schema. Call these first if unsure of a tool's arguments.
-- `store(key, value)` / `load(key)` / `storedKeys()` keep JSON values across codemode calls in this session. Use them to avoid refetching.
-- `console.log(...)` output is returned along with the result.
-- Run independent calls in parallel with `Promise.all`.
-No filesystem, network, timers, or modules exist except through tools. Limits: 64 MB heap, 300 s, 2000 tool calls per run.
-
-Example:
-const files = (await tools.bash({ command: "git ls-files '*.rs'" })).trim().split("\n");
-const hits = await Promise.all(files.slice(0, 50).map(async (f) => {
-  const text = await tools.read({ file_path: f, limit: 400 });
-  return { f, todos: (text.match(/TODO/g) || []).length };
-}));
-store("todo_counts", hits);
-return hits.filter((h) => h.todos > 0).sort((a, b) => b.todos - a.todos).slice(0, 10);"#;
+const DESCRIPTION: &str = "Run sandboxed JavaScript to chain, filter, or parallelize tool calls, including MCP. Supply an async function body using await/return; only returned values and console.log reach the conversation.\n\
+await tools.<name>(args) or callTool(name, args) uses normal tool arguments; JSON output becomes objects, other output stays text, and failures throw. Use Promise.all for independent calls.\n\
+listTools(filter?) lists names/descriptions; describeTool(name) gives the schema. Inspect these when unsure. store(key, value), load(key), storedKeys() persist JSON within this session.\n\
+No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls per run.";
 
 pub struct CodemodeTool {
     registry: WeakRegistry,

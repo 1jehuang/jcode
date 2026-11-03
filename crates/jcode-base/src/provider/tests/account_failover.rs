@@ -291,7 +291,7 @@ fn account_session(
             as Arc<dyn Provider>
     });
     MultiProvider {
-        anthropic: RwLock::new(Some(anthropic as Arc<dyn Provider>)),
+        session_id: RwLock::new(None),        anthropic: RwLock::new(Some(anthropic as Arc<dyn Provider>)),
         openai: RwLock::new(openai),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(None),

@@ -40,7 +40,13 @@ pub(super) async fn recover(server: &Server) {
     let mut stats = HeadlessRecoveryStats::default();
     for session_id in candidates {
         stats.candidates += 1;
-        if server.sessions.read().await.contains_key(&session_id) {
+        let slot = server.sessions.reserve(&session_id).await;
+        if slot.existing().await.is_some() {
+            continue;
+        }
+        if let Err(error) = slot.ensure_vacant() {
+            recovery_failed(server, &session_id, &error).await;
+            stats.failed_to_load += 1;
             continue;
         }
         let pending_wait = match usage_limit_resume::pending_state(&session_id) {
@@ -113,17 +119,31 @@ pub(super) async fn recover(server: &Server) {
             usage_limit_resume::cancel_pending_resume(&session_id);
             continue;
         }
-        let mut sessions = server.sessions.write().await;
-        if sessions.contains_key(&session_id) {
+        // The mutation lease excludes turns while publication briefly releases Agent.
+        let mutation = match held.claim_runtime_mutation() {
+            Ok(lease) => lease,
+            Err(error) => {
+                drop(members);
+                recovery_failed(server, &session_id, &error).await;
+                stats.failed_to_load += 1;
+                continue;
+            }
+        };
+        drop(held);
+        if let Err(error) = slot.publish(Arc::clone(&agent)).await {
+            drop(members);
+            recovery_failed(server, &session_id, &error).await;
+            stats.failed_to_load += 1;
             continue;
         }
+        let held = Arc::clone(&agent).lock_owned().await;
+        drop(mutation);
         // Recovered records intentionally have closed senders. Install a live
         // headless drain, just as creation of a fresh headless worker does.
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         member.event_tx = event_tx;
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        sessions.insert(session_id.clone(), Arc::clone(&agent));
-        drop(sessions);
+        drop(slot);
         drop(members);
         register_session_interrupt_queue(
             &server.soft_interrupt_queues,
@@ -286,8 +306,24 @@ async fn spawn_wait_restore(
 ) {
     let agent = tokio::sync::OwnedMutexGuard::mutex(&held).clone();
     let session_id = session_id.to_string();
-    let event_tx = session_event_fanout_sender(session_id.clone(), Arc::clone(&swarm.members));
-    tokio::spawn(async move {
+    let turn_lease = match held.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot restore provider wait for {session_id}: {error}"
+            ));
+            return;
+        }
+    };
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = super::state::TurnEventChannel::new(
+        session_id.clone(),
+        Arc::clone(&swarm.members),
+        fallback,
+        &turn_lease,
+    );
+    let event_tx = events.sender();
+    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let assignment = swarm.recovered_assignment.clone();
         let on_wait = move |plan: &usage_limit_resume::UsageLimitResumePlan| -> futures::future::BoxFuture<'static, ()> {
             let assignment = assignment.clone();
@@ -302,6 +338,7 @@ async fn spawn_wait_restore(
             &swarm,
             &on_wait,
             Some(&publication),
+            Some(&turn_lease),
         )
         .await;
         let (result, report, reservation) = match outcome {
@@ -328,5 +365,7 @@ async fn spawn_wait_restore(
         )
         .await;
         drop(reservation);
+        events.finish().await;
+        drop(turn_lease);
     });
 }

@@ -1,5 +1,13 @@
 use super::*;
 
+/// Shared fresh-session route choice; see `select_fresh_session_pool_route`.
+#[derive(Clone)]
+struct FreshRouteMemo {
+    key: (String, u64, u64, crate::auth::account_pool::AccountPool),
+    at: std::time::Instant,
+    spec: Option<String>,
+}
+
 impl MultiProvider {
     pub(super) fn spawn_post_auth_model_refresh(
         &self,
@@ -92,6 +100,7 @@ impl MultiProvider {
             }
         }
 
+        let creds_start = std::time::Instant::now();
         let has_claude_creds =
             auth::claude::load_credentials().is_ok() || anthropic::has_anthropic_api_key();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
@@ -107,6 +116,8 @@ impl MultiProvider {
         let has_claude_code_binary = auth::claude_code::binary_available();
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
         let has_openrouter_creds = openrouter::has_credentials();
+        let creds_ms = creds_start.elapsed().as_millis();
+        let runtimes_start = std::time::Instant::now();
 
         if std::env::var_os("JCODE_USE_CLAUDE_CLI").is_some() {
             crate::logging::warn(
@@ -310,6 +321,7 @@ impl MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(None),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
@@ -322,6 +334,7 @@ impl MultiProvider {
         // An explicit CLI/environment provider selection owns startup routing.
         // Applying the configured default model here can reactivate its configured
         // provider/profile before the caller pins a dual-auth credential mode.
+        let mut preserve_config_default = false;
         if result.initial_provider.is_none()
             && let Some(model) = provider_state.default_model()
         {
@@ -333,12 +346,26 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
+                preserve_config_default = !result.config_default_allows_pool_selection(
+                    model,
+                    provider_state.default_provider_key(),
+                );
                 crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
 
         result.spawn_anthropic_catalog_refresh_if_needed();
+        crate::auth::oauth::prefetch_missing_claude_subscription_metadata();
+        let runtimes_ms = runtimes_start.elapsed().as_millis();
+        let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
+        if !preserve_config_default {
+            result.select_fresh_session_pool_route();
+        }
+        let route_ms = route_start.elapsed().as_millis();
+        crate::logging::info(&format!(
+            "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
+        ));
         crate::logging::info(&format!(
             "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
             result
@@ -384,6 +411,218 @@ impl MultiProvider {
             provider_init_start.elapsed().as_millis()
         ));
         result
+    }
+
+    /// Classify only a successfully applied default. Explicit model specs take
+    /// precedence over provider hints, just as in `set_config_default_model`.
+    /// Named profiles and API keys are deliberate routes, not pool identities.
+    fn config_default_allows_pool_selection(
+        &self,
+        model: &str,
+        default_provider: Option<&str>,
+    ) -> bool {
+        let model = model.trim();
+        if Self::named_provider_profile_model_prefix(model).is_some() {
+            return false;
+        }
+        let explicit = explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
+            || Self::openai_compatible_model_prefix(model).is_some();
+        // Never resolve the active provider name as a config hint: an unused
+        // [providers.openai] must not shadow a native bare-model selection.
+        if !explicit
+            && let Some(selection::ConfigProviderSelection::NamedProfile(..)) = default_provider
+                .and_then(|hint| {
+                    Self::resolve_config_provider_selection(hint, crate::config::config())
+                })
+        {
+            return false;
+        }
+
+        let pool = crate::auth::account_pool::AccountPool::load();
+        if self.active_provider() == ActiveProvider::OpenRouter {
+            // A catalog profile can represent a saved login explicitly enrolled
+            // in the pool. User-defined profiles must never inherit membership
+            // merely because they share the OpenRouter execution slot.
+            return ProviderRegistry::new(self)
+                .active_compatible_profile_id()
+                .and_then(|id| crate::provider_catalog::openai_compatible_profile_by_id(&id))
+                .is_some_and(|profile| pool.is_member(profile.id, false));
+        }
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return false;
+        }
+        let (provider, active_label) = match self.active_provider() {
+            ActiveProvider::OpenAI => ("openai", auth::codex::active_account_label()),
+            ActiveProvider::Claude => ("claude", auth::claude::active_account_label()),
+            _ => return false,
+        };
+        let label = self.oauth_account_label().or(active_label);
+        pool.is_member(
+            &crate::auth::account_pool::account_key(provider, label.as_deref()),
+            true,
+        )
+    }
+
+    /// Fresh sessions choose the first ready account in priority order. A saved
+    /// default model remains a preference within the selected account, not a
+    /// sticky billing identity. An explicit initial provider owns routing instead.
+    /// This is deliberately a local
+    /// model/account binding: never promote the fallback or change active logins.
+    fn select_fresh_session_pool_route(&self) {
+        if self.initial_provider.is_some() {
+            return;
+        }
+        // A reconnect burst forks one provider per client. Each choice reads every
+        // saved credential and pool approval across the whole route catalog, so 40
+        // parallel forks took seconds. Identical forks pick the same route, so share
+        // one recent decision. The key covers the inputs that matter (pre-selection
+        // provider state, auth and catalog generations). A short TTL bounds how stale
+        // quota and cooldown state can get.
+        const FRESH_ROUTE_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        static FRESH_ROUTE_MEMO: Mutex<Option<FreshRouteMemo>> = Mutex::new(None);
+        static FRESH_ROUTE_BUILD_LOCK: Mutex<()> = Mutex::new(());
+        let key = (
+            self.routes_memo_key_unscoped(),
+            pricing::auth_pricing_generation(),
+            catalog_generation(),
+            crate::auth::account_pool::AccountPool::load(),
+        );
+        let cached = || {
+            FRESH_ROUTE_MEMO
+                .lock()
+                .ok()
+                .and_then(|memo| memo.clone())
+                .filter(|memo| memo.key == key && memo.at.elapsed() < FRESH_ROUTE_MEMO_TTL)
+        };
+        let apply = |memo: FreshRouteMemo| match memo.spec {
+            None => true,
+            Some(spec) => self.set_model(&spec).is_ok(),
+        };
+        if let Some(memo) = cached()
+            && apply(memo)
+        {
+            return;
+        }
+        let _guard = FRESH_ROUTE_BUILD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(memo) = cached()
+            && apply(memo)
+        {
+            return;
+        }
+        let spec = self.compute_fresh_session_pool_route(key.3.clone());
+        if let Ok(mut memo) = FRESH_ROUTE_MEMO.lock() {
+            *memo = Some(FreshRouteMemo {
+                key,
+                at: std::time::Instant::now(),
+                spec,
+            });
+        }
+    }
+
+    /// Bind the first ready pool route and return its spec (None if nothing bound).
+    fn compute_fresh_session_pool_route(
+        &self,
+        pool: crate::auth::account_pool::AccountPool,
+    ) -> Option<String> {
+        let routes: Vec<_> = self
+            .model_routes()
+            .into_iter()
+            .filter_map(|route| {
+                let spec = jcode_provider_core::RouteSelection::from_model_route(&route)
+                    .routed_model_spec();
+                let approved = route.available && Self::is_failover_route_pool_approved(&spec);
+                let (method, _) = spec.split_once(':')?;
+                let mut exhausted = false;
+                let key = if let Some((method, label)) = method.split_once('@') {
+                    let provider = match method {
+                        "claude-oauth" => "claude",
+                        "openai-oauth" => "openai",
+                        _ => return None,
+                    };
+                    let kind = if provider == "claude" {
+                        crate::usage::MultiAccountProviderKind::Anthropic
+                    } else {
+                        crate::usage::MultiAccountProviderKind::OpenAI
+                    };
+                    exhausted = models::provider_unavailability_detail_for_account_label(
+                        provider,
+                        Some(label),
+                    )
+                    .is_some()
+                        || crate::usage::account_known_exhausted(kind, label);
+                    if !pool.is_member(
+                        &crate::auth::account_pool::account_key(provider, Some(label)),
+                        true,
+                    ) || !models::is_agent_model_for_failover(&route.model, provider)
+                    {
+                        return None;
+                    }
+                    crate::auth::account_pool::account_key(provider, Some(label))
+                } else {
+                    match method {
+                        "claude-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                        "openai-api-key" => "openai-api".to_owned(),
+                        other => other.to_owned(),
+                    }
+                };
+                if !approved && !exhausted {
+                    return None;
+                }
+                Some((key, route.model, spec, approved && !exhausted))
+            })
+            .collect();
+        let mut keys = Vec::new();
+        for (key, _, _, _) in &routes {
+            if !keys.iter().any(|(existing, _)| existing == key) {
+                keys.push((key.clone(), true));
+            }
+        }
+        let cfg = crate::config::config();
+        let configured_model = cfg.provider.default_model.as_deref();
+        let configured_model = configured_model.map(|model| {
+            explicit_model_provider_prefix(model)
+                .map(|(_, _, bare)| bare)
+                .or_else(|| {
+                    model.split_once(':').and_then(|(method, bare)| {
+                        jcode_provider_core::oauth_account_label(method).map(|_| bare)
+                    })
+                })
+                .unwrap_or(model)
+        });
+        // Only when every ready route fails do we bind a known exhausted pool
+        // login. The request router can then explain the quota failure instead
+        // of silently falling through to an unrelated saved manual API key.
+        for ready in [true, false] {
+            for key in pool.partition(&keys).0 {
+                // Exclusion is authoritative even if a malformed saved pool also
+                // lists the same billing identity among its members.
+                if pool.excluded.iter().any(|excluded| excluded == key) {
+                    continue;
+                }
+                let mut candidates: Vec<_> = routes
+                    .iter()
+                    .filter(|route| route.0 == key && route.3 == ready)
+                    .collect();
+                candidates.sort_by_key(|(_, model, _, _)| {
+                    (
+                        configured_model != Some(model.as_str()),
+                        jcode_provider_core::model_generation_rank(model),
+                    )
+                });
+                for (_, _, spec, _) in candidates {
+                    if self.set_model(spec).is_ok() {
+                        return Some(spec.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub(super) fn spawn_openai_catalog_refresh_if_needed(&self) {

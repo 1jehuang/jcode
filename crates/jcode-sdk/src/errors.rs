@@ -39,6 +39,14 @@ pub enum ErrorKind {
     UnsupportedTransport,
     /// A global event consumer fell behind its bounded queue.
     EventBufferOverflow,
+    /// The caller cancelled a long-running operation (sign-in, host wake).
+    Cancelled,
+    /// Jcode Cloud rejected the account credentials. Sign in again.
+    CloudAuth,
+    /// The account has no Jcode Cloud entitlement or allowance left.
+    CloudNotEntitled,
+    /// The server's SSH host key did not match any pinned key.
+    HostKeyMismatch,
 }
 
 impl ErrorKind {
@@ -60,6 +68,10 @@ impl ErrorKind {
             Self::InvalidOption => "invalid_option",
             Self::UnsupportedTransport => "unsupported_transport",
             Self::EventBufferOverflow => "event_buffer_overflow",
+            Self::Cancelled => "cancelled",
+            Self::CloudAuth => "cloud_auth",
+            Self::CloudNotEntitled => "cloud_not_entitled",
+            Self::HostKeyMismatch => "host_key_mismatch",
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",

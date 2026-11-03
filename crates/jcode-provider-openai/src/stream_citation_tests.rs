@@ -32,6 +32,45 @@ fn http_events(frames: Vec<Value>) -> Vec<StreamEvent> {
 }
 
 #[test]
+fn hosted_search_starts_before_completion_and_only_replays_final_item() {
+    use jcode_message_types::provider_native::{
+        ProviderNativeItems, ProviderNativeToolEvent, ProviderNativeTracker,
+    };
+
+    let start = json!({"type":"web_search_call", "id":"ws_timed", "status":"in_progress"});
+    let done = json!({"type":"web_search_call", "id":"ws_timed", "status":"completed",
+        "action":{"type":"search", "query":"jcode"}});
+    let events = http_events(vec![
+        json!({"type":"response.output_item.added", "item":start}),
+        json!({"type":"response.output_item.done", "item":done}),
+    ]);
+    assert_eq!(events.len(), 2);
+    let mut tracker = ProviderNativeTracker::default();
+    let mut items = ProviderNativeItems::default();
+    for (index, event) in events.into_iter().enumerate() {
+        let StreamEvent::ProviderNative { provider, item } = event else {
+            panic!("expected native search event");
+        };
+        let lifecycle = tracker.observe(&provider, &item).unwrap();
+        if index == 0 {
+            assert!(matches!(lifecycle, ProviderNativeToolEvent::Started { .. }));
+            assert!(tracker.is_started("ws_timed"));
+        } else {
+            assert!(
+                matches!(lifecycle, ProviderNativeToolEvent::Completed { input, .. }
+                if input["query"] == "jcode")
+            );
+            assert!(!tracker.is_started("ws_timed"));
+        }
+        items.push(0, provider, item);
+        if index == 0 {
+            assert!(items.is_empty(), "transient start must not enter replay");
+        }
+    }
+    assert!(!items.is_empty());
+}
+
+#[test]
 fn streamed_citation_is_corrected_from_completed_item_before_text_done() {
     let prefix = "许可 🦀. ";
     let raw = format!("{prefix}{MARKER}");

@@ -1,8 +1,106 @@
+#[test]
+fn kagi_engine_order_is_explicit_and_deduplicated() {
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Kagi, &[]),
+        vec![WebSearchEngine::Kagi]
+    );
+    assert_eq!(
+        local_engine_order(
+            WebSearchEngine::Kagi,
+            &[WebSearchEngine::Bing, WebSearchEngine::Kagi]
+        ),
+        vec![WebSearchEngine::Kagi, WebSearchEngine::Bing]
+    );
+    assert_eq!(
+        local_engine_order(WebSearchEngine::Duckduckgo, &[WebSearchEngine::Bing]),
+        vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+    );
+}
+
+#[test]
+fn websearch_schema_exposes_only_search_controls() {
+    let schema = WebSearchTool::new().parameters_schema();
+    let properties = schema["properties"].as_object().unwrap();
+    let mut keys: Vec<_> = properties.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["intent", "num_results", "query"]);
+    assert_eq!(schema["required"], json!(["query"]));
+}
+
+#[test]
+fn websearch_ignores_legacy_provider_overrides() {
+    let input: WebSearchInput = serde_json::from_value(json!({
+        "query": "rust",
+        "num_results": 3,
+        "engine": "not-an-engine",
+        "bing_market": "en-US"
+    }))
+    .unwrap();
+    assert_eq!(input.query, "rust");
+    assert_eq!(input.num_results, Some(3));
+}
+
 fn custom_config() -> CustomWebSearchConfig {
     CustomWebSearchConfig {
         endpoint: "https://example.test/search?keep=yes&q=old".into(),
         count_param: Some("count".into()),
         ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn custom_search_uses_each_sessions_proxy_client() {
+    use base64::Engine;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for user in ["search-session-a", "search-session-b"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode(format!("{user}:secret"));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            loop {
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).await.unwrap();
+                assert!(count > 0);
+                received.extend_from_slice(&bytes[..count]);
+                if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(received).unwrap();
+            assert!(request.starts_with("GET http://search.example.test/search?"));
+            assert!(request.contains("q=proxy+query"));
+            assert!(
+                request
+                    .to_lowercase()
+                    .contains(&format!("proxy-authorization: Basic {expected}").to_lowercase())
+            );
+            let body = r#"{"results":[{"title":"Session routed","url":"https://result.test","snippet":"ok"}]}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        crate::session_env::set_session_env(
+            user,
+            std::collections::HashMap::from([
+                (
+                    "HTTP_PROXY".into(),
+                    format!("http://{user}:secret@{address}"),
+                ),
+                ("NO_PROXY".into(), String::new()),
+            ]),
+        )
+        .unwrap();
+        let client =
+            super::super::session_http::client(user, super::super::session_http::Profile::Custom)
+                .unwrap();
+        let mut config = custom_config();
+        config.endpoint = "http://search.example.test/search".into();
+        let results = search_custom_with_client(&client, &config, "proxy query", 1)
+            .await
+            .unwrap();
+        assert_eq!(results[0].title, "Session routed");
+        server.await.unwrap();
+        crate::session_env::remove_session_env(user);
     }
 }
 

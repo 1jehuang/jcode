@@ -20,6 +20,7 @@ pub fn status_accent(status: &str) -> Color {
         "ready" => rgb(120, 180, 120),
         "running" | "streaming" => rgb(255, 200, 100),
         "thinking" => rgb(140, 180, 255),
+        "waiting" => rgb(255, 170, 80),
         "blocked" | "waiting_network" => rgb(255, 170, 80),
         "failed" | "crashed" => rgb(255, 100, 100),
         "completed" | "done" => rgb(100, 200, 100),
@@ -75,6 +76,7 @@ pub fn status_glyph(status: &str, spinner_frame: usize) -> &'static str {
         }
         "completed" | "done" => "✓",
         "ready" => "•",
+        "waiting" => "◷",
         "blocked" | "waiting_network" => "⏸",
         "failed" | "crashed" => "✗",
         "stopped" => "◼",
@@ -92,6 +94,7 @@ fn card_status_glyph(status: &str) -> &'static str {
         "running" | "streaming" | "thinking" => "●",
         "completed" | "done" => "✓",
         "ready" => "•",
+        "waiting" => "◷",
         "blocked" | "waiting_network" => "⏸",
         "failed" | "crashed" => "✗",
         "stopped" => "◼",
@@ -105,6 +108,7 @@ fn card_status_label(status: &str) -> &'static str {
         "running" | "streaming" | "thinking" => "Working",
         "completed" | "done" => "Completed",
         "ready" | "spawned" => "Ready",
+        "waiting" => "Waiting",
         "blocked" | "waiting_network" => "Blocked",
         "failed" | "crashed" => "Failed",
         "stopped" => "Stopped",
@@ -136,6 +140,61 @@ fn format_model(model: &str) -> String {
     }
 }
 
+/// Minimum task-text width kept on a vertical strip row before the per-worker
+/// meta tail starts dropping pieces.
+const STRIP_META_MIN_BODY: usize = 24;
+
+/// Right-side metadata for one vertical-strip row, most important first:
+/// elapsed time, context usage, model + effort, output tokens, provider route.
+fn strip_meta_parts(m: &GalleryMember) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(elapsed) = m.elapsed_secs {
+        parts.push(format_elapsed(elapsed));
+    }
+    match (m.context_tokens, m.context_limit) {
+        (Some(used), Some(limit)) if limit > 0 => parts.push(format!(
+            "{}/{} {}%",
+            format_tokens(used),
+            format_tokens(limit),
+            (used.saturating_mul(100) / limit).min(100)
+        )),
+        (Some(used), _) => parts.push(format!("{} ctx", format_tokens(used))),
+        _ => {}
+    }
+    let model = m
+        .model
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(format_model);
+    let effort = m.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match (model, effort) {
+        (Some(model), Some(effort)) => parts.push(format!("{model} {effort}")),
+        (Some(model), None) => parts.push(model),
+        (None, Some(effort)) => parts.push(effort.to_string()),
+        (None, None) => {}
+    }
+    if let Some(output) = m.output_tokens {
+        parts.push(format!("↓{}", format_tokens(output)));
+    }
+    if let Some(route) = format_route(m.provider.as_deref(), m.auth_method.as_deref()) {
+        parts.push(route);
+    }
+    parts
+}
+
+/// Compact token count: 523, 12.4k, 355k, 1.0M.
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 100_000 {
+        format!("{}k", tokens / 1_000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// Combine provider display name and credential route into one metadata piece,
 /// e.g. "OpenAI oauth". Returns `None` when both are blank.
 fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
@@ -164,6 +223,7 @@ fn role_rank(role: Option<&str>) -> u8 {
 fn status_rank(status: &str) -> u8 {
     match status {
         s if is_active_status(s) => 0,
+        "waiting" => 0,
         "blocked" | "waiting_network" | "failed" | "crashed" => 1,
         "completed" | "done" | "stopped" => 3,
         // ready/spawned/unknown: idle but not finished.
@@ -230,6 +290,12 @@ pub struct GalleryMember {
     pub effort: Option<String>,
     /// Seconds since this member was spawned.
     pub elapsed_secs: Option<u64>,
+    /// Tokens currently in the member's context window.
+    pub context_tokens: Option<u64>,
+    /// Context window size for the member's model.
+    pub context_limit: Option<u64>,
+    /// Cumulative output tokens produced by the member.
+    pub output_tokens: Option<u64>,
 }
 
 /// One compact todo entry shown in the focused swarm detail view.
@@ -976,6 +1042,24 @@ pub fn render_swarm_strip_vertical(
             .saturating_sub(lead_w)
             .saturating_sub(if row_tail_w > 0 { row_tail_w + gap } else { 0 });
 
+        // Per-worker status tail, mirroring the main status line: route,
+        // model + effort, elapsed. Pieces drop (least important first) so the
+        // task text keeps at least STRIP_META_MIN_BODY cells.
+        let mut meta_parts = strip_meta_parts(m);
+        let mut meta = meta_parts.join(" · ");
+        while !meta_parts.is_empty()
+            && body_budget.saturating_sub(disp_w(&meta) + gap) < STRIP_META_MIN_BODY
+        {
+            meta_parts.pop();
+            meta = meta_parts.join(" · ");
+        }
+        let meta_w = if meta.is_empty() {
+            0
+        } else {
+            disp_w(&meta) + gap
+        };
+        let body_budget = body_budget.saturating_sub(meta_w);
+
         // Expanded workers use the full-width information card header approved
         // for the inline swarm view. Compact rows retain the older chip layout.
         if focused && is_sel && !m.todo_items.is_empty() {
@@ -1044,7 +1128,20 @@ pub fn render_swarm_strip_vertical(
         let mut used = head_w;
         spans.push(Span::styled(head, style));
 
-        if let Some(task) = m.task.as_deref().filter(|t| !t.trim().is_empty()) {
+        // What the agent is doing right now beats what it was spawned for:
+        // working agents show their active todo step, falling back to the
+        // spawn-derived task label when they keep no todo list (or are done).
+        let activity = if is_active_status(&m.status) {
+            m.todo_items
+                .iter()
+                .find(|t| t.status == "in_progress")
+                .map(|t| t.content.as_str())
+                .filter(|t| !t.trim().is_empty())
+        } else {
+            None
+        }
+        .or(m.task.as_deref());
+        if let Some(task) = activity.filter(|t| !t.trim().is_empty()) {
             let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
             if avail >= CHIP_TASK_MIN_W {
                 let label = truncate_label(task, avail);
@@ -1065,10 +1162,23 @@ pub fn render_swarm_strip_vertical(
             ));
         }
 
-        // ---- Right-align the first-row tail ----
+        // ---- Right-align the per-worker meta (and first-row tail) ----
+        if !meta.is_empty() {
+            let tail_w = if row_tail_w > 0 { row_tail_w + gap } else { 0 };
+            let consumed = lead_w + used;
+            if consumed + meta_w + tail_w <= width {
+                let pad = width - consumed - tail_w - disp_w(&meta);
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(
+                    meta.clone(),
+                    Style::default().fg(rgb(120, 120, 135)),
+                ));
+                used += pad + disp_w(&meta);
+            }
+        }
         if row_tail_w > 0 {
             let consumed = lead_w + used;
-            if consumed + gap + row_tail_w <= width {
+            if consumed + row_tail_w <= width {
                 let pad = width - consumed - row_tail_w;
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(
@@ -1907,45 +2017,9 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
 
 /// Truncate `s` to at most `max` display columns (wide glyphs count as 2),
 /// appending an ellipsis when truncated.
-fn truncate_label(s: &str, max: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if disp_w(s) <= max {
-        return s.to_string();
-    }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let target = max - 1;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw > target {
-            break;
-        }
-        used += cw;
-        out.push(ch);
-    }
-    out.push('…');
-    out
-}
-
-/// Terminal display width of a string (wide glyphs like 🐝 count as 2).
-fn disp_w(s: &str) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    s.width()
-}
-
-/// Number of decimal digits in `n` (for budgeting "+N" markers).
-fn count_digits(n: usize) -> usize {
-    let mut n = n.max(1);
-    let mut d = 0;
-    while n > 0 {
-        d += 1;
-        n /= 10;
-    }
-    d
-}
+#[path = "swarm_gallery_labels.rs"]
+mod labels;
+pub(super) use labels::{count_digits, disp_w, truncate_label};
 
 #[cfg(test)]
 #[path = "swarm_gallery_tests.rs"]

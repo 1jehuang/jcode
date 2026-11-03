@@ -6,8 +6,12 @@ pub use claude_code::{
     ClaudeCodeConfig, ClaudeCodeInstanceConfig, is_valid_claude_code_instance_id,
 };
 mod display;
+mod update_policy;
+pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
 mod menubar;
 mod power;
+mod session;
+pub use session::{HibernationMode, SessionConfig};
 pub use {
     display::{DisplayConfig, InfoWidgetLayout},
     menubar::MenubarConfig,
@@ -288,82 +292,6 @@ impl ReasoningDisplayMode {
     }
 }
 
-/// Update channel: how aggressively to receive updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateChannel {
-    /// Only update from tagged GitHub Releases (default).
-    #[default]
-    Stable,
-    /// Update from latest commit on main branch (bleeding edge).
-    Main,
-}
-
-impl UpdateChannel {
-    /// Parse a channel name, returning `None` for unknown values.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "stable" | "release" => Some(Self::Stable),
-            "main" | "nightly" | "edge" => Some(Self::Main),
-            _ => None,
-        }
-    }
-}
-
-/// Config deserialization is deliberately lenient: an unknown or removed
-/// channel name (e.g. a stale `update_channel = "manual"` left in
-/// config.toml) falls back to the default channel instead of failing the
-/// entire config parse. A strict enum here once made the freshly exec'd
-/// server die during the reload handoff, leaving the handoff marker stuck
-/// in `starting` and clients re-requesting the reload forever (issue #349).
-impl<'de> Deserialize<'de> for UpdateChannel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::parse(&value).unwrap_or_default())
-    }
-}
-
-impl std::fmt::Display for UpdateChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stable => write!(f, "stable"),
-            Self::Main => write!(f, "main"),
-        }
-    }
-}
-
-/// Cross-provider failover behavior when the same input would be resent elsewhere.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CrossProviderFailoverMode {
-    /// Show a 3-second cancelable countdown, then resend on another provider.
-    #[default]
-    Countdown,
-    /// Do not resend the prompt to another provider automatically.
-    #[serde(alias = "off", alias = "false", alias = "disabled", alias = "none")]
-    Manual,
-}
-
-impl CrossProviderFailoverMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Countdown => "countdown",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "manual" | "off" | "false" | "disabled" | "none" => Some(Self::Manual),
-            "countdown" | "auto" | "automatic" => Some(Self::Countdown),
-            _ => None,
-        }
-    }
-}
-
 /// Compaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -371,14 +299,26 @@ pub struct CompactionConfig {
     /// Compaction mode: reactive (default), proactive, or semantic
     pub mode: CompactionMode,
 
+    /// [reactive] Context fraction that starts background compaction.
+    pub reactive_threshold: f32,
+
+    /// [reactive] Alternative token threshold, whichever is reached first.
+    /// Zero disables the token alternative.
+    pub reactive_threshold_tokens: usize,
+
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
 
     /// [proactive] EWMA alpha for token growth smoothing (0.0-1.0, higher = more recency bias)
     pub ewma_alpha: f32,
 
-    /// [proactive/semantic] Minimum context fill level before any proactive check fires (0.0-1.0)
+    /// [proactive/semantic] Minimum context fill level (0.0-1.0), alternatively
+    /// satisfied by proactive_floor_tokens when that alternative is enabled.
     pub proactive_floor: f32,
+
+    /// [proactive/semantic] Alternative minimum token count. Either this count
+    /// or proactive_floor must be reached. Zero disables the token alternative.
+    pub proactive_floor_tokens: usize,
 
     /// [proactive/semantic] Minimum number of token snapshots needed before proactive check
     pub min_samples: usize,
@@ -413,9 +353,12 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             mode: CompactionMode::Reactive,
+            reactive_threshold: 0.80,
+            reactive_threshold_tokens: 400_000,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
+            proactive_floor_tokens: 150_000,
             min_samples: 3,
             stall_window: 5,
             min_turns_between_compactions: 10,
@@ -627,19 +570,19 @@ pub struct AgentsConfig {
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
     /// agents inherit the spawning coordinator's model. Set to a concrete model
-    /// string to change the worker default. An explicit `model` in the swarm
-    /// tool overrides this default for newly spawned workers.
+    /// string to change the worker default.
     pub swarm_model: Option<String>,
-    /// Optional default reasoning effort for spawned swarm/subagent sessions
-    /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`
-    /// call does not pass an explicit `effort`. Leave unset to let workers
-    /// inherit the provider-wide reasoning effort.
+    /// Opt in to agent-selected worker models, restricted to the exact allowlist.
+    pub swarm_model_selection: bool,
+    /// Exact model/route strings the agent may request. Empty denies all overrides.
+    pub swarm_model_allowlist: Vec<String>,
+    /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
+    /// `"high"`, ...). The swarm tool does not let agents choose worker
+    /// effort. Unset means `"low"`.
     pub swarm_effort: Option<String>,
-    /// Root reasoning effort in light swarm mode. Unset or invalid means `max`.
+    /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
-    /// Root reasoning effort in deep swarm mode. Unset or invalid means `max`.
-    pub swarm_deep_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -653,10 +596,16 @@ pub struct AgentsConfig {
     /// as chips on a single row.
     #[serde(default)]
     pub swarm_strip_layout: SwarmStripLayout,
-    /// Jev Decisions provider for recall: auto, openrouter, typesafe, aimlapi,
-    /// or jcode. Auto uses a provider-specific BYOK credential before Jcode.
+    /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
+    /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
     pub memory_jev_provider: String,
+    /// Optional model override for memory Jev Decisions.
+    pub memory_jev_model: Option<String>,
+    /// Optional model override for browser Jev Decisions.
+    pub browser_jev_model: Option<String>,
+    /// Optional model override for voice Jev Decisions.
+    pub voice_jev_model: Option<String>,
     /// Minimum Jev relevance probability. Invalid values fail closed.
     #[serde(default = "default_memory_jev_threshold")]
     pub memory_jev_threshold: f32,
@@ -692,9 +641,8 @@ pub struct AgentsConfig {
     #[serde(default)]
     pub memory_embedding_dim: Option<usize>,
     /// Maximum number of live swarm worker agents in one swarm. This is the RAM
-    /// safety budget for both recursive ad hoc spawning and deep-mode `run_plan`
-    /// parallelism. Completed/stopped workers do not consume slots. Light mode
-    /// still uses a smaller fixed fan-out. `0` disables this configurable guard,
+    /// safety budget for spawning. Completed/stopped workers do not consume
+    /// slots. `0` disables this configurable guard,
     /// leaving only the absolute `MAX_SWARM_MEMBERS` hard cap.
     /// Env override: `JCODE_SWARM_MAX_CONCURRENT_AGENTS`.
     #[serde(default = "default_swarm_max_concurrent_agents")]
@@ -753,13 +701,17 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_model_selection: false,
+            swarm_model_allowlist: Vec::new(),
             swarm_effort: None,
             swarm_root_effort: None,
-            swarm_deep_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
             memory_jev_provider: default_memory_jev_provider(),
+            memory_jev_model: None,
+            browser_jev_model: None,
+            voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
@@ -778,20 +730,39 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
-    /// Resolve a swarm mode's root effort without allowing orchestration
-    /// sentinels to recurse into another mode. Unknown values preserve the
-    /// historical maximum-effort behavior without invalidating other settings.
-    pub fn root_effort_for_swarm(&self, deep: bool) -> &'static str {
-        let configured = if deep {
-            self.swarm_deep_root_effort.as_deref()
-        } else {
-            self.swarm_root_effort.as_deref()
+    /// Validate an agent-supplied override before resolving any provider route.
+    /// Matching is exact: a bare model never authorizes another provider's route.
+    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
+        let Some(model) = model else {
+            return Ok(());
         };
-        let value = configured.unwrap_or("max").trim();
+        if !self.swarm_model_selection {
+            return Err(
+                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
+            );
+        }
+        if model.trim().is_empty()
+            || !self
+                .swarm_model_allowlist
+                .iter()
+                .any(|allowed| allowed == model)
+        {
+            return Err(
+                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
+            );
+        }
+        Ok(())
+    }
+
+    /// Resolve swarm mode's root effort without allowing the orchestration
+    /// sentinel to recurse into itself. Unknown values use the low-effort
+    /// default without invalidating other settings.
+    pub fn root_effort_for_swarm(&self) -> &'static str {
+        let value = self.swarm_root_effort.as_deref().unwrap_or("low").trim();
         ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
             .into_iter()
             .find(|level| level.eq_ignore_ascii_case(value))
-            .unwrap_or("max")
+            .unwrap_or("low")
     }
 }
 
@@ -1054,16 +1025,16 @@ pub struct AutoReviewConfig {
 /// Integration discovery configuration (legacy `[sponsors]` section name).
 ///
 /// Integration discovery makes third-party developer tools discoverable to
-/// the agent via a `discover_tools` tool backed by a hosted directory. Some
+/// the agent via an `integration_tools` tool backed by a hosted directory. Some
 /// providers may share revenue with Jcode when a referred user becomes a
 /// customer, but partnership status never influences recommendations.
 /// See <https://jcode.sh/discovery-tools>.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SponsorsConfig {
-    /// Enable integration discovery. Enabled by default; set to false to opt
-    /// out. When false, no discovery categories are added to the prompt, the
-    /// `discover_tools` tool is not registered, and jcode never contacts the
+    /// Enable integration discovery. Disabled by default; set to true to opt
+    /// in. When false, no discovery categories are added to the prompt, the
+    /// `integration_tools` tool is not registered, and jcode never contacts the
     /// discovery endpoint.
     pub enabled: bool,
     /// Base URL of the discovery endpoint.
@@ -1073,7 +1044,7 @@ pub struct SponsorsConfig {
 impl Default for SponsorsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             endpoint: "https://api.jcode.sh/v1/discovery".to_string(),
         }
     }
@@ -1274,19 +1245,25 @@ pub struct FeatureConfig {
     /// incomplete todos). `/poke on` / `/poke off` still override this per session
     /// (default: true)
     pub auto_poke: bool,
+    /// Opt in to one aggregate todo weak-point follow-up per completion cycle.
+    /// Requires auto-poke; independent of the display-only completion report.
+    /// Disabled by default for every user.
+    pub todo_gate_digest: bool,
+    /// Show hypothetical disabled-gate findings in todo completion reports (default: false).
+    /// Display only: does not enable gates or follow-up turns.
+    pub todo_gate_diagnostics: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
     /// them as request-only ephemeral suffix messages (default: false)
     pub persist_memory_injections: bool,
-    /// Surface an in-chat system message whenever a request misses the KV cache
-    /// for a harness-caused (avoidable) reason: the system prompt, tool set, or
-    /// message prefix changed without the conversation legitimately growing.
-    /// These should essentially never happen, so the notice acts as a loud alarm
-    /// that something in the harness silently invalidated the prefix cache
-    /// (default: true).
+    /// Surface an in-chat system message for each meaningful observed KV cache
+    /// miss, including low/zero reads, route changes, expiry, and harness prefix
+    /// changes. Missing telemetry and ordinary first-request cache fills are not
+    /// classified as misses. Harness changes without a documented cause raise a
+    /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
-    /// Update channel: "stable" (releases only) or "main" (latest commits)
+    /// Update channel: "stable" (default), "preview" (v1 previews), or "main" (latest commits).
     pub update_channel: UpdateChannel,
 }
 
@@ -1298,6 +1275,8 @@ impl Default for FeatureConfig {
             swarm: true,
             mermaid: true,
             auto_poke: true,
+            todo_gate_digest: false,
+            todo_gate_diagnostics: false,
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
@@ -1324,7 +1303,7 @@ pub struct ProviderConfig {
     pub anthropic_cache_ttl_1h: bool,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
-    /// OpenAI service tier override (priority|flex)
+    /// OpenAI service tier override (priority|ultrafast|flex|off). Ultrafast is opt-in.
     pub openai_service_tier: Option<String>,
     /// OpenAI native compaction mode: "auto", "explicit", or "off".
     pub openai_native_compaction_mode: String,
@@ -1380,6 +1359,12 @@ pub struct ProviderConfig {
     pub retry_backoff_cap_secs: u64,
     /// `[provider.claude_code]`: Claude through the local Claude Code CLI.
     pub claude_code: ClaudeCodeConfig,
+    /// Request-body compression policy: "auto" (compress only when the
+    /// measured uplink makes it faster), "always", or "off". Applies only to
+    /// endpoints verified to accept it: gzip (Anthropic, ChatGPT HTTPS), zstd
+    /// (OpenAI API), and WebSocket permessage-deflate (Responses sockets).
+    /// Overridable via `JCODE_REQUEST_COMPRESSION`.
+    pub request_compression: String,
 }
 
 impl Default for ProviderConfig {
@@ -1388,7 +1373,7 @@ impl Default for ProviderConfig {
             default_model: None,
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
-            anthropic_reasoning_effort: None,
+            anthropic_reasoning_effort: Some("low".to_string()),
             anthropic_cache_ttl_1h: true,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
@@ -1408,6 +1393,7 @@ impl Default for ProviderConfig {
             max_retries: 8,
             retry_backoff_cap_secs: 30,
             claude_code: ClaudeCodeConfig::default(),
+            request_compression: "auto".to_string(),
         }
     }
 }
@@ -1669,32 +1655,5 @@ pub struct LaunchHotkeysConfig {
 }
 
 #[cfg(test)]
-mod reasoning_display_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn explicit_reasoning_display_is_distinguishable_from_the_legacy_fallback() {
-        // Front-ends (the desktop) apply their own default only when the user
-        // has not chosen one, so this flag must not be true just because
-        // `show_thinking` happens to be set.
-        let mut display = DisplayConfig {
-            reasoning_display: None,
-            show_thinking: true,
-            ..DisplayConfig::default()
-        };
-        assert!(!display.has_explicit_reasoning_display());
-        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Full);
-
-        display.set_reasoning_display(ReasoningDisplayMode::Current);
-        assert!(display.has_explicit_reasoning_display());
-        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Current);
-        assert!(
-            display.show_thinking,
-            "any active display mode must keep reasoning requested from the provider"
-        );
-
-        display.set_reasoning_display(ReasoningDisplayMode::Off);
-        assert!(display.has_explicit_reasoning_display());
-        assert!(!display.show_thinking);
-    }
-}
+#[path = "reasoning_display_defaults_tests.rs"]
+mod reasoning_display_defaults_tests;

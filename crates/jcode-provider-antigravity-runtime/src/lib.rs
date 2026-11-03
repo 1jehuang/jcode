@@ -309,7 +309,11 @@ impl AntigravityProvider {
             None => {
                 let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
                 tokens.project_id = Some(project_id.clone());
-                let _ = antigravity_auth::save_tokens(&tokens);
+                if let Err(error) = antigravity_auth::save_tokens(&tokens) {
+                    jcode_base::logging::warn(&format!(
+                        "Cannot persist discovered Antigravity project: {error}"
+                    ));
+                }
                 project_id
             }
         };
@@ -636,8 +640,8 @@ impl Provider for AntigravityProvider {
             {
                 let _ = tx
                     .send(Ok(StreamEvent::TokenUsage {
-                        input_tokens: usage.prompt_token_count,
-                        output_tokens: usage.candidates_token_count,
+                        input_tokens: usage.input_token_count(),
+                        output_tokens: usage.output_token_count(),
                         cache_read_input_tokens: usage.cached_content_token_count,
                         cache_creation_input_tokens: None,
                     }))
@@ -892,10 +896,35 @@ impl Provider for AntigravityProvider {
                     "Antigravity model catalog refresh failed; keeping fallback list: {}",
                     err
                 ));
+                return Err(err);
             }
         }
 
         Ok(())
+    }
+
+    fn context_window(&self) -> usize {
+        let selected = self.model();
+        let resolved = self.resolve_model_for_request(&selected);
+        let catalog = self.fetched_catalog();
+        // Use this route's limit and resolve aliases just as inference does.
+        let limit_for = |id: &str| {
+            catalog
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.max_tokens)
+                .and_then(|limit| usize::try_from(limit).ok())
+                .filter(|limit| *limit > 0)
+        };
+        limit_for(&resolved)
+            .or_else(|| limit_for(&selected))
+            .or_else(|| {
+                jcode_provider_core::models::context_limit_for_model_with_provider(
+                    &resolved,
+                    Some("antigravity"),
+                )
+            })
+            .unwrap_or(jcode_provider_core::models::DEFAULT_CONTEXT_LIMIT)
     }
 
     fn supports_compaction(&self) -> bool {

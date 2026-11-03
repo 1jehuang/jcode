@@ -29,6 +29,16 @@ pub use notifications::{
     parse_background_task_started_notification_markdown, strip_ansi_escape_sequences,
 };
 
+/// Legacy persisted wakes can retain the provider's user role even though
+/// their display role is a background notification, never a human prompt.
+pub fn is_background_task_notification_content(content: &str) -> bool {
+    content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+        || parse_background_task_notification_markdown(content).is_some()
+        || parse_background_task_progress_notification_markdown(content).is_some()
+}
+
 fn compile_static_regex(pattern: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),
@@ -129,6 +139,7 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(VENICE_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(BELVEDIR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
@@ -169,6 +180,7 @@ pub fn redact_secrets(text: &str) -> String {
         "OLLAMA_API_KEY",
         "CHUTES_API_KEY",
         "CEREBRAS_API_KEY",
+        "VENICE_API_KEY",
         "BELVEDIR_API_KEY",
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",

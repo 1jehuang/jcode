@@ -20,7 +20,7 @@ struct Mock {
 impl RelevanceTransport for Mock {
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
         assert!(questions.len() <= MAX_BATCH_ENTRIES);
-        assert!(request_size(&state, &questions)? <= MAX_REQUEST_BYTES);
+        assert!(request_size(&state, &questions, self.model_id())? <= MAX_REQUEST_BYTES);
         let mut calls = self.calls.lock().unwrap();
         let call = calls.len();
         calls.push(state.clone());

@@ -54,6 +54,11 @@ pub const OPENAI: DialectSpec = DialectSpec {
         "uuid",
     ],
     transforms: DialectTransforms {
+        // OpenAI rejects function parameters whose root has
+        // `oneOf`/`anyOf`/`allOf`/`enum`/`const`/`not` ("schema must have type
+        // 'object' and not have ... at the top level"), observed on the swarm
+        // tool's spawn/non-spawn branches.
+        flatten_top_level_combiners: true,
         one_of_as_any_of: true,
         // OpenAI accepts `allOf` but does not intersect its branches the way
         // the spec requires, so a schema whose properties live only in `allOf`
@@ -95,6 +100,7 @@ pub const GEMINI: DialectSpec = DialectSpec {
         // the `swarm` tool expresses its spawn/non-spawn branches. Nested
         // `anyOf` inside a property is fine, so only the root is widened.
         flatten_top_level_combiners: true,
+        scalar_types: true,
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
@@ -188,6 +194,7 @@ pub const ANTIGRAVITY_CLAUDE: DialectSpec = DialectSpec {
     supported_string_formats: &[],
     transforms: DialectTransforms {
         flatten_all_combiners: true,
+        scalar_types: true,
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
@@ -218,6 +225,7 @@ pub const ANTIGRAVITY_BRIDGE: DialectSpec = DialectSpec {
     supported_string_formats: &[],
     transforms: DialectTransforms {
         flatten_all_combiners: true,
+        scalar_types: true,
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,
@@ -232,6 +240,7 @@ const DEFAULT_TRANSFORMS: DialectTransforms = DialectTransforms {
     prune_dangling_required: false,
     const_as_enum: false,
     one_of_as_any_of: false,
+    scalar_types: false,
     merge_all_of_branches: false,
 };
 

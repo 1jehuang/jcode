@@ -192,6 +192,41 @@ fn test_usage_data_becomes_stale_when_reset_time_has_passed() {
 }
 
 #[test]
+fn test_anthropic_error_backoff_survives_expired_last_good_windows() {
+    for (error, ttl) in [
+        (
+            "Usage API error (429 Too Many Requests)",
+            RATE_LIMIT_BACKOFF,
+        ),
+        ("Usage probe timed out", ERROR_BACKOFF),
+    ] {
+        let mut data = UsageData {
+            five_hour: 0.7,
+            five_hour_resets_at: Some("2020-01-01T00:00:00Z".into()),
+            model_scoped: vec![ModelScopedUsageWindow {
+                model_name: "Fable".into(),
+                utilization: 0.9,
+                resets_at: Some("2020-01-01T00:00:00Z".into()),
+            }],
+            fetched_at: Some(Instant::now()),
+            last_error: Some(error.into()),
+            ..Default::default()
+        };
+        assert!(
+            !data.is_stale(),
+            "expired last-good data must not bypass error backoff"
+        );
+        let display = data.display_snapshot();
+        assert_eq!(display.five_hour, 0.0);
+        assert!(display.last_error.is_some());
+        data.fetched_at = Some(Instant::now() - ttl - Duration::from_secs(1));
+        assert!(data.is_stale(), "expired error backoff must allow retry");
+        data.fetched_at = None;
+        assert!(data.is_stale());
+    }
+}
+
+#[test]
 fn test_openai_usage_data_becomes_stale_when_reset_time_has_passed() {
     let data = OpenAIUsageData {
         five_hour: Some(OpenAIUsageWindow {
@@ -909,86 +944,6 @@ fn test_activity_sweeper_skips_sources_with_dedicated_reports() {
 }
 
 #[test]
-fn anthropic_model_scoped_fable_limit_survives_report_cache_roundtrip() {
-    let usage = UsageData {
-        five_hour: 0.1,
-        seven_day: 0.2,
-        model_scoped: vec![ModelScopedUsageWindow {
-            model_name: "Fable".to_string(),
-            utilization: 0.73,
-            resets_at: Some("2026-08-10T00:00:00Z".to_string()),
-        }],
-        ..Default::default()
-    };
-
-    let report = provider_report_from_usage_data("Anthropic".to_string(), &usage);
-    let fable = report
-        .limits
-        .iter()
-        .find(|limit| limit.name == "7-day Fable window")
-        .expect("Fable limit should be displayed");
-    assert_eq!(fable.usage_percent, 73.0);
-    assert_eq!(fable.resets_at.as_deref(), Some("2026-08-10T00:00:00Z"));
-
-    let restored = usage_data_from_provider_report(&report);
-    assert_eq!(restored.model_scoped, usage.model_scoped);
-}
-
-#[test]
-fn anthropic_usage_response_deserializes_structured_fable_limit() {
-    let response: UsageResponse = serde_json::from_str(
-        r#"{
-            "five_hour": {"utilization": 12.0, "resets_at": "2026-08-04T00:00:00Z"},
-            "seven_day": {"utilization": 34.0, "resets_at": "2026-08-10T00:00:00Z"},
-            "limits": [{
-                "kind": "weekly_scoped",
-                "percent": 56.0,
-                "resets_at": "2026-08-11T00:00:00Z",
-                "scope": {"model": {"display_name": "Fable"}}
-            }]
-        }"#,
-    )
-    .expect("structured Anthropic usage payload should deserialize");
-
-    let fable = response.limits.first().expect("model-scoped limit");
-    assert_eq!(fable.kind.as_deref(), Some("weekly_scoped"));
-    assert_eq!(fable.percent, Some(56.0));
-    assert_eq!(
-        fable
-            .scope
-            .as_ref()
-            .and_then(|scope| scope.model.as_ref())
-            .and_then(|model| model.display_name.as_deref()),
-        Some("Fable")
-    );
-}
-
-#[test]
-fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
-    let usage = UsageData {
-        model_scoped: vec![ModelScopedUsageWindow {
-            model_name: "Fable".to_string(),
-            utilization: 1.0,
-            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
-        }],
-        ..Default::default()
-    };
-
-    assert!(usage.model_scoped_exhausted("claude-fable-5"));
-    assert!(!usage.model_scoped_exhausted("claude-opus-5"));
-
-    let below_limit = UsageData {
-        model_scoped: vec![ModelScopedUsageWindow {
-            model_name: "Claude Fable 5".to_string(),
-            utilization: 0.98,
-            resets_at: None,
-        }],
-        ..Default::default()
-    };
-    assert!(!below_limit.model_scoped_exhausted("claude-fable-5"));
-}
-
-#[test]
 fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
     let label = "test-usage-summary-no-account";
     let mut report = ProviderUsage {
@@ -1254,6 +1209,44 @@ fn account_switch_while_enqueueing_usage_does_not_tie_report_to_old_key() {
     }
 }
 
+#[test]
+fn attach_activity_refreshes_anthropic_oauth_totals_even_on_error() {
+    let label = "test-anthropic-summary-no-account";
+    let expected = crate::provider_activity::anthropic_oauth_usage_summary(label);
+    let mut report = ProviderUsage {
+        error: Some("quota unavailable".into()),
+        extra_info: vec![
+            ("Plan".into(), "Max".into()),
+            ("Today".into(), "stale".into()),
+        ],
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        attach_activity(&mut report, &format!("claude:oauth:{label}"));
+        for row in &expected {
+            assert!(report.extra_info.contains(row));
+            assert_eq!(
+                report
+                    .extra_info
+                    .iter()
+                    .filter(|(key, _)| key == &row.0)
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            report
+                .extra_info
+                .contains(&("Account label".into(), label.into()))
+        );
+        assert!(report.error.is_some());
+        assert!(report.extra_info.contains(&("Plan".into(), "Max".into())));
+    }
+    let mut api = ProviderUsage::default();
+    attach_activity(&mut api, "claude:api-key");
+    assert!(!api.extra_info.iter().any(|(key, _)| key == "Today"));
+}
+
 fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::SubscriptionMe {
     serde_json::from_value(serde_json::json!({
         "account_id": "a", "email": "e@example.com", "tier": "plus", "status": "active",
@@ -1269,9 +1262,92 @@ fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::Subscri
 }
 
 #[test]
+fn jcode_usage_shows_monthly_inference_spending_and_remaining() {
+    let mut me = jcode_me(100, true);
+    me.usage.used_usd = 12.5;
+    me.usage.budget_usd = 50.0;
+    me.usage.resets_at = Some("2026-11-01T00:00:00Z".into());
+    let report = jcode_usage_report(&me);
+    assert_eq!(report.limits.len(), 3);
+    let inference = &report.limits[0];
+    assert_eq!(inference.name, "Inference spending limit (monthly)");
+    assert_eq!(inference.usage_percent, 25.0);
+    assert_eq!(inference.resets_at, me.usage.resets_at);
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending limit remaining".into(), "$37.50".into()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending".into(), "$12.50 / $50.00".into()))
+    );
+    assert_eq!(report.limits[1].name, "Memory recall (daily)");
+    assert!(!report.hard_limit_reached);
+    assert!(report.extra_info.iter().all(|(key, _)| key != "Upgrade"));
+}
+
+#[test]
+fn jcode_usage_monthly_limit_exhaustion_clamps_remaining() {
+    for used in [50.0, 60.0] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = used;
+        me.usage.budget_usd = 50.0;
+        let report = jcode_usage_report(&me);
+        assert!(report.hard_limit_reached);
+        assert_eq!(report.limits[0].usage_percent, (used * 2.0) as f32);
+        assert!(
+            report
+                .extra_info
+                .contains(&("Inference spending limit remaining".into(), "$0.00".into()))
+        );
+    }
+}
+
+#[test]
+fn jcode_usage_unknown_monthly_budget_is_not_exhausted() {
+    for budget in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = 10.0;
+        me.usage.budget_usd = budget;
+        let report = jcode_usage_report(&me);
+        assert_eq!(report.limits.len(), 2);
+        assert!(!report.hard_limit_reached);
+        assert!(
+            report
+                .extra_info
+                .iter()
+                .all(|(key, _)| key != "Inference spending limit remaining")
+        );
+        me.jev_usage.as_mut().unwrap().memory.used = 1000;
+        assert!(jcode_usage_report(&me).hard_limit_reached);
+    }
+}
+
+#[test]
+fn jcode_usage_replaces_subscription_placeholder() {
+    let mut reports = vec![ProviderUsage {
+        provider_name: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+        ..Default::default()
+    }];
+    let report = jcode_usage_report(&jcode_me(100, true));
+    let expected_limits = report.limits.len();
+
+    upsert_provider_usage(&mut reports, report);
+
+    assert_eq!(reports.len(), 1, "subscription must render only one card");
+    assert_eq!(reports[0].limits.len(), expected_limits);
+    assert!(reports[0].extra_info.iter().any(|(key, _)| key == "Plan"));
+}
+
+#[test]
 fn jcode_usage_shows_daily_allowances_without_upsell_when_low() {
     let report = jcode_usage_report(&jcode_me(100, true));
-    assert_eq!(report.provider_name, "Jcode subscription");
+    assert_eq!(
+        report.provider_name,
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert_eq!(report.limits.len(), 2);
     assert_eq!(report.limits[0].name, "Memory recall (daily)");
     assert!((report.limits[0].usage_percent - 10.0).abs() < 0.01);
@@ -1357,3 +1433,65 @@ fn anthropic_usage_follows_a_token_refresh_of_the_same_login() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+#[test]
+fn test_openai_transport_error_retries_sooner_than_api_errors() {
+    let at = Instant::now() - Duration::from_secs(60);
+    let transport = OpenAIUsageData {
+        fetched_at: Some(at),
+        last_error: Some(format!("{TRANSPORT_ERROR_PREFIX}error sending request")),
+        ..Default::default()
+    };
+    assert!(transport.is_transport_error());
+    assert!(transport.is_stale());
+
+    let api = OpenAIUsageData {
+        fetched_at: Some(at),
+        last_error: Some("API error (500): oops".into()),
+        ..Default::default()
+    };
+    assert!(!api.is_transport_error());
+    assert!(!api.is_stale());
+}
+
+#[test]
+fn test_openai_transport_failure_keeps_recent_last_good_only() {
+    let key = "label:transport-last-good-test".to_string();
+    let window = OpenAIUsageWindow {
+        name: "5-hour window".into(),
+        usage_ratio: 0.2,
+        resets_at: None,
+    };
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            five_hour: Some(window.clone()),
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_some());
+
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            five_hour: Some(window),
+            fetched_at: Some(Instant::now() - TRANSPORT_LAST_GOOD_MAX_AGE - Duration::from_secs(1)),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_none());
+
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            fetched_at: Some(Instant::now()),
+            last_error: Some("API error (500)".into()),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_none());
+}
+
+#[path = "model_scoped_tests.rs"]
+mod model_scoped;

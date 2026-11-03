@@ -1,6 +1,9 @@
+mod catalog_discovery;
 use super::*;
 mod catalog_memo;
 mod saved_account_selection;
+mod session_binding;
+mod startup_pool;
 use crate::provider::models::{ensure_model_allowed_for_subscription, filtered_display_models};
 
 fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
@@ -224,6 +227,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
@@ -232,6 +236,67 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         account_failover: Default::default(),
     }
+}
+
+#[test]
+fn model_capabilities_refresh_forwards_only_active_present_openai() {
+    struct RefreshMock(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl Provider for RefreshMock {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("refresh checks must not start a completion")
+        }
+
+        fn name(&self) -> &str {
+            "openai-refresh-mock"
+        }
+
+        fn model(&self) -> String {
+            "gpt-5.4".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self(std::sync::atomic::AtomicBool::new(
+                self.model_capabilities_need_refresh(),
+            )))
+        }
+
+        fn model_capabilities_need_refresh(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+        let provider = test_multi_provider_with_openai();
+        let underlying = Arc::new(RefreshMock(std::sync::atomic::AtomicBool::new(true)));
+        *provider.openai.write().unwrap() = Some(underlying.clone());
+
+        assert!(Provider::model_capabilities_need_refresh(&provider));
+
+        underlying
+            .0
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!Provider::model_capabilities_need_refresh(&provider));
+        underlying
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        *provider.active.write().unwrap() = ActiveProvider::Claude;
+        assert!(!Provider::model_capabilities_need_refresh(&provider));
+
+        *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+        *provider.openai.write().unwrap() = None;
+        assert!(!Provider::model_capabilities_need_refresh(&provider));
+    });
 }
 
 #[test]
@@ -958,6 +1023,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
@@ -1149,66 +1215,6 @@ include!("tests/account_routing_pool.rs");
 include!("tests/catalog_subscription.rs");
 include!("tests/account_pins.rs");
 include!("tests/claude_code.rs");
-
-/// Rendering the route catalog must never schedule network work.
-///
-/// Regression guard for the "spawning a session refetches every provider
-/// catalog" bug: route building used to schedule a background `/models` fetch
-/// for each stale or missing profile cache, so every session attach and picker
-/// open fanned out dozens of HTTP requests. Refresh cadence now belongs solely
-/// to the background catalog scheduler.
-#[test]
-fn building_direct_profile_routes_does_not_schedule_catalog_refreshes() {
-    with_clean_provider_test_env(|| {
-        let runtime = enter_test_runtime();
-        runtime.block_on(async {
-            crate::provider_catalog::save_env_value_to_env_file(
-                "OPENROUTER_API_KEY",
-                "openrouter.env",
-                Some("sk-test-openrouter"),
-            )
-            .expect("save openrouter key");
-
-            // Deliberately leave every profile cache missing/stale: under the
-            // old behavior this was the worst case that scheduled a refresh
-            // for each configured profile.
-            jcode_provider_openrouter_runtime::reset_profile_catalog_refresh_tracker_for_tests();
-
-            for profile in crate::provider_catalog::openai_compatible_profiles()
-                .iter()
-                .copied()
-            {
-                let _ = super::direct_openai_compatible_profile_routes(profile);
-            }
-
-            // If route building had scheduled refreshes, the profile tracker
-            // would have recorded attempts, and this direct call for the
-            // standard OpenRouter namespace would be throttled/in-flight.
-            assert!(
-                openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
-                    "unit test post-render scheduling"
-                ),
-                "route building must leave the refresh tracker untouched"
-            );
-        });
-    });
-}
-
-/// The scheduler's staleness predicate must treat a missing or mismatched
-/// cache as needing a refresh, so the sweeper actually populates cold caches.
-#[test]
-fn profile_catalog_cache_needs_refresh_for_missing_cache() {
-    with_clean_provider_test_env(|| {
-        let profile = crate::provider_catalog::openai_compatible_profiles()
-            .first()
-            .copied()
-            .expect("at least one OpenAI-compatible profile is defined");
-        assert!(
-            super::catalog_scheduler::profile_catalog_cache_needs_refresh(profile),
-            "a missing catalog cache must be reported as needing a refresh"
-        );
-    });
-}
 
 #[test]
 fn jcode_subscription_model_prefix_parses_explicit_specs() {

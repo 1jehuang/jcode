@@ -61,10 +61,12 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
         let registry = Registry::empty();
         let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
         let session_id = { agent.lock().await.session_id().to_string() };
-        let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-            format!("test-session-{}", scenario.name),
-            Arc::clone(&agent),
-        )])));
+        let sessions: SessionAgents = Arc::new(
+            crate::server::session_manager::SessionManager::from_agents(HashMap::from([(
+                format!("test-session-{}", scenario.name),
+                Arc::clone(&agent),
+            )])),
+        );
         let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
         let mut auth = crate::protocol::AuthChanged::new("cerebras");

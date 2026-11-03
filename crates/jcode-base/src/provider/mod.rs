@@ -6,6 +6,7 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
 mod catalog_memo;
+mod catalog_refresh;
 mod catalog_routes;
 pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
@@ -41,7 +42,7 @@ mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
-use account_failover::maybe_annotate_limit_summary;
+use account_failover::{active_account_label_for_provider, maybe_annotate_limit_summary};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
@@ -69,8 +70,8 @@ pub use jcode_provider_core::{
     RouteCostSource, RouteSelection, RuntimeKey, claude_code_api_method, claude_code_model_spec,
     dedupe_model_routes, explicit_model_provider_prefix, fresh_transport_client,
     grok_build_model_spec, inferred_reasoning_efforts, is_chatgpt_web_model,
-    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
-    shared_http_client, summarize_model_catalog_refresh,
+    model_name_for_provider, normalize_copilot_model_name, oauth_account_label,
+    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 pub use jcode_provider_core::{
@@ -162,6 +163,14 @@ pub use stream_timeout::{
     MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER, max_stream_idle_timeout, stream_idle_timeout,
     stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
 };
+
+/// Effective `[provider] request_compression` policy. Unknown values fall back
+/// to `Auto` (the shipped default) rather than silently disabling.
+pub fn request_compression_mode() -> jcode_provider_core::request_compression::CompressionMode {
+    use jcode_provider_core::request_compression::CompressionMode;
+    CompressionMode::parse(&crate::config::config().provider.request_compression)
+        .unwrap_or(CompressionMode::Auto)
+}
 
 /// Whether reasoning deltas should be persisted in session history for later
 /// provider context reconstruction.
@@ -330,6 +339,7 @@ pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
 use self::dispatch::CompletionMode;
 
 mod session_restore;
+pub use self::models::begin_forced_anthropic_model_catalog_refresh_for_scope;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
@@ -362,12 +372,12 @@ pub use self::models::{
 };
 pub use self::models::{
     begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
-    cached_openai_reasoning_efforts_for_scope, clear_model_unavailable_for_scope,
-    finish_openai_model_catalog_refresh_for_scope, get_best_available_openai_model_for_scope,
-    known_openai_model_ids_for_scope, model_availability_for_scope,
-    openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
-    populate_account_models_for_scope, record_model_unavailable_for_scope,
-    refresh_openai_model_catalog_in_background_for_scope,
+    cached_openai_reasoning_efforts_for_scope, cached_openai_service_tiers_for_scope,
+    clear_model_unavailable_for_scope, finish_openai_model_catalog_refresh_for_scope,
+    get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
+    model_availability_for_scope, openai_catalog_scope_for_credential,
+    persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
+    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -418,6 +428,8 @@ pub struct MultiProvider {
     /// switches, catalog display, or auth refresh handling.
     openai_compatible_profiles: RwLock<HashMap<String, Arc<dyn Provider>>>,
     active_openai_compatible_profile: RwLock<Option<String>>,
+    /// Stable application session identity, retained across runtime replacement.
+    session_id: RwLock<Option<String>>,
     active: RwLock<ActiveProvider>,
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
@@ -447,6 +459,24 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    fn bound_session_id(&self) -> Option<String> {
+        self.session_id
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn bind_provider_session(&self, provider: &dyn Provider) {
+        if let Some(session_id) = self.bound_session_id() {
+            provider.set_session_id(&session_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
+        account_failover::same_provider_account_candidates(provider)
+    }
+
     async fn complete_with_failover(
         &self,
         messages: &[Message],
@@ -454,6 +484,7 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.bind_auto_account_for_request(self.active_provider())?;
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
@@ -484,25 +515,95 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
-        // An explicit saved-account route is a billing choice: a removed login
-        // fails closed instead of healing onto another account.
-        if self.provider_uses_oauth_accounts(active)
-            && let Some(bound_label) = self.selected_account_for_provider(active)
-        {
-            let exists = self.saved_account_binding_exists(active, &bound_label)?;
+        // Saved account requests remain session-local. Only configured pool
+        // members may propose another exact account after a startup failure.
+        if let Some(bound_label) = self.selected_account_for_provider(active) {
+            let key = Self::provider_key(active);
+            let exists = match active {
+                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                _ => false,
+            };
             if !exists {
                 anyhow::bail!(
-                    "Saved account '{}' no longer exists. Select an account with /model or /accounts.",
+                    "Saved account '{}' no longer exists. Select an account with /model.",
                     bound_label
                 );
+            }
+            self.revalidate_marked_openai_account(active, Some(&bound_label))
+                .await;
+            if let Some(reason) =
+                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+            {
+                self.try_same_provider_account_failover(
+                    active,
+                    messages,
+                    tools,
+                    mode,
+                    &reason,
+                    &mut Vec::new(),
+                )
+                .await?;
+                anyhow::bail!(
+                    "{} ({}) is unavailable: {}",
+                    Self::provider_label(active),
+                    bound_label,
+                    reason
+                );
+            }
+            let attempt = self
+                .complete_candidate(active, messages, tools, mode, resume_session_id)
+                .await;
+            let attempt = self.await_account_stream_start(active, attempt).await;
+            match attempt {
+                Ok(stream) => {
+                    match active {
+                        ActiveProvider::OpenAI => {
+                            models::clear_openai_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        ActiveProvider::Claude => {
+                            models::clear_claude_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        _ => {}
+                    }
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    let decision = Self::classify_failover_error(&err);
+                    if decision.should_failover() {
+                        let reason = Self::summarize_error(&err);
+                        if decision.should_mark_provider_unavailable() {
+                            models::record_provider_unavailable_for_account_label(
+                                key,
+                                Some(&bound_label),
+                                &reason,
+                            );
+                        }
+                        self.try_same_provider_account_failover(
+                            active,
+                            messages,
+                            tools,
+                            mode,
+                            &reason,
+                            &mut Vec::new(),
+                        )
+                        .await?;
+                    }
+                    return Err(err);
+                }
             }
         }
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
-        // Same-provider account failover runs at most once per call: the
-        // cross-provider path below must never re-enter it for this turn.
-        let mut account_failover_done = false;
         let (estimated_input_chars, estimated_input_tokens) =
             Self::estimate_request_input(messages, tools, mode);
 
@@ -547,122 +648,10 @@ impl MultiProvider {
                 continue;
             }
 
-            // Claude/OpenAI unavailability is per account label (this
-            // session's account), so one window's exhausted account does not
-            // block every window on that provider.
-            // API-key requests (explicit, or Auto that resolved to a key) never
-            // rotate OAuth accounts or touch their per-label cooldowns.
-            let uses_oauth_accounts = self.provider_uses_oauth_accounts(candidate);
-            let session_label = account_failover::account_kind(candidate)
-                .filter(|_| uses_oauth_accounts)
-                .and_then(|kind| self.session_account_label(kind));
-            // The ChatGPT web route runs in the browser session, not on the
-            // stored OpenAI account, so that account's usage must not gate it.
-            let browser_session = candidate == ActiveProvider::OpenAI
-                && self
-                    .openai_provider()
-                    .is_some_and(|provider| is_chatgpt_web_model(&provider.model()));
-            // A usage-limit mark holds until the reset the provider reported.
-            // If the OpenAI account was reset early, recheck live usage first
-            // so a resume is not skipped against a stale mark.
-            if candidate == ActiveProvider::OpenAI
-                && !browser_session
-                && let Some(label) = session_label.as_deref()
-                && (provider_unavailability_detail_for_account_label(key, Some(label)).is_some()
-                    || account_failover::account_exhausted(
-                        jcode_provider_core::AccountProviderKind::OpenAi,
-                        label,
-                    )
-                    .is_some())
-            {
-                crate::usage::revalidate_openai_account_exhaustion(label).await;
-            }
-            let unavailable = match session_label.as_deref() {
-                _ if browser_session => None,
-                Some(label) => provider_unavailability_detail_for_account_label(key, Some(label)),
-                None => provider_unavailability_detail_for_account(key),
-            };
-            // With account failover, a marked account means "rotate", not
-            // "skip the provider".
-            let account_failover = (candidate == active
-                && !account_failover_done
-                && !browser_session
-                && uses_oauth_accounts)
-                .then(|| self.account_failover_labels(candidate))
-                .flatten();
-            if let Some(detail) = unavailable.clone()
-                && account_failover.is_none()
-            {
-                let note = format!("{}: {}", label, detail);
-                if candidate == active {
-                    crate::logging::warn(&format!(
-                        "Failover{}: skipping active provider {} - {}",
-                        mode.log_suffix(),
-                        label,
-                        detail
-                    ));
-                    failover_reason = Some(detail.clone());
-                }
-                notes.push(note);
-                continue;
-            }
-
-            // Same-provider account failover: only this session moves to
-            // another stored account, and only before any output streamed.
-            if let Some(accounts) = account_failover {
-                account_failover_done = true;
-                match self
-                    .complete_with_account_failover(
-                        candidate,
-                        accounts,
-                        unavailable,
-                        messages,
-                        tools,
-                        mode,
-                        resume_session_id,
-                        &mut notes,
-                    )
-                    .await
-                {
-                    multi_provider::AccountAttempt::Stream(stream) => {
-                        self.record_provider_activity(candidate);
-                        return Ok(stream);
-                    }
-                    multi_provider::AccountAttempt::Exhausted(reason) => {
-                        crate::logging::warn(&format!(
-                            "Failover{}: {} has no account left - {}",
-                            mode.log_suffix(),
-                            label,
-                            reason
-                        ));
-                        notes.push(format!("{}: {}", label, reason));
-                        failover_reason = Some(reason);
-                        continue;
-                    }
-                    multi_provider::AccountAttempt::Error(err) => {
-                        let summary = Self::summarize_error(&err);
-                        let decision = Self::classify_failover_error(&err);
-                        notes.push(format!("{}: {}", label, summary));
-                        if !decision.should_failover() {
-                            return Err(err);
-                        }
-                        if decision.should_mark_provider_unavailable()
-                            && let Some(session_label) = session_label.as_deref()
-                        {
-                            record_provider_unavailable_for_account_label(
-                                key,
-                                Some(session_label),
-                                &summary,
-                            );
-                        }
-                        failover_reason = Some(summary);
-                        continue;
-                    }
-                }
-            }
-
-            if !browser_session
-                && let Some(reason) = self.provider_precheck_unavailable_reason(candidate)
+            let cached_unavailability = provider_unavailability_detail_for_account(key);
+            if let Some(reason) = cached_unavailability
+                .clone()
+                .or_else(|| self.provider_precheck_unavailable_reason(candidate))
             {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
@@ -675,13 +664,17 @@ impl MultiProvider {
                     failover_reason = Some(reason.clone());
                 }
                 notes.push(note);
-                match session_label.as_deref() {
-                    Some(session_label) => record_provider_unavailable_for_account_label(
-                        key,
-                        Some(session_label),
-                        &reason,
-                    ),
-                    None => record_provider_unavailable_for_account(key, &reason),
+                if cached_unavailability.is_none() {
+                    record_provider_unavailable_for_account(key, &reason);
+                }
+                if candidate == active
+                    && let Some(stream) = self
+                        .try_same_provider_account_failover(
+                            candidate, messages, tools, mode, &reason, &mut notes,
+                        )
+                        .await?
+                {
+                    return Ok(stream);
                 }
                 continue;
             }
@@ -696,24 +689,16 @@ impl MultiProvider {
                     resume_session_id,
                 )
                 .await;
-            if let Err(err) = &attempt
-                && parse_failover_prompt_message(&err.to_string()).is_some()
+            if let Err(error) = &attempt
+                && parse_failover_prompt_message(&error.to_string()).is_some()
             {
                 return attempt;
             }
-            // OAuth runtimes return their channel before the HTTP request is
-            // accepted. Surface startup errors here so they are classified and
-            // recorded instead of reaching the client as an endless retry.
             let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {
                 Ok(stream) => {
-                    match session_label.as_deref() {
-                        Some(session_label) => {
-                            clear_provider_unavailable_for_label(key, session_label)
-                        }
-                        None => clear_provider_unavailable_for_account(key),
-                    }
+                    clear_provider_unavailable_for_account(key);
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);
@@ -754,16 +739,17 @@ impl MultiProvider {
                     notes.push(format!("{}: {}", label, display_summary));
                     if decision.should_failover() {
                         if decision.should_mark_provider_unavailable() {
-                            match session_label.as_deref() {
-                                Some(session_label) => {
-                                    record_provider_unavailable_for_account_label(
-                                        key,
-                                        Some(session_label),
-                                        &summary,
-                                    )
-                                }
-                                None => record_provider_unavailable_for_account(key, &summary),
-                            }
+                            record_provider_unavailable_for_account(key, &summary);
+                        }
+                        if candidate == active
+                            && decision.should_mark_provider_unavailable()
+                            && let Some(stream) = self
+                                .try_same_provider_account_failover(
+                                    candidate, messages, tools, mode, &summary, &mut notes,
+                                )
+                                .await?
+                        {
+                            return Ok(stream);
                         }
                         if candidate == active {
                             failover_reason = Some(summary);
@@ -1754,6 +1740,13 @@ where
 
 #[async_trait]
 impl Provider for MultiProvider {
+    fn set_session_id(&self, session_id: &str) {
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
+    }
+
     fn catalog_sharing_identity(&self) -> Option<String> {
         Some(format!(
             "{:?}",
@@ -1781,6 +1774,7 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
         };
         if let Some(provider) = provider {
+            self.bind_provider_session(provider.as_ref());
             provider.prewarm(tools, system_static).await;
         }
     }
@@ -2018,6 +2012,18 @@ impl Provider for MultiProvider {
 
     fn oauth_account_label(&self) -> Option<String> {
         self.selected_account_for_provider(self.active_provider())
+    }
+
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            _ => None,
+        }
     }
 
     fn active_oauth_account_email(&self) -> Option<String> {
@@ -2440,133 +2446,27 @@ impl Provider for MultiProvider {
         self.fresh_routes_memo_entry().routes
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        matches!(self.active_provider(), ActiveProvider::OpenAI)
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
-        let anthropic = self.anthropic_provider();
-        let openai = self.openai_provider();
-        let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let antigravity = self.antigravity_provider();
-        let gemini = self.gemini_provider();
-        let cursor = self.cursor_provider();
-        let bedrock = self.bedrock_provider();
+        self.refresh_catalogs(false).await
+    }
 
-        let (
-            anthropic_result,
-            openai_result,
-            openrouter_result,
-            copilot_result,
-            antigravity_result,
-            gemini_result,
-            cursor_result,
-            bedrock_result,
-        ) = tokio::join!(
-            async {
-                match anthropic {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                prefetch_openai_or_web_catalog(openai, async {
-                    chatgpt_web::refresh_models().await.map(|_| ())
-                })
-                .await
-            },
-            async {
-                match openrouter {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match copilot {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match antigravity {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match gemini {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match cursor {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match bedrock {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-        );
-
-        let active_provider = self.active_provider();
-        let mut errors = Vec::new();
-        let mut optional_errors = Vec::new();
-        for (provider_name, result) in [
-            ("anthropic", anthropic_result),
-            ("openai", openai_result),
-            ("openrouter", openrouter_result),
-            ("copilot", copilot_result),
-            ("antigravity", antigravity_result),
-            ("gemini", gemini_result),
-            ("cursor", cursor_result),
-            ("bedrock", bedrock_result),
-        ] {
-            if let Err(err) = result {
-                let is_active = matches!(
-                    (active_provider, provider_name),
-                    (ActiveProvider::Claude, "anthropic" | "claude")
-                        | (ActiveProvider::OpenAI, "openai")
-                        | (ActiveProvider::OpenRouter, "openrouter")
-                        | (ActiveProvider::Copilot, "copilot")
-                        | (ActiveProvider::Antigravity, "antigravity")
-                        | (ActiveProvider::Gemini, "gemini")
-                        | (ActiveProvider::Cursor, "cursor")
-                        | (ActiveProvider::Bedrock, "bedrock")
-                );
-                if !is_active || matches!(provider_name, "bedrock") {
-                    optional_errors.push(format!("{provider_name}: {err}"));
-                } else {
-                    errors.push(format!("{provider_name}: {err}"));
-                }
-            }
-        }
-
-        if !optional_errors.is_empty() {
-            crate::logging::warn(&format!(
-                "Optional model catalog refresh failed: {}",
-                optional_errors.join("; ")
-            ));
-        }
-
-        // Bedrock's built-in default is a 2024 model; once its catalog (live
-        // or cached) is known, land on the newest usable Claude flagship.
-        if let Some(bedrock) = self.bedrock_provider() {
-            promote_bedrock_placeholder_default(&bedrock);
-        }
-
-        if !errors.is_empty() {
-            return Err(anyhow!("{}", errors.join("; ")));
-        }
-
-        // Fresh catalogs may have arrived; retire every memoized copy.
-        self.invalidate_routes_memo_globally();
-        Ok(())
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalogs(true).await?;
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn on_auth_changed(&self) {
@@ -3048,19 +2948,29 @@ impl Provider for MultiProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        let fork_start = std::time::Instant::now();
         let current_model = self.model();
         let active = self.active_provider();
 
+        let mut lap = std::time::Instant::now();
+        let mut laps: Vec<(&str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = std::time::Instant::now();
+        };
+        mark("model_active", &mut laps);
         let anthropic = if self.anthropic_provider().is_some() {
             external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
         };
+        mark("anthropic", &mut laps);
         let openai = if self.openai_provider().is_some() {
             external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
         } else {
             None
         };
+        mark("openai", &mut laps);
         let copilot_api = self
             .copilot_api
             .read()
@@ -3076,6 +2986,7 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        mark("copy", &mut laps);
         let cursor_provider = if self
             .cursor
             .read()
@@ -3089,11 +3000,13 @@ impl Provider for MultiProvider {
         // Each fork gets independent Claude Code child state (its own
         // process and session), carrying the instance and model over.
         let claude_code_provider = self.claude_code_provider().map(|provider| provider.fork());
+        mark("cursor", &mut laps);
         let bedrock_provider = if self.bedrock_provider().is_some() {
             Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };
+        mark("bedrock", &mut laps);
         let openrouter = if self
             .openrouter
             .read()
@@ -3105,6 +3018,7 @@ impl Provider for MultiProvider {
             None
         };
 
+        mark("openrouter", &mut laps);
         let provider = Self {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
@@ -3117,6 +3031,7 @@ impl Provider for MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(self.bound_session_id()),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,
@@ -3126,8 +3041,12 @@ impl Provider for MultiProvider {
             account_failover: self.account_failover.copy(),
         };
 
+        let runtimes_ms = fork_start.elapsed().as_millis();
+        let catalog_start = std::time::Instant::now();
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
+        let catalog_ms = catalog_start.elapsed().as_millis();
+        let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
         // A fork continues this session, so it keeps this session's accounts.
@@ -3143,6 +3062,17 @@ impl Provider for MultiProvider {
                 ));
             }
         }
+        crate::logging::info(&format!(
+            "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
+            runtimes_ms,
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            catalog_ms,
+            set_model_start.elapsed().as_millis(),
+            fork_start.elapsed().as_millis()
+        ));
         Arc::new(provider)
     }
 
@@ -3304,13 +3234,13 @@ mod bedrock_placeholder_default_tests {
         let routes = vec![
             route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
             route("anthropic.claude-sonnet-4-20250514-v1:0", true),
-            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("us.anthropic.claude-opus-6-v1", true),
             route("amazon.nova-pro-v1:0", true),
         ];
         assert_eq!(
             bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
                 .as_deref(),
-            Some("us.anthropic.claude-opus-4-6-v1")
+            Some("us.anthropic.claude-opus-6-v1")
         );
     }
 
@@ -3366,7 +3296,7 @@ mod bedrock_placeholder_default_tests {
                 "models": [
                     "anthropic.claude-3-5-sonnet-20241022-v2:0",
                     "anthropic.claude-sonnet-4-20250514-v1:0",
-                    "anthropic.claude-opus-4-20250514-v1:0",
+                    "anthropic.claude-opus-6-v1:0",
                 ],
                 "inference_profiles": [],
                 "region": null,
@@ -3389,13 +3319,13 @@ mod bedrock_placeholder_default_tests {
                 None => crate::env::remove_var(key),
             }
         }
-        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(promoted, "anthropic.claude-opus-6-v1:0");
         assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
     }
 
     #[test]
     fn bedrock_explicit_model_is_never_replaced() {
-        let routes = vec![route("us.anthropic.claude-opus-4-6-v1", true)];
+        let routes = vec![route("us.anthropic.claude-opus-6-v1", true)];
         assert_eq!(
             bedrock_promoted_default("anthropic.claude-sonnet-4-20250514-v1:0", &routes),
             None

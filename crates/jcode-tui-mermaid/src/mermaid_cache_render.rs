@@ -873,40 +873,124 @@ fn deferred_render_sender() -> &'static mpsc::Sender<DeferredRenderTask> {
     })
 }
 
-fn deferred_render_worker(rx: mpsc::Receiver<DeferredRenderTask>) {
-    for task in rx {
-        let register_active = match PENDING_RENDER_REQUESTS.lock() {
-            Ok(pending) => pending
-                .get(&task.render_key)
-                .map(|request| request.register_active),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .get(&task.render_key)
-                .map(|request| request.register_active),
-        };
+#[cfg(test)]
+mod deferred_batch_tests {
+    use super::*;
 
-        let Some(register_active) = register_active else {
-            if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                state.stats.deferred_worker_skips += 1;
+    #[test]
+    fn deferred_worker_batches_mixed_tasks_and_skips_empty_batches() {
+        for (tasks, expected_wakes) in [
+            (vec![], 0),
+            (vec![false; 65], 0),
+            (vec![false, true, false, true], 1),
+            (vec![true; 65], 3),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            let expected_count = tasks.len();
+            for rendered in tasks {
+                tx.send(rendered).unwrap();
             }
-            continue;
-        };
-
-        if let Ok(mut state) = MERMAID_DEBUG.lock() {
-            state.stats.deferred_worker_renders += 1;
+            drop(tx);
+            let mut processed = 0;
+            let mut wakes = 0;
+            deferred_render_worker_with(
+                rx,
+                |rendered| {
+                    processed += 1;
+                    rendered
+                },
+                || wakes += 1,
+            );
+            assert_eq!(processed, expected_count);
+            assert_eq!(wakes, expected_wakes);
         }
+    }
 
-        let profile = task.render_key.2;
-        let _ = with_preferred_aspect_ratio(profile.preferred_aspect_ratio(), || {
-            render_mermaid_sized_internal(&task.content, task.terminal_width, register_active)
-        });
+    #[test]
+    fn abandoned_mermaid_task_does_not_notify() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(DeferredRenderTask {
+            content: "abandoned-latex-toggle-regression".into(),
+            terminal_width: Some(80),
+            render_key: (u64::MAX - 1908, 80, RenderProfile::default()),
+        })
+        .unwrap();
+        drop(tx);
+        let mut wakes = 0;
+        deferred_render_worker_with(rx, render_deferred_task, || wakes += 1);
+        assert_eq!(
+            wakes, 0,
+            "skipped tasks must not bump the epoch or wake the UI"
+        );
+    }
+}
 
-        if let Ok(mut pending) = PENDING_RENDER_REQUESTS.lock() {
-            pending.remove(&task.render_key);
-        }
+fn deferred_render_worker(rx: mpsc::Receiver<DeferredRenderTask>) {
+    deferred_render_worker_with(rx, render_deferred_task, || {
         bump_deferred_render_epoch();
         crate::notify_render_completed();
+    });
+}
+
+fn deferred_render_worker_with<T>(
+    rx: mpsc::Receiver<T>,
+    mut render: impl FnMut(T) -> bool,
+    mut notify: impl FnMut(),
+) {
+    loop {
+        let Ok(task) = rx.recv() else {
+            return;
+        };
+        let mut rendered_any = render(task);
+        // Drain tasks queued while this one rendered before bumping the epoch:
+        // each bump invalidates prepared-body caches, so a burst of diagrams
+        // must not force one full transcript rebuild per diagram.
+        // Keep a replenished queue from postponing UI wakeups indefinitely.
+        for next in rx.try_iter().take(31) {
+            rendered_any |= render(next);
+        }
+        // Skip tasks (pending request already gone) never changed render
+        // output, so an all-skipped batch must not invalidate anything.
+        if rendered_any {
+            notify();
+        }
     }
+}
+
+/// Render one deferred task. Returns false when the task was skipped because
+/// its pending request is gone (stale geometry the UI already abandoned);
+/// a skipped task must not count as a completed render for wakeup purposes.
+fn render_deferred_task(task: DeferredRenderTask) -> bool {
+    let register_active = match PENDING_RENDER_REQUESTS.lock() {
+        Ok(pending) => pending
+            .get(&task.render_key)
+            .map(|request| request.register_active),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .get(&task.render_key)
+            .map(|request| request.register_active),
+    };
+
+    let Some(register_active) = register_active else {
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.deferred_worker_skips += 1;
+        }
+        return false;
+    };
+
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.deferred_worker_renders += 1;
+    }
+
+    let profile = task.render_key.2;
+    let _ = with_preferred_aspect_ratio(profile.preferred_aspect_ratio(), || {
+        render_mermaid_sized_internal(&task.content, task.terminal_width, register_active)
+    });
+
+    if let Ok(mut pending) = PENDING_RENDER_REQUESTS.lock() {
+        pending.remove(&task.render_key);
+    }
+    true
 }
 
 pub(crate) fn is_likely_stream_update(previous: &str, next: &str) -> bool {

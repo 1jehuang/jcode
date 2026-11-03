@@ -7,22 +7,20 @@ use super::{
     VersionedPlan, broadcast_swarm_plan, persist_swarm_state_for, queue_soft_interrupt_for_session,
     record_swarm_event, summarize_plan_items,
 };
-use crate::agent::Agent;
 use crate::plan::PlanItem;
 use crate::protocol::{NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Reject plans whose dependency graph contains a cycle. Cyclic items can never
 /// become runnable (`summarize_plan_graph` parks them in `blocked_ids` forever),
-/// so letting one into a live plan silently wedges all dependent work. This
-/// mirrors the acyclicity validation `jcode_plan::dag::seed`/`expand` already
-/// enforce on the task-graph paths. Returns a user-facing error naming the
+/// so letting one into a live plan silently wedges all dependent work. Returns
+/// a user-facing error naming the
 /// cyclic item ids, or `None` when the graph is a valid DAG.
 fn plan_cycle_error(items: &[PlanItem]) -> Option<String> {
     let cycle_ids = crate::plan::cycle_item_ids(items);
@@ -122,6 +120,22 @@ pub(super) async fn handle_comm_propose_plan(
                 .entry(swarm_id.clone())
                 .or_insert_with(VersionedPlan::new);
             plan.participants.insert(req_session_id.clone());
+            // A lane plan is re-derived from the todo list on every launch;
+            // keep the status and owner of lanes already in flight so the plan
+            // mirrors the todos without forgetting running work.
+            let mut items = items.clone();
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.id.starts_with(crate::todo::stages::LANE_ID_PREFIX))
+            {
+                for item in &mut items {
+                    if let Some(previous) = plan.items.iter().find(|p| p.id == item.id) {
+                        item.status = previous.status.clone();
+                        item.assigned_to = previous.assigned_to.clone();
+                    }
+                }
+            }
             for item in &items {
                 if let Some(owner) = &item.assigned_to {
                     plan.participants.insert(owner.clone());

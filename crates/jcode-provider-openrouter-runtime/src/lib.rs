@@ -23,10 +23,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use jcode_base::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
-    load_api_key_from_env_or_config, load_env_value_from_env_or_config, normalize_api_base,
-    openai_compatible_profile_by_id, openai_compatible_profile_id_for_api_base,
-    openai_compatible_profile_static_context_limits, openai_compatible_profile_static_models,
-    openai_compatible_profiles, resolve_openai_compatible_profile,
+    load_api_key_from_env_or_config, load_env_value_from_env_or_config,
+    load_openai_compatible_profile_api_key, normalize_api_base, openai_compatible_profile_by_id,
+    openai_compatible_profile_id_for_api_base, openai_compatible_profile_static_context_limits,
+    openai_compatible_profile_static_models, openai_compatible_profiles,
+    resolve_openai_compatible_profile,
 };
 use jcode_message_types::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, Provider};
@@ -55,6 +56,7 @@ mod catalog_fetch;
 use catalog_fetch::fetch_models_from_api;
 
 mod astra_jb;
+mod openai_compatible_runtime;
 
 mod request_headers;
 use request_headers::*;
@@ -68,20 +70,15 @@ const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
 const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
 
-/// Default model (Claude Sonnet via OpenRouter). Placeholder only: once the
-/// live catalog loads, [`OpenRouterProvider::promote_placeholder_default_model`]
-/// replaces it with the newest flagship OpenRouter serves.
-const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+/// Default model (Claude Opus via OpenRouter). Once the live catalog loads,
+/// [`OpenRouterProvider::promote_placeholder_default_model`] can replace it
+/// with a newer flagship OpenRouter serves.
+const DEFAULT_MODEL: &str = "anthropic/claude-opus-5.5";
 
 /// Which model should replace the placeholder default, if any. Pure so it can
 /// be tested without a network catalog.
-fn select_promoted_default(current: &str, catalog: &[&str]) -> Option<String> {
-    if current != DEFAULT_MODEL {
-        return None;
-    }
-    jcode_base::auth::lifecycle::preferred_model_for_provider("openrouter", catalog)
-        .filter(|best| best != DEFAULT_MODEL)
-}
+mod default_selection;
+use default_selection::select_promoted_default;
 
 /// Soft refresh TTL for the model catalog.
 ///
@@ -644,9 +641,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
-    let auth = if let Some(key) =
-        load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file)
-    {
+    let auth = if let Some(key) = load_openai_compatible_profile_api_key(&resolved) {
         ProviderAuth::AuthorizationBearer {
             token: key,
             label: resolved.api_key_env.clone(),
@@ -896,7 +891,9 @@ impl OpenRouterProvider {
                 "xhigh" => "high",
                 other => other,
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -907,7 +904,9 @@ impl OpenRouterProvider {
             } else {
                 effort
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -979,6 +978,7 @@ impl OpenRouterProvider {
     fn model_is_openai_reasoning_family(model: &str) -> bool {
         let model = model.trim().to_ascii_lowercase();
         model.starts_with("gpt-5")
+            || model == "gpt-6.1-sol"
             || model.contains("codex")
             || model.starts_with("o1")
             || model.starts_with("o3")
@@ -1139,7 +1139,7 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "low" | "medium" | "high" | "max" | "swarm" | "swarm-deep" => Some(value),
+            "none" | "low" | "medium" | "high" | "max" | "swarm" => Some(value),
             // Match the existing OpenAI UX: accept unknown non-empty effort values
             // by snapping to the strongest setting instead of rejecting the command.
             other => {
@@ -1158,8 +1158,9 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
-            | "swarm-deep" => Some(value),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => {
+                Some(value)
+            }
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported OpenAI-compatible reasoning effort '{}'.",
@@ -1176,9 +1177,7 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "swarm" | "swarm-deep" => {
-                Some(value)
-            }
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "swarm" => Some(value),
             "max" => Some("xhigh".to_string()),
             other => {
                 jcode_base::logging::info(&format!(
@@ -1299,6 +1298,29 @@ impl OpenRouterProvider {
                     .filter(|value| !value.is_empty())
             });
         (seed, name)
+    }
+
+    /// Provider-specific request fields that built-in profiles need by default.
+    /// User-supplied `JCODE_OPENAI_EXTRA_BODY` values win.
+    fn with_profile_default_extra_body(
+        profile_id: Option<&str>,
+        extra: Option<serde_json::Map<String, Value>>,
+    ) -> Option<serde_json::Map<String, Value>> {
+        if profile_id != Some("venice") {
+            return extra;
+        }
+        // Venice prepends its own system prompt unless told not to, which
+        // would compete with jcode's agent instructions.
+        let mut merged = extra.unwrap_or_default();
+        let params = merged
+            .entry("venice_parameters")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(params) = params.as_object_mut() {
+            params
+                .entry("include_venice_system_prompt")
+                .or_insert(Value::Bool(false));
+        }
+        Some(merged)
     }
 
     pub fn supports_provider_routing_features(&self) -> bool {
@@ -1690,13 +1712,22 @@ impl OpenRouterProvider {
     }
 
     pub fn new() -> Result<Self> {
+        let new_start = std::time::Instant::now();
         let autodetected_profile = autodetected_openai_compatible_profile();
+        let autodetect_ms = new_start.elapsed().as_millis();
         let api_base = configured_api_base();
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth: AuthResolver = Arc::new(Self::resolve_auth);
+        let auth_start = std::time::Instant::now();
         auth()?;
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: autodetect={}ms, auth={}ms, before_auth={}ms",
+            autodetect_ms,
+            auth_start.elapsed().as_millis(),
+            auth_start.duration_since(new_start).as_millis()
+        ));
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -1771,7 +1802,14 @@ impl OpenRouterProvider {
             ProviderRouting::default()
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
-        let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        let extra_body = Self::with_profile_default_extra_body(
+            profile_id.as_deref(),
+            Self::resolve_extra_body(None, &configured_env_file_name()),
+        );
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: pre_struct={}ms",
+            new_start.elapsed().as_millis()
+        ));
         let (thinking_prefill_seed, thinking_prefill_name) =
             Self::resolve_thinking_prefill(None, None, &configured_env_file_name());
 
@@ -1847,9 +1885,9 @@ impl OpenRouterProvider {
                 })
             }),
             supports_provider_features: false,
-            // The proxy's `/models` shape is not a documented catalog; keep the
-            // curated list so `/model` works offline and before first request.
-            supports_model_catalog: false,
+            // The official CLI discovers releases through GET /v1/models.
+            // Static models remain only an offline/pre-discovery fallback.
+            supports_model_catalog: true,
             profile_id: Some("grok-build".to_string()),
             builtin_azure: false,
             reasoning_effort_support: Some(false),
@@ -1922,91 +1960,6 @@ impl OpenRouterProvider {
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
-            provider_pin: Arc::new(Mutex::new(None)),
-            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
-            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
-    }
-
-    pub fn new_openai_compatible_profile_runtime(
-        profile: jcode_base::provider_catalog::OpenAiCompatibleProfile,
-    ) -> Result<Self> {
-        let resolved = resolve_openai_compatible_profile(profile);
-        let api_base = normalize_api_base(&resolved.api_base).ok_or_else(|| {
-            anyhow::anyhow!(
-                "OpenAI-compatible profile '{}' has invalid API base '{}'",
-                resolved.id,
-                resolved.api_base
-            )
-        })?;
-        let resolver_profile = resolved.clone();
-        let auth: AuthResolver = Arc::new(move || {
-            Ok(
-                match load_api_key_from_env_or_config(
-                    &resolver_profile.api_key_env,
-                    &resolver_profile.env_file,
-                ) {
-                    Some(token) => ProviderAuth::AuthorizationBearer {
-                        token,
-                        label: resolver_profile.api_key_env.clone(),
-                    },
-                    None if !resolver_profile.requires_api_key => ProviderAuth::None {
-                        label: "local endpoint (no auth)".to_string(),
-                    },
-                    None => {
-                        let path = jcode_base::storage::app_config_dir()
-                            .map(|dir| dir.join(&resolver_profile.env_file).display().to_string())
-                            .unwrap_or_else(|_| resolver_profile.env_file.clone());
-                        anyhow::bail!(
-                            "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
-                            resolver_profile.display_name,
-                            resolver_profile.api_key_env,
-                            path,
-                            resolver_profile.id,
-                        );
-                    }
-                },
-            )
-        });
-        auth()?;
-
-        let static_context_limits = openai_compatible_profile_static_context_limits(profile);
-        let static_models = openai_compatible_profile_static_models(profile);
-        let model = resolved
-            .default_model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-
-        Ok(Self {
-            client: jcode_provider_core::shared_http_client(),
-            model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                None,
-                Some(&resolved.id),
-            ))),
-            api_base,
-            auth,
-            supports_provider_features: false,
-            supports_model_catalog: true,
-            profile_id: Some(resolved.id.clone()),
-            builtin_azure: false,
-            reasoning_effort_support: None,
-            disable_reasoning_heuristics: false,
-            static_reasoning_config: HashMap::new(),
-            max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
-            extra_body: Self::resolve_extra_body(None, &resolved.env_file),
-            thinking_prefill_seed: Self::resolve_thinking_prefill(None, None, &resolved.env_file).0,
-            thinking_prefill_name: Self::resolve_thinking_prefill(None, None, &resolved.env_file).1,
-            thinking_prefill_non_kimi: false,
-            static_models,
-            static_model_config: HashMap::new(),
-            static_context_limits,
-            static_image_input_support: HashMap::new(),
-            send_openrouter_headers: false,
-            conversation_id: new_conversation_id(),
-            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
-            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
-            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -2716,7 +2669,7 @@ impl OpenRouterProvider {
     fn get_api_key() -> Option<String> {
         let key_name = configured_api_key_name();
         let env_file = configured_env_file_name();
-        load_api_key_from_env_or_config(&key_name, &env_file)
+        jcode_base::provider_catalog::load_runtime_api_key(&key_name, &env_file)
     }
 
     /// Replace the stale built-in placeholder (`DEFAULT_MODEL`) with the newest
@@ -2791,6 +2744,10 @@ impl OpenRouterProvider {
 
     /// Force refresh the models cache from API
     pub async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        if !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
@@ -3054,40 +3011,8 @@ mod issue_1056_tests;
 mod profile_catalog_backoff_tests;
 
 #[cfg(test)]
-mod placeholder_default_tests {
-    use super::*;
+mod muse_native_tests;
 
-    #[test]
-    fn placeholder_default_promotes_to_newest_flagship() {
-        let catalog = [
-            "anthropic/claude-sonnet-4",
-            "anthropic/claude-haiku-4.5",
-            "anthropic/claude-opus-4.6",
-            "anthropic/claude-opus-5.5",
-            "openai/gpt-5.5",
-            "deepseek/deepseek-v4-pro",
-        ];
-        assert_eq!(
-            select_promoted_default(DEFAULT_MODEL, &catalog).as_deref(),
-            Some("anthropic/claude-opus-5.5")
-        );
-    }
-
-    #[test]
-    fn placeholder_default_never_overrides_a_chosen_model() {
-        let catalog = ["anthropic/claude-sonnet-4", "anthropic/claude-opus-5.5"];
-        assert_eq!(
-            select_promoted_default("deepseek/deepseek-v4-pro", &catalog),
-            None
-        );
-    }
-
-    #[test]
-    fn placeholder_default_stays_when_catalog_has_nothing_better() {
-        assert_eq!(
-            select_promoted_default(DEFAULT_MODEL, &["deepseek/deepseek-v4-pro"]),
-            None
-        );
-        assert_eq!(select_promoted_default(DEFAULT_MODEL, &[]), None);
-    }
-}
+#[cfg(test)]
+#[path = "placeholder_default_tests.rs"]
+mod placeholder_default_tests;

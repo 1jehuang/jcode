@@ -263,8 +263,12 @@ async fn remote_startup_case(shared: bool) {
     let mut agent = Agent::new(provider, registry.clone());
     agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
     let before = agent.tool_definitions().await;
-    assert!(before.iter().any(|tool| tool.name == "mcp_call"));
-    assert!(before.iter().any(|tool| tool.name == "mcp_search"));
+    assert!(before.iter().any(|tool| tool.name == "mcp"));
+    assert!(
+        !before
+            .iter()
+            .any(|tool| tool.name == "mcp_call" || tool.name == "mcp_search")
+    );
     slow.wait_for_initialize().await;
     fast.wait_for_initialize().await;
     wait_for_tool(&registry, "mcp__fast__echo").await;

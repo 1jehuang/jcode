@@ -18,8 +18,18 @@ impl App {
     }
 
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
+        if crate::tui::is_ssh_remote()
+            && !crate::usage::remote_account_list()
+                .is_some_and(|(claude, openai)| !claude.is_empty() || !openai.is_empty())
+        {
+            // Enter still requests inventory and explains pending/empty state.
+            // Preview must not append a notice on every keystroke.
+            return None;
+        }
         let trimmed = input.trim_start();
-        let rest = trimmed.strip_prefix("/accounts")?;
+        let rest = trimmed
+            .strip_prefix("/accounts")
+            .or_else(|| trimmed.strip_prefix("/account"))?;
 
         if rest.is_empty() {
             return None;
@@ -87,10 +97,11 @@ impl App {
 
     fn inline_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
         if crate::tui::is_ssh_remote() {
-            // Do not read local auth/account/config while merely typing a
-            // command. Enter will show the actionable SSH setup notice.
+            // Model and account previews consume daemon snapshots only.
+            // Other setup previews must not inspect laptop auth/config.
             return Self::model_picker_preview_filter(input)
-                .map(|filter| InlinePickerPreviewRequest::Model { filter });
+                .map(|filter| InlinePickerPreviewRequest::Model { filter })
+                .or_else(|| self.account_picker_preview_request(input));
         }
         Self::model_picker_preview_filter(input)
             .map(|filter| InlinePickerPreviewRequest::Model { filter })
@@ -106,6 +117,7 @@ impl App {
     }
 
     pub(crate) fn sync_model_picker_preview_from_input(&mut self) {
+        self.ensure_input_image_markers();
         let Some(request) = self.inline_picker_preview_request(&self.input) else {
             if self
                 .inline_interactive_state
@@ -215,6 +227,7 @@ impl App {
                     && picker.filter.is_empty()
                     && picker.selected == 0)
                     || super::picker_enter_should_focus_model_browser(picker)
+                    || (picker.kind == PickerKind::Account && picker.filter.is_empty())
             })
             .unwrap_or(false)
         {

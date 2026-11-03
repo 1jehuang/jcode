@@ -115,7 +115,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        desktop.set_user_response_enabled(true).await;
+        desktop.set_desktop_ui_enabled(true).await;
         let defs = desktop.definitions(None).await;
         let def = defs.iter().find(|d| d.name == "user_response").unwrap();
         assert_eq!(def.input_schema["required"], json!(["content", "intent"]));
@@ -132,7 +132,7 @@ mod tests {
             .unwrap();
         assert_eq!(output.output, "# Hello");
         assert_eq!(output.title.as_deref(), Some("Hi"));
-        desktop.set_user_response_enabled(false).await;
+        desktop.set_desktop_ui_enabled(false).await;
         assert!(desktop.definitions(None).await.is_empty());
         assert!(
             desktop

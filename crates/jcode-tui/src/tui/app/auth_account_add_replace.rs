@@ -2,6 +2,10 @@ use super::*;
 
 impl App {
     pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {
+        if crate::tui::is_ssh_remote() {
+            self.remote_account_management_notice();
+            return;
+        }
         use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
 
         let mut items = vec![AccountPickerItem::action(

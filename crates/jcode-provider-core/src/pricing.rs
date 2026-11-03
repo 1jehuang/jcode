@@ -151,9 +151,10 @@ pub fn openai_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
 
 /// OpenAI API pricing honoring the active service tier.
 ///
-/// `priority` (fast mode) and `flex` bill different per-token rates on the
-/// models that support them; other tier values and unsupported models fall
-/// back to standard rates.
+/// `priority` (fast mode), `ultrafast`, and `flex` bill different per-token
+/// rates on supported models. These are short-context reference rates,
+/// excluding cache writes and regional uplifts. Other tier values and
+/// unsupported models fall back to standard rates.
 pub fn openai_api_pricing_with_tier(
     model: &str,
     service_tier: Option<&str>,
@@ -176,6 +177,7 @@ pub fn openai_api_pricing_with_tier(
         .as_deref()
     {
         Some("priority") => match base {
+            "gpt-6.1-sol" => return exact(4.0, 20.0, Some(0.20), "OpenAI API fast pricing"),
             "gpt-6-astra" => return exact(20.0, 100.0, Some(2.0), "OpenAI API fast pricing"),
             "gpt-5.5" => return exact(12.5, 75.0, Some(1.25), "OpenAI API priority pricing"),
             "gpt-5.4" => return exact(5.0, 30.0, Some(0.5), "OpenAI API priority pricing"),
@@ -184,12 +186,16 @@ pub fn openai_api_pricing_with_tier(
             _ => {}
         },
         Some("ultrafast") => {
-            // Verified 2026-10-05: https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
+            // Verified 2026-10-16: https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
+            if base == "gpt-6.1-sol" {
+                return exact(12.0, 60.0, Some(0.60), "OpenAI API ultrafast pricing");
+            }
             if base == "gpt-6-astra" {
                 return exact(60.0, 300.0, Some(6.0), "OpenAI API ultrafast pricing");
             }
         }
         Some("flex") => match base {
+            "gpt-6.1-sol" => return exact(1.0, 5.0, Some(0.05), "OpenAI API flex pricing"),
             "gpt-6-astra" => return exact(5.0, 25.0, Some(0.5), "OpenAI API flex pricing"),
             "gpt-5.5" => return exact(2.5, 15.0, Some(0.25), "OpenAI API flex pricing"),
             "gpt-5.5-pro" => return exact(15.0, 90.0, None, "OpenAI API flex pricing"),
@@ -203,6 +209,8 @@ pub fn openai_api_pricing_with_tier(
     }
 
     match base {
+        // Verified 2026-10-16: https://developers.openai.com/api/docs/pricing
+        "gpt-6.1-sol" => exact(2.0, 10.0, Some(0.10), "OpenAI API pricing"),
         // Verified 2026-09-07: https://developers.openai.com/api/docs/models/gpt-6-astra
         // The caller applies the >272K-input surcharge using actual request usage.
         "gpt-6-astra" => exact(10.0, 50.0, Some(1.0), "OpenAI API pricing"),
@@ -438,6 +446,23 @@ mod tests {
             assert_eq!(price.input_price_per_mtok_micros, Some(input));
             assert_eq!(price.output_price_per_mtok_micros, Some(output));
             assert_eq!(price.cache_read_price_per_mtok_micros, Some(cached));
+        }
+    }
+
+    #[test]
+    fn sol_public_api_rates_cover_all_speed_tiers() {
+        for model in ["gpt-6.1-sol", "gpt-6.1-sol[1m]"] {
+            for (tier, input, output, cached) in [
+                (None, 2_000_000, 10_000_000, 100_000),
+                (Some("flex"), 1_000_000, 5_000_000, 50_000),
+                (Some("priority"), 4_000_000, 20_000_000, 200_000),
+                (Some("ultrafast"), 12_000_000, 60_000_000, 600_000),
+            ] {
+                let price = openai_api_pricing_with_tier(model, tier).unwrap();
+                assert_eq!(price.input_price_per_mtok_micros, Some(input));
+                assert_eq!(price.output_price_per_mtok_micros, Some(output));
+                assert_eq!(price.cache_read_price_per_mtok_micros, Some(cached));
+            }
         }
     }
 

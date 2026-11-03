@@ -8,6 +8,9 @@ pub(super) fn handle_tool_done(
     output: String,
     error: Option<String>,
 ) -> bool {
+    // Read the raw output before client-side diff rendering replaces it.
+    let observed_duration = remote.take_tool_duration(&id);
+    let duration_secs = DisplayMessage::tool_duration_from_output(&output).or(observed_duration);
     let display_output = remote.handle_tool_done(&id, &name, &output);
     let display_output = if error.is_some()
         && !display_output.starts_with("Error:")
@@ -39,7 +42,7 @@ pub(super) fn handle_tool_done(
         role: "tool".to_string(),
         content: display_output,
         tool_calls: vec![],
-        duration_secs: None,
+        duration_secs,
         title: None,
         tool_data: Some(tool_call.clone()),
     });

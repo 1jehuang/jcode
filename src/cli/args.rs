@@ -3,9 +3,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use super::provider_init::ProviderChoice;
 
 mod build_store;
+mod cloud_env;
+pub(crate) mod plugin;
+pub(crate) use cloud_env::CloudEnvCommand;
+mod cloud_ephemeral;
 mod google;
 mod mcp;
-pub(crate) mod plugin;
+pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -328,11 +332,21 @@ pub(crate) enum Command {
         action: AccountCommand,
     },
 
+    /// Sync session transcripts to your Jcode account for the iOS app
+    Mobile {
+        #[command(subcommand)]
+        action: MobileCommand,
+    },
+
     /// Run in simple REPL mode (no TUI)
     Repl,
 
     /// Update jcode to the latest version
-    Update,
+    Update {
+        /// Persist an update channel (stable permits returning from preview).
+        #[arg(long, value_parser = ["preview", "stable"])]
+        channel: Option<String>,
+    },
 
     /// Show build/version information in human or JSON form
     Version {
@@ -695,6 +709,25 @@ pub(crate) enum TelemetryCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum MobileCommand {
+    /// Turn on transcript sync to your Jcode account (requires a subscription)
+    Enable,
+    /// Turn off sync and delete transcripts stored for mobile
+    Disable,
+    /// Show whether mobile sync is on
+    Status,
+    /// Run one sync pass now
+    Sync,
+    /// Run sessions started or continued from the phone on this machine
+    /// (Jcode Cloud machines do this automatically)
+    Runner {
+        /// Handle queued commands, then exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum AccountCommand {
     /// Open browser-based device authorization and wait for plan activation
     Login {
@@ -781,19 +814,72 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Transfer explicit project environment requirements without exposing values.
+    Env {
+        #[command(subcommand)]
+        action: CloudEnvCommand,
+    },
+    /// Manage disposable remote machines with mandatory automatic expiry.
+    Ephemeral {
+        #[command(subcommand)]
+        action: CloudEphemeralCommand,
+    },
     /// Upload, list, verify, and view cloud-synced sessions
     Sessions {
         #[command(subcommand)]
         action: CloudSessionsCommand,
     },
 
+    /// Prepare the destination without reading or moving a live session.
+    #[command(hide = true)]
+    Prepare {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: report the supported coordinated migration protocol.
+    #[command(hide = true)]
+    GroupProtocol,
+
+    /// Replace the cloud checkout with this local Git repository, keeping a backup.
+    /// Does not move a conversation or copy authentication or ignored files.
+    Replace {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Confirm replacing the cloud checkout after preserving a backup.
+        #[arg(long)]
+        yes: bool,
+        /// Validate the incoming snapshot and destination without replacing files.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: receive a repository-only replacement archive.
+    #[command(hide = true)]
+    ReplaceReceive {
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Move a live session (transcript, repo state, env notes) to a cloud host
     /// and keep working there. Your local files stay editable. Git reconciles
     /// both sides when the session comes back with `jcode cloud return`.
+    /// Copies the session's Jcode-owned OpenAI/Claude OAuth login securely to
+    /// the chosen host. Other accounts and external credentials stay local.
     Move {
         /// Session ID or name. Defaults to the session this command runs in.
         #[arg(long)]
         session: Option<String>,
+        /// Include another independent session sharing this repository (repeatable).
+        #[arg(long = "include-session", conflicts_with = "session_only")]
+        include_sessions: Vec<String>,
+        /// Move only this session instead of its associated swarm.
+        #[arg(long)]
+        session_only: bool,
         #[command(flatten)]
         target: CloudMoveTarget,
         /// Allow moving while the session is mid-turn (the agent itself runs /cloud).
@@ -819,6 +905,9 @@ pub(crate) enum CloudCommand {
         /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
         #[arg(long)]
         refs_only: bool,
+        /// Keep local OAuth credentials instead of importing the cloud copy. Useful when recovering an old session after signing in again locally.
+        #[arg(long)]
+        keep_local_auth: bool,
         /// After returning, resume the session in this terminal.
         #[arg(long)]
         attach: bool,
@@ -839,6 +928,34 @@ pub(crate) enum CloudCommand {
         #[arg(long)]
         session: Option<String>,
     },
+
+    /// Show, wake, or stop the Jcode Cloud machine included with your Jcode
+    /// subscription. Its disk persists while it sleeps.
+    Machine {
+        #[arg(value_enum, default_value = "status")]
+        action: CloudMachineAction,
+    },
+
+    /// Internal: SSH ProxyCommand that wakes and authorizes the managed machine.
+    #[command(hide = true)]
+    Proxy,
+
+    /// Internal: transfer one named OAuth account over the private SSH channel.
+    #[command(hide = true)]
+    Credentials {
+        #[arg(long = "provider", id = "cloud_credential_provider")]
+        provider: String,
+        #[arg(long = "account", id = "cloud_credential_account")]
+        account: String,
+        /// Export to stdout instead of importing from stdin.
+        #[arg(long)]
+        export: bool,
+    },
+
+    /// Internal: import the account router's API keys, provider token stores
+    /// and auto-switch pool from stdin over the private SSH channel.
+    #[command(hide = true)]
+    RouterCredentials,
 
     /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
     #[command(hide = true)]
@@ -863,13 +980,41 @@ pub(crate) enum CloudCommand {
         session: String,
         #[arg(long)]
         epoch: u64,
+        /// Opt in only when the returning client can acknowledge completion.
+        #[arg(long)]
+        require_completion: bool,
     },
+
+    /// Internal: acknowledge a durable local return and permanently fence the cloud owner.
+    #[command(hide = true)]
+    CompleteReturn {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+
+    /// Internal: restore cloud ownership after a rejected credential return.
+    #[command(hide = true)]
+    CancelReturn {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub(crate) enum CloudMachineAction {
+    Status,
+    Wake,
+    Stop,
 }
 
 #[derive(Parser, Debug, Clone, Default)]
 pub(crate) struct CloudMoveTarget {
-    /// SSH host alias for the cloud machine. Defaults to [cloud] host in config
-    /// or $JCODE_CLOUD_HOST.
+    /// SSH host alias for the cloud machine. Defaults to $JCODE_CLOUD_HOST,
+    /// else your subscription's managed Jcode Cloud machine (`jcode-cloud`).
     #[arg(long)]
     pub(crate) host: Option<String>,
     /// Remote jcode binary (name or path). Defaults to `jcode`.
@@ -885,22 +1030,9 @@ pub(crate) struct CloudMoveTarget {
 mod cloud_sessions;
 pub(crate) use cloud_sessions::*;
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum RestartCommand {
-    /// Save a reboot snapshot of currently active jcode windows
-    Save {
-        /// Restore this reboot snapshot automatically the next time plain `jcode` starts
-        #[arg(long)]
-        auto_restore: bool,
-    },
-    /// Restore the most recently saved reboot snapshot
-    Restore,
-    /// Show the currently saved reboot snapshot
-    Status,
-    /// Remove the currently saved reboot snapshot
-    Clear,
-}
-
+#[path = "args/restart.rs"]
+mod restart;
+pub(crate) use restart::RestartCommand;
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelCommand {
     /// List model names you can pass to -m/--model

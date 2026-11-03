@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildModelPriceReport } from "./model-price-report.mjs";
 import {
-  CATALOG_URL, PRICE_KIND_RANK_SQL, buildPriceIndex, observedLabelsSql, resolvePriceRows,
+  CATALOG_URL, PRICE_UPSERT_GUARD_SQL, buildPriceIndex, observedLabelsSql, usageLabelsSql, resolvePriceRows,
 } from "../src/model-pricing.js";
 const DB = "jcode-telemetry";
 
@@ -92,6 +92,19 @@ async function main() {
   const observed = queryRows(
     observedLabelsSql().replace("?", `'-${days} days'`) + ";",
   );
+  for (const canonical of [false, true]) {
+    try {
+      observed.push(...queryRows(
+        usageLabelsSql(canonical).replaceAll("?", `'-${days} days'`) + ";",
+      ));
+    } catch (err) {
+      // Missing tables are expected during rolling migrations, not auth errors
+      // or overload. Never claim a successful refresh after an operational fault.
+      const detail = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join("\n");
+      if (!/no such table/i.test(detail)) throw err;
+      console.warn(`${canonical ? "daily_model_usage_v2" : "daily_model_usage"} unavailable; apply telemetry migrations.`);
+    }
+  }
   console.log(`Found ${observed.length} model/provider label pairs.`);
 
   const rows = resolvePriceRows(observed, index);
@@ -99,7 +112,7 @@ async function main() {
 
   const statements = [...rows.values()].map(
     (r) =>
-      `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at) VALUES (${sqlStr(r.model)}, ${sqlStr(r.sourceModel)}, ${sqlStr(r.sourceProvider)}, ${sqlNum(r.input)}, ${sqlNum(r.output)}, ${sqlNum(r.cacheRead)}, ${sqlNum(r.cacheWrite)}, ${r.cacheInclusive}, ${sqlStr(r.kind)}, datetime('now')) ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now') WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")};`,
+      `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at) VALUES (${sqlStr(r.model)}, ${sqlStr(r.sourceModel)}, ${sqlStr(r.sourceProvider)}, ${sqlNum(r.input)}, ${sqlNum(r.output)}, ${sqlNum(r.cacheRead)}, ${sqlNum(r.cacheWrite)}, ${r.cacheInclusive}, ${sqlStr(r.kind)}, datetime('now')) ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now') WHERE ${PRICE_UPSERT_GUARD_SQL};`,
   );
 
   // A label can occur under multiple providers. Pricing is keyed by label, but

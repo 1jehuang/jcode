@@ -894,7 +894,9 @@ mod tests {
         assert!(super::super::hook_configured_for_dir("pre_tool", Some(cwd)));
         assert!(!root.join("session.json").exists());
         assert_eq!(
-            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
+            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}")
+                .await
+                .decision,
             GateDecision::Block {
                 reason: "scoped".into()
             }
@@ -906,7 +908,8 @@ mod tests {
                 "bash",
                 "{}"
             )
-            .await,
+            .await
+            .decision,
             GateDecision::Allow
         );
         super::super::dispatch_observer(
@@ -952,7 +955,9 @@ mod tests {
             format!("/bin/sh '{}'", native.display()),
         );
         assert_eq!(
-            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
+            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}")
+                .await
+                .decision,
             GateDecision::Block {
                 reason: "native-policy".into()
             }
@@ -962,22 +967,21 @@ mod tests {
                 .unwrap();
         assert_eq!(native_input, json!({"command":"changed"}));
         crate::env::remove_var("JCODE_HOOK_PRE_TOOL");
-        assert_eq!(
-            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
-            GateDecision::Rewrite {
-                input: json!({"command":"changed"})
-            }
-        );
+        let outcome = super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await;
+        assert_eq!(outcome.decision, GateDecision::Allow);
+        assert_eq!(outcome.updated_input, Some(json!({"command":"changed"})));
         std::fs::write(root.join("hooks/hooks.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{
             "type":"command", "command":"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}'"
         }]}]}}).to_string()).unwrap();
         assert!(
-            matches!(super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
+            matches!(super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await.decision,
             GateDecision::Block { reason } if reason.contains("ask is not supported"))
         );
         write_registry(false);
         assert_eq!(
-            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
+            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}")
+                .await
+                .decision,
             GateDecision::Allow
         );
         write_registry(true);
@@ -987,7 +991,9 @@ mod tests {
             Some(cwd)
         ));
         assert_eq!(
-            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}").await,
+            super::super::run_pre_tool_gate("test", Some(cwd), "bash", "{}")
+                .await
+                .decision,
             GateDecision::Allow
         );
     }

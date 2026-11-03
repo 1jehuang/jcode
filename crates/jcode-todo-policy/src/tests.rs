@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn background_dependencies_block_only_for_running_ids() {
+    let todo = TodoItem {
+        completely_blocked: None,
+        external_blocker: None,
+        waiting_on: vec!["task-a".into()],
+        ..Default::default()
+    };
+    assert!(!todo_waits_on_running_task(&todo, |_| false));
+    assert!(!todo_waits_on_running_task(&todo, |id| id == "other"));
+    assert!(todo_waits_on_running_task(&todo, |id| id == "task-a"));
+}
+
 fn intent_observation(state: Option<IntentUnderstanding>) -> GateObservation {
     GateObservation {
         kind: GateObservationKind::IntentUnderstanding,
@@ -596,11 +609,17 @@ fn todo(content: &str, status: &str, group: Option<&str>) -> TodoItem {
         priority: "high".to_string(),
         id: content.to_ascii_lowercase().replace(' ', "-"),
         group: group.map(str::to_string),
+        lane_after: None,
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
+        completely_blocked: None,
+        external_blocker: None,
+        waiting_on: Vec::new(),
         assigned_to: None,
+        stage: None,
+        details: None,
     }
 }
 
@@ -1092,5 +1111,27 @@ fn ungrouped_session_title_prefers_plan_intention_then_item_content() {
     assert_eq!(
         derive_session_title(&todos, &TodoPlan::default()).as_deref(),
         Some("Run targeted tests")
+    );
+}
+
+#[test]
+fn plan_title_beats_lane_name_and_intention() {
+    let todos = vec![todo("Fix it", "in_progress", Some("implementation"))];
+    let plan = TodoPlan {
+        title: Some("  Live default sync ".to_string()),
+        user_intention: Some("Make defaults apply immediately".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        derive_session_title(&todos, &plan).as_deref(),
+        Some("Live default sync")
+    );
+    let blank = TodoPlan {
+        title: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        derive_session_title(&todos, &blank).as_deref(),
+        Some("implementation")
     );
 }

@@ -67,6 +67,30 @@ def verify_downloads(directory, names, tag, expected_sha):
         raise ValueError("Release provenance does not match the validated unpatched commit")
 
 
+def fetch_release_metadata(repo, tag, allow_draft=False):
+    """Return release metadata for `tag`.
+
+    GitHub's `releases/tags/{tag}` endpoint only resolves published releases
+    and returns 404 for drafts, so staged-draft verification must search the
+    authenticated release list instead.
+    """
+    if not allow_draft:
+        return json.loads(subprocess.check_output(
+            ["gh", "api", f"repos/{repo}/releases/tags/{tag}"]))
+    page = 1
+    while True:
+        releases = json.loads(subprocess.check_output(
+            ["gh", "api", f"repos/{repo}/releases?per_page=100&page={page}"]))
+        matches = [release for release in releases if release.get("tag_name") == tag]
+        if len(matches) > 1:
+            raise ValueError(f"Multiple releases claim tag {tag}")
+        if matches:
+            return matches[0]
+        if len(releases) < 100:
+            raise ValueError(f"No release found for tag {tag}")
+        page += 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag")
@@ -82,8 +106,7 @@ def main():
         parser.error("sha must be a full lowercase commit SHA")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", args.repo):
         parser.error("repo must be OWNER/REPO")
-    metadata = json.loads(subprocess.check_output(
-        ["gh", "api", f"repos/{args.repo}/releases/tags/{args.tag}"]))
+    metadata = fetch_release_metadata(args.repo, args.tag, allow_draft=args.allow_draft)
     names = verify_metadata(metadata, args.tag, allow_draft=args.allow_draft)
 
     def download_and_verify(directory):

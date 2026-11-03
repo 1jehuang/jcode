@@ -112,3 +112,49 @@ async fn concurrency_guards_belong_to_each_agent_not_the_global_telemetry_slot()
     assert!(first.concurrency_session.is_none());
     assert_owns_current_session(&second);
 }
+
+/// The server resume path defers the post-restore save until after History is
+/// sent (it is a full snapshot rewrite for sessions with large compaction
+/// state). The deferred save must still persist the resumed status.
+#[tokio::test]
+async fn deferred_restore_save_persists_when_called() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut stored = Session::create(None, Some("Deferred save fixture".to_owned()));
+    stored.append_stored_message(crate::session::StoredMessage {
+        id: "msg_deferred".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    stored.mark_closed();
+    stored.save().unwrap();
+    let id = stored.id.clone();
+
+    agent.restore_session_deferring_save(&id, None).unwrap();
+    assert!(
+        matches!(
+            Session::load(&id).unwrap().status,
+            crate::session::SessionStatus::Closed
+        ),
+        "deferring must not write before persist_restored_session"
+    );
+    agent.persist_restored_session();
+    assert!(
+        matches!(
+            Session::load(&id).unwrap().status,
+            crate::session::SessionStatus::Active
+        ),
+        "deferred save must persist the resumed status"
+    );
+}

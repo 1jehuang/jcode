@@ -74,6 +74,23 @@ impl Framed {
         self
     }
 
+    /// Keep existing footer details, but never leave a visible frame's bottom
+    /// border empty when neither slot contains text.
+    pub(crate) fn footer_if_empty(mut self, line: impl Into<Line<'static>>) -> Self {
+        if ![&self.footer, &self.footer_right]
+            .into_iter()
+            .flatten()
+            .any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| !span.content.trim().is_empty())
+            })
+        {
+            self.footer = Some(line.into());
+        }
+        self
+    }
+
     /// A widget whose body is empty would render as a bare border with text
     /// on it, which placement treats as border-only. Pull the headline back
     /// into the body so there is always at least one content row.
@@ -133,10 +150,15 @@ fn place<'a>(
     let left_w = left.as_ref().map_or(0, Line::width);
     // Keep at least one border cell between the two slots.
     let gap = usize::from(left_w > 0);
-    let right = right
-        .as_ref()
-        .map(padded)
-        .filter(|line| left_w + gap + line.width() <= avail);
+    // A right slot sharing the border with a left slot is secondary and is
+    // dropped before it collides. Alone, it truncates like the left slot.
+    let right = right.as_ref().map(padded).and_then(|line| {
+        if left_w == 0 {
+            fit(&line, avail)
+        } else {
+            Some(line).filter(|line| left_w + gap + line.width() <= avail)
+        }
+    });
 
     let mut block = block;
     for (line, alignment) in [(left, Alignment::Left), (right, Alignment::Right)] {
@@ -251,6 +273,47 @@ mod tests {
         let rows = render(&f, 30);
         assert!(rows[2].starts_with("╰ +3 more "), "{}", rows[2]);
         assert!(rows[2].ends_with(" ● edited ╯"), "{}", rows[2]);
+    }
+
+    #[test]
+    fn missing_or_blank_footers_receive_fallback_text() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]),
+            Framed::body(vec![Line::from("x")])
+                .footer("  ")
+                .footer_right(""),
+        ] {
+            let framed = framed.footer_if_empty(dim("Working tree"));
+            for width in [8, 12, 30] {
+                let rows = render(&framed, width);
+                assert!(rows[2].contains("Wor"), "{}", rows[2]);
+                assert_eq!(UnicodeWidthStr::width(rows[2].as_str()), usize::from(width));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_existing_footer_slots() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]).footer("+3 more"),
+            Framed::body(vec![Line::from("x")]).footer_right("● edited"),
+            Framed::body(vec![Line::from("x")])
+                .footer("+3 more")
+                .footer_right("● edited"),
+        ] {
+            let before = render(&framed, 30);
+            let after = render(&framed.footer_if_empty(dim("fallback")), 30);
+            assert_eq!(before, after);
+        }
+    }
+
+    #[test]
+    fn lone_right_footer_truncates_with_ellipsis() {
+        let f = Framed::body(vec![Line::from("x")]).footer_right("abcdefghijklmnopqrstuvwxyz");
+        let rows = render(&f, 12);
+        assert!(rows[2].contains('…'), "{}", rows[2]);
+        assert_eq!(rows[2].chars().count(), 12);
+        assert!(rows[2].ends_with('╯'), "{}", rows[2]);
     }
 
     #[test]

@@ -15,6 +15,23 @@ fn context(dir: &std::path::Path, session: &str) -> ToolContext {
 }
 
 #[tokio::test]
+async fn panel_visibility_follows_implementation_not_registry_name() {
+    let registry = super::super::Registry::empty();
+    registry
+        .register(
+            "legacy_alias".into(),
+            std::sync::Arc::new(super::super::side_panel::SidePanelTool::new()),
+        )
+        .await;
+    registry
+        .register("side_panel".into(), std::sync::Arc::new(PanelTool::new()))
+        .await;
+    let definitions = registry.definitions(None).await;
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].name, "side_panel");
+}
+
+#[tokio::test]
 async fn panel_registered_lifecycle_and_validation() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
@@ -37,6 +54,20 @@ async fn panel_registered_lifecycle_and_validation() {
     assert!(registry.tools.read().await.contains_key("side_panel"));
     assert!(registry.tools.read().await.contains_key("panel"));
     let definitions = registry.definitions(None).await;
+    assert!(!definitions.iter().any(|d| d.name == "side_panel"));
+    let allowed = ["panel".to_string(), "side_panel".to_string()]
+        .into_iter()
+        .collect();
+    let allowed_definitions = registry.definitions(Some(&allowed)).await;
+    assert_eq!(allowed_definitions.len(), 1);
+    assert_eq!(allowed_definitions[0].name, "panel");
+    assert!(
+        !registry
+            .definitions_for_session("panel-test")
+            .await
+            .iter()
+            .any(|d| d.name == "side_panel")
+    );
     let definition = definitions
         .iter()
         .find(|d| d.name == "panel")

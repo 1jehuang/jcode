@@ -383,9 +383,8 @@ async fn busy_host_errors_instead_of_serving_saved_summary() {
     let agent = hosted(saved).await;
     let _busy = agent.lock().await;
     let event = request(&sessions(Some(agent.clone())), &members(), None).await;
-    assert!(
-        matches!(event, ServerEvent::Error { id: 71, retry_after_secs: Some(1), message, .. } if message.contains("busy"))
-    );
+    assert!(matches!(event, ServerEvent::Error {
+server_resumes: false, id: 71, retry_after_secs: Some(1), message, .. } if message.contains("busy")));
 }
 
 #[tokio::test]
@@ -398,9 +397,8 @@ async fn saved_summary_requires_same_swarm_access() {
     let members = members();
     members.write().await.get_mut("requester").unwrap().swarm_id = Some("other-swarm".into());
     let event = request(&sessions(None), &members, None).await;
-    assert!(
-        matches!(event, ServerEvent::Error { message, retry_after_secs: None, .. } if message.contains("not in the same swarm"))
-    );
+    assert!(matches!(event, ServerEvent::Error {
+server_resumes: false, message, retry_after_secs: None, .. } if message.contains("not in the same swarm")));
 }
 
 #[tokio::test]
@@ -433,10 +431,9 @@ async fn missing_or_corrupt_saved_only_summary_errors_without_context() {
             std::fs::write(&path, "private-corrupt-fixture").expect("corrupt disposable snapshot");
         }
         let event = request(&sessions, &members, None).await;
-        assert!(
-            matches!(event, ServerEvent::Error { id: 71, message, retry_after_secs: None, .. }
-            if message == "Session 'summary-fixture' summary is unavailable")
-        );
+        assert!(matches!(event, ServerEvent::Error {
+server_resumes: false, id: 71, message, retry_after_secs: None, .. }
+            if message == "Session 'summary-fixture' summary is unavailable"));
     }
 }
 

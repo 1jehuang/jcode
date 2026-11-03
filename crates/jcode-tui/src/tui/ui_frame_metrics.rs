@@ -496,7 +496,7 @@ pub(super) fn begin_frame_resource_sample() {
     });
 }
 
-fn frame_perf_stats_snapshot() -> FramePerfStats {
+pub(super) fn frame_perf_stats_snapshot() -> FramePerfStats {
     frame_perf_stats()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

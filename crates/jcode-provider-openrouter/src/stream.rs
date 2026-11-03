@@ -515,6 +515,7 @@ impl OpenRouterStream {
                 if input_tokens.is_some()
                     || output_tokens.is_some()
                     || cache_read_input_tokens.is_some()
+                    || cache_creation_input_tokens.is_some()
                 {
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,

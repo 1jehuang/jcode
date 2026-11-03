@@ -209,6 +209,33 @@ pub fn list_accounts() -> Result<Vec<OpenAiAccount>> {
     Ok(auth.openai_accounts)
 }
 
+/// Label of the saved account whose tokens these credentials are. This is the
+/// account a request actually authenticates as, which can differ from the
+/// globally active login when a session loaded its credentials earlier.
+pub fn account_label_for_credentials(
+    accounts: &[OpenAiAccount],
+    credentials: &CodexCredentials,
+) -> Option<String> {
+    accounts
+        .iter()
+        .find(|account| {
+            (!credentials.access_token.is_empty()
+                && account.access_token == credentials.access_token)
+                || (!credentials.refresh_token.is_empty()
+                    && account.refresh_token == credentials.refresh_token)
+        })
+        .or_else(|| {
+            // Tokens rotate; the ChatGPT account id is stable per login.
+            let account_id = credentials.account_id.as_deref()?;
+            let mut matches = accounts
+                .iter()
+                .filter(|account| account.account_id.as_deref() == Some(account_id));
+            let account = matches.next()?;
+            matches.next().is_none().then_some(account)
+        })
+        .map(|account| account.label.clone())
+}
+
 pub fn active_account_label() -> Option<String> {
     let auth = load_auth_file().ok()?;
     crate::auth::account_store::active_account_label(
@@ -356,14 +383,18 @@ pub fn update_account_tokens(
     {
         account.access_token = access_token.to_string();
         account.refresh_token = refresh_token.to_string();
-        if let Some(id_token) = id_token {
-            account.email = extract_email(&id_token).or_else(|| account.email.clone());
-            account.account_id = account_id
-                .or_else(|| extract_account_id(&id_token))
-                .or_else(|| account.account_id.clone());
-            account.id_token = Some(id_token);
-        } else if let Some(account_id) = account_id {
-            account.account_id = Some(account_id);
+        // Refresh grants may omit id_token. Keep identity hints from login so
+        // cloud return can still verify the same account after token rotation.
+        if let Some(email) = id_token.as_deref().and_then(extract_email) {
+            account.email = Some(email);
+        }
+        if let Some(identity) =
+            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id))
+        {
+            account.account_id = Some(identity);
+        }
+        if id_token.is_some() {
+            account.id_token = id_token;
         }
         account.expires_at = expires_at;
         save_auth_file_unlocked(&auth)?;
@@ -824,6 +855,18 @@ pub fn extract_email(id_token: &str) -> Option<String> {
         .get("email")
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
+}
+
+/// Read plan metadata as a routing hint, never as proof of authorization.
+pub fn extract_subscription_type(token: &str) -> Option<String> {
+    let payload = decode_jwt_payload(token)?;
+    payload
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_plan_type")?
+        .as_str()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(str::to_owned)
 }
 
 fn decode_jwt_payload(token: &str) -> Option<Value> {

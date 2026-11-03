@@ -1681,7 +1681,7 @@ fn model_scoped_usage_routes_only_exhausted_fable_to_opus() {
         model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
             model_name: "Fable".to_string(),
             utilization: 1.0,
-            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+            resets_at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
         }],
         ..Default::default()
     };
@@ -1769,10 +1769,10 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
         Some("low"),
     );
-    // Opus 5.5 is jcode's default Claude model and defaults to `medium`.
+    // Opus 5.5 is jcode's default Claude model and also defaults to `low`.
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5-5").as_deref(),
-        Some("medium"),
+        Some("low"),
     );
     assert_eq!(
         AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
@@ -1847,7 +1847,7 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
 fn configured_swarm_root_effort_controls_adaptive_and_manual_thinking() {
     let mut provider = AnthropicProvider::new();
     provider.max_tokens_override = Some(32_768);
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         *provider.reasoning_effort.write().unwrap() = Some(mode.to_string());
         for (effort, budget) in [
             ("minimal", 1_024),
@@ -1918,7 +1918,6 @@ fn configured_swarm_root_effort_reads_real_config() {
             ])
             .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
             .env("JCODE_SWARM_ROOT_EFFORT", "low")
-            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
             .output()
             .expect("run isolated config test");
         assert!(
@@ -1931,7 +1930,7 @@ fn configured_swarm_root_effort_reads_real_config() {
     }
     let mut provider = AnthropicProvider::new();
     provider.max_tokens_override = Some(32_768);
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         *provider.reasoning_effort.write().unwrap() = Some(mode.into());
         for model in ["claude-opus-4-8", "claude-opus-4-5"] {
             let (thinking, output, temperature) =

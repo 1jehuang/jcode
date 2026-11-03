@@ -50,6 +50,7 @@ fn profile_isolates_normal_override_and_own_provider_prompts() {
 struct PromptCaptureProvider {
     requests: Arc<Mutex<Vec<(String, String)>>>,
     own_system_prompt: bool,
+    message_requests: Arc<Mutex<Vec<Vec<Message>>>>,
     tool_requests: Arc<Mutex<Vec<Vec<ToolDefinition>>>>,
     lifecycle: Arc<Mutex<Vec<&'static str>>>,
     resume_hints: Arc<Mutex<Vec<Option<String>>>>,
@@ -69,12 +70,16 @@ impl Provider for PromptCaptureProvider {
 
     async fn complete_split(
         &self,
-        _: &[Message],
+        messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
         system_dynamic: &str,
         resume: Option<&str>,
     ) -> Result<EventStream> {
+        self.message_requests
+            .lock()
+            .unwrap()
+            .push(messages.to_vec());
         self.lifecycle.lock().unwrap().push("request");
         self.tool_requests.lock().unwrap().push(tools.to_vec());
         self.resume_hints
@@ -144,20 +149,21 @@ async fn custom_prompt_recovery_reminder_reaches_both_agent_request_paths() {
                 .await
                 .unwrap();
         } else {
-            agent.current_turn_system_reminder = reminder;
+            agent
+                .append_turn_system_reminder(reminder.as_deref().unwrap_or(""))
+                .unwrap();
             agent.run_turn(false).await.unwrap();
         }
     }
     assert_eq!(
         *provider.requests.lock().unwrap(),
-        vec![
-            (
-                CUSTOM_PROMPT.into(),
-                format!("# System Reminder\n\n{RECOVERY_REMINDER}"),
-            );
-            2
-        ]
+        vec![(CUSTOM_PROMPT.into(), String::new()); 2]
     );
+    let requests = provider.message_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for messages in requests.iter() {
+        assert!(messages.iter().any(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains(RECOVERY_REMINDER)))));
+    }
 }
 
 #[test]
@@ -166,7 +172,9 @@ fn custom_prompt_without_meaningful_reminder_keeps_dynamic_section_empty() {
     let mut agent = custom_prompt_agent(Arc::new(PromptCaptureProvider::default()));
     let mut prompts = Vec::new();
     for reminder in [None, Some(""), Some(" \n\t ")] {
-        agent.current_turn_system_reminder = reminder.map(str::to_owned);
+        agent
+            .append_turn_system_reminder(reminder.unwrap_or(""))
+            .unwrap();
         let split = agent.build_system_prompt_split(Some("ignored memory prompt"));
         prompts.push((split.static_part, split.dynamic_part));
     }
@@ -183,24 +191,16 @@ fn changing_recovery_reminders_never_pollutes_custom_static_prompt() {
         Some("Resume the next saved step."),
         None,
     ] {
-        agent.current_turn_system_reminder = reminder.map(str::to_owned);
+        agent
+            .append_turn_system_reminder(reminder.unwrap_or(""))
+            .unwrap();
         let split = agent.build_system_prompt_split(None);
         prompts.push((split.static_part, split.dynamic_part));
     }
     assert_eq!(
         (prompts, agent.session.system_prompt.clone()),
         (
-            vec![
-                (
-                    CUSTOM_PROMPT.into(),
-                    format!("# System Reminder\n\n{RECOVERY_REMINDER}"),
-                ),
-                (
-                    CUSTOM_PROMPT.into(),
-                    "# System Reminder\n\nResume the next saved step.".into(),
-                ),
-                (CUSTOM_PROMPT.into(), String::new()),
-            ],
+            vec![(CUSTOM_PROMPT.into(), String::new()); 3],
             Some(CUSTOM_PROMPT.into()),
         )
     );

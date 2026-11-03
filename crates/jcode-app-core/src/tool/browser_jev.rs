@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-const MODEL: &str = "typesafe/jev-1.13";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 
 pub(super) struct JevTransport {
@@ -25,7 +24,12 @@ impl JevTransport {
     }
 }
 
+#[cfg(test)]
 fn request_body(request: &DecisionRequest) -> Result<Value> {
+    request_body_for_model(request, &crate::jev::browser_jev_model_label())
+}
+
+fn request_body_for_model(request: &DecisionRequest, model: &str) -> Result<Value> {
     ensure!(
         !request.goal.trim().is_empty(),
         "Browser handoff goal is empty"
@@ -99,7 +103,7 @@ fn request_body(request: &DecisionRequest) -> Result<Value> {
     // labels in state wastes the bounded Decisions API request budget.
     state.remove("available_actions");
     let mut body = json!({
-        "model": MODEL,
+        "model": model,
         "state": serde_json::to_string(&state)?,
         "questions": {
             "action": {"type": "choice", "instructions": instructions, "criteria": criteria}
@@ -248,7 +252,7 @@ impl DecisionTransport for JevTransport {
     }
 
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision> {
-        let body = request_body(request)?;
+        let body = request_body_for_model(request, self.client.model_id())?;
         let questions = body["questions"]
             .as_object()
             .context("Browser decision questions are missing")?
@@ -302,7 +306,7 @@ mod tests {
 
     #[test]
     fn uses_decisions_protocol_not_chat_completions() {
-        let body = request_body(&request()).unwrap();
+        let body = request_body_for_model(&request(), "typesafe/jev-1.13").unwrap();
         assert_eq!(body["model"], "typesafe/jev-1.13");
         assert_eq!(body["questions"]["action"]["type"], "choice");
         assert!(body["state"].is_string());
@@ -319,6 +323,12 @@ mod tests {
                 .unwrap()
                 .contains("untrusted")
         );
+    }
+
+    #[test]
+    fn configured_model_is_used_in_browser_decision_body() {
+        let body = request_body_for_model(&request(), "typesafe/jev-1.14").unwrap();
+        assert_eq!(body["model"], "typesafe/jev-1.14");
     }
 
     #[test]

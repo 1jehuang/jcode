@@ -15,8 +15,14 @@ tokio = { version = "1", features = ["io-util", "net", "time"] }
 [target.'cfg(windows)'.dependencies]
 sha2 = "0.10"
 hex = "0.4"
-# Only the error constants the pipe retry loops branch on.
-windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
+# Blocking clients use per-operation overlapped I/O and cancellation.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

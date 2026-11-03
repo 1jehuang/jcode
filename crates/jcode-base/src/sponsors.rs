@@ -99,8 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_enabled_by_default() {
+    fn discovery_is_disabled_by_default() {
         let config = crate::config::Config::default();
-        assert!(config.sponsors.enabled);
+        assert!(!config.sponsors.enabled);
     }
 }

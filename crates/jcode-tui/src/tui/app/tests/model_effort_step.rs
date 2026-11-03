@@ -483,8 +483,9 @@ fn effort_step_confirming_a_level_drops_a_pending_route_load() {
         // A background route load completes while the step is open.
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Ok(ModelPickerRoutesResult {
-            routes: app.remote_model_options.clone(),
-            routes_ms: 1,
+            outcome: ModelPickerBuildOutcome::Built {
+                entries: Vec::new(), model_count: 0, routes: app.remote_model_options.clone(),
+            },
         }))
         .unwrap();
         // Same signature the picker computes, so the load counts as current.
@@ -502,6 +503,7 @@ fn effort_step_confirming_a_level_drops_a_pending_route_load() {
             &efforts,
         );
         app.pending_model_picker_load = Some(PendingModelPickerLoad {
+store_remote_routes: true,
             request_id: app.model_picker_load_request_id,
             signature,
             picker_started: std::time::Instant::now(),

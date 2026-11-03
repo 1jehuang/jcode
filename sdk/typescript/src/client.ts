@@ -811,9 +811,8 @@ export class JcodeClient extends EventEmitter {
   async runtimeCommand(sessionId: string, command: RuntimeCommand, args: string[] = []): Promise<{
     session_id: string; command: RuntimeCommand; data: unknown; message: string;
   }> {
-    if (!this.capabilities.includes("runtime_commands")) {
-      throw new HarnessError("unknown_request", "This runtime does not support structured commands. Update and restart the daemon and bridge.");
-    }
+    // Hello capabilities are a snapshot. Let the bridge recheck a missing
+    // capability without disturbing the session, and send the request once.
     const frame = await this.expectReply(
       { req: "runtime_command", session_id: sessionId, command, args }, "runtime_command_result",
     );
@@ -952,6 +951,15 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_model", session_id: sessionId, model });
   }
 
+  /** Override a session context budget. Null or zero restores its default. */
+  async setContextCap(sessionId: string, maxContextTokens: number | null): Promise<number> {
+    if (maxContextTokens !== null && (!Number.isSafeInteger(maxContextTokens) || maxContextTokens < 0)) {
+      throw new RangeError("maxContextTokens must be a non-negative safe integer or null");
+    }
+    const frame = await this.expectReply({ req: "set_context_cap", session_id: sessionId, max_context_tokens: maxContextTokens }, "context_cap_changed");
+    return frame.effective_budget;
+  }
+
   /**
    * Set how much the model deliberates before answering.
    *
@@ -979,6 +987,11 @@ export class JcodeClient extends EventEmitter {
   /** Set a session's title. Omit `title` to restore the generated one. */
   async renameSession(sessionId: string, title?: string): Promise<void> {
     await this.requestOk({ req: "rename_session", session_id: sessionId, title });
+  }
+
+  /** Replace the session's process-local environment overlay. Empty clears it. */
+  async setSessionEnv(sessionId: string, env: Record<string, string>): Promise<void> {
+    await this.requestOk({ req: "set_session_env", session_id: sessionId, env });
   }
 
   /** Bookmark or unbookmark a session. A label also becomes its title. */
@@ -1434,6 +1447,7 @@ export class JcodeClient extends EventEmitter {
             input: event.input,
             output: event.output,
             cacheReadInput: event.cache_read_input,
+            effectiveBudget: event.effective_budget,
           };
           break;
         case "permission_request":
@@ -1518,7 +1532,7 @@ export interface TurnResult {
   messages: AssistantTextMessage[];
   reasoning: string;
   toolCalls: Array<{ callId: string; name: string; output: string; error?: string }>;
-  usage?: { input: number; output: number; cacheReadInput?: number };
+  usage?: { input: number; output: number; cacheReadInput?: number; effectiveBudget?: number };
 }
 
 export interface AssistantTextMessage {

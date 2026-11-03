@@ -154,6 +154,30 @@ pub fn render_image_widget(
         image_area
     };
 
+    if runtime::use_classic_kitty()
+        && PICKER
+            .get()
+            .and_then(|picker| picker.as_ref())
+            .is_some_and(|picker| picker.protocol_type() == ProtocolType::Kitty)
+    {
+        return if path.as_ref().is_some_and(|path| {
+            kitty_classic::render_widget(
+                hash,
+                path,
+                render_area,
+                buf,
+                Resize::Crop(Some(CropOptions {
+                    clip_top: crop_top,
+                    clip_left: false,
+                })),
+            )
+        }) {
+            area.height
+        } else {
+            0
+        };
+    }
+
     // Try to render from existing state - single lock for the whole operation
     {
         let mut state = IMAGE_STATE
@@ -379,6 +403,27 @@ fn render_image_widget_fit_inner(
     } else {
         image_area
     };
+
+    if runtime::use_classic_kitty()
+        && PICKER
+            .get()
+            .and_then(|picker| picker.as_ref())
+            .is_some_and(|picker| picker.protocol_type() == ProtocolType::Kitty)
+    {
+        let resize = if scale_up {
+            Resize::Scale(None)
+        } else {
+            Resize::Fit(None)
+        };
+        return if path
+            .as_ref()
+            .is_some_and(|path| kitty_classic::render_widget(hash, path, render_area, buf, resize))
+        {
+            area.height
+        } else {
+            0
+        };
+    }
 
     {
         let mut state = IMAGE_STATE

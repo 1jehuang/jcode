@@ -9,7 +9,8 @@ pub use jcode_background_types::{
 pub use jcode_batch_types::{BatchProgress, BatchSubcallProgress, BatchSubcallState};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -46,6 +47,14 @@ pub struct ToolEvent {
 pub struct TodoEvent {
     pub session_id: String,
     pub todos: Vec<TodoItem>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LaneEdited {
+    pub coordinator: String,
+    pub worker: String,
+    pub lane: String,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -312,6 +321,14 @@ pub struct SwarmAwaitCompleted {
     pub wake: bool,
 }
 
+/// A worker report that must reach its owner's model, not just its UI.
+#[derive(Clone, Debug)]
+pub struct SwarmWorkerReported {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -423,6 +440,9 @@ pub enum SessionUpdateStatus {
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
+    /// The coordinator changed a lane a worker owns; the worker's todo list
+    /// was rewritten to match and the worker should be told.
+    LaneEdited(LaneEdited),
     SubagentStatus(SubagentStatus),
     ManualToolCompleted(ManualToolCompleted),
     BatchProgress(BatchProgress),
@@ -438,6 +458,8 @@ pub enum BusEvent {
     BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
+    /// A spawned worker finished and its owner needs to coordinate next steps.
+    SwarmWorkerReported(SwarmWorkerReported),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -516,8 +538,53 @@ pub enum BusEvent {
     ProductivityReportReady(ProductivityReportReady),
 }
 
+impl BusEvent {
+    /// Owner of server-consumed continuation effects. Unknown ownership stays
+    /// global rather than being guessed from the publisher's current turn.
+    pub fn runtime_session_id(&self) -> Option<&str> {
+        match self {
+            Self::FileTouch(event) => Some(&event.session_id),
+            Self::LaneEdited(event) => Some(&event.worker),
+            Self::BackgroundTaskCompleted(event) => Some(&event.session_id),
+            Self::BackgroundTaskProgress(event) => Some(&event.session_id),
+            Self::BackgroundTaskStalled(event) => Some(&event.session_id),
+            Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
+            Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::UiActivity(event) => event.session_id.as_deref(),
+            Self::ToolUpdated(event) => Some(&event.session_id),
+            Self::SubagentStatus(event) => Some(&event.session_id),
+            Self::BatchProgress(event) => Some(&event.session_id),
+            Self::TodoUpdated(event) => Some(&event.session_id),
+            Self::SwarmOutputTail(event) => Some(&event.session_id),
+            _ => None,
+        }
+    }
+}
+
+/// A server delivery remains pending until dispatch, including any queue write,
+/// finishes. Receiving the event alone must not release the idle-upgrade fence.
+#[derive(Clone)]
+pub struct RuntimeBusDelivery {
+    pub event: BusEvent,
+    _pending: Arc<PendingRuntimeDelivery>,
+    // Reserve at publication, not receipt. A detached callback queued after
+    // its parent exits must still exclude transfer of its owning session.
+    _activity: Option<Arc<crate::runtime_activity::ActivityReservation>>,
+}
+
+struct PendingRuntimeDelivery(Arc<AtomicUsize>);
+
+impl Drop for PendingRuntimeDelivery {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct Bus {
     sender: broadcast::Sender<BusEvent>,
+    runtime_pending: Arc<AtomicUsize>,
+    runtime_epoch: AtomicUsize,
+    runtime_publication: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<RuntimeBusDelivery>>>,
     /// Debounce state for [`Bus::publish_models_updated`]. Per-instance (not a
     /// global static) so tests can exercise coalescing on a private bus
     /// without racing other tests that publish to the global bus.
@@ -563,6 +630,9 @@ impl Bus {
         let (sender, _) = broadcast::channel(256);
         Bus {
             sender,
+            runtime_pending: Arc::new(AtomicUsize::new(0)),
+            runtime_epoch: AtomicUsize::new(0),
+            runtime_publication: Mutex::new(Vec::new()),
             models_updated_state: std::sync::Arc::new(Mutex::new(
                 ModelsUpdatedPublishState::default(),
             )),
@@ -573,7 +643,79 @@ impl Bus {
         self.sender.subscribe()
     }
 
+    pub fn subscribe_runtime(&self) -> tokio::sync::mpsc::UnboundedReceiver<RuntimeBusDelivery> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.runtime_publication
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(sender);
+        receiver
+    }
+
+    /// Final synchronous exec fence. Never retain this across an await or a
+    /// checkpoint, since either could publish. Events accepted before this
+    /// fence must finish dispatch first; a later publisher cannot return until
+    /// the replacement decision has completed.
+    pub fn runtime_delivery_checkpoint(&self) -> Option<usize> {
+        let _publication = self.runtime_publication.try_lock().ok()?;
+        (self.runtime_pending.load(Ordering::SeqCst) == 0)
+            .then(|| self.runtime_epoch.load(Ordering::SeqCst))
+    }
+
+    pub fn try_runtime_delivery_idle(&self, checkpoint: usize) -> Option<impl Drop + '_> {
+        let publication = self.runtime_publication.try_lock().ok()?;
+        if self.runtime_pending.load(Ordering::SeqCst) != 0
+            || self.runtime_epoch.load(Ordering::SeqCst) != checkpoint
+        {
+            return None;
+        }
+        Some(publication)
+    }
+
     pub fn publish(&self, event: BusEvent) {
+        let mut publication = self
+            .runtime_publication
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Only server-consumed events need reliable delivery. Do not retain
+        // ignored UI-only payloads in the runtime continuation queue.
+        if matches!(
+            &event,
+            BusEvent::FileTouch(_)
+                | BusEvent::LaneEdited(_)
+                | BusEvent::BackgroundTaskCompleted(_)
+                | BusEvent::BackgroundTaskProgress(_)
+                | BusEvent::BackgroundTaskStalled(_)
+                | BusEvent::SwarmAwaitCompleted(_)
+                | BusEvent::SwarmWorkerReported(_)
+                | BusEvent::UiActivity(_)
+                | BusEvent::ToolUpdated(_)
+                | BusEvent::SubagentStatus(_)
+                | BusEvent::BatchProgress(_)
+                | BusEvent::TodoUpdated(_)
+                | BusEvent::SwarmOutputTail(_)
+        ) {
+            publication.retain(|sender| {
+                // A publication racing an existing transfer cannot block its
+                // synchronous producer. Queue it without admission instead:
+                // dispatch waits for the fence and rechecks durable ownership.
+                let activity = match event.runtime_session_id() {
+                    Some(session) => crate::runtime_activity::global().try_enter_session(session),
+                    None => crate::runtime_activity::global().try_enter_global(),
+                }
+                .ok()
+                .map(Arc::new);
+                self.runtime_epoch.fetch_add(1, Ordering::SeqCst);
+                self.runtime_pending.fetch_add(1, Ordering::SeqCst);
+                sender
+                    .send(RuntimeBusDelivery {
+                        event: event.clone(),
+                        _pending: Arc::new(PendingRuntimeDelivery(self.runtime_pending.clone())),
+                        _activity: activity,
+                    })
+                    .is_ok()
+            });
+        }
         if let BusEvent::UpdateStatus(status) = &event {
             let mut latest = latest_update_status()
                 .lock()
@@ -648,7 +790,9 @@ impl Bus {
                 state.publish_pending = false;
                 state.last_published_at = Some(Instant::now());
                 drop(state);
-                let _ = sender.send(BusEvent::ModelsUpdated);
+                if sender.send(BusEvent::ModelsUpdated).is_err() {
+                    crate::logging::debug("Model update notification has no subscribers");
+                }
             });
             return;
         }
@@ -661,6 +805,101 @@ impl Bus {
 mod tests {
     use super::{Bus, BusEvent};
     use tokio::time::{Duration, timeout};
+
+    fn completion() -> BusEvent {
+        BusEvent::SwarmAwaitCompleted(super::SwarmAwaitCompleted {
+            session_id: "idle-session".into(),
+            completed: true,
+            summary: "finished".into(),
+            notification: "accepted continuation".into(),
+            notify: true,
+            wake: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn worker_report_uses_reliable_owner_scoped_runtime_delivery() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(BusEvent::SwarmWorkerReported(super::SwarmWorkerReported {
+            session_id: "root".into(),
+            worker_session_id: "worker".into(),
+            notification: "ready for next chunk".into(),
+        }));
+        assert!(bus.runtime_delivery_checkpoint().is_none());
+        let delivery = receiver.recv().await.unwrap();
+        assert_eq!(delivery.event.runtime_session_id(), Some("root"));
+        assert!(
+            matches!(&delivery.event, BusEvent::SwarmWorkerReported(report) if report.notification == "ready for next chunk")
+        );
+        drop(delivery);
+        assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
+
+    #[tokio::test]
+    async fn runtime_delivery_fences_queued_and_delayed_continuations() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(completion());
+        assert!(
+            bus.runtime_delivery_checkpoint().is_none(),
+            "published but not received"
+        );
+        let delivery = receiver.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            bus.runtime_delivery_checkpoint().is_none(),
+            "received but queue delivery delayed"
+        );
+        let mut pending_input = Vec::new();
+        if let BusEvent::SwarmAwaitCompleted(event) = &delivery.event {
+            pending_input.push(event.notification.clone());
+        }
+        drop(delivery);
+        let checkpoint = bus
+            .runtime_delivery_checkpoint()
+            .expect("dispatch finished");
+        let snapshot = pending_input.clone();
+        let fence = bus.try_runtime_delivery_idle(checkpoint).unwrap();
+        assert_eq!(snapshot, ["accepted continuation"]);
+        drop(fence);
+    }
+
+    #[tokio::test]
+    async fn runtime_delivery_after_checkpoint_invalidates_even_if_fully_dispatched() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        let old_checkpoint = bus.runtime_delivery_checkpoint().unwrap();
+        bus.publish(completion());
+        drop(receiver.recv().await.unwrap());
+        assert!(
+            bus.try_runtime_delivery_idle(old_checkpoint).is_none(),
+            "the saved queue predates this delivered completion"
+        );
+        let fresh_checkpoint = bus.runtime_delivery_checkpoint().unwrap();
+        assert!(bus.try_runtime_delivery_idle(fresh_checkpoint).is_some());
+    }
+
+    #[test]
+    fn runtime_delivery_publication_is_atomic_with_final_exec_fence() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        let checkpoint = bus.runtime_delivery_checkpoint().unwrap();
+        let fence = bus.try_runtime_delivery_idle(checkpoint).unwrap();
+        let (published, wait) = std::sync::mpsc::channel();
+        let publisher = bus.clone();
+        let task = std::thread::spawn(move || {
+            publisher.publish(completion());
+            published.send(()).unwrap();
+        });
+        assert!(wait.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(fence);
+        wait.recv_timeout(Duration::from_secs(1)).unwrap();
+        task.join().unwrap();
+        assert!(bus.runtime_delivery_checkpoint().is_none());
+        drop(receiver.try_recv().unwrap());
+        assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
 
     #[tokio::test]
     async fn models_updated_publishes_are_coalesced() {
