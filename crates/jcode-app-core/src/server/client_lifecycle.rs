@@ -924,6 +924,7 @@ pub(super) async fn handle_client(
                 },
                 Some(id),
                 Some(request_decoded_at),
+                Some(&sessions),
             )
             .await;
             crate::logging::info(&format!(
@@ -1176,6 +1177,7 @@ pub(super) async fn handle_client(
                     },
                     Some(id),
                     Some(request_decoded_at),
+                    Some(&sessions),
                 )
                 .await;
                 if !client_is_processing {
@@ -3759,7 +3761,28 @@ async fn cancel_processing_message(
     swarm: &SwarmStatusRefs<'_>,
     request_id: Option<u64>,
     request_decoded_at: Option<Instant>,
+    sessions: Option<&SessionAgents>,
 ) {
+    // Capture before cancellation releases the reservation. Modern clients
+    // reject unscoped terminal events to protect newer turns from stale ones.
+    let identity = sessions
+        .and_then(|sessions| sessions.turn_observer(&session_control.session_id))
+        .and_then(|observer| {
+            let (latest, active) = observer.snapshot();
+            active.or_else(|| {
+                (latest > 0).then(|| crate::protocol::TurnIdentity {
+                    runtime_generation: observer.runtime_generation().to_owned(),
+                    turn_id: latest,
+                })
+            })
+        });
+    let scoped = |event| match &identity {
+        Some(identity) => ServerEvent::TurnEvent {
+            identity: identity.clone(),
+            event: Box::new(event),
+        },
+        None => event,
+    };
     let cancel_start = Instant::now();
     let session_label = state
         .session_id
@@ -3872,8 +3895,8 @@ async fn cancel_processing_message(
             .await;
         }
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(ServerEvent::Interrupted);
-            let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
                 request_id,
@@ -3904,9 +3927,9 @@ async fn cancel_processing_message(
                 request_id, session_label
             ));
             *state.client_is_processing = false;
-            let _ = client_event_tx.send(ServerEvent::Interrupted);
+            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
             if let Some(message_id) = state.message_id.take() {
-                let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+                let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
             }
             return;
         }
@@ -3950,9 +3973,9 @@ async fn cancel_processing_message(
             Some(swarm.event_tx),
         )
         .await;
-        let _ = client_event_tx.send(ServerEvent::Interrupted);
+        let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
                 request_id,

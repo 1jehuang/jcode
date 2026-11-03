@@ -103,7 +103,21 @@ async fn scoped_and_legacy_socket_subscribers_receive_compatible_turn_streams() 
     sdk_socket_workflow(false, true, true).await;
 }
 
+#[tokio::test]
+async fn scoped_cancel_socket_immediately_dispatches_next_prompt() {
+    sdk_socket_cancel_workflow(false, true, true, true).await;
+}
+
 async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
+    sdk_socket_cancel_workflow(response_only, terminal_race, identity_capability, false).await;
+}
+
+async fn sdk_socket_cancel_workflow(
+    response_only: bool,
+    terminal_race: bool,
+    identity_capability: bool,
+    cancel_first: bool,
+) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let terminal_provider = TerminalSocketProvider::default();
@@ -257,7 +271,12 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_
         )
         .await
         .unwrap();
-        terminal_provider.finish_first.notify_one();
+        if cancel_first {
+            send(&mut client_writer, json!({"type":"cancel","id":3})).await;
+        } else {
+            terminal_provider.finish_first.notify_one();
+        }
+        let mut interrupted = false;
         let mut active = None;
         let mut scoped_text = false;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -279,7 +298,14 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_
                             ServerEvent::TextDelta { ref text } if text == "completed" => {
                                 scoped_text = true
                             }
-                            ServerEvent::Done { id: 2 } => break,
+                            ServerEvent::Interrupted => {
+                                interrupted = true;
+                            }
+                            ServerEvent::Done { id: 2 } => {
+                                if !cancel_first || interrupted {
+                                    break;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -294,26 +320,50 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_
         })
         .await
         .unwrap();
-        assert!(scoped_text);
-        let legacy_text = std::cell::Cell::new(false);
-        until(&mut legacy_reader, |event| {
+        if cancel_first {
             assert!(
-                !matches!(
-                    event,
-                    ServerEvent::TurnState { .. }
-                        | ServerEvent::TurnStarted { .. }
-                        | ServerEvent::TurnEvent { .. }
-                ),
-                "legacy observer receives flat events only"
+                interrupted,
+                "cancel completion must be scoped, not lost until the UI timeout"
             );
-            if matches!(event, ServerEvent::TextDelta { text } if text == "completed") {
-                legacy_text.set(true);
-            }
-            matches!(event, ServerEvent::Done { id: 2 })
-        })
-        .await;
-        assert!(legacy_text.get());
-        assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 1);
+            send(
+                &mut client_writer,
+                json!({"type":"message","id":4,"content":"next prompt"}),
+            )
+            .await;
+            until(&mut client_reader, |event| match event {
+                ServerEvent::TurnEvent { identity, event } => {
+                    assert_ne!(Some(identity), active.as_ref());
+                    assert!(!matches!(event.as_ref(), ServerEvent::Error { .. }));
+                    matches!(event.as_ref(), ServerEvent::Done { id: 4 })
+                }
+                _ => false,
+            })
+            .await;
+            assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(scoped_text);
+        }
+        let legacy_text = std::cell::Cell::new(false);
+        if !cancel_first {
+            until(&mut legacy_reader, |event| {
+                assert!(
+                    !matches!(
+                        event,
+                        ServerEvent::TurnState { .. }
+                            | ServerEvent::TurnStarted { .. }
+                            | ServerEvent::TurnEvent { .. }
+                    ),
+                    "legacy observer receives flat events only"
+                );
+                if matches!(event, ServerEvent::TextDelta { text } if text == "completed") {
+                    legacy_text.set(true);
+                }
+                matches!(event, ServerEvent::Done { id: 2 })
+            })
+            .await;
+            assert!(legacy_text.get());
+            assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 1);
+        }
         sessions.clear_for_test().await;
         drop(client_writer);
         drop(client_reader);

@@ -425,6 +425,7 @@ async fn cancel_without_local_task_still_signals_session_control() {
         },
         Some(99),
         None,
+        None,
     )
     .await;
 
@@ -498,6 +499,7 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
                 event_tx: &swarm_event_tx,
             },
             Some(request_id),
+            None,
             None,
         )
         .await;
@@ -672,6 +674,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
             },
             Some(1),
             None,
+            None,
         )
         .await;
 
@@ -758,6 +761,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
                 event_tx: &swarm_event_tx,
             },
             Some(1),
+            None,
             None,
         )
         .await;
