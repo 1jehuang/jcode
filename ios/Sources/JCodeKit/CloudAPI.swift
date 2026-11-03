@@ -101,6 +101,12 @@ public struct CloudAPI: Sendable {
         public let text: String
         public let createdAt: String?
         public var id: Int { seq }
+        public init(seq: Int, role: String, text: String, createdAt: String?) {
+            self.seq = seq
+            self.role = role
+            self.text = text
+            self.createdAt = createdAt
+        }
         enum CodingKeys: String, CodingKey {
             case seq, role, text
             case createdAt = "created_at"
@@ -111,6 +117,36 @@ public struct CloudAPI: Sendable {
         public let session: SessionSummary
         public let messages: [Message]
         public let more: Bool
+    }
+
+    /// A phone-issued command for the account's Jcode Cloud machine.
+    public struct Command: Decodable, Identifiable, Hashable, Sendable {
+        public let commandID: String
+        public let kind: String
+        public let sessionID: String?
+        public let text: String
+        public let status: String
+        public let resultSessionID: String?
+        public let error: String?
+        public let createdAt: String
+        public var id: String { commandID }
+        public var isPending: Bool { status == "queued" || status == "running" }
+        /// The session this command belongs to, once known.
+        public var targetSessionID: String? { resultSessionID ?? sessionID }
+
+        enum CodingKeys: String, CodingKey {
+            case commandID = "command_id"
+            case kind, text, status, error
+            case sessionID = "session_id"
+            case resultSessionID = "result_session_id"
+            case createdAt = "created_at"
+        }
+    }
+
+    public struct Enqueued: Decodable, Sendable {
+        public let command: Command
+        public let host: Host?
+        public struct Host: Decodable, Sendable { public let state: String }
     }
 
     // MARK: - Calls
@@ -145,6 +181,30 @@ public struct CloudAPI: Sendable {
             after = last.messages.last?.seq ?? after
         } while last.more && !last.messages.isEmpty
         return SessionDetail(session: last.session, messages: all, more: false)
+    }
+
+    /// Start a new session on Jcode Cloud with `text` as the first message.
+    public func createSession(apiKey: String, text: String) async throws -> Enqueued {
+        try await send("mobile/commands", method: "POST", apiKey: apiKey, body: ["kind": "create", "text": text])
+    }
+
+    /// Send a follow-up message to a Jcode Cloud session.
+    public func sendMessage(apiKey: String, sessionID: String, text: String) async throws -> Enqueued {
+        try await send("mobile/commands", method: "POST", apiKey: apiKey,
+                       body: ["kind": "message", "session_id": sessionID, "text": text])
+    }
+
+    public func command(apiKey: String, id: String) async throws -> Command {
+        struct One: Decodable { let command: Command }
+        let one: One = try await send("mobile/commands/\(id)", apiKey: apiKey)
+        return one.command
+    }
+
+    public func commands(apiKey: String, sessionID: String) async throws -> [Command] {
+        struct List: Decodable { let commands: [Command] }
+        let q = sessionID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? sessionID
+        let list: List = try await send("mobile/commands?session_id=\(q)", apiKey: apiKey)
+        return list.commands
     }
 
     // MARK: - Plumbing

@@ -16,6 +16,10 @@ final class CloudModel {
     private(set) var sessions: [CloudAPI.SessionSummary] = []
     private(set) var isLoading = false
     private(set) var hasSubscription = true
+    /// New-session requests not yet turned into a synced session.
+    private(set) var pendingCreates: [CloudAPI.Command] = []
+    /// Set when a new session the user started becomes available.
+    var openSessionID: String?
     var errorMessage: String?
 
     private let api: CloudAPI
@@ -116,5 +120,61 @@ final class CloudModel {
     func transcript(for id: String) async throws -> CloudAPI.SessionDetail {
         guard let credential else { throw CloudAPI.APIError.unauthorized }
         return try await api.transcript(apiKey: credential.apiKey, sessionID: id)
+    }
+
+    // MARK: - Cloud commands
+
+    func createSession(text: String) async throws -> CloudAPI.Enqueued {
+        guard let credential else { throw CloudAPI.APIError.unauthorized }
+        let queued = try await api.createSession(apiKey: credential.apiKey, text: text)
+        pendingCreates.insert(queued.command, at: 0)
+        return queued
+    }
+
+    func dismissPending(_ id: String) {
+        pendingCreates.removeAll { $0.id == id }
+    }
+
+    /// Advance pending new-session requests; open the session once it syncs.
+    func pollPendingCreates() async {
+        guard let credential, !pendingCreates.isEmpty else { return }
+        var changed = false
+        for (i, cmd) in pendingCreates.enumerated() where cmd.isPending || cmd.resultSessionID != nil {
+            guard let fresh = try? await api.command(apiKey: credential.apiKey, id: cmd.id) else { continue }
+            if fresh != cmd { pendingCreates[i] = fresh; changed = true }
+        }
+        if changed || pendingCreates.contains(where: { $0.status == "done" }) { await refresh() }
+        for cmd in pendingCreates where cmd.status == "done" {
+            if let sid = cmd.resultSessionID, sessions.contains(where: { $0.sessionID == sid }) {
+                pendingCreates.removeAll { $0.id == cmd.id }
+                openSessionID = sid
+            }
+        }
+    }
+
+    func sendMessage(sessionID: String, text: String) async throws -> CloudAPI.Enqueued {
+        guard let credential else { throw CloudAPI.APIError.unauthorized }
+        return try await api.sendMessage(apiKey: credential.apiKey, sessionID: sessionID, text: text)
+    }
+
+    func command(id: String) async throws -> CloudAPI.Command {
+        guard let credential else { throw CloudAPI.APIError.unauthorized }
+        return try await api.command(apiKey: credential.apiKey, id: id)
+    }
+
+    func commands(sessionID: String) async throws -> [CloudAPI.Command] {
+        guard let credential else { throw CloudAPI.APIError.unauthorized }
+        return try await api.commands(apiKey: credential.apiKey, sessionID: sessionID)
+    }
+
+    /// Human status for a queued command, given the host wake result.
+    static func hostMessage(_ state: String?) -> String? {
+        switch state {
+        case "starting", "pending": return "Waking your cloud machine…"
+        case "absent": return "No cloud machine yet. Connect once from jcode desktop (`jcode cloud`) to create it."
+        case "allowance_exhausted": return "This month's cloud runtime is used up."
+        case "not_entitled": return "Jcode Cloud needs a paid subscription."
+        default: return nil
+        }
     }
 }

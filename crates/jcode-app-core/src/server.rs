@@ -1557,6 +1557,8 @@ impl Server {
 
         // Upload transcripts for the iOS app when the user enabled mobile sync.
         crate::mobile_sync::spawn_background_sync();
+        // On Jcode Cloud machines, run sessions the phone starts or continues.
+        crate::mobile_runner::spawn_cloud_runner();
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {

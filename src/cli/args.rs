@@ -656,6 +656,13 @@ pub(crate) enum MobileCommand {
     Status,
     /// Run one sync pass now
     Sync,
+    /// Run sessions started or continued from the phone on this machine
+    /// (Jcode Cloud machines do this automatically)
+    Runner {
+        /// Handle queued commands, then exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

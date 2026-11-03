@@ -197,6 +197,24 @@ pub(crate) async fn run_mobile(action: super::args::MobileCommand) -> Result<()>
                 report.sessions_uploaded, report.messages_uploaded, report.errors
             );
         }
+        MobileCommand::Runner { once } => {
+            crate::mobile_runner::ensure_sync_enabled();
+            println!("Waiting for sessions from the jcode app (Ctrl-C to stop)…");
+            loop {
+                match crate::mobile_runner::run_one(&client).await {
+                    Ok(true) => println!("Finished a phone command"),
+                    Ok(false) if once => break,
+                    Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                    Err(err) => {
+                        eprintln!("phone command failed: {err:#}");
+                        if once {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

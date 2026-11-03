@@ -90,6 +90,8 @@ pub fn is_enabled() -> bool {
 pub fn session_source() -> &'static str {
     if std::env::var_os("JCODE_CLOUD_ENV_SESSION").is_some()
         || std::env::var_os("JCODE_CLOUD_MACHINE").is_some()
+        || std::env::var("JCODE_SERVER_NAME").as_deref() == Ok("jcode-cloud")
+        || Path::new("/opt/jcode-cloud/ready").exists()
     {
         "cloud"
     } else {
@@ -143,7 +145,10 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             let mut is_tool_result = false;
             for block in &message.content {
                 match block {
-                    ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
+                    ContentBlock::Text { text, .. }
+                        if !text.trim().is_empty()
+                            && !text.trim_start().starts_with("<system-reminder>") =>
+                    {
                         parts.push(text.clone())
                     }
                     ContentBlock::ToolUse { name, input, .. } => {

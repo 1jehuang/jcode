@@ -68,6 +68,7 @@ pub mod memory_log;
 pub mod memory_rerank;
 pub mod memory_types;
 pub mod message;
+pub mod mobile_runner;
 pub mod mobile_sync;
 pub mod model_pricing;
 pub mod model_usage;
