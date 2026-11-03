@@ -43,6 +43,9 @@ impl ReconnectBackoff {
     fn blocked(&self, now: std::time::Instant) -> bool {
         self.retry_after.is_some_and(|at| now < at)
     }
+    fn should_defer(&self, now: std::time::Instant, user_requested_retry: bool) -> bool {
+        !user_requested_retry && self.blocked(now)
+    }
     /// Record a failure. Returns true when it should be logged (first failure,
     /// then every power of two) so long outages produce a handful of lines.
     fn fail(&mut self, now: std::time::Instant) -> bool {
@@ -500,7 +503,8 @@ async fn accept_connections(
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { break; };
                 if connections.len() >= MAX_CONNECTIONS { continue; }
-                if backoff.lock().map(|b| b.blocked(std::time::Instant::now())).unwrap_or(false) {
+                let user_requested_retry = crate::tui::take_immediate_ssh_reconnect_request();
+                if backoff.lock().map(|b| b.should_defer(std::time::Instant::now(), user_requested_retry)).unwrap_or(false) {
                     // Drop the stream: the client sees a closed connection and retries later.
                     continue;
                 }
@@ -650,6 +654,19 @@ mod tests {
         assert_eq!(b.succeed(), Some(8));
         assert!(!b.blocked(now));
         assert_eq!(b.succeed(), None);
+    }
+
+    #[test]
+    fn reconnect_backoff_user_submission_bypasses_only_one_attempt() {
+        let now = std::time::Instant::now();
+        let mut backoff = ReconnectBackoff::default();
+        for _ in 0..8 {
+            backoff.fail(now);
+        }
+        assert!(backoff.should_defer(now, false));
+        assert!(!backoff.should_defer(now, true));
+        assert!(backoff.should_defer(now, false));
+        assert_eq!(backoff.failures, 8);
     }
 
     fn hello() -> String {

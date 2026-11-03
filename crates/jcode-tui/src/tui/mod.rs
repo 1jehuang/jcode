@@ -2056,6 +2056,19 @@ pub(crate) fn ssh_remote_host() -> Option<String> {
         .filter(|host| !host.trim().is_empty())
 }
 
+// A submitted prompt is an explicit retry request, not an automatic retry.
+// The native SSH adapter consumes this once on the next socket connection.
+static USER_REQUESTED_SSH_RECONNECT: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_immediate_ssh_reconnect() {
+    USER_REQUESTED_SSH_RECONNECT.store(true, Ordering::Release);
+}
+
+#[doc(hidden)]
+pub fn take_immediate_ssh_reconnect_request() -> bool {
+    USER_REQUESTED_SSH_RECONNECT.swap(false, Ordering::AcqRel)
+}
+
 pub(crate) fn is_ssh_remote() -> bool {
     ssh_remote_host().is_some()
 }

@@ -2041,6 +2041,9 @@ fn queue_message_for_reconnect(app: &mut App) {
 
     let prepared = input::take_prepared_input(app);
     app.queued_messages.push(prepared.expanded);
+    if crate::tui::is_ssh_remote() {
+        crate::tui::request_immediate_ssh_reconnect();
+    }
 
     let queued_count = app.queued_messages.len();
     app.set_status_notice(format!(
