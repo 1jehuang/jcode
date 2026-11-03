@@ -1,9 +1,11 @@
 use super::*;
-use crate::tui::app::terminal_title::{program_state, TurnOutcome};
-use crate::tui::app::tests::create_test_app;
 use crate::tui::app::PendingRemoteMessage;
+use crate::tui::app::commands::handle_cancel_command;
+use crate::tui::app::terminal_title::{TurnOutcome, program_state};
+use crate::tui::app::tests::create_test_app;
 use crate::tui::backend::RemoteConnection;
 use crate::tui::program_status::ProgramState;
+use std::time::{Duration, Instant};
 
 fn pending_user_message(content: &str) -> PendingRemoteMessage {
     PendingRemoteMessage {
@@ -102,4 +104,26 @@ fn new_send_clears_stale_guardrail_stop() {
 
     app.note_turn_done(app.turn_guardrail_stopped);
     assert_eq!(app.terminal_title.borrow().turn_outcome, TurnOutcome::Done);
+}
+
+/// `/cancel` and `/stop` drop a held rate-limit retry. The turn is no longer
+/// working, so herdr must see `idle` instead of the stale `retrying` state.
+#[test]
+fn canceling_a_retry_hold_reports_idle() {
+    let mut app = create_test_app();
+    app.suppress_terminal_title_updates = true;
+    app.rate_limit_reset = Some(Instant::now() + Duration::from_secs(30));
+    app.rate_limit_pending_message = Some(pending_user_message("hello"));
+    app.note_turn_retrying("rate limited");
+    assert!(!app.is_processing);
+
+    handle_cancel_command(&mut app, "/cancel");
+
+    assert!(app.rate_limit_pending_message.is_none());
+    let state = app.terminal_title.borrow();
+    assert_eq!(state.turn_outcome, TurnOutcome::Interrupted);
+    assert_eq!(
+        program_state(app.is_processing(), state.turn_outcome),
+        ProgramState::Idle
+    );
 }

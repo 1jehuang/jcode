@@ -147,6 +147,14 @@ impl App {
         state.turn_error_message = Some(message.into());
     }
 
+    /// Clear a retry hold when the held request is canceled, so the terminal
+    /// stops showing the agent as working.
+    pub(super) fn clear_retrying_outcome(&self) {
+        if self.terminal_title.borrow().turn_outcome == TurnOutcome::Retrying {
+            self.note_turn_interrupted();
+        }
+    }
+
     /// Emit the current state through OSC 7501 when it changes. The TUI
     /// client owns the pane PTY, so this is the program-to-terminal channel
     /// herdr-core reads. Cheap enough for every tick: unchanged reports are
@@ -167,9 +175,7 @@ impl App {
             )
         };
         let program_state = program_state(self.is_processing(), outcome);
-        let message = if program_state == ProgramState::Error
-            || outcome == TurnOutcome::Retrying
-        {
+        let message = if program_state == ProgramState::Error || outcome == TurnOutcome::Retrying {
             error_message.unwrap_or_default()
         } else {
             String::new()
@@ -353,18 +359,12 @@ mod tests {
             program_state(true, TurnOutcome::Error),
             ProgramState::Working
         );
-        assert_eq!(
-            program_state(false, TurnOutcome::None),
-            ProgramState::Idle
-        );
+        assert_eq!(program_state(false, TurnOutcome::None), ProgramState::Idle);
         assert_eq!(
             program_state(false, TurnOutcome::Interrupted),
             ProgramState::Idle
         );
-        assert_eq!(
-            program_state(false, TurnOutcome::Done),
-            ProgramState::Done
-        );
+        assert_eq!(program_state(false, TurnOutcome::Done), ProgramState::Done);
         assert_eq!(
             program_state(false, TurnOutcome::Error),
             ProgramState::Error
