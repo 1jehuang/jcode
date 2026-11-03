@@ -393,4 +393,70 @@ mod tests {
             dirs.len()
         );
     }
+
+    /// End-to-end acceptance for the original bug: a directory that a LIVE process is
+    /// sitting inside must survive a prune pass, while an equally stale directory with
+    /// nobody in it must be removed in the same pass.
+    ///
+    /// This exercises the real probe and the real prune together, on the real
+    /// filesystem, against a real child process. Before the macOS implementation
+    /// existed the probe returned an empty Vec and the busy directory was deleted.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn prune_pass_keeps_directory_with_live_process_and_removes_idle_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scratch = temp.path().join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+
+        // Stale entry nobody is using: must be removed.
+        let idle = scratch.join("idle");
+        fs::create_dir_all(&idle).unwrap();
+        fs::write(idle.join("f"), b"x").unwrap();
+        age(&idle.join("f"), 30 * DAY);
+        age(&idle, 30 * DAY);
+
+        // Equally stale entry, but a live process will hold it as its cwd: must be kept.
+        let busy = scratch.join("busy");
+        let busy_inner = busy.join("work");
+        fs::create_dir_all(&busy_inner).unwrap();
+        fs::write(busy_inner.join("f"), b"x").unwrap();
+        age(&busy_inner.join("f"), 30 * DAY);
+        age(&busy_inner, 30 * DAY);
+        age(&busy, 30 * DAY);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("120")
+            .current_dir(&busy_inner)
+            .spawn()
+            .expect("spawn a live child process inside the scratch entry");
+
+        // Production canonicalises the scratch root before comparing, because the
+        // probe reports canonical cwds (/private/var on macOS vs /var). Mirror that,
+        // otherwise the comparison silently never matches.
+        let scratch_canon = std::fs::canonicalize(&scratch).unwrap_or_else(|_| scratch.clone());
+
+        let dirs = busy_process_dirs().expect("cwd probe must succeed on this platform");
+        assert!(
+            !dirs.is_empty(),
+            "probe returned no working directories; guard would be inert"
+        );
+
+        let report = prune_stale_scratch_in(&scratch_canon, SystemTime::now(), 7 * DAY, &dirs);
+
+        let idle_gone = !idle.exists();
+        let busy_kept = busy.exists();
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            idle_gone,
+            "a stale entry with no live process should have been removed; report={report:?}"
+        );
+        assert!(
+            busy_kept,
+            "a stale entry holding a live process cwd was deleted - this is the original bug; \
+             report={report:?}"
+        );
+    }
 }
