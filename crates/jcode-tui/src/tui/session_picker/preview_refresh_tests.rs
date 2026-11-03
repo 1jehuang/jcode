@@ -35,6 +35,7 @@ fn fixture() -> SessionInfo {
             session_id: "faithful_refresh".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 

@@ -36,6 +36,7 @@ fn session_picker_resume_action_keeps_overlay_open() {
                     session_id: "session_keep_open".to_string(),
                 },
                 external_path: None,
+                todo_statuses: Vec::new(),
             },
         ]),
     ));
@@ -87,6 +88,7 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
                     session_id: "session_here_123".to_string(),
                 },
                 external_path: None,
+                todo_statuses: Vec::new(),
             },
         ]),
     ));
@@ -463,6 +465,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
             session_id: "session_scroll".to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     };
 
     let mut picker = crate::tui::session_picker::SessionPicker::new(vec![session]);

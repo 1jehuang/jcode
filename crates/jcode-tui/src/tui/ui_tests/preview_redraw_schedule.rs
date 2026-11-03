@@ -91,6 +91,7 @@ fn running_picker_keeps_existing_spinner_cadence_without_pending_work() {
             session_id: "spinner-fixture".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }]);
     picker.set_live_presence_for_test(vec![crate::session::SessionPresence {
         session_id: "spinner-fixture".into(),

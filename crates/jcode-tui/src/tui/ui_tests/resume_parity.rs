@@ -108,6 +108,7 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
             session_id: "parity-no-disk-load".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     };
     for width in [40, 80, 120] {
         let height = 40;

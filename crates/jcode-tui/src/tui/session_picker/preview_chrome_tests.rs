@@ -35,6 +35,7 @@ fn selected_session() -> SessionInfo {
             session_id: "selected".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 

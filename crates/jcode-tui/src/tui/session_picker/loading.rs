@@ -1737,6 +1737,11 @@ fn parse_jcode_session_info(
             session_id: stem.to_string(),
         },
         external_path: None,
+        todo_statuses: crate::todo::load_todos(stem)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|todo| todo.status)
+            .collect(),
     })
 }
 
@@ -1990,6 +1995,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                     session_path: session.full_path.clone(),
                 },
                 external_path: Some(session.full_path),
+                todo_statuses: Vec::new(),
             }
         })
         .collect()
@@ -2152,6 +2158,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2348,6 +2355,7 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2512,6 +2520,7 @@ fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2622,6 +2631,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2772,6 +2782,7 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2947,6 +2958,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -3056,6 +3068,7 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
             session_id: id.clone(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 

@@ -37,6 +37,7 @@ fn external_session(id: &str, path: &Path) -> SessionInfo {
             session_path: path.to_string_lossy().into_owned(),
         },
         external_path: Some(path.to_string_lossy().into_owned()),
+        todo_statuses: Vec::new(),
     }
 }
 

@@ -392,6 +392,7 @@ fn make_session_with_flags(
             session_id: id.to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 
