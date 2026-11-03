@@ -76,7 +76,7 @@ fn worker_sample(
     let mut search = TranscriptSearch::default();
     search.reset(query, sessions.iter());
     assert!(search.pending());
-    search.started_at = Some(Instant::now() - DEBOUNCE);
+    search.started_at = Some(Instant::now());
     let start = Instant::now();
     let mut first = None;
     while search.pending() {

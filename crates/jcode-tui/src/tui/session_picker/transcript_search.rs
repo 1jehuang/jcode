@@ -1,4 +1,4 @@
-//! Incremental fuzzy and full-transcript search with debounced cold scans.
+//! Incremental fuzzy and full-transcript search without typing delays.
 //! Only cheap literal metadata and resident-cache hints run on the UI thread,
 //! never fuzzy DP or transcript file reads.
 use super::loading::search_query_tokens;
@@ -12,7 +12,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 mod text_cache;
 mod word_scores;
@@ -20,7 +22,6 @@ use word_scores::WordScores;
 mod token_cache;
 mod warmup;
 
-const DEBOUNCE: Duration = Duration::from_millis(150);
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
 /// A close contiguous opening request outranks incidental transcript evidence.
@@ -145,7 +146,7 @@ struct Candidate {
 }
 
 /// Rank in memory before publishing results or opening transcripts. Keep this
-/// on the debounced worker, not the render thread. Stable sorting preserves
+/// on the background worker, not the render thread. Stable sorting preserves
 /// the incoming order for equally promising candidates.
 fn prioritize_candidates(
     candidates: Vec<Candidate>,
@@ -320,19 +321,10 @@ impl TranscriptSearch {
         self.started_at.is_some() || self.receiver.is_some()
     }
 
-    /// Resident evidence can run while typing. Cold scans remain debounced.
-    /// Only cheap bounded cache hints run here, never IO or fuzzy matching.
+    /// Start pending queries immediately, including cold scans.
+    /// IO and fuzzy matching stay on the cancellable background worker.
     pub(super) fn poll(&mut self) -> bool {
-        if self.started_at.is_some_and(|start| {
-            start.elapsed() >= DEBOUNCE
-                || self
-                    .candidates
-                    .iter()
-                    .flat_map(|candidate| candidate.paths.iter())
-                    .take(32)
-                    .any(|path| text_cache::is_cached_hint(path))
-        }) {
-            let cold_deadline = self.started_at.take().unwrap() + DEBOUNCE;
+        if self.started_at.take().is_some() {
             let candidates = std::mem::take(&mut self.candidates);
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
@@ -464,20 +456,6 @@ impl TranscriptSearch {
                             }
                             Some(None) => {}
                             None => cold_transcripts.push((candidate, missing, rank)),
-                        }
-                    }
-                    if !cold_transcripts.is_empty() {
-                        // Query-dependent cold work is still disposable. Small
-                        // query-independent preparations finish on their own queue.
-                        while Instant::now() < cold_deadline {
-                            if cancel.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            std::thread::sleep(
-                                cold_deadline
-                                    .saturating_duration_since(Instant::now())
-                                    .min(Duration::from_millis(5)),
-                            );
                         }
                     }
                     let mut fuzzy_transcripts = Vec::new();

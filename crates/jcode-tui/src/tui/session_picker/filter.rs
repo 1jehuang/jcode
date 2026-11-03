@@ -108,8 +108,8 @@ impl SessionPicker {
         }
 
         // Keep literal matches immediate. Expensive typo-tolerant matching is
-        // debounced in the worker alongside transcript search, not performed
-        // on every keypress. Reconsider all sessions for new worker results.
+        // scheduled immediately on the worker alongside transcript search,
+        // never on the UI thread. Reconsider all sessions for new worker results.
         let candidates = self.all_session_refs();
         let tokens = loading::search_query_tokens(&normalized);
 

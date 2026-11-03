@@ -3,7 +3,7 @@ use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 #[test]
-fn warm_queries_complete_before_cold_deadline_across_edits_and_backspace() {
+fn warm_queries_complete_immediately_across_edits_and_backspace() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("warm.jsonl");
     std::fs::write(&path, "{\"text\":\"deploy configuration cloud\"}\n").unwrap();
@@ -20,8 +20,7 @@ fn warm_queries_complete_before_cold_deadline_across_edits_and_backspace() {
         "clodu",
     ] {
         search.reset(query, std::iter::once(&session));
-        // A future cold deadline makes this a scheduling assertion, not a
-        // flaky machine-speed threshold. Only resident work can finish here.
+        // A future timestamp verifies scheduling does not consult a timer.
         search.started_at = Some(Instant::now() + Duration::from_secs(60));
         let deadline = Instant::now() + Duration::from_secs(5);
         while search.pending() {
@@ -40,7 +39,7 @@ fn warm_queries_complete_before_cold_deadline_across_edits_and_backspace() {
 }
 
 #[test]
-fn typing_prepares_cold_text_for_the_latest_query_without_waiting_for_debounce() {
+fn typing_prepares_cold_text_for_the_latest_query_without_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("during-typing.jsonl");
     std::fs::write(&path, "{\"text\":\"deploy configuration\"}\n".repeat(200)).unwrap();
@@ -62,6 +61,34 @@ fn typing_prepares_cold_text_for_the_latest_query_without_waiting_for_debounce()
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(search.contains_literal("typing"));
+}
+
+#[test]
+fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.jsonl");
+    // Too large for warmup or decoded-text caching, so this must use cold IO.
+    let mut text = format!("{}\n", r#"{"text":"needle"}"#);
+    text.push_str(&" ".repeat(2 * 1024 * 1024));
+    std::fs::write(&path, text).unwrap();
+    let session = external_session("cold", &path);
+    let mut search = TranscriptSearch::default();
+    search.reset("needle", std::iter::once(&session));
+    search.started_at = Some(Instant::now() + Duration::from_secs(60));
+    search.poll();
+    assert!(search.started_at.is_none());
+    assert!(search.candidates.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search.pending() {
+        assert!(
+            Instant::now() < deadline,
+            "cold search waited for typing timer"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(search.contains_literal("cold"));
+    assert!(!text_cache::is_cached_hint(&path));
 }
 
 #[test]
@@ -245,7 +272,7 @@ fn benchmark_incremental_query_readiness() {
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     eprintln!(
-        "incremental query first-result readiness_ms={samples:?} (warm transcript, actual debounce, modeled 1ms polling, includes query edits and backspace)"
+        "incremental query first-result readiness_ms={samples:?} (warm transcript, immediate scheduling, modeled 1ms polling, includes query edits and backspace)"
     );
 }
 
@@ -258,7 +285,7 @@ fn repeated_search_and_reopened_picker_observe_transcript_changes() {
     let run = |query: &str| {
         let mut search = TranscriptSearch::default();
         search.reset(query, std::iter::once(&session));
-        search.started_at = Some(Instant::now() - DEBOUNCE);
+        search.started_at = Some(Instant::now());
         let deadline = Instant::now() + Duration::from_secs(5);
         while search.pending() {
             assert!(Instant::now() < deadline);
@@ -363,7 +390,7 @@ fn external_session(id: &str, path: &Path) -> SessionInfo {
 
 fn wait_for_search(picker: &mut SessionPicker) {
     if picker.transcript_search.started_at.is_some() {
-        picker.transcript_search.started_at = Some(Instant::now() - DEBOUNCE);
+        picker.transcript_search.started_at = Some(Instant::now());
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while picker.transcript_search.pending() {
@@ -423,7 +450,7 @@ fn progressive_search_publishes_best_opening_in_first_batch_and_keeps_weak_match
     sessions.push(best);
     let mut search = TranscriptSearch::default();
     search.reset(query, sessions.iter());
-    search.started_at = Some(Instant::now() - DEBOUNCE);
+    search.started_at = Some(Instant::now());
     let deadline = Instant::now() + Duration::from_secs(5);
     while search.ranks.is_empty() {
         assert!(
@@ -549,7 +576,7 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
     let mut picker = SessionPicker::new(vec![external_session("one", &path)]);
     picker.search_query = "oldneedle".into();
     picker.rebuild_items();
-    picker.transcript_search.started_at = Some(Instant::now() - DEBOUNCE);
+    picker.transcript_search.started_at = Some(Instant::now());
     picker.poll_transcript_search();
     let cancelled = picker.transcript_search.cancel.clone();
     picker.search_query = "absentneedle".into();
@@ -564,15 +591,15 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
 }
 
 #[test]
-fn typing_debounces_disk_work_and_metadata_search_stays_immediate() {
+fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
     let temp = tempfile::tempdir().unwrap();
     let session = external_session("one", &temp.path().join("absent.jsonl"));
     let mut picker = SessionPicker::new(vec![session]);
     picker.search_query = "needle".into();
     picker.rebuild_items();
     picker.poll_transcript_search();
-    assert!(picker.transcript_search.started_at.is_some());
-    assert!(picker.transcript_search.receiver.is_none());
+    assert!(picker.transcript_search.started_at.is_none());
+    assert!(picker.transcript_search.candidates.is_empty());
     picker.search_query = "TITLE metadata".into();
     picker.rebuild_items();
     assert_eq!(picker.visible_sessions.len(), 1);
@@ -580,7 +607,7 @@ fn typing_debounces_disk_work_and_metadata_search_stays_immediate() {
 }
 
 #[test]
-fn fuzzy_metadata_matching_is_debounced_and_never_runs_on_keystroke() {
+fn fuzzy_metadata_matching_runs_on_worker_not_on_keystroke() {
     let temp = tempfile::tempdir().unwrap();
     let mut session = external_session("one", &temp.path().join("absent.jsonl"));
     session.search_index = "config deploy".into();

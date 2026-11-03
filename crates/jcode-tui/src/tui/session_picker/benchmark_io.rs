@@ -252,7 +252,8 @@ fn resume_bench_disk_preview_and_search() {
                 timeout,
             );
 
-            // Real query replacement while the old scan is still debounced.
+            // Real query replacement before the old scan is polled.
+            // Historical metric names retain "debounce" for comparison.
             // This measures UI cancellation state, not worker termination latency.
             let start = Instant::now();
             picker.search_query = "absentoldquery".into();
