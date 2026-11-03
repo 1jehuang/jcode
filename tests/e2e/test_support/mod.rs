@@ -15,6 +15,7 @@ pub(crate) use jcode::server;
 pub(crate) use jcode::session::{Session, StoredCompactionState};
 pub(crate) use jcode::tool::Registry;
 pub(crate) use std::ffi::OsString;
+#[cfg(unix)]
 pub(crate) use std::io::Read;
 pub(crate) use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
@@ -1165,7 +1166,9 @@ pub(crate) async fn wait_for_debug_client_count(
 #[cfg(unix)]
 #[path = "mod/selfdev_reload.rs"]
 mod selfdev_reload;
-pub(crate) use selfdev_reload::wait_for_selfdev_client_reload_cycle;
-pub(crate) use selfdev_reload::wait_for_selfdev_reload_cycle;
+#[cfg(unix)]
+pub(crate) use selfdev_reload::{
+    wait_for_selfdev_client_reload_cycle, wait_for_selfdev_reload_cycle,
+};
 mod logs;
 pub(crate) use logs::latest_log_excerpt;
