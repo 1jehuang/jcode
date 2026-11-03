@@ -850,7 +850,15 @@ fn parse_url(url: &str) -> Option<(String, String, u16, String)> {
         Some(i) => (&rest[..i], rest[i..].to_string()),
         None => (rest, "/".to_string()),
     };
-    let (host, port) = if let Some(i) = authority.rfind(':') {
+    // Bracketed IPv6 literals keep their brackets; only a colon after `]` is a port separator.
+    let (host, port) = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        let host = authority[..=end].to_string();
+        match &authority[end + 1..] {
+            "" => (host, default_port),
+            p => (host, p.strip_prefix(':')?.parse().ok()?),
+        }
+    } else if let Some(i) = authority.rfind(':') {
         let port: u16 = authority[i + 1..].parse().ok()?;
         (authority[..i].to_string(), port)
     } else {
@@ -965,6 +973,17 @@ pub fn trace_id_from_uuid(uuid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_url_handles_ipv6_and_default_ports() {
+        let p = |u| parse_url(u).map(|(_, h, p, _)| (h, p));
+        assert_eq!(p("https://[::1]/v1/traces"), Some(("[::1]".into(), 443)));
+        assert_eq!(p("http://[::1]/v1/traces"), Some(("[::1]".into(), 80)));
+        assert_eq!(p("https://[::1]:4318/v1/traces"), Some(("[::1]".into(), 4318)));
+        assert_eq!(p("http://localhost:4318/x"), Some(("localhost".into(), 4318)));
+        assert_eq!(p("http://[::1"), None);
+        assert_eq!(p("http://[::1]x/"), None);
+    }
 
     #[test]
     fn parse_kv_pairs_basic() {
