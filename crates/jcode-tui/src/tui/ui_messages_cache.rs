@@ -15,6 +15,10 @@ where
     if msg.role == "background_task" && msg.content.contains("_Called at:_ `") {
         return render(msg, width, diff_mode);
     }
+    // Finished todo reports show a relative "finished Xm ago" age.
+    if msg.title.as_deref() == Some("Todo completion") && msg.content.contains("\"completed_at\"") {
+        return render(msg, width, diff_mode);
+    }
     jcode_tui_messages::get_cached_message_lines(
         msg,
         width,

@@ -8,6 +8,8 @@ struct Snapshot {
     observations: Vec<crate::todo::GateObservation>,
     #[serde(default)]
     todos: Vec<crate::todo::TodoItem>,
+    #[serde(default)]
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub(super) fn render(
@@ -47,6 +49,18 @@ fn render_with_gate_diagnostics(
     let width = width.max(1) as usize;
     let mut lines =
         render_finished_todo_summary(&snapshot.todos, "", width, Some("Todo completion"));
+    if let Some(completed_at) = snapshot.completed_at {
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                format!(
+                    "  finished {}",
+                    crate::tui::session_picker::format_time_ago(completed_at)
+                ),
+                Style::default().fg(todo_meta_color()),
+            )),
+            width,
+        ));
+    }
     if show_gate_diagnostics {
         lines.extend(render_gate_categories(&snapshot.observations, width));
     }
