@@ -114,6 +114,12 @@ impl App {
             // Return current state as JSON for easier parsing
             serde_json::json!({
                 "processing": self.is_processing,
+                "processing_status": format!("{:?}", self.status),
+                "current_message_id": self.current_message_id,
+                "pending_soft_interrupts": self.pending_soft_interrupts.len(),
+                "pending_soft_interrupt_requests": self.pending_soft_interrupt_requests.len(),
+                "pending_queued_dispatch": self.pending_queued_dispatch,
+                "remote_session_id": self.remote_session_id,
                 "terminal_title": self.terminal_title.borrow().last_sent,
                 "session_edit_lines": self.display_edit_line_counts,
                 "messages": self.messages.len(),
