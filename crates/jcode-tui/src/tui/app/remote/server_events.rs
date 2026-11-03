@@ -3108,7 +3108,21 @@ fn handle_server_event_inner(
                     app.set_status_notice(status_notice);
                     return false;
                 } else if scope == "background_activity" {
-                    if !app.upsert_running_background_task_started(&message) {
+                    if let Some(completed) =
+                        crate::message::parse_background_task_notification_markdown(&message)
+                    {
+                        let status = if completed.status.contains("completed") {
+                            crate::tui::BackgroundTaskRowStatus::Completed
+                        } else {
+                            crate::tui::BackgroundTaskRowStatus::Failed
+                        };
+                        let label = crate::message::background_task_display_label(
+                            &completed.tool_name,
+                            completed.display_name.as_deref(),
+                        );
+                        app.finish_background_task(completed.task_id, label, status);
+                        return false;
+                    } else if !app.upsert_running_background_task_started(&message) {
                         app.push_display_message(DisplayMessage::background_task(message.clone()));
                         persist_replay_display_message(app, "background_task", None, &message);
                     }

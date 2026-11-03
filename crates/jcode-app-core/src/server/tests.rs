@@ -628,6 +628,15 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
     )
     .await;
 
+    let lifecycle = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("silent lifecycle should arrive promptly")
+        .expect("member event stream should remain open");
+    assert!(matches!(lifecycle, ServerEvent::Notification {
+        notification_type: crate::protocol::NotificationType::Message { scope: Some(scope), .. },
+        ..
+    } if scope == "background_activity"));
+
     let event = timeout(Duration::from_secs(2), member_event_rx.recv())
         .await
         .expect("external wake request should arrive promptly")
