@@ -1,4 +1,5 @@
 //! Process-wide cache of decoded string values, never JSON keys or syntax.
+use super::super::preview_result;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashMap;
 use std::io::Read;
@@ -23,13 +24,13 @@ struct Fingerprint {
 }
 impl Fingerprint {
     fn read(path: &Path) -> Option<Self> {
-        let metadata = std::fs::metadata(path).ok()?;
+        let metadata = preview_result(std::fs::metadata(path), "transcript metadata")?;
         if !metadata.is_file() {
             return None;
         }
         Some(Self {
             len: metadata.len(),
-            modified: metadata.modified().ok(),
+            modified: preview_result(metadata.modified(), "transcript timestamp"),
             #[cfg(unix)]
             identity: {
                 use std::os::unix::fs::MetadataExt;
@@ -125,7 +126,7 @@ pub(super) fn cached_segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Ve
         return None;
     }
     let fingerprint = Fingerprint::read(path);
-    cache().lock().ok()?.get(path, fingerprint.as_ref())
+    preview_result(cache().lock(), "text cache lock")?.get(path, fingerprint.as_ref())
 }
 
 /// None requests the existing streaming scanner. No cache lock spans IO,
@@ -135,24 +136,28 @@ pub(super) fn segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Vec<Strin
         return None;
     }
     let fingerprint = Fingerprint::read(path);
-    if let Some(text) = cache().lock().ok()?.get(path, fingerprint.as_ref()) {
+    if let Some(text) =
+        preview_result(cache().lock(), "text cache lock")?.get(path, fingerprint.as_ref())
+    {
         return Some(text);
     }
     let fingerprint = fingerprint?;
     if fingerprint.len > MAX_FILE as u64 {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = preview_result(std::fs::File::open(path), "transcript open")?;
     let mut input = Vec::new();
     // Bounded even when a live journal grows after stat.
     let mut reader = super::CancellableReader {
         reader: file,
         cancel,
     };
-    (&mut reader)
-        .take(MAX_FILE as u64 + 1)
-        .read_to_end(&mut input)
-        .ok()?;
+    preview_result(
+        (&mut reader)
+            .take(MAX_FILE as u64 + 1)
+            .read_to_end(&mut input),
+        "transcript read",
+    )?;
     if input.len() > MAX_FILE || cancel.load(Ordering::Relaxed) {
         return None;
     }
@@ -165,10 +170,12 @@ pub(super) fn segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Vec<Strin
         return None;
     }
     let text = Arc::new(text);
-    cache()
-        .lock()
-        .ok()?
-        .insert(path, fingerprint, text.clone(), bytes);
+    preview_result(cache().lock(), "text cache publication")?.insert(
+        path,
+        fingerprint,
+        text.clone(),
+        bytes,
+    );
     Some(text)
 }
 
@@ -248,8 +255,20 @@ fn decode(input: &[u8], jsonl: bool, cancel: &AtomicBool) -> Option<(Vec<String>
         let mut line = Vec::new();
         while !remaining.is_empty() {
             line.clear();
-            std::io::BufRead::read_until(&mut remaining, b'\n', &mut line).ok()?;
-            let _ = (&mut collector).deserialize(&mut serde_json::Deserializer::from_slice(&line));
+            preview_result(
+                std::io::BufRead::read_until(&mut remaining, b'\n', &mut line),
+                "transcript record read",
+            )?;
+            if let Err(error) =
+                (&mut collector).deserialize(&mut serde_json::Deserializer::from_slice(&line))
+            {
+                // A partial/corrupt journal record must not prevent later records from matching.
+                if !cancel.load(Ordering::Relaxed) && !collector.overflow {
+                    crate::logging::debug(&format!(
+                        "Skipping malformed transcript cache record: {error}"
+                    ));
+                }
+            }
             if cancel.load(Ordering::Relaxed) || collector.overflow {
                 return None;
             }

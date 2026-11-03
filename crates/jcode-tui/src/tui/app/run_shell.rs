@@ -6,8 +6,12 @@ fn report_reload_interaction_gap() {
         return;
     };
     crate::env::remove_var("JCODE_RELOAD_GAP_STARTED_MS");
-    let Some(started_ms) = started.parse::<u128>().ok() else {
-        return;
+    let started_ms = match started.parse::<u128>() {
+        Ok(started) => started,
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid reload interaction timestamp: {error}"));
+            return;
+        }
     };
     let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
         return;
@@ -52,8 +56,7 @@ pub(crate) fn refresh_preview_redraw_timer(
         && state.session_picker_overlay().is_some_and(|picker| {
             picker
                 .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_pending_preview_work())
+                .is_ok_and(|picker| picker.has_pending_preview_work())
         });
     if pending {
         let desired = crate::tui::redraw_interval(state);

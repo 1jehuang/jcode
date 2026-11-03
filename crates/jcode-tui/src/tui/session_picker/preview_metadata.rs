@@ -39,8 +39,7 @@ pub(super) fn hydrate_workspace(data: &mut InfoWidgetData, target: &WorkspaceTar
     else {
         return;
     };
-    let config = crate::storage::jcode_dir()
-        .ok()
+    let config = super::preview_result(crate::storage::jcode_dir(), "SSH config directory")
         .map(|dir| dir.join("cloud/ssh_config"));
     let config = config.as_deref().filter(|path| path.is_file());
     if let crate::tui::cloud_git::RepoState::Ready(info) = runtime.block_on(

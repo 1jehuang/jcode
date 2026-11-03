@@ -12,7 +12,7 @@ const CACHE_BUDGET: u64 = 256 * 1024 * 1024;
 const TTL: Duration = Duration::from_secs(15);
 
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
-    let root = crate::storage::jcode_dir().ok()?;
+    let root = super::super::preview_result(crate::storage::jcode_dir(), "cache directory")?;
     Some(key_path(&root, session_id, host, epoch))
 }
 
@@ -27,24 +27,30 @@ fn key_path(root: &Path, session_id: &str, host: &str, epoch: u64) -> PathBuf {
 }
 
 pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
-    let file = File::open(path).ok()?;
-    if file.metadata().ok()?.len() > MAX_BYTES as u64 {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => return super::super::preview_result(Err::<Vec<u8>, _>(error), "cache open"),
+    };
+    if super::super::preview_result(file.metadata(), "cache metadata")?.len() > MAX_BYTES as u64 {
         return None;
     }
     // Do not trust metadata for allocation or bounds: the file can grow concurrently.
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    super::super::preview_result(
+        file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
+        "cache read",
+    )?;
     (bytes.len() <= MAX_BYTES).then_some(bytes)
 }
 
 pub(super) fn fresh(path: &Path) -> bool {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age < TTL)
+    super::super::preview_result(
+        fs::metadata(path).and_then(|metadata| metadata.modified()),
+        "cache freshness",
+    )
+    .and_then(|modified| super::super::preview_result(modified.elapsed(), "cache timestamp"))
+    .is_some_and(|age| age < TTL)
 }
 
 pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {

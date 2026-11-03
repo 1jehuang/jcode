@@ -18,19 +18,29 @@ pub(super) fn publish_then_hydrate(
     hydrate: impl FnOnce(&mut InfoWidgetData),
 ) {
     let Some(mut preview) = preview else {
-        let _ = transcript.send(None);
+        if transcript.send(None).is_err() {
+            // Navigation already dropped this receiver. Nothing remains to publish.
+            return;
+        }
         return;
     };
     let generation = Instant::now();
     preview.extras.loaded_at = Some(generation);
-    let mut data = preview.extras.info_data.clone().unwrap_or_default();
+    // A transcript can arrive before any optional workspace metadata.
+    let mut data = preview
+        .extras
+        .info_data
+        .as_ref()
+        .map_or_else(InfoWidgetData::default, Clone::clone);
     // Navigating away drops the receiver. Do not start a potentially slow Git
     // or SSH probe for a transcript that nobody is waiting for anymore.
     if transcript.send(Some(preview)).is_err() {
         return;
     }
     hydrate(&mut data);
-    let _ = workspace.send((generation, data));
+    if workspace.send((generation, data)).is_err() {
+        crate::logging::debug("Workspace preview receiver closed after navigation");
+    }
 }
 
 impl SessionPicker {
@@ -59,7 +69,9 @@ impl SessionPicker {
         };
         match pending.receiver.try_recv() {
             Ok((generation, data)) => {
-                let pending = self.pending_workspace_load.take().unwrap();
+                let Some(pending) = self.pending_workspace_load.take() else {
+                    return false;
+                };
                 if let Some(extras) = self.preview_extras.get_mut(&pending.session_id)
                     && extras.loaded_at == Some(generation)
                 {

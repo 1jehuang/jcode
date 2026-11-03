@@ -19,10 +19,10 @@ pub(super) fn persisted_info_from_snapshot(
     // A session may have switched routes since that message. Only a snapshot
     // with exact route and compaction identity is eligible for context chrome.
     let context_tokens = snapshot.as_ref().map(|s| s.context_tokens);
-    let (auth_method, usage_info) = snapshot
-        .as_ref()
-        .map(snapshot_account_info)
-        .unwrap_or_default();
+    let (auth_method, usage_info) = snapshot.as_ref().map_or(
+        (info_widget::AuthMethod::Unknown, None),
+        snapshot_account_info,
+    );
     InfoWidgetData {
         auth_method,
         usage_info,

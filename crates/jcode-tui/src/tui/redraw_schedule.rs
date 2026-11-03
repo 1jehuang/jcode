@@ -316,8 +316,7 @@ fn session_picker_spinner_redraw_active(state: &dyn TuiState) -> bool {
         && state.session_picker_overlay().is_some_and(|picker| {
             picker
                 .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_visible_running_sessions())
+                .is_ok_and(|picker| picker.has_visible_running_sessions())
         })
 }
 
@@ -328,8 +327,7 @@ fn session_picker_preview_redraw_active(state: &dyn TuiState) -> bool {
         && state.session_picker_overlay().is_some_and(|picker| {
             picker
                 .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_pending_preview_work())
+                .is_ok_and(|picker| picker.has_pending_preview_work())
         })
 }
 

@@ -253,14 +253,16 @@ fn resolve(
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let cached = cache.lock().ok()?.get(text, token, fuzzy);
+        let cached =
+            super::super::preview_result(cache.lock(), "token cache lock")?.get(text, token, fuzzy);
         let outcome = match cached {
             Some(outcome) => outcome,
             None => {
                 let outcome = scan(text, token, cancel, fuzzy)?;
                 // Publish each completed token independently, even if a later
                 // token cancels. Incomplete negatives never reach this point.
-                cache.lock().ok()?.insert(text, token, fuzzy, outcome);
+                super::super::preview_result(cache.lock(), "token cache lock")?
+                    .insert(text, token, fuzzy, outcome);
                 outcome
             }
         };
@@ -308,9 +310,16 @@ fn scan_token_with_scores(
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let _ = scan.normalized_text::<serde_json::Error>(segment);
+        let scanned = scan.normalized_text::<serde_json::Error>(segment);
+        // The visitor uses an error sentinel to stop JSON traversal after a hit.
         if scan.complete() {
             return Some(Some(scan.score));
+        }
+        if let Err(error) = scanned {
+            if !cancel.load(Ordering::Relaxed) {
+                crate::logging::debug(&format!("Transcript token scan stopped: {error}"));
+            }
+            return None;
         }
     }
     if cancel.load(Ordering::Relaxed) {

@@ -60,12 +60,13 @@ fn load_cached_or_fetch(
         {
             let path = path.to_owned();
             let id = session_id.to_owned();
-            let _ = std::thread::Builder::new()
+            let refresh = std::thread::Builder::new()
                 .name("jcode-cloud-preview-refresh".into())
                 .spawn(move || {
                     let _guard = guard;
                     fetch_and_cache(&id, Some(&path), fetch);
                 });
+            preview_result(refresh, "cloud refresh worker");
         }
         return Some(snapshot);
     }
@@ -149,7 +150,14 @@ fn parse_preview(
         .position(|b| *b == 0)
         .map(|offset| first + 1 + offset);
     let session = parse_transcript(&bytes[..second.unwrap_or(bytes.len())])?;
-    let telemetry = second.and_then(|split| serde_json::from_slice(&bytes[split + 1..]).ok());
+    let telemetry = second.and_then(|split| {
+        let bytes = &bytes[split + 1..];
+        if bytes.is_empty() {
+            None
+        } else {
+            preview_result(serde_json::from_slice(bytes), "remote telemetry decoding")
+        }
+    });
     Some((session, telemetry))
 }
 

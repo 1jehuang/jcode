@@ -279,12 +279,16 @@ impl TranscriptSearch {
                 search_index: session.search_index.clone(),
                 missing_tokens,
                 exact_field: exact_metadata_field(session, query),
-                opening_prompt: session.first_user_prompt.clone().unwrap_or_default(),
+                opening_prompt: session
+                    .first_user_prompt
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_owned(),
                 intent_text: format!(
                     "{}\n{}\n{}",
                     session.title,
-                    session.save_label.as_deref().unwrap_or_default(),
-                    session.first_user_prompt.as_deref().unwrap_or_default(),
+                    session.save_label.as_deref().unwrap_or(""),
+                    session.first_user_prompt.as_deref().unwrap_or(""),
                 ),
             });
         }

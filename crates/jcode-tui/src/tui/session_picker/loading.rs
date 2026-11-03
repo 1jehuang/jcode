@@ -1378,7 +1378,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
                     token_usage = map.next_value()?;
                 }
                 _ => {
-                    let _ = map.next_value::<IgnoredAny>()?;
+                    map.next_value::<IgnoredAny>()?;
                 }
             }
         }

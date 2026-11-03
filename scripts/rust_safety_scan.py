@@ -41,7 +41,7 @@ def code_only(text: str) -> str:
     return ''.join(output)
 
 
-MODULE = re.compile(r'^\s*(?P<attrs>(?:#\s*\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\s*;', re.M)
+MODULE = re.compile(r'^[ \t]*(?P<attrs>(?:#\s*\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\s*;', re.M)
 PATH = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\n]+)"\s*\]')
 
 

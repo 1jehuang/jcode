@@ -17,20 +17,23 @@ impl Queue {
         let (sender, receiver) = mpsc::sync_channel::<PathBuf>(QUEUE_CAPACITY);
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let worker_pending = pending.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("jcode-search-prepare".into())
             .spawn(move || {
                 let cancel = AtomicBool::new(false);
                 while let Ok(path) = receiver.recv() {
                     // segments bounds each source read and normalized allocation.
                     // Query cancellation intentionally does not cancel this work.
-                    let _ = text_cache::segments(&path, &cancel);
+                    if text_cache::segments(&path, &cancel).is_none() {
+                        // Uncacheable inputs retain the normal streaming search path.
+                        crate::logging::debug("Transcript warmup deferred to streaming search");
+                    }
                     if let Ok(mut pending) = worker_pending.lock() {
                         pending.remove(&path);
                     }
                 }
-            })
-            .ok()?;
+            });
+        super::super::preview_result(worker, "warmup worker startup")?;
         Some(Self { sender, pending })
     }
 
