@@ -1,5 +1,6 @@
-//! Debounced fuzzy and full-transcript search. Only cheap literal metadata
-//! matching runs on the UI thread, never fuzzy DP or transcript file reads.
+//! Incremental fuzzy and full-transcript search with debounced cold scans.
+//! Only cheap literal metadata and resident-cache hints run on the UI thread,
+//! never fuzzy DP or transcript file reads.
 use super::loading::search_query_tokens;
 use super::{ResumeTarget, SessionInfo};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -14,6 +15,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 mod text_cache;
+mod word_scores;
+use word_scores::WordScores;
+mod token_cache;
+mod warmup;
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
@@ -109,22 +114,22 @@ impl SearchRank {
     }
 }
 
+#[cfg(test)]
 fn fuzzy_metadata_rank(index: &str, tokens: &[String]) -> SearchRank {
+    fuzzy_metadata_rank_with_scores(index, tokens, &mut WordScores::default())
+}
+
+fn fuzzy_metadata_rank_with_scores(
+    index: &str,
+    tokens: &[String],
+    scores: &mut WordScores,
+) -> SearchRank {
     let mut rank = literal_metadata_rank(index, tokens);
     // Score every term, including terms already matched literally. Scoring
     // only the missing terms perversely rewarded candidates with fewer hits.
     rank.score = tokens
         .iter()
-        .filter_map(|token| {
-            let query = jcode_fuzzy::PreparedTokenQuery::new(token);
-            index
-                .split_whitespace()
-                // Match the boolean search's DP bound for minified data/URLs.
-                .filter(|word| word.chars().count() <= 128)
-                .filter_map(|word| query.score(word))
-                .max()
-                .map(i64::from)
-        })
+        .filter_map(|token| scores.best_score(token, index, false).map(i64::from))
         .sum();
     rank
 }
@@ -284,6 +289,11 @@ impl TranscriptSearch {
         }
         if !self.candidates.is_empty() {
             self.started_at = Some(Instant::now());
+            warmup::schedule(
+                self.candidates
+                    .iter()
+                    .flat_map(|candidate| candidate.paths.iter()),
+            );
         }
     }
 
@@ -310,13 +320,19 @@ impl TranscriptSearch {
         self.started_at.is_some() || self.receiver.is_some()
     }
 
-    /// Start only after typing pauses, then merge a bounded batch per frame.
+    /// Resident evidence can run while typing. Cold scans remain debounced.
+    /// Only cheap bounded cache hints run here, never IO or fuzzy matching.
     pub(super) fn poll(&mut self) -> bool {
-        if self
-            .started_at
-            .is_some_and(|start| start.elapsed() >= DEBOUNCE)
-        {
-            self.started_at = None;
+        if self.started_at.is_some_and(|start| {
+            start.elapsed() >= DEBOUNCE
+                || self
+                    .candidates
+                    .iter()
+                    .flat_map(|candidate| candidate.paths.iter())
+                    .take(32)
+                    .any(|path| text_cache::is_cached_hint(path))
+        }) {
+            let cold_deadline = self.started_at.take().unwrap() + DEBOUNCE;
             let candidates = std::mem::take(&mut self.candidates);
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
@@ -328,6 +344,7 @@ impl TranscriptSearch {
                     // Finish the in-memory fuzzy pass before opening any large
                     // transcripts. Neither DP matching nor disk scans belong
                     // on the keystroke/render thread.
+                    let mut scores = WordScores::default();
                     let mut fuzzy_candidates = Vec::new();
                     for (mut candidate, priority) in
                         prioritize_candidates(candidates, &query, &tokens, &cancel)
@@ -336,7 +353,11 @@ impl TranscriptSearch {
                             return;
                         }
                         if priority.opening_prompt > 0 {
-                            let mut rank = fuzzy_metadata_rank(&candidate.search_index, &tokens);
+                            let mut rank = fuzzy_metadata_rank_with_scores(
+                                &candidate.search_index,
+                                &tokens,
+                                &mut scores,
+                            );
                             rank.opening_prompt = priority.opening_prompt;
                             rank.intent_terms = priority.intent_terms;
                             if sender.send((candidate.id.clone(), rank)).is_err() {
@@ -362,14 +383,16 @@ impl TranscriptSearch {
                             return;
                         }
                         let mut fuzzy_missing = candidate.missing_tokens.clone();
-                        let mut rank = fuzzy_metadata_rank(&candidate.search_index, &tokens)
-                            .with_exact_field(candidate.exact_field);
+                        let mut rank = fuzzy_metadata_rank_with_scores(
+                            &candidate.search_index,
+                            &tokens,
+                            &mut scores,
+                        )
+                        .with_exact_field(candidate.exact_field);
                         rank.opening_prompt = priority.opening_prompt;
                         rank.intent_terms = priority.intent_terms;
-                        fuzzy_missing.retain(|token| {
-                            !jcode_fuzzy::PreparedTokenQuery::new(token)
-                                .matches_search_text(&candidate.search_index)
-                        });
+                        fuzzy_missing
+                            .retain(|token| !scores.matches_text(token, &candidate.search_index));
                         candidate.search_index = String::new();
                         if fuzzy_missing.is_empty()
                             && sender.send((candidate.id.clone(), rank)).is_err()
@@ -383,8 +406,82 @@ impl TranscriptSearch {
                     // Fuzzy scoring adds evidence unavailable to the cheap
                     // pass. Use it to schedule disk reads, too.
                     transcripts.sort_by_key(|(_, _, rank)| std::cmp::Reverse(*rank));
-                    let mut fuzzy_transcripts = Vec::new();
+                    let mut cold_transcripts = Vec::new();
+                    let mut warm_fuzzy = Vec::new();
+                    // Reuse resident token evidence before waiting for a typing
+                    // pause. Never narrow fuzzy candidates using literal results.
                     for (candidate, fuzzy_missing, rank) in transcripts {
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        match cached_paths_scan_with_scores(
+                            &candidate.paths,
+                            &candidate.missing_tokens,
+                            &cancel,
+                            false,
+                            &mut scores,
+                        ) {
+                            Some(Some(_)) => {
+                                if sender
+                                    .send((
+                                        candidate.id,
+                                        SearchRank {
+                                            literal: true,
+                                            ..rank
+                                        },
+                                    ))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Some(None) if fuzzy_missing.is_empty() => {}
+                            Some(None) => warm_fuzzy.push((candidate, fuzzy_missing, rank)),
+                            None => cold_transcripts.push((candidate, fuzzy_missing, rank)),
+                        }
+                    }
+                    for (candidate, missing, rank) in warm_fuzzy {
+                        match cached_paths_scan_with_scores(
+                            &candidate.paths,
+                            &missing,
+                            &cancel,
+                            true,
+                            &mut scores,
+                        ) {
+                            Some(Some(score)) => {
+                                if sender
+                                    .send((
+                                        candidate.id,
+                                        SearchRank {
+                                            score: rank.score + score,
+                                            ..rank
+                                        },
+                                    ))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Some(None) => {}
+                            None => cold_transcripts.push((candidate, missing, rank)),
+                        }
+                    }
+                    if !cold_transcripts.is_empty() {
+                        // Query-dependent cold work is still disposable. Small
+                        // query-independent preparations finish on their own queue.
+                        while Instant::now() < cold_deadline {
+                            if cancel.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            std::thread::sleep(
+                                cold_deadline
+                                    .saturating_duration_since(Instant::now())
+                                    .min(Duration::from_millis(5)),
+                            );
+                        }
+                    }
+                    let mut fuzzy_transcripts = Vec::new();
+                    for (candidate, fuzzy_missing, rank) in cold_transcripts {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
@@ -416,8 +513,13 @@ impl TranscriptSearch {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        if let Some(score) = paths_match_scored(&candidate.paths, &missing, &cancel)
-                        {
+                        if let Some(score) = scan_paths_with_scores(
+                            &candidate.paths,
+                            &missing,
+                            &cancel,
+                            true,
+                            &mut scores,
+                        ) {
                             let rank = SearchRank {
                                 score: rank.score + score,
                                 ..rank
@@ -497,6 +599,7 @@ struct Scan<'a> {
     cancel: &'a AtomicBool,
     fuzzy: bool,
     score: i64,
+    scores: &'a mut WordScores,
 }
 
 impl Scan<'_> {
@@ -527,22 +630,11 @@ impl Scan<'_> {
                     && token.chars().count() >= 4
                     && token.chars().all(char::is_alphabetic)
                 {
-                    let query = jcode_fuzzy::PreparedTokenQuery::new(token);
                     // Score the words that actually matched, not unrelated
                     // metadata. Bound DP work for URLs and minified output.
-                    if let Some(score) = lower
-                        .split_whitespace()
-                        .filter(|word| word.chars().count() <= 128)
-                        .filter_map(|word| {
-                            query.score(word).map(|score| {
-                                // The shared matcher intentionally treats suffixes
-                                // like prefixes. Transcript search should prefer
-                                // the closest word over an incidental longer one.
-                                score - word.chars().count().abs_diff(token.chars().count()) as i32
-                            })
-                        })
-                        .max()
-                    {
+                    // Transcript evidence prefers the closest word length
+                    // over an incidental longer prefix or suffix match.
+                    if let Some(score) = self.scores.best_score(token, lower, true) {
                         *found = true;
                         self.score += i64::from(score);
                     }
@@ -624,6 +716,7 @@ fn paths_match(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool) -> boo
     paths_match_mode(paths, tokens, cancel, true)
 }
 
+#[cfg(test)]
 fn paths_match_scored(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool) -> Option<i64> {
     scan_paths(paths, tokens, cancel, true)
 }
@@ -643,12 +736,23 @@ fn scan_paths(
     cancel: &AtomicBool,
     fuzzy: bool,
 ) -> Option<i64> {
+    scan_paths_with_scores(paths, tokens, cancel, fuzzy, &mut WordScores::default())
+}
+
+fn scan_paths_with_scores(
+    paths: &[PathBuf],
+    tokens: &[String],
+    cancel: &AtomicBool,
+    fuzzy: bool,
+    scores: &mut WordScores,
+) -> Option<i64> {
     let mut scan = Scan {
         tokens,
         found: vec![false; tokens.len()],
         cancel,
         fuzzy,
         score: 0,
+        scores,
     };
     for path in paths {
         if cancel.load(Ordering::Relaxed) {
@@ -662,15 +766,81 @@ fn scan_paths(
     None
 }
 
-fn scan_file(path: &Path, scan: &mut Scan<'_>) {
-    if let Some(segments) = text_cache::segments(path, scan.cancel) {
-        for segment in segments.iter() {
-            if scan.normalized_text::<serde_json::Error>(segment).is_err() {
-                break;
-            }
+fn apply_token_matches(scan: &mut Scan<'_>, matches: Vec<Option<i64>>) {
+    for (found, score) in scan.found.iter_mut().zip(matches) {
+        if !*found && let Some(score) = score {
+            *found = true;
+            scan.score += score;
         }
+    }
+}
+
+/// Outer None means at least one file needs cold work. Inner None is a
+/// definitive resident nonmatch. Literal evidence can succeed on a subset,
+/// but fuzzy scores require all earlier paths to preserve first-match scoring.
+#[cfg(test)]
+fn cached_paths_scan(
+    paths: &[PathBuf],
+    tokens: &[String],
+    cancel: &AtomicBool,
+    fuzzy: bool,
+) -> Option<Option<i64>> {
+    cached_paths_scan_with_scores(paths, tokens, cancel, fuzzy, &mut WordScores::default())
+}
+
+fn cached_paths_scan_with_scores(
+    paths: &[PathBuf],
+    tokens: &[String],
+    cancel: &AtomicBool,
+    fuzzy: bool,
+    scores: &mut WordScores,
+) -> Option<Option<i64>> {
+    let mut scan = Scan {
+        tokens,
+        found: vec![false; tokens.len()],
+        cancel,
+        fuzzy,
+        score: 0,
+        scores,
+    };
+    let mut all_resident = true;
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(matches) =
+            token_cache::matches_cached_with_scores(path, tokens, cancel, fuzzy, scan.scores)
+        {
+            apply_token_matches(&mut scan, matches);
+            if scan.complete() && (!fuzzy || all_resident) {
+                return Some(Some(scan.score));
+            }
+        } else if !std::fs::metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            // Missing journal/snapshot alternatives need no cold read. Other
+            // errors and existing uncached files still require normal fallback.
+            all_resident = false;
+        }
+    }
+    if cancel.load(Ordering::Relaxed) || !all_resident {
+        None
+    } else {
+        Some(scan.complete().then_some(scan.score))
+    }
+}
+
+fn scan_file(path: &Path, scan: &mut Scan<'_>) {
+    if let Some(matches) =
+        token_cache::matches_with_scores(path, scan.tokens, scan.cancel, scan.fuzzy, scan.scores)
+    {
+        apply_token_matches(scan, matches);
         return;
     }
+    scan_file_streaming(path, scan);
+}
+
+fn scan_file_streaming(path: &Path, scan: &mut Scan<'_>) {
     if scan.cancel.load(Ordering::Relaxed) {
         return;
     }
@@ -761,3 +931,7 @@ mod tests;
 #[cfg(test)]
 #[path = "relevance_tests.rs"]
 mod relevance_tests;
+
+#[cfg(test)]
+#[path = "search_speed_tests.rs"]
+mod search_speed_tests;

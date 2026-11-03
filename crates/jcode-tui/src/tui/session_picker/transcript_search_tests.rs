@@ -3,6 +3,253 @@ use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 #[test]
+fn warm_queries_complete_before_cold_deadline_across_edits_and_backspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.jsonl");
+    std::fs::write(&path, "{\"text\":\"deploy configuration cloud\"}\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&path, &cancel).unwrap();
+    let session = external_session("warm", &path);
+    let mut search = TranscriptSearch::default();
+    for query in [
+        "dep",
+        "deploy",
+        "deploy conf",
+        "deploy configuration",
+        "deploy",
+        "clodu",
+    ] {
+        search.reset(query, std::iter::once(&session));
+        // A future cold deadline makes this a scheduling assertion, not a
+        // flaky machine-speed threshold. Only resident work can finish here.
+        search.started_at = Some(Instant::now() + Duration::from_secs(60));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while search.pending() {
+            assert!(
+                Instant::now() < deadline,
+                "warm query {query} waited for cold work"
+            );
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(search.contains("warm"), "query {query} lost its match");
+        if query == "clodu" {
+            assert!(!search.contains_literal("warm"));
+        }
+    }
+}
+
+#[test]
+fn typing_prepares_cold_text_for_the_latest_query_without_waiting_for_debounce() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("during-typing.jsonl");
+    std::fs::write(&path, "{\"text\":\"deploy configuration\"}\n".repeat(200)).unwrap();
+    let session = external_session("typing", &path);
+    assert!(!text_cache::is_cached_hint(&path));
+    let mut search = TranscriptSearch::default();
+    search.reset("dep", std::iter::once(&session));
+    let old_cancel = search.cancel.clone();
+    search.reset("deploy conf", std::iter::once(&session));
+    assert!(old_cancel.load(Ordering::Relaxed));
+    search.started_at = Some(Instant::now() + Duration::from_secs(60));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !search.contains("typing") {
+        assert!(
+            Instant::now() < deadline,
+            "preparation failed to serve latest query"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(search.contains_literal("typing"));
+}
+
+#[test]
+fn cached_literal_exclusions_do_not_hide_future_fuzzy_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fuzzy.json");
+    std::fs::write(&path, r#"{"text":"cloud"}"#).unwrap();
+    let cancel = AtomicBool::new(false);
+    assert!(!paths_match_mode(
+        std::slice::from_ref(&path),
+        &["clod".into()],
+        &cancel,
+        false
+    ));
+    assert!(!paths_match_mode(
+        std::slice::from_ref(&path),
+        &["clodu".into()],
+        &cancel,
+        false
+    ));
+    assert!(paths_match_scored(&[path], &["clodu".into()], &cancel).is_some());
+}
+
+#[test]
+fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.json");
+    let second = dir.path().join("second.json");
+    std::fs::write(&first, r#"{"text":"configuration deploy"}"#).unwrap();
+    std::fs::write(&second, r#"{"text":"config cloud"}"#).unwrap();
+    let paths = vec![first, second];
+    let cancel = AtomicBool::new(false);
+    for path in &paths {
+        text_cache::segments(path, &cancel).unwrap();
+    }
+    for (query, fuzzy) in [
+        ("deploy cloud", false),
+        ("conifg clodu", true),
+        ("absent", false),
+    ] {
+        let tokens = search_query_tokens(query);
+        let mut reference = Scan {
+            tokens: &tokens,
+            found: vec![false; tokens.len()],
+            cancel: &cancel,
+            fuzzy,
+            score: 0,
+            scores: &mut WordScores::default(),
+        };
+        for path in &paths {
+            scan_file_streaming(path, &mut reference);
+            if reference.complete() {
+                break;
+            }
+        }
+        assert_eq!(
+            cached_paths_scan(&paths, &tokens, &cancel, fuzzy),
+            Some(reference.complete().then_some(reference.score))
+        );
+    }
+}
+
+#[test]
+fn missing_native_alternative_does_not_delay_resident_fuzzy_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join("session.json");
+    let missing_journal = dir.path().join("session.journal.jsonl");
+    std::fs::write(&snapshot, r#"{"text":"cloud deployment"}"#).unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&snapshot, &cancel).unwrap();
+    let tokens = search_query_tokens("clodu");
+    let paths = vec![missing_journal, snapshot];
+    let expected = scan_paths(&paths, &tokens, &cancel, true);
+    assert!(expected.is_some());
+    assert_eq!(
+        cached_paths_scan(&paths, &tokens, &cancel, true),
+        Some(expected)
+    );
+}
+
+#[test]
+fn incremental_token_sequences_match_fresh_streaming_results_and_scores() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("equivalence.jsonl");
+    std::fs::write(&path, "{\"text\":\"deployment café clod configuration\"}\n{broken\n{\"text\":\"deploy cloud config βeta\"}\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&path, &cancel).unwrap();
+    let words = [
+        "dep", "deploy", "deply", "cloud", "clodu", "café", "cafe", "βeta", "absent",
+    ];
+    for fuzzy in [false, true] {
+        for first in words {
+            for second in words {
+                let tokens = vec![first.to_string(), second.to_string()];
+                let mut scores = WordScores::default();
+                let mut reference = Scan {
+                    tokens: &tokens,
+                    found: vec![false; tokens.len()],
+                    cancel: &cancel,
+                    fuzzy,
+                    score: 0,
+                    scores: &mut scores,
+                };
+                scan_file_streaming(&path, &mut reference);
+                let expected = reference.complete().then_some(reference.score);
+                assert_eq!(
+                    cached_paths_scan(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
+                    Some(expected),
+                    "tokens={tokens:?} fuzzy={fuzzy}"
+                );
+                assert_eq!(
+                    scan_paths(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn warm_hint_cannot_publish_stale_content_after_file_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("changed.json");
+    let cancel = AtomicBool::new(false);
+    std::fs::write(&path, r#"{"text":"oldneedle"}"#).unwrap();
+    text_cache::segments(&path, &cancel).unwrap();
+    std::fs::write(&path, r#"{"text":"replacement words"}"#).unwrap();
+    assert!(text_cache::is_cached_hint(&path));
+    assert_eq!(
+        cached_paths_scan(
+            std::slice::from_ref(&path),
+            &["oldneedle".into()],
+            &cancel,
+            false
+        ),
+        None
+    );
+    assert!(!paths_match_mode(
+        &[path],
+        &["oldneedle".into()],
+        &cancel,
+        false
+    ));
+}
+
+#[test]
+#[ignore = "manual incremental typing readiness measurement"]
+fn benchmark_incremental_query_readiness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incremental.jsonl");
+    let record = format!(
+        "{{\"text\":\"{} searchalpha betabravo\"}}\n",
+        "ordinary text ".repeat(40)
+    );
+    std::fs::write(&path, record.repeat(300)).unwrap();
+    let session = external_session("incremental", &path);
+    // Prepare the query-independent text exactly as a preceding search would.
+    assert!(paths_match_mode(
+        &[path],
+        &["searchalpha".into()],
+        &AtomicBool::new(false),
+        false
+    ));
+    let mut search = TranscriptSearch::default();
+    let mut samples = Vec::new();
+    for query in [
+        "searchal",
+        "searchalpha",
+        "searchalpha bet",
+        "searchalpha beta",
+        "searchalpha",
+    ] {
+        let start = Instant::now();
+        search.reset(query, std::iter::once(&session));
+        let deadline = start + Duration::from_secs(5);
+        while !search.contains("incremental") {
+            assert!(Instant::now() < deadline, "query {query} timed out");
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    eprintln!(
+        "incremental query first-result readiness_ms={samples:?} (warm transcript, actual debounce, modeled 1ms polling, includes query edits and backspace)"
+    );
+}
+
+#[test]
 fn repeated_search_and_reopened_picker_observe_transcript_changes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("session.jsonl");

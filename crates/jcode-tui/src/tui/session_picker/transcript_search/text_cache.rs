@@ -111,6 +111,23 @@ fn cache() -> &'static Mutex<Cache> {
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
+/// Scheduling hint only. Never trust it as evidence about file contents.
+/// This performs no filesystem work on the input/render thread.
+pub(super) fn is_cached_hint(path: &Path) -> bool {
+    cache()
+        .try_lock()
+        .is_ok_and(|cache| cache.entries.contains_key(path))
+}
+
+/// Validate a resident entry on the search worker without opening a transcript.
+pub(super) fn cached_segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Vec<String>>> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let fingerprint = Fingerprint::read(path);
+    cache().lock().ok()?.get(path, fingerprint.as_ref())
+}
+
 /// None requests the existing streaming scanner. No cache lock spans IO,
 /// decoding, normalization, or query matching. Active readers own their Arc.
 pub(super) fn segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Vec<String>>> {
