@@ -951,6 +951,21 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_500_enters_provider_overload_resume_policy() {
+        let error = anyhow::anyhow!(
+            "Anthropic API error (500 Internal Server Error): {{\"error\":{{\"message\":\"Internal server error\"}}}}"
+        );
+        match decide_with_jitter(&error, 0, Duration::ZERO) {
+            UsageLimitDecision::Resume(plan) => {
+                assert_eq!(plan.delay, Duration::from_secs(15));
+                assert_eq!(plan.kind, ResumeKind::ProviderOverload);
+                assert_eq!(plan.attempt, 1);
+            }
+            other => panic!("Anthropic 500 must use the overload continuation policy: {other:?}"),
+        }
+    }
+
+    #[test]
     fn error_retry_after_prefers_stream_hint_then_usage_reset() {
         let stream: anyhow::Error =
             jcode_agent_runtime::StreamError::new("rate limited".into(), Some(42)).into();

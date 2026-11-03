@@ -57,6 +57,10 @@ struct LegacyTokens {
 
 const ACCOUNT_LABEL_PREFIX: &str = "openai";
 
+#[path = "codex_refresh_cas.rs"]
+mod refresh_cas;
+pub(super) use refresh_cas::{capture_refresh_account, commit_refresh_account};
+
 /// Set the runtime override for the active account label.
 /// This allows `/accounts switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
@@ -160,6 +164,11 @@ pub fn has_unconsented_legacy_credentials() -> bool {
 }
 
 pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
+    let _lock = refresh_cas::lock_auth_file()?;
+    load_auth_file_unlocked()
+}
+
+fn load_auth_file_unlocked() -> Result<JcodeOpenAiAuthFile> {
     let path = jcode_auth_path()?;
     let mut auth = if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
@@ -173,13 +182,18 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
         crate::logging::info(
             "Renaming OpenAI accounts to animal labels (openai-otter, openai-fox, ...)",
         );
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
     }
 
     Ok(auth)
 }
 
 pub fn save_auth_file(auth: &JcodeOpenAiAuthFile) -> Result<()> {
+    let _lock = refresh_cas::lock_auth_file()?;
+    save_auth_file_unlocked(auth)
+}
+
+fn save_auth_file_unlocked(auth: &JcodeOpenAiAuthFile) -> Result<()> {
     let auth_path = jcode_auth_path()?;
     let clean = JcodeOpenAiAuthFile {
         openai_accounts: auth.openai_accounts.clone(),
@@ -206,7 +220,8 @@ pub fn active_account_label() -> Option<String> {
 }
 
 pub fn set_active_account(label: &str) -> Result<()> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     crate::auth::account_store::set_active_account(
         label,
         &auth.openai_accounts,
@@ -214,13 +229,18 @@ pub fn set_active_account(label: &str) -> Result<()> {
         "No OpenAI account with label '{}' found",
         |account| account.label.as_str(),
     )?;
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
     set_active_account_override(Some(label.to_string()));
     Ok(())
 }
 
 pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    upsert_account_unlocked(account)
+}
+
+fn upsert_account_unlocked(account: OpenAiAccount) -> Result<String> {
+    let mut auth = load_auth_file_unlocked()?;
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
         &mut auth.openai_accounts,
@@ -229,12 +249,13 @@ pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
         |account| account.label.as_str(),
         |account, label| account.label = label,
     );
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
     Ok(label)
 }
 
 pub fn remove_account(label: &str) -> Result<()> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     let before = auth.openai_accounts.len();
     auth.openai_accounts
         .retain(|account| account.label != label);
@@ -246,7 +267,7 @@ pub fn remove_account(label: &str) -> Result<()> {
         auth.active_openai_account = auth.openai_accounts.first().map(|a| a.label.clone());
     }
 
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
 
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_openai_account.clone());
@@ -259,6 +280,7 @@ pub fn remove_account(label: &str) -> Result<()> {
 /// References to the old label (active account and runtime override) are
 /// migrated; identity-based session pins continue resolving to the renamed login.
 pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
+    let _lock = refresh_cas::lock_auth_file()?;
     let new_label = new_label.trim();
     if new_label.is_empty() {
         anyhow::bail!("New account name cannot be empty");
@@ -270,7 +292,7 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
     {
         anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
     }
-    let mut auth = load_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     if new_label == old_label {
         if auth
             .openai_accounts
@@ -297,7 +319,7 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
         auth.active_openai_account = Some(new_label.to_string());
     }
 
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
 
     if get_active_account_override().as_deref() == Some(old_label) {
         set_active_account_override(Some(new_label.to_string()));
@@ -307,11 +329,12 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
 }
 
 pub fn clear_accounts() -> Result<usize> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     let removed = auth.openai_accounts.len();
     auth.openai_accounts.clear();
     auth.active_openai_account = None;
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
     set_active_account_override(None);
     Ok(removed)
 }
@@ -324,7 +347,8 @@ pub fn update_account_tokens(
     account_id: Option<String>,
     expires_at: Option<i64>,
 ) -> Result<()> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     if let Some(account) = auth
         .openai_accounts
         .iter_mut()
@@ -342,7 +366,7 @@ pub fn update_account_tokens(
             account.account_id = Some(account_id);
         }
         account.expires_at = expires_at;
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
         Ok(())
     } else {
         anyhow::bail!(
@@ -358,9 +382,10 @@ pub fn replace_account_if_unchanged(
     expected_identity: Option<&str>,
     replacement: OpenAiAccount,
 ) -> Result<()> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     replace_saved_login(&mut auth, label, expected_identity, replacement)?;
-    save_auth_file(&auth)
+    save_auth_file_unlocked(&auth)
 }
 
 fn replace_saved_login(
@@ -410,14 +435,15 @@ fn replace_saved_login(
 mod replacement_tests;
 
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     if let Some(account) = auth
         .openai_accounts
         .iter_mut()
         .find(|account| account.label == label)
     {
         account.email = email;
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
         Ok(())
     } else {
         anyhow::bail!(
@@ -652,6 +678,7 @@ pub fn upsert_account_from_tokens(
     id_token: Option<String>,
     expires_at: Option<i64>,
 ) -> Result<String> {
+    let _lock = refresh_cas::lock_auth_file()?;
     let creds = CodexCredentials {
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),
@@ -663,7 +690,7 @@ pub fn upsert_account_from_tokens(
     let mut account = account_from_credentials(label, &creds, email);
     // A refresh response without an id_token must not erase the identity
     // (email/account id) that per-session account pins resolve against.
-    if let Some(existing) = load_auth_file()
+    if let Some(existing) = load_auth_file_unlocked()
         .ok()
         .and_then(|auth| auth.openai_accounts.into_iter().find(|a| a.label == label))
     {
@@ -674,7 +701,7 @@ pub fn upsert_account_from_tokens(
             account.account_id = existing.account_id;
         }
     }
-    upsert_account(account)
+    upsert_account_unlocked(account)
 }
 
 fn load_jcode_credentials() -> Result<CodexCredentials> {

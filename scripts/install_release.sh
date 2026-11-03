@@ -95,6 +95,15 @@ install_dir="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 prepared_dir=$(mktemp -d)
 trap 'rm -rf -- "$prepared_dir"' EXIT
 install -m 755 "$bin" "$prepared_dir/jcode"
+# Git metadata describes the source, not the executable bytes. Even clean builds
+# can differ with build flags/toolchains; never reuse an immutable payload label.
+if command -v sha256sum >/dev/null 2>&1; then
+  payload_hash="$(sha256sum < "$prepared_dir/jcode")"
+else
+  payload_hash="$(shasum -a 256 < "$prepared_dir/jcode")"
+fi
+hash="$hash-${payload_hash%% *}"
+version_dir="$builds_dir/versions/$hash"
 if ! "$prepared_dir/jcode" --no-update publish-build --source "$prepared_dir" \
   --version "$hash" --channel current --launcher "$install_dir/jcode"; then
   echo "Publication failed. The new binary must support publish-build for safe, locked installation." >&2

@@ -4,6 +4,9 @@
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
 
+#[path = "session_picker_selection_intent_tests.rs"]
+mod selection_intent;
+
 struct ProjectScopeRefreshEnv {
     home: Option<std::ffi::OsString>,
     scope: Option<std::ffi::OsString>,

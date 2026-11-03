@@ -396,7 +396,17 @@ esac
                 .unwrap(),
         );
         let mut publication = accept(&publication_listener, b"copied");
-        let new_binary = home.join("builds/versions/fixture-new/jcode");
+        let new_binary = std::fs::read_dir(home.join("builds/versions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("fixture-new-")
+            })
+            .expect("content-addressed source build")
+            .join(binary_name());
         assert!(
             new_binary.is_file(),
             "must pause in rename-to-reference gap"

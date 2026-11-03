@@ -119,7 +119,7 @@ impl Agent {
         // Return to the preferred account after its reset, at turn start only.
         self.return_account_home_at_turn_start(Some(&event_tx));
 
-        loop {
+        'turn: loop {
             // Never open a new provider request after a cancel. Several paths
             // `continue` this loop (compaction retry, incomplete/stranded
             // continuation, empty-response recovery, soft-interrupt injection),
@@ -352,7 +352,7 @@ impl Agent {
                                             summary_chars: None,
                                             active_messages: None,
                                         });
-                                        continue;
+                                        continue 'turn;
                                     }
                                     self.sync_route_change_after_stream(
                                         &event_tx,

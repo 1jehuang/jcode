@@ -1,9 +1,8 @@
 //! Building the stream-json `user` line for one turn from jcode history.
 //!
-//! Claude Code keeps the transcript itself, so only the newest user input is
-//! sent. When a brand new Claude session starts for a conversation that
-//! already has history (for example after switching from native Claude), a
-//! compact text transcript of the earlier turns is prepended once.
+//! Claude Code keeps its own transcript. Normal continuation sends only new
+//! input. A fresh session gets a bounded history seed; a retained child gets
+//! only intervening turns it missed while another provider was selected.
 
 use jcode_base::prompt::SESSION_CONTEXT_HEADING;
 use jcode_message_types::{ContentBlock, Message, Role};

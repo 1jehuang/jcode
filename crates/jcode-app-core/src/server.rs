@@ -87,11 +87,11 @@ use self::swarm_channels::{
 };
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{
-    LoadedSwarmRuntimeState, capture_swarm_state_version,
-    load_runtime_state as load_persisted_swarm_runtime_state,
-    persist_swarm_state as persist_swarm_state_snapshot, remove_swarm_state_if_version,
-    swarm_operation_lock,
+    LoadedSwarmRuntimeState, load_runtime_state as load_persisted_swarm_runtime_state,
+    persist_swarm_state as persist_swarm_state_snapshot, swarm_operation_lock,
 };
+#[cfg(test)]
+use self::swarm_persistence::{capture_swarm_state_version, remove_swarm_state_if_version};
 use self::util::get_shared_mcp_pool;
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
@@ -369,6 +369,7 @@ pub(super) async fn persist_swarm_state_for(swarm_id: &str, swarm_state: &SwarmS
     );
 }
 
+#[cfg(test)]
 pub(super) async fn remove_persisted_swarm_state_for(swarm_id: &str, swarm_state: &SwarmState) {
     // Persist and remove share one per-swarm ordering domain. The file version
     // is an extra CAS guard against direct/recovery writers outside this path.

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::control::{self, McpAction};
+use crate::history::NativeHistory;
 use crate::process::{self, ChildEvent, ChildHandle, INTERRUPT_GRACE};
 use crate::translate::{ClaudeCodeRateLimits, Translator};
 
@@ -40,6 +41,7 @@ pub struct TurnOutcome {
     pub child_usable: bool,
     /// Session id the CLI reported, when it differs from the child's.
     pub session_id: Option<String>,
+    pub(crate) native_history: NativeHistory,
 }
 
 /// Inputs of one turn.
@@ -80,6 +82,7 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
     let mut queued = false;
     let mut pending_tools: HashMap<String, Value> = HashMap::new();
     let mut reported_session: Option<String> = None;
+    let mut native_history = NativeHistory::default();
 
     if let Err(err) = child.send(&user_line).await {
         child.detach_turn();
@@ -93,6 +96,7 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
             produced_output: false,
             child_usable: false,
             session_id: None,
+            native_history,
         };
     }
 
@@ -123,7 +127,7 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
                 }
                 if line.get("type").and_then(Value::as_str) == Some("control_request") {
                     let events = handle_control(child, &line, tools, permission_mode, &mut pending_tools).await;
-                    if !emit_all(out, events).await {
+                    if !emit_all(out, events, &mut native_history).await {
                         break TurnEnd::Cancelled;
                     }
                     continue;
@@ -141,7 +145,7 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
                     events.push(StreamEvent::SessionId(session_id));
                 }
                 events.extend(outcome.events);
-                if !emit_all(out, events).await {
+                if !emit_all(out, events, &mut native_history).await {
                     break TurnEnd::Cancelled;
                 }
                 if outcome.rate_limit_rejected {
@@ -178,11 +182,17 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
         produced_output: translator.produced_output(),
         child_usable,
         session_id: reported_session,
+        native_history,
     }
 }
 
-async fn emit_all(out: &mpsc::Sender<Result<StreamEvent>>, events: Vec<StreamEvent>) -> bool {
+async fn emit_all(
+    out: &mpsc::Sender<Result<StreamEvent>>,
+    events: Vec<StreamEvent>,
+    native_history: &mut NativeHistory,
+) -> bool {
     for event in events {
+        native_history.observe(&event);
         if out.send(Ok(event)).await.is_err() {
             return false;
         }

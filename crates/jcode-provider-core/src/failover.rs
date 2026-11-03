@@ -196,7 +196,7 @@ pub fn parse_http_status_message(message: &str) -> Option<u16> {
     let lower = message.to_ascii_lowercase();
     for line in lower.lines().filter(|line| !is_request_metadata(line)) {
         let line = line.trim_start();
-        let tail = ["status:", "http "]
+        let tail = ["status:", "http ", "anthropic api error ("]
             .iter()
             .find_map(|marker| {
                 line.match_indices(marker).find_map(|(idx, _)| {
@@ -278,6 +278,14 @@ mod tests {
             ("429 Too Many Requests", 429),
             ("status: 100 Continue", 100),
             ("status: 599 upstream failed", 599),
+            (
+                "Anthropic API error (500 Internal Server Error): Internal server error",
+                500,
+            ),
+            (
+                "Anthropic API error (401 Unauthorized): Internal server error",
+                401,
+            ),
         ] {
             assert_eq!(
                 parse_http_status_message(message),
@@ -312,9 +320,22 @@ mod tests {
             "status: 99",
             "status: nope",
             "endpoint: http://localhost:529",
+            "Anthropic API error (5000 Internal Server Error): failure",
+            "Anthropic API error (500busy): failure",
+            "endpoint: Anthropic API error (500 Internal Server Error)",
         ] {
             assert_eq!(parse_http_status_message(message), None, "{message}");
         }
+    }
+
+    #[test]
+    fn anthropic_runtime_status_drives_overload_classification() {
+        assert!(is_provider_overload_message(
+            "Anthropic API error (500 Internal Server Error): {\"error\":{\"message\":\"Internal server error\"}}"
+        ));
+        assert!(!is_provider_overload_message(
+            "Anthropic API error (401 Unauthorized): temporarily unavailable"
+        ));
     }
 
     #[test]
