@@ -11,6 +11,8 @@ fn reload_replay_history(
             content: "Work interrupted by reload".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }],
         messages_base_count: None,
         images_unchanged: false,

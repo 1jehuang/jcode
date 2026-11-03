@@ -648,7 +648,16 @@ fn handle_server_event_inner(
             name,
             output,
             error,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+            duration_ms,
+        } => super::server_event_handlers::handle_tool_done(
+            app,
+            remote,
+            id,
+            name,
+            output,
+            error,
+            duration_ms,
+        ),
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -1050,6 +1059,8 @@ fn handle_server_event_inner(
                         duration_secs: app.display_turn_duration_secs(),
                         title: None,
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
             }
@@ -1185,6 +1196,8 @@ fn handle_server_event_inner(
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
+                            tool_duration_ms: None,
                         });
                     }
                     app.push_turn_footer(duration);
@@ -1369,6 +1382,8 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             app.is_processing = false;
@@ -1745,6 +1760,8 @@ fn handle_server_event_inner(
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
                             tool_data: msg.tool_data,
+                            timestamp: msg.timestamp,
+                            tool_duration_ms: msg.tool_duration_ms,
                         }),
                 );
                 messages.extend(tail);
@@ -2215,6 +2232,8 @@ fn handle_server_event_inner(
                                 duration_secs: None,
                                 title: None,
                                 tool_data: msg.tool_data,
+                                timestamp: msg.timestamp,
+                                tool_duration_ms: msg.tool_duration_ms,
                             })
                             .collect();
                         super::super::remote_notifications::normalize_swarm_delivery_messages(
@@ -2415,6 +2434,8 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title: None,
                     tool_data: msg.tool_data,
+                    timestamp: msg.timestamp,
+                    tool_duration_ms: msg.tool_duration_ms,
                 })
                 .collect();
             app.apply_compacted_history_window(
@@ -2940,6 +2961,8 @@ fn handle_server_event_inner(
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
                 app.push_turn_footer(duration);
@@ -2977,6 +3000,8 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             if let Some(n) = tools_skipped {

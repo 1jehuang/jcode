@@ -3977,6 +3977,24 @@ pub(crate) fn render_tool_message(
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
+    // #1453: " · 2m 3s" (how long the call ran) rides with the token suffix
+    // when the stored tool result or the live event carries a duration.
+    let duration_suffix = tool_row_duration_suffix(msg);
+    let duration_suffix_width = duration_suffix
+        .as_ref()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .unwrap_or(0);
+    // #1454: opt-in HH:MM:SS stamp (when the call ran) sits in the LEFT
+    // prefix, before the tool name, exactly as the PR describes. A
+    // fixed-position clock column is the whole point: every stamp starts at
+    // the same x-offset, so the eye can scan a column of rows as a timeline.
+    // It is part of the reserved prefix width, so the summary still truncates
+    // first and the stamp survives narrow terminals.
+    let time_prefix = tool_row_time_suffix(msg);
+    let time_prefix_width = time_prefix
+        .as_ref()
+        .map(|label| UnicodeWidthStr::width(label.as_str()))
+        .unwrap_or(0);
     let edit_suffix_width = if show_header_diff_counts {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
@@ -3984,7 +4002,9 @@ pub(crate) fn render_tool_message(
     };
     let reserved_summary_width = row_width
         .saturating_sub(UnicodeWidthStr::width(base_prefix.as_str()))
+        .saturating_sub(time_prefix_width)
         .saturating_sub(token_suffix_width)
+        .saturating_sub(duration_suffix_width)
         .saturating_sub(edit_suffix_width);
 
     let intent = tc
@@ -4039,10 +4059,23 @@ pub(crate) fn render_tool_message(
         summary
     };
 
-    let mut tool_line = vec![
-        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
-        Span::styled(display_name, Style::default().fg(tool_color())),
-    ];
+    let mut tool_line = Vec::new();
+    // The clock leads the row in its own neutral blue-grey: it never inherits
+    // severity color, so a slow call cannot make the stamp read as an error.
+    if let Some(label) = time_prefix.as_ref() {
+        tool_line.push(Span::styled(
+            label.clone(),
+            Style::default().fg(rgb(120, 130, 145)),
+        ));
+    }
+    tool_line.push(Span::styled(
+        format!("  {} ", icon),
+        Style::default().fg(icon_color),
+    ));
+    tool_line.push(Span::styled(
+        display_name,
+        Style::default().fg(tool_color()),
+    ));
     if let Some(intent) = intent {
         tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
         tool_line.push(Span::styled(
@@ -4081,6 +4114,18 @@ pub(crate) fn render_tool_message(
         &msg.content,
     ));
     let token_suffix = Line::from(usage_spans);
+
+    // #1453: append the duration badge after the token count so each tool
+    // row answers "how long did this take". Color mirrors the token badge
+    // severity: >= 10s warns (amber), >= 60s alarms (red).
+    let token_suffix = if let Some((label, severity)) = duration_suffix.as_ref() {
+        let color = severity_badge_color(*severity, rgb(120, 130, 145));
+        let mut spans = token_suffix.spans;
+        spans.push(Span::styled(label.clone(), Style::default().fg(color)));
+        Line::from(spans)
+    } else {
+        token_suffix
+    };
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
@@ -4451,6 +4496,89 @@ pub(crate) fn render_tool_message(
 struct ToolOutputTokenBadge {
     label: String,
     color: Color,
+}
+
+/// Shared severity-to-color mapping so the token and duration badges cannot
+/// drift apart. `normal_color` differs per badge (tokens: mid-grey, duration:
+/// blue-grey); Warning/Danger are shared amber/red.
+fn severity_badge_color(
+    severity: crate::util::ApproxTokenSeverity,
+    normal_color: ratatui::style::Color,
+) -> ratatui::style::Color {
+    match severity {
+        crate::util::ApproxTokenSeverity::Normal => normal_color,
+        crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
+        crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
+    }
+}
+
+/// #1453: duration badge for a tool row, rendered after the token count:
+/// " · 2m 3s" (how long the call took). Present only when the row carries a
+/// stored/live duration AND the user opted in via `display.show_tool_duration`
+/// (default off). Returns (label, severity) for coloring.
+fn tool_row_duration_suffix(
+    msg: &DisplayMessage,
+) -> Option<(String, crate::util::ApproxTokenSeverity)> {
+    if !tools_ui::show_tool_duration() {
+        return None;
+    }
+    let duration_ms = msg.tool_duration_ms.filter(|ms| *ms > 0)?;
+    // Skip the badge when the usage label already carries this call's elapsed
+    // time: `tool_usage_label` folds `duration_secs` (live rows) or the
+    // stored "[tool timing: ...]" header (restored rows) into the label
+    // before the token count, e.g. "48s, 14 tok". Appending " · 48.3s" on
+    // top of that duplicated the elapsed time on one row (Greptile finding).
+    let already_labeled = msg.duration_secs.is_some()
+        || msg.content.trim_start().starts_with("[tool timing:")
+        || msg.content.contains("] [tool timing:");
+    if already_labeled {
+        return None;
+    }
+    Some((
+        format!(" · {}", format_tool_row_duration(duration_ms)),
+        crate::util::tool_duration_severity(duration_ms),
+    ))
+}
+
+/// #1454: time-of-day badge for a tool row, rendered in the LEFT prefix
+/// before the tool name: "17:32:05  ✓ bash ...". Opt-in via
+/// `display.show_tool_timestamp`; the stamp honors `display.timestamp_tz`
+/// (e.g. "UTC+3") and falls back to the machine's local timezone.
+fn tool_row_time_suffix(msg: &DisplayMessage) -> Option<String> {
+    if !crate::config::config().display.show_tool_timestamp {
+        return None;
+    }
+    let ts = msg.timestamp?;
+    let tz = crate::config::config()
+        .display
+        .timestamp_fixed_offset_secs();
+    let formatted = match tz.and_then(chrono::FixedOffset::east_opt) {
+        Some(offset) => ts.with_timezone(&offset).format("%H:%M:%S").to_string(),
+        None => ts
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
+    };
+    Some(format!(" · {formatted}"))
+}
+
+/// #1453: compact tool duration: milliseconds under a second ("45ms" — a
+/// bare "0.0s" is noise), tenths of a second up to a minute ("42.3s"),
+/// minutes + seconds from a minute ("2m 3s"), hours + minutes from an hour
+/// ("1h 05m").
+fn format_tool_row_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    if ms < 60_000 {
+        return format!("{}.{d}s", ms / 1000, d = (ms % 1000) / 100);
+    }
+    let secs = ms / 1000;
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m {}s", secs % 60);
+    }
+    format!("{}h {:02}m", mins / 60, mins % 60)
 }
 
 fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {

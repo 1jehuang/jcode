@@ -122,6 +122,8 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -130,6 +132,8 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
     ];
     app.bump_display_messages_version();
@@ -798,6 +802,8 @@ fn test_history_anchor_keeps_distance_from_bottom_after_prepend() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
     );
     app.bump_display_messages_version();
@@ -851,6 +857,8 @@ fn test_history_anchor_reconciles_into_scroll_offset_after_render() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         },
     );
     app.bump_display_messages_version();
@@ -917,6 +925,8 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
             duration_secs: None,
             title: None,
             tool_data: msg.tool_data,
+            timestamp: None,
+            tool_duration_ms: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -1685,6 +1695,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
+            timestamp: None,
         });
         msgs.push(DisplayMessage {
             role: "assistant".to_string(),
@@ -1693,6 +1705,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
+            timestamp: None,
         });
     }
     app.display_messages = msgs;

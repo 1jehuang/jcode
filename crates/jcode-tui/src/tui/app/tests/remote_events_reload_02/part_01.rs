@@ -287,6 +287,7 @@ fn test_handle_server_event_remote_observe_tracks_tool_exec_and_done() {
             name: "read".to_string(),
             output: "1 fn main() {}".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -505,6 +506,7 @@ fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
                 name: "read".to_string(),
                 output: "1 fn main() {}".to_string(),
                 error: None,
+                duration_ms: None,
             }),
         ))
         .expect("tool done should succeed");

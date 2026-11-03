@@ -217,6 +217,8 @@ fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
                 duration_secs: msg.duration_secs,
                 title: msg.title.clone(),
                 tool_data: msg.tool_data.clone(),
+                timestamp: None,
+                tool_duration_ms: None,
             })
             .collect();
         let text_width = width - u16::from(cache.show_scrollbar);

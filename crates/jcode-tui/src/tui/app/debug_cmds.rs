@@ -811,6 +811,8 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 }
             };
             self.push_display_message(message);

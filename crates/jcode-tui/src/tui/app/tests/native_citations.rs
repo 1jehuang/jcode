@@ -22,6 +22,7 @@ fn native_citation_suffix_correction_flushes_pacing_and_preserves_message_bounda
             name: "web_search".into(),
             output: "Search completed".into(),
             error: None,
+            duration_ms: None,
         },
     ] {
         app.handle_server_event(event, &mut remote);

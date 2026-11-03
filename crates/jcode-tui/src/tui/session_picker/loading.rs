@@ -1593,7 +1593,7 @@ pub(super) fn build_messages_preview_with_offset(
             tool_data: msg.tool_data,
             duration_secs: msg.duration_secs,
             title: msg.title,
-            timestamp: None,
+            timestamp: msg.timestamp,
         })
         .collect();
     (preview, hidden_prompts)
