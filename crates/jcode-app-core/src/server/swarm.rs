@@ -1794,6 +1794,15 @@ pub(super) async fn update_member_status_with_report_tldr(
         }
     };
     if swarm_id.is_some() {
+        let coordinator_working_dir = match crate::hooks::swarm_identity(session_id) {
+            Some(identity) => swarm_members
+                .read()
+                .await
+                .get(&identity.coordinator_session_id)
+                .and_then(|member| member.working_dir.as_ref())
+                .map(|dir| dir.display().to_string()),
+            None => None,
+        };
         swarm_hooks::member_status_changed(&swarm_hooks::StatusTransition {
             session_id,
             old_status: &old_status,
@@ -1801,6 +1810,7 @@ pub(super) async fn update_member_status_with_report_tldr(
             status_changed,
             duration_ms: running_ms,
             completion_report: completion_report.as_deref(),
+            coordinator_working_dir: coordinator_working_dir.as_deref(),
         });
     }
     if let Some(ref id) = swarm_id {

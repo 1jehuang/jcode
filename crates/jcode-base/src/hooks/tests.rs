@@ -126,6 +126,29 @@ async fn tool_transformers_compose_json_replacements() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn tool_transformer_keeps_output_larger_than_default_capture_limit() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // ~2 MiB of valid JSON, above the 1 MiB default stream capture.
+    let big = write_executable_script(
+        temp.path(),
+        "big.sh",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"command\":\"'\nhead -c 2097152 /dev/zero | tr '\\0' 'a'\nprintf '\"}'\n",
+    );
+    let _env = transform_test_config(&big.to_string_lossy(), 10_000);
+
+    let output = transform_tool_input(
+        "ses_transform",
+        None,
+        "bash",
+        serde_json::json!({"command": "original"}),
+    )
+    .await;
+    assert_eq!(output["command"].as_str().map(str::len), Some(2 * 1024 * 1024));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn tool_transformer_fails_open_for_invalid_output_and_timeout() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
