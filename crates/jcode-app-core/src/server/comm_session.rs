@@ -562,6 +562,10 @@ pub(super) async fn spawn_swarm_agent(
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
+    // Observers run in the coordinator's context, so use its directory rather
+    // than the worker's.
+    let coordinator_working_dir =
+        resolve_spawn_working_dir(None, req_session_id, sessions, swarm_members).await;
     super::swarm::swarm_hooks::worker_spawned(&super::swarm::swarm_hooks::SpawnedWorker::new(
         &new_session_id,
         swarm_id,
@@ -569,11 +573,15 @@ pub(super) async fn spawn_swarm_agent(
         label.as_deref(),
         definition.as_ref().map(|d| d.name.as_str()),
         if is_headless_fallback {
-            "headless"
+            if resolved_spawn_mode == SwarmSpawnMode::Inline {
+                "inline"
+            } else {
+                "headless"
+            }
         } else {
             "visible"
         },
-        resolved_working_dir.as_deref(),
+        coordinator_working_dir.as_deref(),
     ));
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
