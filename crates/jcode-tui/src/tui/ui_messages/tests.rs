@@ -3626,7 +3626,6 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
-
 fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {
     DisplayMessage {
         timestamp: None,
@@ -4862,4 +4861,3 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
         }
     }
 }
-

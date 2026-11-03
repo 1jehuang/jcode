@@ -1166,7 +1166,8 @@ fn parses_cloud_commands() {
 fn queued_system_reminders_reach_agent_before_handoff() {
     let mut app = crate::tui::app::tests::create_test_app();
     let session = super::super::commands::active_session_id(&app);
-    app.hidden_queued_system_messages.push("bg task done".into());
+    app.hidden_queued_system_messages
+        .push("bg task done".into());
     handle_cloud_command(&mut app, "/local", &session);
     assert!(app.pending_cloud_handoff.is_some());
     // Reminders still dispatch while the handoff waits.
@@ -1174,7 +1175,10 @@ fn queued_system_reminders_reach_agent_before_handoff() {
     assert!(app.poll_cloud_job());
     assert!(app.pending_queued_dispatch);
     assert!(app.cloud_job.is_none());
-    assert_eq!(app.hidden_queued_system_messages, vec!["bg task done".to_string()]);
+    assert_eq!(
+        app.hidden_queued_system_messages,
+        vec!["bg task done".to_string()]
+    );
     assert!(app.pending_cloud_handoff.is_some());
 
     // Once delivered, the handoff proceeds and blocks new work again.

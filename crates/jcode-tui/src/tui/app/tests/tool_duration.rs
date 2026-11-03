@@ -68,7 +68,6 @@ fn tool_duration_remote_completion_and_local_update() {
                 output: output.into(),
                 error: None,
 
-            
                 duration_ms: None,
             },
             &mut remote,

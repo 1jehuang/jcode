@@ -3996,7 +3996,6 @@ pub(crate) fn render_tool_message(
         .map(|label| UnicodeWidthStr::width(label.as_str()))
         .unwrap_or(0);
     let edit_suffix_width = if show_header_diff_counts {
-
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
         0
