@@ -347,7 +347,7 @@ fn new_file_gid(parent: Option<&fs::Metadata>) -> u32 {
     parent.map_or_else(
         || unsafe { libc::getegid() },
         |metadata| {
-            if metadata.mode() & libc::S_ISGID as u32 != 0 {
+            if metadata.mode() & u32::from(libc::S_ISGID) != 0 {
                 metadata.gid()
             } else {
                 unsafe { libc::getegid() }
