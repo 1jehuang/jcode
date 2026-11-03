@@ -459,4 +459,100 @@ mod tests {
              report={report:?}"
         );
     }
+
+    /// Exercises the scheduled entry point itself, not just the helpers beneath it.
+    ///
+    /// `prune_pass_keeps_directory_with_live_process_and_removes_idle_one` covers the
+    /// probe + prune composition, but it hands in its own scratch root and busy list.
+    /// The real caller is `prune_stale_scratch`, which additionally resolves the home
+    /// via `KCODE_HOME`, honours the 24h stamp gate, canonicalises the scratch root,
+    /// and writes the stamp afterwards. Any of those could reintroduce the bug while
+    /// the lower-level test still passed.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn scheduled_entry_point_keeps_live_directory_and_removes_idle_one() {
+        let _guard = crate::storage::lock_test_env();
+        let prev_home = std::env::var_os("KCODE_HOME");
+        let prev_retention = std::env::var_os(SCRATCH_RETENTION_ENV);
+
+        // NOTE: `tempfile::tempdir()` is unusable for a KCODE_HOME here. In this harness TMPDIR
+        // points at `~/.jcode/scratch`, so a default tempdir is created *inside* a jcode directory
+        // and `require_kcode_path` correctly rejects it. Use an explicit root outside all jcode paths.
+        let temp = tempfile::Builder::new()
+            .prefix("scratch-prune-entrypoint-")
+            .tempdir_in("/private/tmp")
+            .expect("tempdir outside jcode paths");
+        crate::env::set_var("KCODE_HOME", temp.path());
+        // Pin retention so the test cannot be defeated by an ambient value.
+        crate::env::set_var(SCRATCH_RETENTION_ENV, "7");
+
+        let scratch = temp.path().join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+
+        let idle = scratch.join("idle");
+        fs::create_dir_all(&idle).unwrap();
+        fs::write(idle.join("f"), b"x").unwrap();
+        age(&idle.join("f"), 30 * DAY);
+        age(&idle, 30 * DAY);
+
+        let busy = scratch.join("busy");
+        let busy_inner = busy.join("work");
+        fs::create_dir_all(&busy_inner).unwrap();
+        fs::write(busy_inner.join("f"), b"x").unwrap();
+        age(&busy_inner.join("f"), 30 * DAY);
+        age(&busy_inner, 30 * DAY);
+        age(&busy, 30 * DAY);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("120")
+            .current_dir(&busy_inner)
+            .spawn()
+            .expect("spawn a live child process inside the scratch entry");
+
+        // No stamp yet, so the pass is due (prune_due is true when the marker is absent).
+        assert!(
+            prune_due(temp.path()),
+            "a fresh home has no prune stamp, so the pass must be due"
+        );
+        // Localise the failure: prove the redirect and the scratch root before pruning.
+        let resolved = crate::storage::jcode_dir().expect("jcode_dir must resolve");
+        assert_eq!(
+            resolved,
+            temp.path(),
+            "KCODE_HOME did not redirect storage::jcode_dir"
+        );
+        assert!(scratch.is_dir(), "scratch root must exist under the redirected home");
+        assert!(
+            retention_from_env().is_some(),
+            "retention must be enabled for the pass to run"
+        );
+
+        prune_stale_scratch();
+
+        let idle_gone = !idle.exists();
+        let busy_kept = busy.exists();
+        let stamped = temp.path().join(PRUNE_MARKER).exists();
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        match prev_retention {
+            Some(value) => crate::env::set_var(SCRATCH_RETENTION_ENV, value),
+            None => crate::env::remove_var(SCRATCH_RETENTION_ENV),
+        }
+        match prev_home {
+            Some(value) => crate::env::set_var("KCODE_HOME", value),
+            None => crate::env::remove_var("KCODE_HOME"),
+        }
+
+        assert!(
+            idle_gone,
+            "the scheduled pass should have removed a stale idle entry"
+        );
+        assert!(
+            busy_kept,
+            "the scheduled pass deleted a directory holding a live process cwd"
+        );
+        assert!(stamped, "the pass must record its stamp so it runs once a day");
+    }
 }
