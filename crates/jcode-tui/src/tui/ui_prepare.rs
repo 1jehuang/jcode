@@ -1175,22 +1175,11 @@ pub(crate) fn prepare_history_preview(
     diff_mode: crate::config::DiffDisplayMode,
 ) -> PreparedMessages {
     prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
-        .unwrap_or_else(|| {
-            crate::logging::warn("Unbounded history preview unexpectedly failed to complete");
-            wrap_lines_with_map(
-                vec![Line::raw("Preview unavailable")],
-                &["Preview unavailable".to_string()],
-                &[],
-                &[],
-                &[],
-                &[],
-                width,
-                &[],
-                &[],
-                &[],
-            )
-        })
+        .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
+
+#[path = "ui_prepare/preview_fallback.rs"]
+mod preview_fallback;
 
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
