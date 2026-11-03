@@ -86,6 +86,7 @@ impl SessionPicker {
     }
 
     /// How long the session's current streaming turn has been running.
+    #[cfg(test)]
     pub(in crate::tui) fn session_streaming_duration(
         &self,
         session: &SessionInfo,

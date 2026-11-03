@@ -171,6 +171,7 @@ const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
     "status_animation",
     "swarm_spinner",
     "session_picker_spinner",
+    "session_picker_preview",
 ];
 
 fn record_full_frame_redraw_reason(reason: &'static str) {
@@ -194,6 +195,9 @@ pub(crate) fn last_full_frame_redraw_reason() -> Option<&'static str> {
 /// against current state instead.
 pub(crate) fn current_full_frame_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
     let policy = crate::perf::tui_policy();
+    if session_picker_preview_redraw_active(state) {
+        return Some("session_picker_preview");
+    }
     if full_frame_status_animation_active_with_policy(state, &policy) {
         return Some("status_animation");
     }
@@ -312,8 +316,18 @@ fn session_picker_spinner_redraw_active(state: &dyn TuiState) -> bool {
         && state.session_picker_overlay().is_some_and(|picker| {
             picker
                 .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_visible_running_sessions())
+                .is_ok_and(|picker| picker.has_visible_running_sessions())
+        })
+}
+
+/// Preview completions are functional updates, not decorative animation. Poll
+/// only while focused, including Minimal policy and deep idle.
+fn session_picker_preview_redraw_active(state: &dyn TuiState) -> bool {
+    state.client_focused()
+        && state.session_picker_overlay().is_some_and(|picker| {
+            picker
+                .try_borrow()
+                .is_ok_and(|picker| picker.has_pending_preview_work())
         })
 }
 
@@ -398,6 +412,12 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
 ) -> Duration {
     let animation_interval = fps_to_duration(policy.animation_fps);
     let fast_interval = fps_to_duration(policy.redraw_fps);
+
+    // Preview receivers have no independent event-loop notification. Poll
+    // promptly until drained, regardless of decorative-animation policy.
+    if session_picker_preview_redraw_active(state) {
+        return Duration::from_millis(16);
+    }
 
     // A retained/collapsing reasoning trace used to need animation cadence here;
     // anchored traces are static transcript messages now. The tail-follow
@@ -575,6 +595,11 @@ pub(crate) fn periodic_redraw_required_excluding_idle_animation(state: &dyn TuiS
 fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: bool) -> bool {
     let policy = crate::perf::tui_policy();
 
+    if session_picker_preview_redraw_active(state) {
+        record_full_frame_redraw_reason("session_picker_preview");
+        return true;
+    }
+
     let deep_idle = deep_idle_dormant(state);
 
     if deep_idle
@@ -694,6 +719,7 @@ mod tests {
             "status_animation",
             "swarm_spinner",
             "session_picker_spinner",
+            "session_picker_preview",
         ] {
             assert!(
                 FULL_FRAME_REDRAW_REASONS.contains(&reason),

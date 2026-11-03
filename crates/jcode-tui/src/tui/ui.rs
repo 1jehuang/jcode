@@ -130,6 +130,7 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{draw_inline_ui, inline_ui_height};
+pub(crate) use layout_support::{SIDE_PANEL_DISMISSED_HINT, side_panel_restore_area};
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
@@ -515,9 +516,9 @@ mod status_support;
 #[path = "ui_theme.rs"]
 mod theme_support;
 use super::color_support::rgb;
-pub(crate) use layout_support::align_if_unset;
+pub(crate) use layout_support::{align_if_unset, left_aligned_content_inset};
 use layout_support::{
-    centered_content_block_width, clear_area, draw_right_rail_chrome, left_aligned_content_inset,
+    centered_content_block_width, clear_area, draw_right_rail_chrome,
     left_pad_lines_to_block_width, right_rail_border_style,
 };
 #[cfg(test)]
@@ -957,6 +958,7 @@ struct BodyCacheKey {
     /// member, so status/todo/tool-intent updates must invalidate the body.
     swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Clone)]
@@ -1041,6 +1043,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1064,6 +1067,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1106,6 +1110,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (false, idx, entry.msg_count));
@@ -1130,6 +1135,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (true, idx, entry.msg_count));
@@ -1239,6 +1245,7 @@ struct FullPrepCacheKey {
     /// Signature of live swarm member cards embedded beneath spawn tool calls.
     swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Clone)]
@@ -1697,6 +1704,7 @@ pub(crate) fn draw_onboarding_welcome_for_tests(
 #[derive(Clone)]
 enum CopyViewportData {
     Dense {
+        link_lines: Option<Arc<Vec<Line<'static>>>>,
         wrapped_plain_lines: Arc<Vec<String>>,
         wrapped_copy_offsets: Arc<Vec<usize>>,
         raw_plain_lines: Arc<Vec<String>>,
@@ -1899,6 +1907,7 @@ fn record_copy_pane_snapshot(
             *copy_snapshot_slot_mut(&mut state.borrow_mut(), pane) = Some(CopyViewportSnapshot {
                 pane,
                 data: CopyViewportData::Dense {
+                    link_lines: None,
                     wrapped_plain_lines,
                     wrapped_copy_offsets,
                     raw_plain_lines,
@@ -1917,6 +1926,7 @@ fn record_copy_pane_snapshot(
         *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
             pane,
             data: CopyViewportData::Dense {
+                link_lines: None,
                 wrapped_plain_lines,
                 wrapped_copy_offsets,
                 raw_plain_lines,
@@ -1971,6 +1981,7 @@ fn record_copy_viewport_frame_snapshot(
     reason = "Viewport snapshot helpers carry explicit render state to avoid hidden globals in call sites"
 )]
 pub(crate) fn record_side_pane_snapshot_precomputed(
+    lines: &[Line<'static>],
     wrapped_plain_lines: Arc<Vec<String>>,
     wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
@@ -1991,6 +2002,33 @@ pub(crate) fn record_side_pane_snapshot_precomputed(
         content_area,
         left_margins,
     );
+    record_link_lines(crate::tui::CopySelectionPane::SidePane, lines);
+}
+
+fn record_link_lines(pane: crate::tui::CopySelectionPane, lines: &[Line<'static>]) {
+    // Only retain styled lines when they contain links. The common plain-text
+    // pane path should not duplicate an entire rendered document every frame.
+    let lines = lines
+        .iter()
+        .any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        })
+        .then(|| Arc::new(lines.to_vec()));
+    let update = |state: &mut CopyViewportSnapshots| {
+        if let Some(snapshot) = copy_snapshot_slot_mut(state, pane).as_mut()
+            && let CopyViewportData::Dense { link_lines, .. } = &mut snapshot.data
+        {
+            *link_lines = lines;
+        }
+    };
+    #[cfg(test)]
+    TEST_COPY_VIEWPORT.with(|state| update(&mut state.borrow_mut()));
+    #[cfg(not(test))]
+    if let Ok(mut state) = copy_viewport_state().lock() {
+        update(&mut state);
+    }
 }
 
 #[expect(
@@ -2146,6 +2184,7 @@ fn record_pane_snapshot_from_lines(
         content_area,
         visible_left_margins,
     );
+    record_link_lines(pane, wrapped_lines);
 }
 
 pub(crate) fn copy_point_from_screen(
@@ -2395,6 +2434,70 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     link_target_from_snapshot(&snapshot, point)
 }
 
+/// Resolve styled markdown labels against their owning source before falling
+/// back to the existing bare-URL hit tester. No global label-to-URL registry is
+/// used, so repeated labels cannot leak destinations between messages.
+pub(crate) fn link_target_from_screen_with_state(
+    column: u16,
+    row: u16,
+    app: &dyn TuiState,
+) -> Option<String> {
+    let point = copy_point_from_screen(column, row)?;
+    if point.pane == crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let target = match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared.sections.iter().find_map(|section| {
+            let local = point.abs_line.checked_sub(section.line_start)?;
+            if local >= section.prepared.wrapped_lines.len() {
+                return None;
+            }
+            let (source, start, end) = match section.kind {
+                PreparedSectionKind::Body => {
+                    let boundaries = &section.prepared.message_boundaries;
+                    let index =
+                        boundaries.partition_point(|boundary| boundary.wrapped_len <= local);
+                    let message = app.display_messages().get(index)?;
+                    let end = boundaries.get(index)?.wrapped_len;
+                    let start = index
+                        .checked_sub(1)
+                        .map(|i| boundaries[i].wrapped_len)
+                        .unwrap_or(0);
+                    (message.content.as_str(), start, end)
+                }
+                PreparedSectionKind::Streaming => (
+                    app.streaming_text(),
+                    0,
+                    section.prepared.wrapped_lines.len(),
+                ),
+                _ => return None,
+            };
+            jcode_tui_markdown::markdown_link_target(
+                source,
+                section.prepared.wrapped_lines.get(start..end)?,
+                local - start,
+                point.column,
+            )
+        }),
+        CopyViewportData::Dense {
+            link_lines: Some(lines),
+            ..
+        } if point.pane == crate::tui::CopySelectionPane::SidePane => {
+            app.side_panel().focused_page().and_then(|page| {
+                jcode_tui_markdown::markdown_link_target(
+                    &page.content,
+                    lines,
+                    point.abs_line,
+                    point.column,
+                )
+            })
+        }
+        _ => None,
+    };
+    target.or_else(|| link_target_from_screen(column, row))
+}
+
 /// Short OAuth link labels resolve against the source card, not a printed URL.
 pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Option<usize> {
     let point = copy_point_from_screen(column, row)?;
@@ -2562,34 +2665,9 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 /// Conservatively detect overflow without rendering Markdown. This lets a cold
 /// reload skip preparing a wide transcript that would immediately be discarded
 /// to reserve the scrollbar column. Only count rows the body must emit.
-fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: usize) -> bool {
-    let mut rows = 0usize;
-    for message in messages {
-        let role = message.effective_role();
-        // Tool results can be hidden (notably pinned todos). These three roles
-        // do not add the usual inter-message separator either.
-        if rows > 0 && messages::needs_message_separator(message) {
-            rows = rows.saturating_add(1);
-        }
-        rows = rows.saturating_add(match role {
-            // Voice/transcription normalization can remove source lines, but
-            // even an empty user prompt still emits its numbered first row.
-            "user" | "meta" | "error" => 1,
-            "spacer" => message
-                .content
-                .trim()
-                .parse::<usize>()
-                .unwrap_or(0)
-                .saturating_sub(1),
-            _ => 0,
-        });
-        if rows > available_rows {
-            return true;
-        }
-    }
-    false
-}
-
+#[path = "ui/overflow.rs"]
+mod overflow;
+use overflow::transcript_definitely_overflows;
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     record_idle_animation_area(None);
     if let Some(frozen) = app.hibernation_frame()
@@ -2642,7 +2720,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
-        Ok(()) => {}
+        Ok(()) => layout_support::draw_side_panel_restore(frame, app),
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
     // Adapt the finished frame at buffer level so every widget and overlay
@@ -3172,12 +3250,40 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .0
             .len()
     };
+    // A fresh cloud transcript is short even on a tall terminal. Keep enough
+    // packed rows for the cloud card stack instead of hiding directory counts
+    // above an otherwise unused lower half of the screen.
+    let widget_data_start = Instant::now();
+    let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
+    let cloud_card_height = if app.info_widget_overlays_enabled()
+        && widget_data.cloud_info.is_some()
+        && chat_area.width >= 120
+        && !show_donut
+        && !swarm_page_active
+        && !side_panel_fullscreen
+    {
+        [
+            info_widget::WidgetKind::Overview,
+            info_widget::WidgetKind::CloudVm,
+            info_widget::WidgetKind::CloudDirectories,
+        ]
+        .into_iter()
+        .map(|kind| info_widget::calculate_widget_height(kind, &widget_data, 40, available_height))
+        .fold(0u16, u16::saturating_add)
+        // Placement reserves breathing room around the card stack.
+        .saturating_add(8)
+        .min(available_height.saturating_sub(fixed_height))
+    } else {
+        0
+    };
     let content_height = prepared
         .total_wrapped_lines()
         .saturating_sub(clear_start.unwrap_or(0))
         .saturating_add(pinned_band_height)
         .max(1)
         .min(u16::MAX as usize) as u16;
+    let content_height = content_height.max(cloud_card_height);
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
     // transcript row blank, so a normal bottom-anchored layout would park the
@@ -3492,9 +3598,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let chrome_elapsed = chrome_start.elapsed();
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
-    let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
-    let widget_data_elapsed = widget_data_start.elapsed();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;

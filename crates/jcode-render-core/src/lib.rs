@@ -26,7 +26,7 @@ pub mod preprocess;
 pub mod reasoning;
 pub mod wrap;
 
-pub use markdown::parse_markdown;
+pub use markdown::{MarkdownParseOptions, parse_markdown, parse_markdown_with_options};
 pub use math::{render_display_latex, render_inline_latex};
 pub use model::{
     Alignment, Block, BlockKind, Document, FillRole, StyleRole, StyledLine, StyledSpan, TextAttrs,

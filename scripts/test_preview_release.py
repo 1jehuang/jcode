@@ -69,7 +69,7 @@ class PreviewPublicationTests(unittest.TestCase):
               patch.object(preview, "change_notes", return_value="## What changed\n\nTest change\n\n"),
               patch.object(preview, "authorize", side_effect=ci_error) as authorize):
             preview.publish(preview.REPOSITORY, SHA, TAG, self.directory)
-        authorize.assert_called_once_with(preview.REPOSITORY, SHA, timeout=0)
+        authorize.assert_called_once_with(preview.REPOSITORY, SHA, timeout=0, preview=True)
 
     def test_complete_assets_publish_only_as_nonlatest_prerelease(self):
         self.publish()
@@ -342,6 +342,9 @@ class PreviewWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/preview.yml").read_text()
         triggers = workflow.split("on:\n", 1)[1].split("concurrency:", 1)[0]
         self.assertIn("branches: [master]", triggers)
+        self.assertIn("  workflow_dispatch:\n", triggers)
+        self.assertNotIn("inputs:", triggers)
+        self.assertIn("github.ref == 'refs/heads/master'", workflow)
         self.assertNotIn("tags:", triggers)
         self.assertNotIn("workflow_run:", triggers)
         self.assertNotIn("release:", triggers)

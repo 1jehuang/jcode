@@ -97,11 +97,16 @@ fn hierarchy_flattens_and_clears() {
 
 #[test]
 fn hierarchy_rejects_malformed_structures() {
+    assert!(
+        parse_todo_input(json!({"phases": null}))
+            .unwrap()
+            .todos
+            .is_none()
+    );
     let item = json!({"id":"a","content":"A","status":"pending","priority":"high"});
     let lane = json!({"lane":"x","items":[item]});
     let phase = json!({"phase":1,"lanes":[lane]});
     for bad in [
-        json!(null),
         json!({}),
         json!([null]),
         json!([{"phase":0,"lanes":[lane]}]),
@@ -249,6 +254,44 @@ fn new_in_progress_todo_preserves_explicit_worker_assignment() {
 }
 
 #[test]
+fn model_facing_descriptions_stay_compact() {
+    fn description_bytes(value: &Value) -> usize {
+        match value {
+            Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| {
+                    if key == "description" && value.is_string() {
+                        value.as_str().unwrap().len()
+                    } else {
+                        description_bytes(value)
+                    }
+                })
+                .sum(),
+            Value::Array(values) => values.iter().map(description_bytes).sum(),
+            _ => 0,
+        }
+    }
+
+    let tool = TodoTool::new();
+    let schema = tool.parameters_schema();
+    let bytes = tool.description().len() + description_bytes(&schema);
+    println!(
+        "todo description bytes: {bytes}; schema bytes: {}",
+        schema.to_string().len()
+    );
+    assert!(bytes < 3_500, "todo descriptions grew to {bytes} bytes");
+    for route in ["add", "update"] {
+        let properties = &schema["properties"][route]["items"]["properties"];
+        for field in ["description", "status", "priority", "lane", "phase"] {
+            assert!(
+                properties[field].get("description").is_none(),
+                "{route}.{field}"
+            );
+        }
+    }
+}
+
+#[test]
 fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
     let schema = TodoTool::new().parameters_schema();
     let add = &schema["properties"]["add"]["items"];
@@ -312,7 +355,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(!item_props.contains_key("closed_feedback_loop"));
     assert_eq!(
         item_props["confidence"]["description"],
-        "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
+        "Evidence that the task can be completed correctly."
     );
 
     let plan_props = props["plan"]
@@ -370,10 +413,10 @@ fn schema_advertises_intent_and_todos() {
         .as_str()
         .expect("feedback-loop relevance should explain every state");
     for required_concept in [
-        "custom harnesses",
-        "real public interfaces",
-        "external constraint",
-        "Substitute-only validation is never acceptance_aligned",
+        "mocks/custom harness",
+        "real interfaces",
+        "externally blocked",
+        "never substitutes only",
     ] {
         assert!(relevance_description.contains(required_concept));
     }
@@ -403,12 +446,11 @@ fn schema_advertises_intent_and_todos() {
             .any(|value| value == "feedback_loop_traceability")
     );
 
-    let alignment_description = plan_props["understands_user_intent"]
-        .get("description")
-        .and_then(Value::as_str)
-        .expect("alignment score should describe representation coverage");
-    assert!(alignment_description.contains("what the user wants"));
-    assert!(alignment_description.contains("when guessing"));
+    assert!(
+        plan_props["understands_user_intent"]
+            .get("description")
+            .is_none()
+    );
     // Deferred continuation messages are intentionally concise. Preserve
     // their actionable guidance without requiring the legacy long rubric.
     for required_concept in [
@@ -425,16 +467,9 @@ fn schema_advertises_intent_and_todos() {
         .get("description")
         .and_then(Value::as_str)
         .expect("feedback loop should describe requirement-to-check coverage");
-    // Case-insensitive: the description opens the sentence with
-    // "Requirement-to-check", so a case-sensitive match broke when the
-    // wording moved to the front of the string (issue #730).
     let feedback_description_lower = feedback_description.to_ascii_lowercase();
     assert!(
-        feedback_description_lower.contains("requirement-to-check"),
-        "feedback_loop description omitted the requirement-to-check framing: {feedback_description}"
-    );
-    assert!(
-        feedback_description_lower.contains("explicit observation or check"),
+        feedback_description_lower.contains("check for each requirement"),
         "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
     );
     for required_concept in [
@@ -447,23 +482,7 @@ fn schema_advertises_intent_and_todos() {
             "feedback gate message omitted {required_concept}"
         );
     }
-    assert!(
-        !alignment_description
-            .to_ascii_lowercase()
-            .contains("threshold")
-    );
-
-    let ownership_description = goal_props["delivery_state"]
-        .get("description")
-        .and_then(Value::as_str)
-        .expect("delivery state should have a neutral description");
-    assert!(ownership_description.contains("toward the user's outcome"));
-    assert!(!ownership_description.contains("90"));
-    assert!(
-        !ownership_description
-            .to_ascii_lowercase()
-            .contains("threshold")
-    );
+    assert!(goal_props["delivery_state"].get("description").is_none());
 
     let loop_description = goal_props["closed_feedback_loop"]
         .get("description")
@@ -488,11 +507,9 @@ fn schema_advertises_intent_and_todos() {
         );
     }
     for required_guidance in [
-        "public interfaces",
-        "integration boundaries",
-        "edge cases",
-        "packaging",
-        "likely failure modes",
+        "real interfaces",
+        "edge_and_integration_paths",
+        "check for each requirement",
     ] {
         assert!(
             model_visible_schema.contains(required_guidance),
@@ -714,6 +731,7 @@ fn goal(group: Option<&str>, state: crate::todo::FeedbackLoopState) -> TodoGoal 
 /// tests observe only closed feedback loop behavior.
 fn aligned_plan() -> TodoPlan {
     TodoPlan {
+        title: None,
         user_intention: Some("understood".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Complete),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Complete],
@@ -882,6 +900,7 @@ fn merge_goals_retains_unmentioned_goals() {
 #[test]
 fn merge_plan_retains_stored_intent_when_update_omits_fields() {
     let stored = TodoPlan {
+        title: None,
         user_intention: Some("make search feel instant".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],

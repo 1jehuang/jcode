@@ -31,10 +31,9 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        temp_session_id.to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(temp_session_id.to_string(), Arc::clone(&agent))]),
+    ));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
@@ -163,6 +162,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
                 &event_history,
                 &event_counter,
                 &swarm_event_tx,
+                false,
                 false,
             )
             .await

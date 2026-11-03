@@ -48,6 +48,8 @@ pub struct DisplayConfig {
     /// Markdown block spacing style (compact/document, default: compact)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub markdown_spacing: MarkdownSpacingMode,
+    /// Append link destinations after Markdown link labels (default: false).
+    pub show_link_urls: bool,
     /// LaTeX rendering style (none/unicode/image, default: image)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub latex_rendering: LatexRenderingMode,
@@ -150,6 +152,7 @@ impl Default for DisplayConfig {
             reasoning_display: Some(ReasoningDisplayMode::Full),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
+            show_link_urls: false,
             latex_rendering: LatexRenderingMode::default(),
             idle_animation: false,
             prompt_entry_animation: true,
@@ -226,6 +229,23 @@ impl DisplayConfig {
 mod tests {
     use super::DisplayConfig;
     use crate::ReasoningDisplayMode;
+
+    #[test]
+    fn link_urls_are_opt_in_and_roundtrip() {
+        assert!(!DisplayConfig::default().show_link_urls);
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert!(!missing.show_link_urls);
+        for value in [true, false] {
+            let config: DisplayConfig = serde_json::from_value(serde_json::json!({
+                "show_link_urls": value
+            }))
+            .unwrap();
+            assert_eq!(config.show_link_urls, value);
+            let roundtrip: DisplayConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(roundtrip.show_link_urls, value);
+        }
+    }
 
     #[test]
     fn recent_close_window_defaults_to_thirty_and_is_configurable() {
