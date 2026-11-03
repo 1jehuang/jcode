@@ -90,7 +90,6 @@ where
 }
 
 /// Start local server and wait for OAuth callback
-
 pub fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
     eprintln!("Waiting for OAuth callback on port {}...", port);
