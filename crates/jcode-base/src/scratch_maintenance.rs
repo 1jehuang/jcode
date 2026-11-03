@@ -58,7 +58,13 @@ pub fn prune_stale_scratch() {
     }
     // /proc cwd links are canonical, so compare against the canonical path.
     let scratch = std::fs::canonicalize(&scratch).unwrap_or(scratch);
-    let busy = busy_process_dirs();
+    let Some(busy) = busy_process_dirs() else {
+        // Without working cwd detection there is no way to know which entries are
+        // in use, so skip the pass entirely rather than delete a live directory.
+        // This is the fail-safe direction: not pruning costs disk, pruning a live
+        // build orphans processes and destroys in-progress work.
+        return;
+    };
     let report = prune_stale_scratch_in(&scratch, SystemTime::now(), retention, &busy);
     mark_pruned(&base);
     if !report.removed.is_empty() {
@@ -159,25 +165,113 @@ fn modified_since(path: &Path, cutoff: SystemTime) -> bool {
 /// Working directories of live processes, so an in-progress build or shell
 /// sitting inside a scratch entry is never deleted out from under it.
 #[cfg(target_os = "linux")]
-fn busy_process_dirs() -> Vec<PathBuf> {
+fn busy_process_dirs() -> Option<Vec<PathBuf>> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
+        return Some(Vec::new());
     };
-    entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
-        })
-        .filter_map(|entry| std::fs::read_link(entry.path().join("cwd")).ok())
-        .collect()
+    Some(
+        entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .filter_map(|entry| std::fs::read_link(entry.path().join("cwd")).ok())
+            .collect(),
+    )
 }
 
-#[cfg(not(target_os = "linux"))]
-fn busy_process_dirs() -> Vec<PathBuf> {
-    Vec::new()
+/// macOS has no `/proc`; use libproc's `PROC_PIDVNODEPATHINFO` to read each
+/// process's current working directory. Without this the prune guard was inert on
+/// macOS (`Vec::new()`), so directories holding live processes were deleted out
+/// from under them.
+#[cfg(target_os = "macos")]
+fn busy_process_dirs() -> Option<Vec<PathBuf>> {
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+
+    // From <libproc.h>; libc does not export these.
+    const PROC_ALL_PIDS: u32 = 1;
+
+    let mut capacity = 4096usize;
+    let mut pids: Vec<libc::pid_t> = Vec::new();
+    let count;
+    let mut attempt = 0;
+    loop {
+        pids.resize(capacity, 0);
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                pids.as_mut_ptr().cast(),
+                (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+            )
+        };
+        if bytes <= 0 {
+            return None;
+        }
+        let filled = bytes as usize / std::mem::size_of::<libc::pid_t>();
+        // A full buffer means the list may be truncated: retry with more room.
+        if filled < capacity || attempt >= 3 {
+            count = filled;
+            break;
+        }
+        attempt += 1;
+        capacity *= 2;
+    }
+    pids.truncate(count);
+
+    let expect = std::mem::size_of::<libc::proc_vnodepathinfo>();
+    let mut dirs = Vec::with_capacity(count);
+    let mut readable = 0usize;
+    for pid in pids {
+        if pid <= 0 {
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                expect as libc::c_int,
+            )
+        };
+        // Short read means the process vanished or we lack permission to inspect it.
+        if got as usize != expect {
+            continue;
+        }
+        readable += 1;
+        let info = unsafe { info.assume_init() };
+        let raw: *const c_char = info.pvi_cdir.vip_path.as_ptr().cast();
+        if raw.is_null() {
+            continue;
+        }
+        let path = unsafe { CStr::from_ptr(raw) };
+        if let Ok(text) = path.to_str() {
+            if !text.is_empty() {
+                dirs.push(PathBuf::from(text));
+            }
+        }
+    }
+
+    // If not a single process was inspectable the API is not behaving as expected;
+    // report that as "unknown" so the caller declines to prune.
+    if readable == 0 {
+        None
+    } else {
+        Some(dirs)
+    }
+}
+
+/// Any platform without a working cwd probe reports "unknown", which makes
+/// [`prune_stale_scratch`] skip the pass instead of pruning unprotected.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn busy_process_dirs() -> Option<Vec<PathBuf>> {
+    None
 }
 
 #[cfg(test)]
@@ -272,5 +366,31 @@ mod tests {
         assert_eq!(report.removed.len(), 1);
         assert!(!entry.exists());
         assert!(outside.path().join("precious").exists());
+    }
+
+    /// The whole point of `busy_process_dirs` is that a live process' cwd is seen.
+    /// The test process is a live process, so its own cwd must appear. Before the
+    /// macOS implementation existed this probe returned an empty Vec on macOS, so
+    /// the prune guard could never fire.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn sees_own_working_directory() {
+        let dirs = busy_process_dirs().expect("cwd probe must succeed on this platform");
+        assert!(
+            !dirs.is_empty(),
+            "cwd probe returned no directories for any process"
+        );
+
+        let cwd = std::env::current_dir().expect("current_dir");
+        // Compare canonically: macOS reports /private/var for /var, and scratch is
+        // canonicalised before comparison in prune_stale_scratch.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let want = canon(&cwd);
+        assert!(
+            dirs.iter().any(|d| canon(d) == want),
+            "own cwd {:?} missing from {} detected working directories",
+            want,
+            dirs.len()
+        );
     }
 }
