@@ -30,7 +30,11 @@ fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
             Arc::new(self.clone())
         }
         fn available_models_display(&self) -> Vec<String> {
-            vec![self.model()]
+            if self.prefetches.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                vec![self.model()]
+            } else {
+                vec!["claude-future-catalog-fixture-2099".into()]
+            }
         }
         async fn prefetch_models(&self) -> Result<()> {
             self.prefetches
@@ -59,6 +63,7 @@ fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
             ("antigravity", &provider.antigravity),
             ("gemini", &provider.gemini),
             ("cursor", &provider.cursor),
+            ("claude-code", &provider.claude_code),
         ];
         let mut probes = Vec::new();
         for (name, slot) in slots {
@@ -73,6 +78,13 @@ fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
         }
         runtime.block_on(provider.prefetch_models()).unwrap();
         runtime.block_on(provider.refresh_model_catalog()).unwrap();
+        assert!(
+            provider.model_routes().iter().any(|route| {
+                route.api_method == "claude-code"
+                    && route.model == "claude-future-catalog-fixture-2099"
+            }),
+            "discovered Claude Code models must reach the picker routes"
+        );
         for (name, probe) in &probes {
             assert_eq!(
                 probe.prefetches.load(std::sync::atomic::Ordering::SeqCst),
@@ -113,6 +125,23 @@ fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
             catalog_generation() > generation_before,
             "partial success must invalidate route memos even when the active catalog fails"
         );
+        active
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let claude_code = &probes
+            .iter()
+            .find(|(name, _)| *name == "claude-code")
+            .unwrap()
+            .1;
+        claude_code
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.block_on(provider.refresh_model_catalog()).unwrap();
+        *provider.active.write().unwrap() = ActiveProvider::ClaudeCode;
+        let error = runtime
+            .block_on(provider.refresh_model_catalog())
+            .unwrap_err();
+        assert!(error.to_string().contains("claude-code"));
     });
 }
 

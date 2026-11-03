@@ -33,8 +33,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use jcode_message_types::{Message, ToolDefinition};
 use jcode_provider_core::{
-    AccountPin, AccountPinSlot, AccountProviderKind, EventStream, NativeToolResult,
-    NativeToolResultSender, Provider,
+    AccountPin, AccountPinSlot, AccountProviderKind, EventStream, ModelCatalogRefreshSummary,
+    NativeToolResult, NativeToolResultSender, Provider, summarize_model_catalog_refresh,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -139,6 +139,13 @@ pub async fn probe_instance(
                 .unwrap_or(&Value::Null);
             match request_id {
                 Some("probe-init") => {
+                    if response
+                        .and_then(|r| r.get("subtype"))
+                        .and_then(Value::as_str)
+                        != Some("success")
+                    {
+                        bail!("Claude Code initialization probe failed");
+                    }
                     let info = InitInfo::from_response(body);
                     identity = Some(ClaudeCodeIdentity {
                         email: info.email.clone(),
@@ -195,6 +202,8 @@ struct SessionState {
     hint_spent: bool,
 }
 
+type ModelCatalogCache = Vec<(ClaudeCodeInstance, Instant, Vec<String>)>;
+
 /// Claude via the local Claude Code CLI.
 pub struct ClaudeCodeProvider {
     settings: Arc<RwLock<ClaudeCodeSettings>>,
@@ -207,8 +216,9 @@ pub struct ClaudeCodeProvider {
     result_tx: mpsc::Sender<NativeToolResult>,
     result_rx: Arc<Mutex<mpsc::Receiver<NativeToolResult>>>,
     rate_limits: Arc<StdMutex<Option<ClaudeCodeRateLimits>>>,
-    init: Arc<StdMutex<Option<InitInfo>>>,
-    probe_cache: Arc<StdMutex<Vec<(String, Instant, ClaudeCodeIdentity)>>>,
+    model_catalogs: Arc<StdMutex<ModelCatalogCache>>,
+    probe_cache: Arc<StdMutex<Vec<(ClaudeCodeInstance, Instant, ClaudeCodeIdentity)>>>,
+    probe_lock: Arc<Mutex<()>>,
     /// jcode session served, for background-task rows between turns.
     jcode_session: background::SessionSlot,
     host_tool_executor: Arc<AtomicBool>,
@@ -254,8 +264,9 @@ impl ClaudeCodeProvider {
             result_tx,
             result_rx: Arc::new(Mutex::new(result_rx)),
             rate_limits: Arc::new(StdMutex::new(None)),
-            init: Arc::new(StdMutex::new(None)),
+            model_catalogs: Arc::new(StdMutex::new(Vec::new())),
             probe_cache: Arc::new(StdMutex::new(Vec::new())),
+            probe_lock: Arc::new(Mutex::new(())),
             jcode_session: Default::default(),
             host_tool_executor: Arc::new(AtomicBool::new(false)),
         }
@@ -292,8 +303,24 @@ impl ClaudeCodeProvider {
             .clone()
     }
 
-    fn init_info(&self) -> Option<InitInfo> {
-        self.init.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    fn cache_models(&self, instance: &ClaudeCodeInstance, models: Vec<String>) {
+        if models.is_empty() {
+            return;
+        }
+        let mut cache = self
+            .model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let changed = cache
+            .iter()
+            .find(|(key, _, _)| key == instance)
+            .is_none_or(|(_, _, cached)| cached != &models);
+        cache.retain(|(key, _, _)| key != instance);
+        cache.push((instance.clone(), Instant::now(), models));
+        drop(cache);
+        if changed {
+            jcode_base::bus::Bus::global().publish_models_updated();
+        }
     }
 
     fn login_hint(&self, instance: &ClaudeCodeInstance) -> String {
@@ -326,23 +353,30 @@ impl ClaudeCodeProvider {
         &self,
         instance: &ClaudeCodeInstance,
     ) -> Result<ClaudeCodeIdentity> {
-        let key = instance
-            .resolved_home()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        if let Some((_, _, cached)) = self
-            .probe_cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .find(|(k, at, _)| *k == key && at.elapsed() < PROBE_CACHE_TTL)
+        self.probe_identity_inner(instance, false).await
+    }
+
+    async fn probe_identity_inner(
+        &self,
+        instance: &ClaudeCodeInstance,
+        force: bool,
+    ) -> Result<ClaudeCodeIdentity> {
+        let _probe = self.probe_lock.lock().await;
+        if !force
+            && let Some((_, _, cached)) = self
+                .probe_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|(key, at, _)| key == instance && at.elapsed() < PROBE_CACHE_TTL)
         {
             return Ok(cached.clone());
         }
         let identity = probe_instance(&self.settings(), instance).await?;
+        self.cache_models(instance, identity.models.clone());
         let mut cache = self.probe_cache.lock().unwrap_or_else(|p| p.into_inner());
-        cache.retain(|(k, _, _)| *k != key);
-        cache.push((key, Instant::now(), identity.clone()));
+        cache.retain(|(key, _, _)| key != instance);
+        cache.push((instance.clone(), Instant::now(), identity.clone()));
         Ok(identity)
     }
 
@@ -471,7 +505,7 @@ impl ClaudeCodeProvider {
             }
         };
         let info = child.init.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        *self.init.lock().unwrap_or_else(|p| p.into_inner()) = Some(info);
+        self.cache_models(&instance, info.model_ids());
         self.pin.set_resolved_label(Some(instance.id.clone()));
         state.resume_id = Some(child.session_id().to_string());
         state.child = Some(child.clone());
@@ -492,8 +526,9 @@ impl ClaudeCodeProvider {
             result_tx,
             result_rx: Arc::new(Mutex::new(result_rx)),
             rate_limits: Arc::new(StdMutex::new(self.rate_limit_snapshot())),
-            init: Arc::new(StdMutex::new(self.init_info())),
+            model_catalogs: self.model_catalogs.clone(),
             probe_cache: self.probe_cache.clone(),
+            probe_lock: self.probe_lock.clone(),
             jcode_session: Default::default(),
             host_tool_executor: Arc::new(AtomicBool::new(false)),
         }
@@ -578,19 +613,58 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let from_cli = self
-            .init_info()
-            .map(|info| info.model_ids())
-            .unwrap_or_default();
-        if from_cli.is_empty() {
-            FALLBACK_MODELS.iter().map(|m| m.to_string()).collect()
-        } else {
-            from_cli
-        }
+        let instance = self.active_instance();
+        self.model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(key, _, _)| key == &instance)
+            .map(|(_, _, models)| models.clone())
+            .unwrap_or_else(|| {
+                FALLBACK_MODELS
+                    .iter()
+                    .map(|model| model.to_string())
+                    .collect()
+            })
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
         self.available_models_display()
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        let instance = self.active_instance();
+        if self
+            .model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|(key, at, _)| key == &instance && at.elapsed() < PROBE_CACHE_TTL)
+        {
+            return Ok(());
+        }
+        let identity = self.probe_identity(&instance).await?;
+        if identity.models.is_empty() {
+            bail!("Claude Code returned no discoverable models");
+        }
+        Ok(())
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        let identity = self
+            .probe_identity_inner(&self.active_instance(), true)
+            .await?;
+        if identity.models.is_empty() {
+            bail!("Claude Code returned no discoverable models");
+        }
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn reasoning_effort(&self) -> Option<String> {
@@ -748,8 +822,9 @@ impl ClaudeCodeProvider {
             result_tx: self.result_tx.clone(),
             result_rx: self.result_rx.clone(),
             rate_limits: self.rate_limits.clone(),
-            init: self.init.clone(),
+            model_catalogs: self.model_catalogs.clone(),
             probe_cache: self.probe_cache.clone(),
+            probe_lock: self.probe_lock.clone(),
             jcode_session: self.jcode_session.clone(),
             host_tool_executor: self.host_tool_executor.clone(),
         }

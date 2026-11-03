@@ -30,5 +30,6 @@ libc = "0.2"
 
 [dev-dependencies]
 futures = "0.3"
+jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

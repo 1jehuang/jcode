@@ -22,6 +22,7 @@ impl MultiProvider {
         let antigravity = self.antigravity_provider();
         let gemini = self.gemini_provider();
         let cursor = self.cursor_provider();
+        let claude_code = self.claude_code_provider();
         let bedrock = self.bedrock_provider();
         // Compatible profiles (including Grok Build) have independent catalogs
         // and do not occupy the OpenRouter slot.
@@ -41,6 +42,7 @@ impl MultiProvider {
             antigravity_result,
             gemini_result,
             cursor_result,
+            claude_code_result,
             bedrock_result,
             compatible_results,
         ) = tokio::join!(
@@ -94,6 +96,12 @@ impl MultiProvider {
                 }
             },
             async {
+                match claude_code {
+                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
+                    None => Ok(()),
+                }
+            },
+            async {
                 match bedrock {
                     Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
                     None => Ok(()),
@@ -128,6 +136,7 @@ impl MultiProvider {
             ("antigravity", antigravity_result),
             ("gemini", gemini_result),
             ("cursor", cursor_result),
+            ("claude-code", claude_code_result),
             ("bedrock", bedrock_result),
         ] {
             if let Err(err) = result {
@@ -141,6 +150,7 @@ impl MultiProvider {
                             | (ActiveProvider::Antigravity, "antigravity")
                             | (ActiveProvider::Gemini, "gemini")
                             | (ActiveProvider::Cursor, "cursor")
+                            | (ActiveProvider::ClaudeCode, "claude-code")
                             | (ActiveProvider::Bedrock, "bedrock")
                     );
                 if !is_active || matches!(provider_name, "bedrock") {

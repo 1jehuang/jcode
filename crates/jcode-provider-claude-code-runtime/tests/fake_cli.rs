@@ -75,6 +75,172 @@ impl Fake {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     }
+
+    fn catalog(&self, model: &str) {
+        std::fs::write(
+            self.root.join("initialize.json"),
+            json!({"subtype": "success", "response": {
+                "models": [{"value": "future", "resolvedModel": model}]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn inputs(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.root.join("argv.log.stdin"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn model_catalog_prefetch_and_forced_refresh_preserve_live_turns_and_last_good_models() {
+    use jcode_base::bus::{Bus, BusEvent};
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let fork = provider.fork();
+    let first_model = "claude-future-catalog-2099-alpha";
+    let second_model = "claude-future-catalog-2099-beta";
+    assert!(
+        !provider
+            .available_models_display()
+            .contains(&first_model.into())
+    );
+    fake.catalog(first_model);
+    jcode_base::bus::reset_models_updated_publish_state_for_tests();
+    let mut updates = Bus::global().subscribe();
+    let (first, second) = tokio::join!(provider.prefetch_models(), fork.prefetch_models());
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        fake.launches().len(),
+        1,
+        "concurrent prefetch shares a probe"
+    );
+    assert_eq!(provider.available_models_for_switching(), vec![first_model]);
+    assert_eq!(fork.available_models_display(), vec![first_model]);
+    assert!(
+        fake.inputs()
+            .iter()
+            .all(|row| row["message"]["type"] != "user")
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(updates.recv().await.unwrap(), BusEvent::ModelsUpdated) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("discovery must notify attached pickers");
+
+    let first_turn = run_turn(&provider, &[Message::user("text")], None).await;
+    assert_eq!(text(&first_turn), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 2);
+    fake.catalog(second_model);
+    provider.prefetch_models().await.unwrap();
+    assert_eq!(fake.launches().len(), 2, "a fresh cache skips the probe");
+    let summary = provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(summary.models_added_names, vec![second_model]);
+    assert_eq!(summary.models_removed_names, vec![first_model]);
+    assert_eq!(fork.available_models_display(), vec![second_model]);
+    let second_turn = run_turn(
+        &provider,
+        &[
+            Message::user("text"),
+            Message::assistant_text(&text(&first_turn)),
+            Message::user("text again"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(text(&second_turn), "Hello from fake claude");
+    assert_eq!(
+        fake.launches().len(),
+        3,
+        "refresh must preserve the live conversation child"
+    );
+    assert_eq!(provider.available_models_display(), vec![second_model]);
+
+    for response in [
+        json!({"subtype": "error", "error": "authentication_failed"}),
+        json!({"subtype": "success", "response": {"models": []}}),
+        json!({"subtype": "success", "response": {"models": "malformed"}}),
+    ] {
+        std::fs::write(fake.root.join("initialize.json"), response.to_string()).unwrap();
+        assert!(provider.refresh_model_catalog().await.is_err());
+        assert_eq!(provider.available_models_display(), vec![second_model]);
+        assert_eq!(fork.available_models_display(), vec![second_model]);
+    }
+    std::fs::write(fake.root.join("initialize.json"), "{").unwrap();
+    assert!(provider.refresh_model_catalog().await.is_err());
+    assert_eq!(provider.available_models_display(), vec![second_model]);
+    assert_eq!(
+        fake.inputs()
+            .iter()
+            .filter(|row| row["message"]["type"] == "user")
+            .count(),
+        2
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_catalog_is_scoped_to_instance_environment_even_with_the_same_home() {
+    let fake = Fake::new();
+    let mut instances = Vec::new();
+    for id in ["work", "personal"] {
+        let path = fake.root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            json!({"subtype": "success", "response": {
+                "models": [{"value": "future", "resolvedModel": format!("claude-future-{id}-2099")}]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        instances.push(ClaudeCodeInstance {
+            id: id.into(),
+            env: [(
+                "FAKE_CLAUDE_CATALOG_FILE".into(),
+                path.display().to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        });
+    }
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        instances,
+        default_instance: "work".into(),
+        ..fake.settings()
+    });
+    provider.prefetch_models().await.unwrap();
+    let fork = provider.fork();
+    provider
+        .set_account_pin(
+            AccountProviderKind::ClaudeCode,
+            Some(AccountPin::new("personal", None)),
+        )
+        .unwrap();
+    assert!(
+        !provider
+            .available_models_display()
+            .contains(&"claude-future-work-2099".into())
+    );
+    provider.prefetch_models().await.unwrap();
+    assert_eq!(
+        provider.available_models_display(),
+        vec!["claude-future-personal-2099"]
+    );
+    assert_eq!(
+        fork.available_models_display(),
+        vec!["claude-future-work-2099"]
+    );
+    assert_eq!(fake.launches().len(), 2);
 }
 
 fn tools() -> Vec<ToolDefinition> {
