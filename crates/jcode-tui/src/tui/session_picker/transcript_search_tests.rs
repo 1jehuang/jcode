@@ -474,3 +474,79 @@ fn progressive_results_preserve_selected_preview_scroll() {
     assert_eq!(picker.scroll_offset, 17);
     assert!(!picker.auto_scroll_preview);
 }
+
+fn picker_with_pending_better_match() -> SessionPicker {
+    let mut direct = external_session("direct", Path::new("unused"));
+    direct.search_index = "needle".into();
+    let discovered = external_session("discovered", Path::new("unused"));
+    let mut picker = SessionPicker::new(vec![direct, discovered]);
+    picker.search_query = "needle".into();
+    picker.rebuild_items();
+    assert_eq!(picker.selected_session().unwrap().id, "direct");
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send((
+            "discovered".into(),
+            SearchRank {
+                opening_prompt: 10,
+                literal: true,
+                ..SearchRank::default()
+            },
+        ))
+        .unwrap();
+    picker.transcript_search.started_at = None;
+    picker.transcript_search.receiver = Some(receiver);
+    picker
+}
+
+#[test]
+fn early_progressive_results_follow_best_match_and_reset_preview() {
+    let mut picker = picker_with_pending_better_match();
+    picker.scroll_offset = 17;
+    picker.auto_scroll_preview = false;
+    picker.poll_transcript_search();
+    assert_eq!(picker.selected_session().unwrap().id, "discovered");
+    assert_eq!(picker.scroll_offset, 0);
+    assert!(picker.auto_scroll_preview);
+}
+
+#[test]
+fn late_progressive_results_reorder_without_switching_or_resetting_preview() {
+    let mut picker = picker_with_pending_better_match();
+    picker.search_selection.expire_for_test();
+    picker.scroll_offset = 17;
+    picker.auto_scroll_preview = false;
+    picker.poll_transcript_search();
+    assert_eq!(picker.selected_session().unwrap().id, "direct");
+    assert_eq!(picker.scroll_offset, 17);
+    assert!(!picker.auto_scroll_preview);
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "discovered"
+    );
+}
+
+#[test]
+fn manual_navigation_or_preview_scroll_stops_early_best_match_following() {
+    for scroll in [false, true] {
+        let mut picker = picker_with_pending_better_match();
+        if scroll {
+            picker.scroll_preview_up(1);
+        } else {
+            // Even pressing Up at the top means the user has taken control.
+            picker.previous();
+        }
+        picker.poll_transcript_search();
+        assert_eq!(picker.selected_session().unwrap().id, "direct");
+        assert_eq!(
+            picker
+                .session_by_ref(picker.visible_sessions[0])
+                .unwrap()
+                .id,
+            "discovered"
+        );
+    }
+}

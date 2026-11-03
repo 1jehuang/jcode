@@ -1,5 +1,68 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct SearchSelection {
+    query: String,
+    follow_until: Option<std::time::Instant>,
+}
+
+impl SearchSelection {
+    fn update_query(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        if self.query != query {
+            self.follow_until = (!query.is_empty())
+                .then(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
+            self.query = query;
+        }
+    }
+
+    pub(super) fn following(&self) -> bool {
+        self.follow_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.follow_until = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire_for_test(&mut self) {
+        self.follow_until = Some(std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod search_selection_tests {
+    use super::*;
+
+    #[test]
+    fn follows_for_one_second_without_extending_on_rebuild() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(selection.following());
+        let deadline = selection.follow_until.unwrap();
+        selection.update_query("needle");
+        assert_eq!(selection.follow_until, Some(deadline));
+        selection.follow_until = Some(std::time::Instant::now());
+        assert!(!selection.following());
+        selection.update_query("needle");
+        assert!(
+            !selection.following(),
+            "same query must not restart an expired window"
+        );
+        selection.update_query("another query");
+        assert!(selection.following());
+        selection.stop();
+        selection.update_query("another query");
+        assert!(
+            !selection.following(),
+            "refresh must not undo a manual override"
+        );
+        selection.update_query("");
+        assert!(!selection.following());
+    }
+}
+
 impl SessionPicker {
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
@@ -258,6 +321,9 @@ impl SessionPicker {
         let show_test = self.show_test_sessions;
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
+        self.search_selection.update_query(&search_query);
+        let current_selected_id =
+            current_selected_id.filter(|_| !self.search_selection.following());
         let search_matches = self.search_matched_session_refs(&search_query);
         let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 

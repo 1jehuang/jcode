@@ -68,17 +68,16 @@ fn relevance_overrides_recency_and_clearing_restores_default_order_and_selection
     let whole = session("whole", "repair needle behavior", 100, &path);
     let mut picker = SessionPicker::new(vec![recent, exact, whole]);
     assert_eq!(ids(&picker), ["recent", "whole", "exact"]);
-    let selected = picker.selected_session().unwrap().id.clone();
     picker.search_query = "needle".into();
     picker.rebuild_items();
     assert_eq!(ids(&picker), ["exact", "whole", "recent"]);
-    assert_eq!(picker.selected_session().unwrap().id, selected);
+    assert_eq!(picker.selected_session().unwrap().id, "exact");
     wait(&mut picker);
     assert_eq!(ids(&picker), ["exact", "whole", "recent"]);
     picker.search_query = "  ".into();
     picker.rebuild_items();
     assert_eq!(ids(&picker), ["recent", "whole", "exact"]);
-    assert_eq!(picker.selected_session().unwrap().id, selected);
+    assert_eq!(picker.selected_session().unwrap().id, "exact");
 }
 
 #[test]
@@ -213,7 +212,7 @@ fn negative_fuzzy_scores_survive_async_merge() {
 }
 
 #[test]
-fn newly_discovered_stronger_hit_reorders_without_moving_selection() {
+fn newly_discovered_stronger_hit_reorders_without_moving_manually_scrolled_selection() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("absent.json");
     let mut picker = SessionPicker::new(vec![
@@ -236,6 +235,7 @@ fn newly_discovered_stronger_hit_reorders_without_moving_selection() {
         .unwrap();
     picker.poll_transcript_search();
     assert_eq!(picker.selected_session().unwrap().id, "first");
+    picker.scroll_preview_up(1);
     picker.scroll_offset = 7;
     picker.auto_scroll_preview = false;
     sender
