@@ -151,11 +151,10 @@ pub(super) fn control(
             if let Some(workflow) = state.workflow.as_mut() {
                 workflow.active = true;
             }
-            state.last_notice = Some(
-                "Remote auto-poke enabled. Continuation will be checked at the next turn boundary. Use /poke to continue now.".into(),
-            );
+            let message = "Remote auto-poke enabled. Continuation will be checked at the next turn boundary. Use /poke to continue now.".to_string();
+            state.last_notice = Some(message.clone());
             let data = status_data(session_id, state)?;
-            Ok(Some((data, state.last_notice.clone().unwrap_or_default())))
+            Ok(Some((data, message)))
         });
     }
     if !matches!(action.as_str(), "off" | "stop") {
