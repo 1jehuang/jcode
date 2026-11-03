@@ -1061,6 +1061,8 @@ mod newest_reload_candidate_integration_tests {
 
         if let Some(prev_home) = prev_home {
             crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
         }
     }
 
