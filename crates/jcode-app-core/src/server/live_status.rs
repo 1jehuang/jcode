@@ -335,7 +335,7 @@ mod tests {
                 name: "search".into(),
                 output: String::new(),
                 error: None,
-            
+
                 duration_ms: None,
             },
             now,
@@ -434,7 +434,7 @@ mod tests {
                 name: "bash".into(),
                 output: "ok".into(),
                 error: None,
-            
+
                 duration_ms: None,
             },
             start + Duration::from_secs(102),
