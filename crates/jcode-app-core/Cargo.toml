@@ -141,7 +141,9 @@ async-stream = "0.3"
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# This revision exposes the job handle needed to verify descendant cleanup.
+process-wrap = { git = "https://github.com/watchexec/process-wrap", rev = "33dd9288cdd5c3d2b4f024bfad1ebc10c156975c", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

@@ -3692,6 +3692,7 @@ dependencies = [
  "jcode-tool-types",
  "jcode-update-core",
  "libc",
+ "process-wrap",
  "rand 0.9.3",
  "regex",
  "reqwest 0.12.28",
@@ -6784,6 +6785,18 @@ dependencies = [
  "syn 2.0.117",
  "version_check",
  "yansi",
+]
+
+[[package]]
+name = "process-wrap"
+version = "10.0.1"
+source = "git+https://github.com/watchexec/process-wrap?rev=33dd9288cdd5c3d2b4f024bfad1ebc10c156975c#33dd9288cdd5c3d2b4f024bfad1ebc10c156975c"
+dependencies = [
+ "futures",
+ "indexmap",
+ "nix 0.31.3",
+ "tokio",
+ "windows 0.62.2",
 ]
 
 [[package]]
