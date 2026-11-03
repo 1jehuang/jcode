@@ -142,6 +142,47 @@ fn test_rewind_undo_restores_truncated_messages() {
     );
 }
 
+/// Regression for the Greptile "rewind removes tool badges" finding: the rows
+/// RETAINED by /rewind N must keep their stored wall-clock timestamp and
+/// measured duration (rendered through the same mapper /rewind undo uses).
+#[test]
+fn test_rewind_retained_tool_rows_keep_timing_fields() {
+    let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
+
+    // user prompt -> timed tool result -> user prompt -> timed tool result.
+    for idx in 1..=2 {
+        app.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("msg-{}", idx),
+                cache_control: None,
+            }],
+        );
+        app.session.add_message_with_duration(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: format!("[tool timing: start=21:51:28Z duration=48.3s] result-{}", idx),
+                cache_control: None,
+            }],
+            Some(48_300),
+        );
+    }
+
+    app.input = "/rewind 2".to_string();
+    app.submit_input();
+    assert_eq!(app.session.visible_conversation_message_count(), 2);
+
+    // The retained turn's rendered tool row keeps both timing fields.
+    let rebuilt = app.display_messages();
+    let timed_row = rebuilt
+        .iter()
+        .find(|m| m.role == "tool" && m.content.contains("result-1"))
+        .expect("retained tool row present");
+    assert_eq!(timed_row.tool_duration_ms, Some(48_300));
+    assert!(timed_row.timestamp.is_some(), "timestamp must survive rewind");
+}
+
 #[test]
 fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
     let mut app = create_test_app();
