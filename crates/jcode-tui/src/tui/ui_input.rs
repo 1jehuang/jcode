@@ -1109,6 +1109,13 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     };
 
+    let line = status_with_background_tasks(
+        line,
+        app.background_task_rows(),
+        area.width as usize,
+        app.is_processing(),
+    );
+
     crate::memory::check_staleness();
 
     if app.centered_mode() {
@@ -1116,6 +1123,46 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         return;
     }
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Background launches finish their tool call immediately, but the work and
+/// its intent must remain visible while the agent moves on to another tool.
+fn status_with_background_tasks(
+    foreground: Line<'static>,
+    tasks: &[crate::tui::BackgroundTaskRow],
+    width: usize,
+    processing: bool,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus;
+    use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
+
+    let running: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
+        .collect();
+    if running.is_empty() {
+        return fit(&foreground, width);
+    }
+    let labels = running
+        .iter()
+        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let background = Line::from(Span::styled(
+        format!("bg {}: {}", running.len(), labels),
+        Style::default().fg(ai_color()),
+    ));
+    // Idle tips must not displace actual work. While processing, reserve space
+    // for both activities rather than letting a long foreground intent hide bg.
+    if !processing || foreground.width() == 0 || width < 24 {
+        return fit(&background, width);
+    }
+    let background_width = background.width().min(width / 2);
+    let mut line = fit(&foreground, width.saturating_sub(background_width + 3));
+    line.spans
+        .push(Span::styled(" · ", Style::default().fg(dim_color())));
+    line.spans.extend(fit(&background, background_width).spans);
+    line
 }
 
 fn running_tool_header_spans(
