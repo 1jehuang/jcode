@@ -216,7 +216,6 @@ impl SessionPicker {
             Style::default().fg(Color::White)
         };
 
-        let canary_marker = if session.is_canary { " 🔬" } else { "" };
         let debug_marker = if session.is_debug { " 🧪" } else { "" };
         let saved_marker = if session.saved { " 📌" } else { "" };
         let selection_marker = if is_marked { "● " } else { "○ " };
@@ -244,7 +243,6 @@ impl SessionPicker {
             name_style,
         ));
         line1_spans.extend([
-            Span::styled(canary_marker, Style::default().fg(rgb(255, 193, 7))),
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
             Span::styled(saved_marker, Style::default().fg(rgb(255, 180, 100))),
         ]);
@@ -286,14 +284,6 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        if same_dir {
-            line1_spans.push(Span::styled(
-                "  ▸ here",
-                Style::default()
-                    .fg(same_dir_clr)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
         line1_spans.push(Span::styled(
             format!(
                 "  {}",
@@ -319,6 +309,14 @@ impl SessionPicker {
             ));
         } else {
             detail_spans.push(Span::styled("No directory", Style::default().fg(dimmer)));
+        }
+        if same_dir {
+            detail_spans.push(Span::styled(
+                "  ▸ here",
+                Style::default()
+                    .fg(same_dir_clr)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         let activity = format!("  {active_ago}");
         detail_spans.push(Span::styled(activity, Style::default().fg(dim)));

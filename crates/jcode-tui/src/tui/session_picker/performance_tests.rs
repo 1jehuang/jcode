@@ -377,6 +377,26 @@ fn retained_previews_have_byte_and_entry_bounds_and_evict_lru() {
 }
 
 #[test]
+fn self_dev_entries_keep_here_marker_on_directory_row() {
+    let mut item = session(0, 1);
+    item.is_canary = true;
+    item.working_dir = Some("/project/picker-layout".into());
+    let mut picker = SessionPicker::new(vec![item.clone()]);
+    picker.current_dir = item.working_dir.clone();
+    for selected in [false, true] {
+        let rows = picker.render_session_item_lines(&item, selected);
+        assert!(!rows[0].to_string().contains("🔬"));
+        assert!(!rows[0].to_string().contains("▸ here"));
+        assert!(rows[1].to_string().contains("picker-layout  ▸ here"));
+        assert!(rows[1].spans.last().unwrap().content.contains("ago"));
+    }
+    picker.current_dir = Some("/different-project".into());
+    picker.current_repo = None;
+    let rows = picker.render_session_item_lines(&item, false);
+    assert!(!rows[1].to_string().contains("▸ here"));
+}
+
+#[test]
 fn compact_session_entries_keep_context_without_spacer_rows() {
     let mut item = session(0, 1);
     item.working_dir = Some("/project/resume-layout".into());
