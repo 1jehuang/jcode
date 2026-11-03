@@ -150,7 +150,7 @@ fn test_rewind_retained_tool_rows_keep_timing_fields() {
     let mut app = create_test_app();
     app.session.replace_messages(Vec::new());
 
-    // user prompt -> timed tool result -> user prompt -> timed tool result.
+    // user prompt -> tool result (real ToolResult block) -> user prompt -> tool result.
     for idx in 1..=2 {
         app.session.add_message(
             Role::User,
@@ -159,11 +159,25 @@ fn test_rewind_retained_tool_rows_keep_timing_fields() {
                 cache_control: None,
             }],
         );
-        app.session.add_message_with_duration(
+        let call_id = format!("call-{}", idx);
+        app.session.add_message(
             Role::Assistant,
-            vec![ContentBlock::Text {
-                text: format!("[tool timing: start=21:51:28Z duration=48.3s] result-{}", idx),
-                cache_control: None,
+            vec![ContentBlock::ToolUse {
+                id: call_id.clone(),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "command": "echo ok" }),
+                thought_signature: None,
+            }],
+        );
+        app.session.add_message_with_duration(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: call_id,
+                content: format!(
+                    "[tool timing: start=21:51:28Z duration=48.3s] result-{}",
+                    idx
+                ),
+                is_error: Some(false),
             }],
             Some(48_300),
         );
@@ -171,7 +185,8 @@ fn test_rewind_retained_tool_rows_keep_timing_fields() {
 
     app.input = "/rewind 2".to_string();
     app.submit_input();
-    assert_eq!(app.session.visible_conversation_message_count(), 2);
+    // Two rewind targets survive: the two user prompts.
+    assert_eq!(app.session.rewind_target_count(), 2);
 
     // The retained turn's rendered tool row keeps both timing fields.
     let rebuilt = app.display_messages();
