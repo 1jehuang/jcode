@@ -17,10 +17,12 @@ create_fixture() {
     "$BUILDS/current" "$BUILDS/shared-server" "$HOME_DIR/.local/bin"
   cat > "$BUILDS/versions/0.91.0/jcode" <<'EOF'
 #!/usr/bin/env bash
+flock -n "$TEST_HOME/.jcode/builds/.store.lock" true || exit 97
 printf 'stock:%s:%s\n' "${JCODE_NO_AUTO_UPDATE:-}" "$*" >> "$TEST_HOME/reloads"
 EOF
   cat > "$FIXTURE/custom-jcode" <<'EOF'
 #!/usr/bin/env bash
+flock -n "$TEST_HOME/.jcode/builds/.store.lock" true || exit 97
 printf 'custom:%s:%s\n' "${JCODE_NO_AUTO_UPDATE:-}" "$*" >> "$TEST_HOME/reloads"
 [[ "${TEST_RELOAD_FAIL:-0}" != 1 ]]
 EOF
