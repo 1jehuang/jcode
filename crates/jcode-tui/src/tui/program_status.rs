@@ -13,6 +13,8 @@ use base64::Engine as _;
 
 /// Stable program id used for grouping, filtering, and icons in herdr.
 const APP: &str = "jcode";
+/// The protocol caps a decoded title at 192 bytes.
+const MAX_TITLE_BYTES: usize = 192;
 /// Keep one report well under the protocol's 4096-byte whole-sequence cap.
 const MAX_MESSAGE_BYTES: usize = 512;
 
@@ -37,17 +39,18 @@ impl ProgramState {
 
 /// Build one OSC 7501 report.
 ///
-/// `msg` is optional and standard-base64 encoded as the protocol requires.
-/// Control characters are replaced before encoding because a report that
-/// decodes to text containing them is discarded whole.
-pub(crate) fn report(state: ProgramState, message: Option<&str>) -> String {
+/// `title` and `msg` are optional and standard-base64 encoded as the protocol
+/// requires. Control characters are replaced before encoding because a report
+/// that decodes to text containing them is discarded whole.
+pub(crate) fn report(state: ProgramState, title: Option<&str>, message: Option<&str>) -> String {
     let mut report = format!("\x1b]7501;state={}:app={}", state.as_str(), APP);
-    if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
-        let message = sanitized_message(message);
-        if !message.is_empty() {
-            report.push_str(":msg=");
-            report.push_str(&base64::engine::general_purpose::STANDARD.encode(message.as_bytes()));
-        }
+    if let Some(title) = encoded_field(title, MAX_TITLE_BYTES) {
+        report.push_str(":title=");
+        report.push_str(&title);
+    }
+    if let Some(message) = encoded_field(message, MAX_MESSAGE_BYTES) {
+        report.push_str(":msg=");
+        report.push_str(&message);
     }
     report.push_str("\x1b\\");
     report
@@ -67,7 +70,13 @@ pub(crate) fn emit(report: &str) {
     }
 }
 
-fn sanitized_message(message: &str) -> String {
+fn encoded_field(value: Option<&str>, max_bytes: usize) -> Option<String> {
+    let value = value.filter(|value| !value.trim().is_empty())?;
+    let value = sanitized_message(value, max_bytes);
+    (!value.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(value.as_bytes()))
+}
+
+fn sanitized_message(message: &str, max_bytes: usize) -> String {
     let mut sanitized = String::new();
     for character in message.chars() {
         let character = if character.is_control() {
@@ -75,7 +84,7 @@ fn sanitized_message(message: &str) -> String {
         } else {
             character
         };
-        if sanitized.len() + character.len_utf8() > MAX_MESSAGE_BYTES {
+        if sanitized.len() + character.len_utf8() > max_bytes {
             break;
         }
         sanitized.push(character);
@@ -87,10 +96,11 @@ fn sanitized_message(message: &str) -> String {
 mod tests {
     use super::*;
 
-    fn decode_message(report: &str) -> String {
+    fn decode_field(report: &str, key: &str) -> String {
+        let marker = format!(":{key}=");
         let encoded = report
-            .split_once(":msg=")
-            .expect("report carries a message")
+            .split_once(marker.as_str())
+            .unwrap_or_else(|| panic!("report carries {key}"))
             .1
             .split_once('\x1b')
             .expect("report is terminated")
@@ -106,42 +116,61 @@ mod tests {
     #[test]
     fn reports_are_well_formed_osc_7501() {
         assert_eq!(
-            report(ProgramState::Working, None),
+            report(ProgramState::Working, None, None),
             "\x1b]7501;state=working:app=jcode\x1b\\"
         );
         assert_eq!(
-            report(ProgramState::Done, None),
+            report(ProgramState::Done, None, None),
             "\x1b]7501;state=done:app=jcode\x1b\\"
         );
     }
 
     #[test]
     fn error_messages_are_base64_and_control_free() {
-        let report = report(ProgramState::Error, Some("line one\nline two\t\u{7}"));
-        assert!(report.starts_with("\x1b]7501;state=error:app=jcode:msg="));
-        assert!(report.ends_with("\x1b\\"));
-        assert_eq!(decode_message(&report), "line one line two");
+        let osc = report(ProgramState::Error, None, Some("line one\nline two\t\u{7}"));
+        assert!(osc.starts_with("\x1b]7501;state=error:app=jcode:msg="));
+        assert!(osc.ends_with("\x1b\\"));
+        assert_eq!(decode_field(&osc, "msg"), "line one line two");
     }
 
     #[test]
     fn empty_and_control_only_messages_are_omitted() {
         assert_eq!(
-            report(ProgramState::Error, Some(" \n\t ")),
+            report(ProgramState::Error, None, Some(" \n\t ")),
             "\x1b]7501;state=error:app=jcode\x1b\\"
         );
         assert_eq!(
-            report(ProgramState::Error, None),
+            report(ProgramState::Error, None, None),
             "\x1b]7501;state=error:app=jcode\x1b\\"
         );
     }
 
     #[test]
     fn long_messages_are_truncated_before_encoding() {
-        let report = report(
+        let osc = report(
             ProgramState::Error,
+            None,
             Some(&"x".repeat(MAX_MESSAGE_BYTES * 2)),
         );
-        assert!(report.len() < 4096);
-        assert_eq!(decode_message(&report).len(), MAX_MESSAGE_BYTES);
+        assert!(osc.len() < 4096);
+        assert_eq!(decode_field(&osc, "msg").len(), MAX_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn session_titles_are_base64_and_clipped() {
+        let osc = report(
+            ProgramState::Working,
+            Some("Session title\nwith a control"),
+            None,
+        );
+        assert!(osc.contains(":title="));
+        assert_eq!(
+            decode_field(&osc, "title"),
+            "Session title with a control"
+        );
+
+        let long = "x".repeat(MAX_TITLE_BYTES * 2);
+        let osc = report(ProgramState::Working, Some(&long), None);
+        assert_eq!(decode_field(&osc, "title").len(), MAX_TITLE_BYTES);
     }
 }

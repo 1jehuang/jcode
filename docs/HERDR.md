@@ -14,7 +14,8 @@ herdr-core, the runtime behind the Herdr app, does not expose an agent-status
 socket method. A pane's status comes only from OSC 7501 reports written by the
 program that owns the pane pty. Jcode's TUI client therefore emits `idle`,
 `working`, `done`, and `error` directly to its stdout on state changes
-(`crates/jcode-tui/src/tui/program_status.rs`), tagged with `app=jcode`.
+(`crates/jcode-tui/src/tui/program_status.rs`), tagged with `app=jcode` and the
+session title.
 `done` follows a successful turn, `error` a failed turn or a guardrail stop,
 and an interrupt reports `idle`. Terminals that do not understand OSC 7501
 ignore the report.
@@ -37,7 +38,7 @@ Jcode already:
 - recognizes Herdr as a masking terminal multiplexer for Mermaid graphics capability detection;
 - exports stable lifecycle observer hooks for `session_start`, `session_end`, `turn_start`, and `turn_end`;
 - exports `JCODE_HOOK_SESSION_ID`, `JCODE_HOOK_CWD`, event fields, and a JSON `JCODE_HOOK_PAYLOAD`;
-- reports herdr-core status over OSC 7501 as `app=jcode`;
+- reports herdr-core status and the session title over OSC 7501 as `app=jcode`;
 - resumes a native session with `jcode --resume <session-id>`.
 
 ## Recommended first Herdr integration
