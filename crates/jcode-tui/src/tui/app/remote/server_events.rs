@@ -1076,6 +1076,7 @@ fn handle_server_event_inner(
             }
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
+            app.note_turn_interrupted();
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             app.processing_started = None;
@@ -1194,6 +1195,7 @@ fn handle_server_event_inner(
                 }
                 crate::tui::mermaid::clear_streaming_preview_diagram();
                 app.is_processing = false;
+                app.note_turn_done();
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
                 // Turn completed successfully; drop the saved prompt so a later
@@ -1372,6 +1374,7 @@ fn handle_server_event_inner(
                 });
             }
             app.is_processing = false;
+            app.note_turn_failed();
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             let recovered_local = recover_local_interleave_to_queue(app, "request error");

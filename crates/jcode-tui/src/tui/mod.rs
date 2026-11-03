@@ -35,6 +35,7 @@ pub(crate) mod color_support;
 mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
+pub(crate) mod program_status;
 mod info_widget_cloud;
 mod info_widget_cloud_directories;
 // Terminal image display + metadata helpers now live in the dependency-free
