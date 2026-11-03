@@ -105,11 +105,16 @@ async fn scoped_and_legacy_socket_subscribers_receive_compatible_turn_streams() 
 
 #[tokio::test]
 async fn scoped_cancel_socket_immediately_dispatches_next_prompt() {
-    sdk_socket_cancel_workflow(false, true, true, true).await;
+    sdk_socket_cancel_workflow(false, true, true, true, false).await;
+}
+
+#[tokio::test]
+async fn idle_soft_interrupt_without_client_id_is_picked_up_before_cancel() {
+    sdk_socket_cancel_workflow(false, true, true, true, true).await;
 }
 
 async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
-    sdk_socket_cancel_workflow(response_only, terminal_race, identity_capability, false).await;
+    sdk_socket_cancel_workflow(response_only, terminal_race, identity_capability, false, false).await;
 }
 
 async fn sdk_socket_cancel_workflow(
@@ -117,6 +122,7 @@ async fn sdk_socket_cancel_workflow(
     terminal_race: bool,
     identity_capability: bool,
     cancel_first: bool,
+    idle_soft_interrupt: bool,
 ) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -262,7 +268,7 @@ async fn sdk_socket_cancel_workflow(
         .await;
         send(
             &mut client_writer,
-            json!({"type":"message","id":2,"content":"one shared turn"}),
+            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn"}),
         )
         .await;
         tokio::time::timeout(
@@ -271,6 +277,13 @@ async fn sdk_socket_cancel_workflow(
         )
         .await
         .unwrap();
+        if idle_soft_interrupt {
+            until(&mut client_reader, |event| {
+                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, .. }
+                    if content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
+            })
+            .await;
+        }
         if cancel_first {
             send(&mut client_writer, json!({"type":"cancel","id":3})).await;
         } else {
@@ -289,11 +302,13 @@ async fn sdk_socket_cancel_workflow(
                         assert!(active.replace(identity).is_none());
                     }
                     ServerEvent::TurnEvent { identity, event } => {
-                        assert_eq!(
-                            active.as_ref(),
-                            Some(&identity),
-                            "every emission belongs to accepted runtime turn"
-                        );
+                        if idle_soft_interrupt && active.is_none() {
+                            // The pickup wait may already have consumed the
+                            // asynchronous TurnStarted notification.
+                            active = Some(identity.clone());
+                        }
+                        assert_eq!(active.as_ref(), Some(&identity),
+                            "every emission belongs to accepted runtime turn");
                         match *event {
                             ServerEvent::TextDelta { ref text } if text == "completed" => {
                                 scoped_text = true

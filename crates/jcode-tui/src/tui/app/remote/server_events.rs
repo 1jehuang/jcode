@@ -1369,7 +1369,11 @@ fn handle_server_event_inner(
                 "Client received Done id={}, current_message_id={:?}",
                 id, app.current_message_id
             ));
-            let has_resumed_turn_evidence = had_remote_resume_activity
+            // An accepted scoped turn can finish during connection setup,
+            // before text, usage or MessageEnd. Its identity is authoritative
+            // even if ConnectionPhase replaced the initial Streaming status.
+            let has_resumed_turn_evidence = app.remote_turn_fence.active.is_some()
+                || had_remote_resume_activity
                 || app.stream_message_ended
                 || app.has_streaming_footer_stats()
                 || !app.streaming.streaming_text.is_empty()

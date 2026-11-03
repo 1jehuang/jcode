@@ -1222,18 +1222,7 @@ pub(super) async fn handle_client(
                     start
                 };
                 if start_idle_turn {
-                    // The interrupt becomes the new turn's prompt, so the
-                    // model sees it before anything else. A caller tracking it
-                    // by id must still learn that it was picked up.
-                    if let Some(client_id) = client_id {
-                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
-                            content: content.clone(),
-                            display_role: None,
-                            point: "turn_start".to_string(),
-                            tools_skipped: None,
-                            client_ids: vec![client_id],
-                        });
-                    }
+                    let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
                             id,
@@ -1263,6 +1252,19 @@ pub(super) async fn handle_client(
                         },
                     )
                     .await;
+                    // Ack only confirms receipt, not injection. TUI callers
+                    // have no SDK client_id, but still retain a queued preview
+                    // until this pickup event. Publish only after acceptance:
+                    // a rejected prompt must remain recoverable by its caller.
+                    if processing_message_id == Some(id) {
+                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content: accepted_content,
+                            display_role: None,
+                            point: "turn_start".to_string(),
+                            tools_skipped: None,
+                            client_ids: client_id.into_iter().collect(),
+                        });
+                    }
                     if !client_is_processing {
                         let mut connections = client_connections.write().await;
                         if let Some(info) = connections.get_mut(&client_connection_id) {
