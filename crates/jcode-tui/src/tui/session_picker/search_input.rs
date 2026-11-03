@@ -178,6 +178,19 @@ impl SessionPicker {
             }
             return true;
         }
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        let alt = modifiers.contains(KeyModifiers::ALT);
+        if !alt
+            && ((ctrl && matches!(code, KeyCode::Backspace | KeyCode::Char('w')))
+                || code == KeyCode::Char('\u{8}'))
+        {
+            self.delete_search_word_back();
+            return true;
+        }
+        if ctrl && !alt && code == KeyCode::Char('u') {
+            self.search_query.clear();
+            return true;
+        }
         if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return false;
         }

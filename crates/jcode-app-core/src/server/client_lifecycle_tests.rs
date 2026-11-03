@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[path = "client_checkpoint_tests.rs"]
 mod checkpoint_tests;
+#[path = "client_response_capability_tests.rs"]
+mod response_capability_tests;
+#[path = "client_lifecycle_socket_tests.rs"]
+mod socket_tests;
 
 #[test]
 fn identity_transport_negotiation_preserves_legacy_payload_shape() {
