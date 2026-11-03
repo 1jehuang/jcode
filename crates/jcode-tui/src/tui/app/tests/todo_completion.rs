@@ -39,6 +39,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
         crate::todo::save_plan(
             &session_id,
             &crate::todo::TodoPlan {
+                title: None,
                 user_intention: Some("Show all evidence without another agent turn".into()),
                 understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
                 understands_user_intent_history: vec![

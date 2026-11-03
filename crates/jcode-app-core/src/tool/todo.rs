@@ -913,6 +913,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
     let Some(mut plan) = incoming else {
         return stored.clone();
     };
+    if plan.title.is_none() {
+        plan.title = stored.title.clone();
+    }
     if plan.user_intention.is_none() {
         plan.user_intention = stored.user_intention.clone();
     }
@@ -929,6 +932,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
 
 fn plan_change(before: &TodoPlan, after: &TodoPlan) -> Option<TodoPlanChange> {
     let mut fields = Vec::new();
+    if before.title != after.title {
+        fields.push(TodoPlanField::Title);
+    }
     if before.user_intention != after.user_intention {
         fields.push(TodoPlanField::UserIntention);
     }
@@ -1349,6 +1355,10 @@ impl Tool for TodoTool {
                     "description": "Send initially and when understanding changes.",
                     "required": ["user_intention", "understands_user_intent"],
                     "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Session name, 2-5 specific words. Set when creating the plan."
+                        },
                         "user_intention": {
                             "type": "string"
                         },

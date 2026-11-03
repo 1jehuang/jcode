@@ -731,6 +731,7 @@ fn goal(group: Option<&str>, state: crate::todo::FeedbackLoopState) -> TodoGoal 
 /// tests observe only closed feedback loop behavior.
 fn aligned_plan() -> TodoPlan {
     TodoPlan {
+        title: None,
         user_intention: Some("understood".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Complete),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Complete],
@@ -899,6 +900,7 @@ fn merge_goals_retains_unmentioned_goals() {
 #[test]
 fn merge_plan_retains_stored_intent_when_update_omits_fields() {
     let stored = TodoPlan {
+        title: None,
         user_intention: Some("make search feel instant".to_string()),
         understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Partial],
