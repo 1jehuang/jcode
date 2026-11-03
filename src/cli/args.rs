@@ -281,6 +281,12 @@ pub(crate) enum Command {
         action: AccountCommand,
     },
 
+    /// Sync session transcripts to your Jcode account for the iOS app
+    Mobile {
+        #[command(subcommand)]
+        action: MobileCommand,
+    },
+
     /// Run in simple REPL mode (no TUI)
     Repl,
 
@@ -641,6 +647,25 @@ pub(crate) enum TelemetryCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum MobileCommand {
+    /// Turn on transcript sync to your Jcode account (requires a subscription)
+    Enable,
+    /// Turn off sync and delete transcripts stored for mobile
+    Disable,
+    /// Show whether mobile sync is on
+    Status,
+    /// Run one sync pass now
+    Sync,
+    /// Run sessions started or continued from the phone on this machine
+    /// (Jcode Cloud machines do this automatically)
+    Runner {
+        /// Handle queued commands, then exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum AccountCommand {
     /// Open browser-based device authorization and wait for plan activation
     Login {
@@ -943,22 +968,9 @@ pub(crate) struct CloudMoveTarget {
 mod cloud_sessions;
 pub(crate) use cloud_sessions::*;
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum RestartCommand {
-    /// Save a reboot snapshot of currently active jcode windows
-    Save {
-        /// Restore this reboot snapshot automatically the next time plain `jcode` starts
-        #[arg(long)]
-        auto_restore: bool,
-    },
-    /// Restore the most recently saved reboot snapshot
-    Restore,
-    /// Show the currently saved reboot snapshot
-    Status,
-    /// Remove the currently saved reboot snapshot
-    Clear,
-}
-
+#[path = "args/restart.rs"]
+mod restart;
+pub(crate) use restart::RestartCommand;
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelCommand {
     /// List model names you can pass to -m/--model

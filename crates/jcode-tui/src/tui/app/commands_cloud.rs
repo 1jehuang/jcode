@@ -474,12 +474,24 @@ impl App {
 
     /// Drain the running job or dispatch a pending handoff when idle.
     pub(super) fn cloud_handoff_blocks_work(&self) -> bool {
-        self.pending_cloud_handoff.is_some()
+        (self.pending_cloud_handoff.is_some() && !self.cloud_handoff_draining_reminders())
             || self
                 .cloud_job
                 .as_ref()
                 .is_some_and(|job| !matches!(job.command, CloudCommand::Prepare { .. }))
             || self.cloud_handoff_requested.is_some()
+    }
+
+    /// Queued system reminders (background task results, monitors) are
+    /// delivered to the agent before a pending handoff moves the session, so
+    /// they never block or get lost. Only reminder-only queues drain here.
+    pub(super) fn cloud_handoff_draining_reminders(&self) -> bool {
+        self.pending_cloud_handoff.is_some()
+            && self.cloud_job.is_none()
+            && self.cloud_handoff_requested.is_none()
+            && !self.hidden_queued_system_messages.is_empty()
+            && self.queued_messages.is_empty()
+            && self.queued_commands.is_empty()
     }
 
     fn has_unsent_handoff_work(&self, accepted_command: Option<&str>) -> bool {
@@ -497,10 +509,6 @@ impl App {
             ),
             (!self.queued_messages.is_empty(), "queued messages"),
             (!self.queued_commands.is_empty(), "queued commands"),
-            (
-                !self.hidden_queued_system_messages.is_empty(),
-                "queued system reminders",
-            ),
             (!self.pending_images.is_empty(), "image attachments"),
             (!self.pasted_contents.is_empty(), "pasted contents"),
             (
@@ -563,6 +571,7 @@ impl App {
 
     fn cloud_handoff_can_dispatch(&self) -> bool {
         !self.is_processing
+            && self.hidden_queued_system_messages.is_empty()
             && !self.pending_turn
             && self.cloud_job.is_none()
             && self.cloud_handoff_requested.is_none()
@@ -581,6 +590,16 @@ impl App {
             let trimmed = pending.trimmed.clone();
             let session_id = pending.session_id.clone();
             return start_cloud_command(self, command, &trimmed, &session_id, None);
+        }
+        if self.cloud_handoff_draining_reminders()
+            && !self.is_processing
+            && !self.pending_turn
+            && !self.pending_queued_dispatch
+        {
+            // Deliver reminders that arrived while the handoff waited, then
+            // move once the agent has seen them.
+            self.pending_queued_dispatch = true;
+            return true;
         }
         let had_pending = self.pending_cloud_handoff.is_some();
         if let Some(pending) = self.take_ready_cloud_handoff() {

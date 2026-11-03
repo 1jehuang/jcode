@@ -397,6 +397,7 @@ pub fn config() -> &'static Config {
     }
 
     let mut reload_reason = None;
+    let mut changed_default_route = None;
     let config = {
         let mut cache = CONFIG_CACHE
             .write()
@@ -417,7 +418,16 @@ pub fn config() -> &'static Config {
                 &cache.fingerprint,
                 &fingerprint,
             ));
-            cache.config = leak_config(Config::load());
+            let next = Config::load();
+            // Direct file edits bypass set_default_model's account-pool sync.
+            // Reconcile only a changed default in the same home, so unrelated
+            // reloads never undo a deliberate pool ordering change.
+            if cache.fingerprint.path == fingerprint.path
+                && cache.config.provider.default_provider != next.provider.default_provider
+            {
+                changed_default_route = next.provider.default_provider.clone();
+            }
+            cache.config = leak_config(next);
             // Loading applies env overrides that can themselves set env vars
             // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
@@ -427,6 +437,15 @@ pub fn config() -> &'static Config {
         }
         cache.config
     };
+
+    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
+    if let Some(route) = changed_default_route
+        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
+    {
+        crate::logging::error(&format!(
+            "Could not sync account order after config edit: {error}"
+        ));
+    }
 
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
@@ -1028,18 +1047,8 @@ mod color_tests;
 /// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.
 ///
-/// Discovery originally shipped opt-in with `enabled = false`, and because
-/// config saves serialize the whole struct, any save during that window froze
-/// the old default into the user's file and permanently disabled discovery even
-/// after the default flipped. Omitting default sections prevents a repeat.
+/// Explicit opt-ins must be serialized so unrelated preference saves cannot
+/// silently disable discovery on the next load.
 fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
-    sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
-}
-
-/// Endpoints used by shipped defaults. These may also be explicit user choices.
-fn is_default_discovery_endpoint(endpoint: &str) -> bool {
-    matches!(
-        endpoint.trim_end_matches('/'),
-        "https://api.jcode.sh/v1/discovery" | "https://api.solosystems.dev/v1/discovery"
-    )
+    !sponsors.enabled && sponsors.endpoint == SponsorsConfig::default().endpoint
 }

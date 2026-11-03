@@ -129,6 +129,60 @@ class Provider(unittest.TestCase):
 
 
 class Isolation(unittest.TestCase):
+    def test_attachment_rejects_idle_outgoing_client_and_wrong_session(self):
+        from unittest.mock import Mock
+
+        for cloud in (True, False):
+            with self.subTest(cloud=cloud):
+                fixture = Mock(sid="moved-session")
+                destination = "server: SSH cloud-acceptance" if cloud else "server: local"
+                outgoing = "server: local" if cloud else "server: SSH cloud-acceptance"
+                fixture.frame.side_effect = [outgoing, destination, destination]
+                fixture.state.side_effect = [
+                    {"remote": True, "remote_session_id": "another-session"},
+                    {"remote": True, "remote_session_id": fixture.sid},
+                ]
+
+                def poll(predicate, description):
+                    self.assertIn("TUI reattachment", description)
+                    self.assertFalse(predicate(), "idle outgoing client is not ready")
+                    self.assertFalse(predicate(), "wrong session is not ready")
+                    self.assertTrue(predicate())
+
+                with patch("cloud_acceptance_tui.wait_for", side_effect=poll):
+                    acceptance.CloudTUI.wait_attachment(fixture, cloud=cloud)
+
+    def test_cloud_continuation_waits_for_new_client_before_idle(self):
+        from unittest.mock import Mock, call
+
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Mock(cloud_repo=Path(temp))
+            (fixture.cloud_repo / "file.txt").write_text("local uncommitted edit")
+            fixture.frame.return_value = "saw_cloud_notice=True"
+            fixture.lease.return_value = {"away_host": "cloud-acceptance"}
+            fixture.records.return_value = [{"messages": [
+                {"role": "user", "content": "[jcode cloud] moved"}
+            ]}]
+            with patch("cloud_acceptance_tui.wait_for", side_effect=lambda predicate, _: predicate()):
+                acceptance.CloudTUI.await_cloud(fixture, 0)
+            calls = fixture.mock_calls
+            self.assertLess(calls.index(call.wait_attachment(cloud=True)),
+                            calls.index(call.wait_idle()))
+
+    def test_return_waits_for_new_client_before_fresh_prompt(self):
+        from unittest.mock import Mock, call
+
+        fixture = Mock()
+        fixture.records.return_value = []
+        fixture.lease.return_value = {"epoch": 2}
+        fixture.frame.return_value = "server: local OpenAI-compatible Fake Model"
+        fixture.session.return_value = {"notice": "returned from cloud host"}
+        with patch("cloud_acceptance_tui.wait_for", side_effect=lambda predicate, _: predicate()):
+            acceptance.CloudTUI.go_local(fixture)
+        calls = fixture.mock_calls
+        self.assertLess(calls.index(call.wait_attachment(cloud=False)),
+                        calls.index(call.send("acceptance back on laptop")))
+
     def test_cloud_selection_preserves_group_default_and_explicit_round_trip(self):
         from unittest.mock import Mock
 

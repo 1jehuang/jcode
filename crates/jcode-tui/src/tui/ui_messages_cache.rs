@@ -15,6 +15,10 @@ where
     if msg.role == "background_task" && msg.content.contains("_Called at:_ `") {
         return render(msg, width, diff_mode);
     }
+    // Finished todo reports show a relative "finished Xm ago" age.
+    if msg.title.as_deref() == Some("Todo completion") && msg.content.contains("\"completed_at\"") {
+        return render(msg, width, diff_mode);
+    }
     jcode_tui_messages::get_cached_message_lines(
         msg,
         width,
@@ -32,6 +36,7 @@ where
             tool_call_details: crate::config::config().display.tool_call_details,
             show_tool_duration: crate::config::config().display.show_tool_duration,
             latex_rendering: crate::config::config().display.latex_rendering,
+            show_link_urls: crate::config::config().display.show_link_urls,
         },
         render,
     )

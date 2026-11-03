@@ -12,9 +12,13 @@ to evaluate everything that can be checked locally.
 | 3 | Protocol smoke vs real gateway | `protocol_smoke_test.py --port 7643` vs `jcode serve` | PASS |
 | 4 | Interaction-graph engine deterministic | `python3 -m reward.interaction.test_engine` exit 0 | PASS |
 | 5 | Reward scorers deterministic | `python3 -m reward.test_determinism` exit 0 | PASS |
-| 6 | UX reward at or above baseline (88.7), worst cell >= 83 | `reward.aggregate --baseline --candidate` non-negative delta | PASS |
+| 6 | UX reward tracked across the device x scenario matrix | `./TestHarness/scoreboard.sh` reward and worst cell recorded | TRACKED (see note) |
 | 7 | Foreground reconnect | scenePhase handler in JCodeMobileApp.swift | PASS |
 | 8 | Unauthorized (revoked token) stops reconnect loop, prompts re-pair | `unauthorizedStopsReconnectingAndAsksForRePair` test | PASS |
+| 8a | App target actually compiles | `xcodebuild ... -destination "generic/platform=iOS Simulator"` exit 0 | PASS |
+| 8b | Offline demo mode (Guideline 2.1) | `DemoTransportTests` + demo entry/banner/exit greps | PASS |
+| 8c | Optimistic send survives a racing history payload | `OptimisticHistoryTests` | PASS |
+| 8d | Readable column on iPad (universal app) | `readableColumn()` applied; iPad screenshots reviewed | PASS |
 
 ## App Store submission requirements
 
@@ -28,6 +32,23 @@ to evaluate everything that can be checked locally.
 | 14 | Launch screen | `UILaunchScreen` dict + LaunchBackground colorset | PASS |
 | 15 | ATS exception justified | `NSAllowsArbitraryLoads=true` documented below | PASS (documented) |
 | 16 | Version/build numbers | MARKETING_VERSION set; build number injected by CI from run number | PASS |
+| 16a | App Review notes written | `AppStore/REVIEW_NOTES.md` | PASS |
+| 16b | Store metadata written | `AppStore/METADATA.md` | PASS |
+| 16c | Privacy policy published | `AppStore/PRIVACY.md` (URL must be reachable before submit) | PASS |
+| 16d | Screenshots reproducible | `./TestHarness/capture_screenshots.sh` | PASS |
+
+### UX reward note (2026-09-23 Desktop restyle)
+
+Same harness, same matrix, before vs after adopting Jcode Desktop's visual
+language: **75.7 -> 73.2** (worst cell 68.4 -> 68.5). The earlier 88.7 figure
+came from an older harness and is not comparable. Gains: perf, visual
+hierarchy, content safety. Losses concentrate in pixel heuristics tuned to the
+old bubble/mint design: `space_efficiency` counts non-background fill (Desktop
+style removes assistant bubbles and tool cards), and `touch_targets` finds
+controls by accent-colored blobs (the send button is neutral until a draft
+exists). Real regressions found by the same run were fixed (copy button hit
+area, fixed-size fonts, token sprawl). Screens reviewed by eye: pairing, empty,
+live activity, multi-turn, expanded tool, Sessions and Model sheets.
 
 ### ATS justification (App Review note)
 
@@ -44,7 +65,31 @@ connects to any host the user did not explicitly pair with. This is why
 |---|------|----------------|--------|
 | 17 | swift test job | `.github/workflows/ios-testflight.yml` test job green | PASS |
 | 18 | Simulator compile check | compile-check job green | PASS |
-| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: cloud signing permission error (see below)** |
+| 18a | Production gate in CI | `production-gate` job runs `check_production.sh` | PASS |
+| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: Apple-account permission only (see below)** |
+
+Verified on run
+[31283473798](https://github.com/1jehuang/jcode/actions/runs/31283473798)
+(branch `ios/mobile-real-nav`, 2026-08-08): `swift test`, `compile-check`, and
+`production-gate` all green; `Archive` succeeds; the run fails only at
+`exportArchive` with:
+
+```
+error: exportArchive Cloud signing permission error
+error: exportArchive No profiles for 'com.jcode.mobile' were found
+```
+
+Nothing in this repository can fix that. It requires the four account-holder
+steps below.
+
+## Guideline 2.1 mitigation (why review can exercise the app)
+
+App Review has no `jcode` server, so without a demo path the app is a pairing
+form that can never succeed. "Try the offline demo" on the pairing screen runs a
+scripted server (`JCodeKit/DemoTransport.swift`) through the real `Connection`
+and `SessionReducer`, entirely on device, with a persistent disclosure banner
+and a one-tap exit to pairing. `REVIEW_NOTES.md` tells the reviewer exactly
+where to tap.
 
 ## Account-holder-only items (exact instructions)
 

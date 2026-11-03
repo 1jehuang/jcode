@@ -43,6 +43,7 @@ fn uncapped_and_preserves_every_todo_field() {
 #[test]
 fn improved_histories_remain_prominent_and_all_goal_fields_render() {
     let plan = TodoPlan {
+        title: None,
         user_intention: Some("Deliver outcome".into()),
         understands_user_intent: Some(IntentUnderstanding::Complete),
         understands_user_intent_history: vec![

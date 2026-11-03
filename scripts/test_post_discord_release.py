@@ -78,11 +78,30 @@ class DiscordReleaseTests(unittest.TestCase):
             body=notes + "## First-time preview setup\nDO NOT DUPLICATE SETUP",
             url="https://example.test/releases/preview",
         )
-        self.assertIn(notes.strip(), message)
+        self.assertIn(notes.strip().replace(
+            "(https://example.test/commit/abc1234)",
+            "(<https://example.test/commit/abc1234>)"), message)
         self.assertLess(message.index("Fix picker"), message.index("First time:"))
         self.assertNotIn("DO NOT DUPLICATE SETUP", message)
         self.assertNotIn("Full notes:", message)
         self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+
+    def test_preview_only_release_link_can_embed(self) -> None:
+        message = MODULE.format_message(
+            tag="v1.0.0-preview.99", name="Preview",
+            body=("## What changed\n"
+                  "[Full comparison](https://example.test/compare/a...b)\n"
+                  "- [abc](https://example.test/commit/abc) Fix\n"
+                  "Already suppressed: <https://example.test/old>\n"
+                  "Bare link: https://example.test/other\n"),
+            url="https://example.test/releases/preview.99",
+        )
+        self.assertIn("Download binaries and notes: https://example.test/releases/preview.99\n", message)
+        self.assertIn("[Full comparison](<https://example.test/compare/a...b>)", message)
+        self.assertIn("[abc](<https://example.test/commit/abc>)", message)
+        self.assertIn("Bare link: <https://example.test/other>", message)
+        self.assertIn("Already suppressed: <https://example.test/old>", message)
+        self.assertNotIn("<<", message)
 
     def test_preview_long_notes_keep_guidance_and_full_notes_link(self) -> None:
         for url in ("https://example.test/preview", "https://example.test/" + "x" * 236,
@@ -101,7 +120,7 @@ class DiscordReleaseTests(unittest.TestCase):
                 self.assertIn("SHA256SUMS", message)
                 self.assertIn("jcode update --channel stable", message)
                 expected = url if len(url) <= 256 else "https://github.com/1jehuang/jcode/releases"
-                self.assertIn(f"Download binaries and notes: <{expected}>", message)
+                self.assertIn(f"Download binaries and notes: {expected}\n", message)
 
     def test_preview_without_summary_keeps_install_guidance(self) -> None:
         for body in ("", "Legacy notes", "## What changed\n\n## First-time preview setup\nsetup"):

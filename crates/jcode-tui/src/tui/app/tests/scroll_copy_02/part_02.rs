@@ -713,6 +713,84 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
 }
 
 #[test]
+fn test_rendered_markdown_link_labels_open_their_own_message_targets() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.set_centered(false);
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::assistant(
+        "First [guide](https://one.example/docs).",
+    ));
+    app.push_display_message(DisplayMessage::assistant(
+        "Second [**guide**](https://two.example/docs).",
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    for (prefix, expected) in [
+        ("First guide", "https://one.example/docs"),
+        ("Second guide", "https://two.example/docs"),
+    ] {
+        let row = rows
+            .iter()
+            .position(|row| row.contains(prefix))
+            .expect("rendered link label");
+        let col = rows[row].find("guide").unwrap();
+        assert_eq!(
+            crate::tui::ui::link_target_from_screen_with_state(col as u16, row as u16, &app)
+                .as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            crate::tui::ui::link_target_from_screen_with_state((col - 2) as u16, row as u16, &app),
+            None
+        );
+    }
+}
+
+#[test]
+fn test_rendered_wrapped_markdown_link_label_is_clickable() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.set_centered(false);
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::assistant(
+        "Read [a long linked guide with several words and destination](https://wrapped.example).",
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(35, 30)).unwrap();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    let row = rows
+        .iter()
+        .position(|row| row.contains("destination"))
+        .expect("wrapped label tail");
+    let col = rows[row].find("destination").unwrap();
+    assert_eq!(
+        crate::tui::ui::link_target_from_screen_with_state(col as u16, row as u16, &app).as_deref(),
+        Some("https://wrapped.example")
+    );
+}
+
+#[test]
+fn test_side_pane_markdown_link_label_is_clickable() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.side_panel = test_side_panel_snapshot("links", "Links");
+    app.side_panel.pages[0].content = "Read [the guide](https://pane.example/docs).".to_string();
+    let lines = crate::tui::markdown::render_markdown(&app.side_panel.pages[0].content);
+    let row = lines
+        .iter()
+        .position(|line| line.to_string().contains("the guide"))
+        .unwrap();
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_side_pane_snapshot(&lines, 0, lines.len(), Rect::new(40, 2, 40, 10));
+    assert_eq!(
+        crate::tui::ui::link_target_from_screen_with_state(46, 2 + row as u16, &app).as_deref(),
+        Some("https://pane.example/docs")
+    );
+}
+
+#[test]
 fn test_repository_markdown_link_cannot_escape_working_directory() {
     let parent = tempfile::tempdir().unwrap();
     let repository = parent.path().join("repo");
@@ -1599,69 +1677,7 @@ fn test_click_on_inline_image_body_cycles_level() {
 
 /// Ctrl+wheel (how terminals report a trackpad pinch) over an inline image
 /// steps its size without wrapping, while Ctrl+wheel elsewhere still scrolls.
-#[test]
-fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
-    use crate::tui::ui::inline_image_ui::{
-        AllFit, ImageExpandLevel, InlineImageItem, build_section,
-    };
-    use jcode_tui_messages::PreparedChatFrame;
-
-    let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-
-    const IMAGE_ID: u64 = 0xB1AC;
-    let chat_width: u16 = 80;
-    let items = vec![InlineImageItem {
-        id: IMAGE_ID,
-        width: 320,
-        height: 200,
-        label: "pinch.png".to_string(),
-        uses_text_fallback: false,
-        collapsed_by_default: false,
-    }];
-    let section = build_section(&items, chat_width, 40, false, true, &AllFit);
-    let region = *section
-        .image_regions
-        .iter()
-        .find(|r| r.hash == IMAGE_ID)
-        .expect("section should carry the image region");
-    let prepared =
-        std::sync::Arc::new(PreparedChatFrame::from_single(std::sync::Arc::new(section)));
-    let visible_end = prepared.wrapped_plain_line_count();
-    let content_area = Rect::new(0, 0, chat_width, visible_end as u16 + 1);
-    crate::tui::ui::clear_copy_viewport_snapshot();
-    crate::tui::ui::record_copy_viewport_frame_snapshot_for_test(
-        prepared,
-        0,
-        visible_end,
-        content_area,
-        &vec![0u16; visible_end],
-    );
-
-    let row = content_area.y + region.abs_line_idx as u16 + 1;
-    let col = content_area.x + region.width / 2;
-    let wheel = |app: &mut App, kind: MouseEventKind, column: u16| {
-        app.handle_mouse_event(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::CONTROL,
-        })
-    };
-
-    wheel(&mut app, MouseEventKind::ScrollUp, col);
-    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Large);
-    // Full has the same geometry as Large here, so zooming in further holds.
-    wheel(&mut app, MouseEventKind::ScrollUp, col);
-    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Large);
-    wheel(&mut app, MouseEventKind::ScrollDown, col);
-    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
-    wheel(&mut app, MouseEventKind::ScrollDown, col);
-    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
-
-    // Off the image, Ctrl+wheel falls through to chat scrolling.
-    wheel(&mut app, MouseEventKind::ScrollUp, chat_width - 2);
-    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);
-}
+#[path = "part_02/image_zoom.rs"]
+mod image_zoom;
 
 include!("math_selection.rs");

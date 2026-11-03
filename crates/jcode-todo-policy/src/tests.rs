@@ -1113,3 +1113,25 @@ fn ungrouped_session_title_prefers_plan_intention_then_item_content() {
         Some("Run targeted tests")
     );
 }
+
+#[test]
+fn plan_title_beats_lane_name_and_intention() {
+    let todos = vec![todo("Fix it", "in_progress", Some("implementation"))];
+    let plan = TodoPlan {
+        title: Some("  Live default sync ".to_string()),
+        user_intention: Some("Make defaults apply immediately".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        derive_session_title(&todos, &plan).as_deref(),
+        Some("Live default sync")
+    );
+    let blank = TodoPlan {
+        title: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        derive_session_title(&todos, &blank).as_deref(),
+        Some("implementation")
+    );
+}

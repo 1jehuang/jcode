@@ -23,6 +23,28 @@ work. Command failures do not trigger provider fallback or clear an active chat.
 Local daemon mode is distinct from SSH mode and retains its existing behavior.
 Command sequences are not an atomic remote-command API.
 
+## Cloud auto-poke ownership
+
+SSH/cloud subscriptions enable the daemon's persisted automatic follow-up policy
+using the **host's** `features.auto_poke` default. The daemon reads the session's
+host-side todos and runs continuation turns itself. It does not need a local TUI
+to remain attached. Disconnecting the laptop does not stop an already-running
+cloud turn or its automatic follow-ups.
+
+- `/poke` explicitly resumes actionable work now, when the session is idle.
+- `/poke on` arms automatic continuation at the next turn boundary, including
+  while a turn is busy. It does not start an overlapping turn.
+- `/poke off` stops future automatic continuation without cancelling the current
+  turn. `/poke status` reports the host's persisted state.
+- The auto-poke hotkey controls the daemon rather than laptop todo files.
+
+Reattaching does not reset retry budgets or override a persisted `/poke off`.
+Background waits, external blockers, runtime failures and bounded retry limits
+still apply. This is not a promise of unlimited execution or survival of a killed
+daemon. The host must run a build that supports these runtime commands. An
+`unknown variant 'poke'` error means that host runtime needs upgrading, not that
+the request should be sent as an ordinary agent prompt.
+
 ## Capability matrix
 
 Every registered name appears below. **Wire** means an existing request targets

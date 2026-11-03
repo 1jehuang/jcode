@@ -10,6 +10,9 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
     public var serverName: String
     public var serverVersion: String
     public var pairedAt: Date
+    /// Absolute working directory this server asked remote clients to use.
+    /// Optional so credentials stored before this field decode unchanged.
+    public var workingDir: String?
 
     public init(
         host: String,
@@ -17,7 +20,8 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         token: String,
         serverName: String,
         serverVersion: String,
-        pairedAt: Date = Date()
+        pairedAt: Date = Date(),
+        workingDir: String? = nil
     ) {
         self.host = host
         self.port = port
@@ -25,6 +29,7 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         self.serverName = serverName
         self.serverVersion = serverVersion
         self.pairedAt = pairedAt
+        self.workingDir = workingDir
     }
 
     public var gateway: Gateway {

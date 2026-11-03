@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Which memory store a headless session gets.
 ///
@@ -192,10 +192,9 @@ pub(super) async fn create_headless_session(
     }
 
     let agent = Arc::new(Mutex::new(new_agent));
-    {
-        let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
-    }
+    sessions
+        .register_new(client_session_id.clone(), Arc::clone(&agent))
+        .await?;
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;
         register_session_interrupt_queue(

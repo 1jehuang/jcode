@@ -581,6 +581,10 @@ pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
 /// faithfully the plan and its feedback loops represent that.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoPlan {
+    /// Short session name (a few words) chosen by the agent. Used as the
+    /// session title in pickers ahead of lane names and generated titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The user's underlying reason and desired outcome for this work, kept
     /// distinct from the agent's steps and validation loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -610,6 +614,7 @@ pub struct TodoPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoPlanField {
+    Title,
     UserIntention,
     #[serde(alias = "alignment_score", alias = "user_intention_alignment")]
     UnderstandsUserIntent,
