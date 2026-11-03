@@ -8,6 +8,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub(super) const MAX_BYTES: usize = 64 * 1024 * 1024;
+const CACHE_BUDGET: u64 = 256 * 1024 * 1024;
 const TTL: Duration = Duration::from_secs(15);
 
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
@@ -58,6 +59,11 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache path needs a parent"))?;
     fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
     // NamedTempFile creates an owner-only file and removes it on every failure.
     // Persist renames within the same directory, leaving the old blob intact
     // until the complete replacement is ready.
@@ -65,7 +71,46 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
+    prune(parent, path, CACHE_BUDGET);
     Ok(())
+}
+
+/// Only our hashed blobs are eviction candidates. Never touch canonical
+/// sessions, in-flight temporary files, symlinks, or unrelated cache entries.
+fn prune(parent: &Path, keep: &Path, budget: u64) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let mut blobs = Vec::new();
+    let mut total = 0_u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = path.extension().and_then(|s| s.to_str()) == Some("blob")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if !ours || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            total = total.saturating_add(meta.len());
+            blobs.push((
+                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                path,
+                meta.len(),
+            ));
+        }
+    }
+    blobs.sort_unstable();
+    for (_, path, size) in blobs {
+        if total <= budget {
+            break;
+        }
+        if path != keep && fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
 }
 
 fn refreshing() -> &'static Mutex<HashSet<PathBuf>> {
@@ -180,6 +225,40 @@ mod tests {
             Some(root.join("cache/cloud-previews/v1").as_path())
         );
         assert_eq!(hostile.file_name().unwrap().to_str().unwrap().len(), 69);
+    }
+
+    #[test]
+    fn aggregate_budget_evicts_old_blobs_but_not_current_or_unrelated_files() {
+        let root = tempfile::tempdir().unwrap();
+        let oldest = key_path(root.path(), "oldest", "host", 1);
+        let newer = key_path(root.path(), "newer", "host", 1);
+        let keep = key_path(root.path(), "keep", "host", 1);
+        for (path, age) in [(&oldest, 60), (&newer, 30), (&keep, 0)] {
+            write(path, b"0123456789").unwrap();
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(age))
+                .unwrap();
+        }
+        let parent = keep.parent().unwrap();
+        let unrelated = parent.join("unrelated.blob");
+        fs::write(&unrelated, b"leave alone").unwrap();
+        prune(parent, &keep, 20);
+        assert!(!oldest.exists());
+        assert!(newer.exists() && keep.exists() && unrelated.exists());
+        prune(parent, &keep, 5);
+        assert!(!newer.exists());
+        assert!(keep.exists() && unrelated.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]
