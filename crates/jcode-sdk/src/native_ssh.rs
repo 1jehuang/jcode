@@ -33,7 +33,7 @@ impl NativeSshKey {
     /// A fresh ed25519 key. `comment` ends up in the OpenSSH public key line.
     pub fn generate(comment: &str) -> Result<Self> {
         let private =
-            russh::keys::PrivateKey::random(&mut rand_core::OsRng, russh::keys::Algorithm::Ed25519)
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .map_err(|e| {
                     Error::new(
                         ErrorKind::ConnectFailed,
@@ -143,9 +143,16 @@ impl russh::client::Handler for PinnedHost {
     type Error = russh::Error;
     async fn check_server_key(
         &mut self,
-        key: &russh::keys::PublicKey,
+        key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        let ok = self.keys.iter().any(|k| k.key_data() == key.key_data());
+        // Only raw pinned keys are trusted. Certificates must not silently
+        // become a new trust path when upgrading russh's handler API.
+        let ok = match key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => {
+                self.keys.iter().any(|k| k.key_data() == key.key_data())
+            }
+            russh::keys::PublicKeyOrCertificate::Certificate(_) => false,
+        };
         if !ok {
             self.mismatch.store(true, Ordering::Relaxed);
         }
@@ -412,6 +419,118 @@ impl JcodeClient {
 mod tests {
     use super::*;
 
+    struct TestSshServer {
+        authorized: russh::keys::PublicKey,
+    }
+
+    impl russh::server::Handler for TestSshServer {
+        type Error = russh::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            key: russh::server::VerifiedPublicKey<'_>,
+        ) -> std::result::Result<russh::server::Auth, Self::Error> {
+            Ok(
+                if user == "test" && key.public_key.key_data() == self.authorized.key_data() {
+                    russh::server::Auth::Accept
+                } else {
+                    russh::server::Auth::reject()
+                },
+            )
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _session: &mut russh::server::Session,
+        ) -> std::result::Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            command: &[u8],
+            session: &mut russh::server::Session,
+        ) -> std::result::Result<(), Self::Error> {
+            assert!(String::from_utf8_lossy(command).ends_with("api --stdio"));
+            session.channel_success(channel)?;
+            session.data(channel, b"encrypted SSH channel ready\n".to_vec())?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ed25519_handshake_auth_exec_and_wrong_pin() {
+        let host = NativeSshKey::generate("host").unwrap();
+        let client = NativeSshKey::generate("client").unwrap();
+        let config = Arc::new(russh::server::Config {
+            keys: vec![(*host.private).clone()],
+            ..Default::default()
+        });
+        for correct_pin in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let config = Arc::clone(&config);
+            let authorized = client.private.public_key().clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(session) =
+                    russh::server::run_stream(config, stream, TestSshServer { authorized }).await
+                {
+                    let _ = session.await;
+                }
+            });
+            let options = NativeSshOptions::new(
+                CloudTarget {
+                    address: addr.ip(),
+                    port: addr.port(),
+                    user: "test".into(),
+                    host_keys: vec![host.public_openssh().into()],
+                },
+                client.clone(),
+            );
+            let pinned = if correct_pin { &host } else { &client };
+            let mismatch = Arc::new(AtomicBool::new(false));
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                open(
+                    &options,
+                    vec![pinned.private.public_key().clone()],
+                    Arc::clone(&mismatch),
+                    &options.remote_command().unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            if correct_pin {
+                let (session, mut channel) = result.unwrap();
+                let data = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if let Some(russh::ChannelMsg::Data { data }) = channel.wait().await {
+                            break data;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(&data[..], b"encrypted SSH channel ready\n");
+                assert!(!mismatch.load(Ordering::Relaxed));
+                session
+                    .disconnect(russh::Disconnect::ByApplication, "", "en")
+                    .await
+                    .unwrap();
+            } else {
+                assert!(result.is_err());
+                assert!(mismatch.load(Ordering::Relaxed));
+            }
+            server.abort();
+        }
+    }
+
     #[test]
     fn keys_are_fresh_openssh_ed25519_with_safe_comment() {
         let a = NativeSshKey::generate("jcode ios\n").unwrap();
@@ -440,6 +559,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_subject_does_not_implicitly_trust_host_certificates() {
+        use russh::client::Handler;
+        use russh::keys::ssh_key::certificate::{Builder, CertType};
+        let host = NativeSshKey::generate("host").unwrap();
+        let ca = NativeSshKey::generate("untrusted-ca").unwrap();
+        let mut builder = Builder::new_with_random_nonce(
+            &mut rand::rng(),
+            host.private.public_key().clone(),
+            0,
+            u64::MAX,
+        )
+        .unwrap();
+        builder.cert_type(CertType::Host).unwrap();
+        builder.valid_principal("localhost").unwrap();
+        let cert = builder.sign(&*ca.private).unwrap();
+        let mismatch = Arc::new(AtomicBool::new(false));
+        let mut handler = PinnedHost {
+            keys: vec![host.private.public_key().clone()],
+            mismatch: Arc::clone(&mismatch),
+        };
+        assert!(!handler.check_server_key(&cert.into()).await.unwrap());
+        assert!(mismatch.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
     async fn host_key_mismatch_is_recorded_without_poisonable_state() {
         use russh::client::Handler;
         let mismatch = Arc::new(AtomicBool::new(false));
@@ -450,7 +594,7 @@ mod tests {
         let key = NativeSshKey::generate("host").unwrap();
         assert!(
             !handler
-                .check_server_key(key.private.public_key())
+                .check_server_key(&key.private.public_key().clone().into())
                 .await
                 .unwrap()
         );
