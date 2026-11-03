@@ -113,6 +113,33 @@ fn tool_use_input_is_hidden_by_default_and_searchable_when_requested() {
 }
 
 #[test]
+fn tool_intents_are_searchable_by_default_without_raw_arguments() {
+    with_temp_home(|home| {
+        save_test_session(
+            "todo-intent-session",
+            vec![(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "todo-1".to_string(),
+                    name: "todo".to_string(),
+                    input: json!({
+                        "intent": "Investigate marmalade synchronization",
+                        "plan": {"user_intention": "hiddenrawneedle"}
+                    }),
+                    thought_signature: None,
+                }],
+            )],
+        );
+        let options = SearchOptions::for_test("current-session");
+        let results = run_search(home, "marmalade synchronization", &options);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].snippet.contains("marmalade"));
+        assert!(!results[0].snippet.contains("hiddenrawneedle"));
+        assert!(run_search(home, "hiddenrawneedle", &options).is_empty());
+    });
+}
+
+#[test]
 fn journal_entries_are_searchable() {
     with_temp_home(|home| {
         let mut session = Session::create_with_id("journal-session".to_string(), None, None);
