@@ -37,6 +37,8 @@ include!("protocol_tests/comm_format_awaited.rs");
 include!("protocol_tests/misc_events.rs");
 include!("protocol_tests/randomized.rs");
 include!("protocol_tests/model_usage.rs");
+#[path = "protocol_tests/turn_identity.rs"]
+mod turn_identity;
 #[test]
 fn swarm_runtime_wait_metadata_is_optional_and_nonempty() {
     let empty: super::SwarmMemberRuntime = serde_json::from_str("{}").unwrap();

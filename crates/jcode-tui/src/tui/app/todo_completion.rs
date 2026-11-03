@@ -14,6 +14,9 @@ pub(super) struct TodoCompletionReportState {
     fingerprint: Option<u64>,
     checked_at: Option<Instant>,
     observations: Vec<crate::todo::GateObservation>,
+    /// When this completion cycle first finished. Late assessment writes
+    /// update the report but keep this original time.
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl App {
@@ -61,6 +64,7 @@ impl App {
             // Reopening work starts a new cycle; preserve its earlier report.
             self.todo_completion_report.fingerprint = None;
             self.todo_completion_report.observations.clear();
+            self.todo_completion_report.completed_at = None;
             return false;
         }
         let plan = match crate::todo::load_plan(&session_id) {
@@ -126,8 +130,13 @@ impl App {
 
         // Persist data rather than a reference to the live todo file so earlier
         // completion cycles remain unchanged when work resumes.
+        let completed_at = *self
+            .todo_completion_report
+            .completed_at
+            .get_or_insert_with(chrono::Utc::now);
         let content = serde_json::json!({
             "todo_completion_version": 1,
+            "completed_at": completed_at,
             "todos": todos,
             "plan": plan,
             "goals": goals,

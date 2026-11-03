@@ -44,6 +44,7 @@ mod read;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
+pub(crate) mod session_http;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
@@ -574,7 +575,7 @@ impl Registry {
                 codemode::CodemodeTool::new(registry.downgrade()),
             );
         }
-        // Integration discovery is on by default (opt-out); when disabled the
+        // Integration discovery is opt-in via `[sponsors] enabled = true`; when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
         if crate::config::config().sponsors.enabled {

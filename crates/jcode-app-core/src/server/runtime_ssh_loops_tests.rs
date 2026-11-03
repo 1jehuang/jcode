@@ -187,6 +187,71 @@ impl Drop for RestoreHome {
 }
 
 #[tokio::test]
+async fn remote_subscription_enables_real_followups_without_manual_poke() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    initialize_remote_session(&session_id, true).unwrap();
+    let (tx, rx) = mpsc::unbounded_channel();
+    // The cloud runtime must continue with no observer attached, not just
+    // enqueue work for a live laptop client to dispatch.
+    drop(rx);
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    let persisted = std::fs::read(state_path(&session_id).unwrap()).unwrap();
+    initialize_remote_session(&session_id, true).unwrap();
+    assert_eq!(
+        std::fs::read(state_path(&session_id).unwrap()).unwrap(),
+        persisted
+    );
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "reattaching must not reset retry budgets"
+    );
+
+    control(&session_id, "poke", &["off".into()])
+        .unwrap()
+        .unwrap();
+    initialize_remote_session(&session_id, true).unwrap();
+    assert!(
+        !read_state(&state_path(&session_id).unwrap())
+            .unwrap()
+            .poke_enabled
+    );
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+
+    // Arming needs no Agent lock and does not launch an overlapping turn.
+    let (data, _) = control(&session_id, "poke", &["on".into()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(data["poke_enabled"], true);
+    assert!(data.get("next_prompt").is_none());
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 6);
+
+    initialize_remote_session("remote-disabled", false).unwrap();
+    initialize_remote_session("remote-disabled", true).unwrap();
+    assert!(
+        !read_state(&state_path("remote-disabled").unwrap())
+            .unwrap()
+            .poke_enabled
+    );
+}
+
+#[tokio::test]
 async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actual_context() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();

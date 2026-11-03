@@ -56,8 +56,7 @@ impl Target {
         let socket = self
             .socket
             .as_deref()
-            .map(|v| format!(" --socket {}", quote(v)))
-            .unwrap_or_default();
+            .map_or_else(String::new, |v| format!(" --socket {}", quote(v)));
         let cwd = self
             .cwd
             .as_deref()
