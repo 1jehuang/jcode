@@ -2407,7 +2407,10 @@ mod tests {
         // Use a temp socket so we don't talk to the shared daemon.
         let tmp = std::env::temp_dir().join(format!("jcode-e2e-otel-{}.sock", port));
 
+        let home = std::env::temp_dir().join(format!("jcode-e2e-otel-home-{}", port));
         let output = std::process::Command::new(&bin)
+            // Isolated home: no inherited credentials/config, so no live model requests.
+            .env("JCODE_HOME", &home)
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://127.0.0.1:{port}"))
             .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
             // Do NOT set JCODE_NO_TELEMETRY: OTEL is independent of anonymous telemetry,
@@ -2419,8 +2422,9 @@ mod tests {
             .arg("echo hello")
             .output();
 
-        // Clean up socket file.
+        // Clean up socket file and isolated home.
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
 
         match output {
             Err(e) => {
@@ -2505,7 +2509,10 @@ mod tests {
         });
 
         let tmp = std::env::temp_dir().join(format!("jcode-e2e-otel-notelem-{}.sock", port));
+        let home = std::env::temp_dir().join(format!("jcode-e2e-otel-notelem-home-{}", port));
         let output = std::process::Command::new(&bin)
+            // Isolated home: no inherited credentials/config, so no live model requests.
+            .env("JCODE_HOME", &home)
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://127.0.0.1:{port}"))
             .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
             // Explicitly set the anonymous-telemetry opt-out flag.
@@ -2518,6 +2525,7 @@ mod tests {
             .arg("echo hello")
             .output();
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
 
         if let Err(e) = output {
             eprintln!("Binary failed to launch: {e} — skipping");
