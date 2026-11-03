@@ -1751,6 +1751,12 @@ pub(super) async fn handle_client(
                     supports_user_response,
                 )
                 .await;
+                if requested_continuation {
+                    super::runtime_ssh_loops::initialize_remote_session(
+                        &client_session_id,
+                        crate::config::config().features.auto_poke,
+                    )?;
+                }
                 client_subscribed = true;
                 provisional_session = false;
             }

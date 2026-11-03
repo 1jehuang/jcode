@@ -494,6 +494,18 @@ async fn handle_remote_key_internal(
     }
 
     if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            let args = if app.auto_poke_incomplete_todos {
+                vec!["off".to_string()]
+            } else if app.is_processing {
+                vec!["on".to_string()]
+            } else {
+                Vec::new()
+            };
+            remote.runtime_command("poke", args).await?;
+            app.set_status_notice("Requested remote poke toggle");
+            return Ok(());
+        }
         if app.auto_poke_incomplete_todos {
             let cleared = app_mod::commands::disable_auto_poke(app);
             app.set_status_notice("Poke: OFF");

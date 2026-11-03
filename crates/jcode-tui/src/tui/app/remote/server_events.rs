@@ -648,8 +648,20 @@ fn handle_server_event_inner(
     }
 
     // Control responses are transcript notices, never conversation-turn activity.
-    if let ServerEvent::RuntimeCommandResult { id, message, .. } = event {
+    if let ServerEvent::RuntimeCommandResult {
+        id,
+        command,
+        data,
+        message,
+    } = event
+    {
         remote.finish_runtime_command(id);
+        if command == "poke"
+            && let Some(enabled) = data["poke_enabled"].as_bool()
+        {
+            app.auto_poke_incomplete_todos = enabled;
+            app.auto_poke_default_on = enabled;
+        }
         app.push_display_message(DisplayMessage::system(message));
         return true;
     }
