@@ -402,6 +402,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels: true,
         supports_user_response: true,
         supports_server_failover: false,
+        supports_turn_identity: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -422,6 +423,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_turn_identity: _,
         id,
         working_dir,
         selfdev,
@@ -464,6 +466,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_turn_identity: _,
         id,
         working_dir,
         selfdev,
@@ -684,9 +687,11 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
             ..
         }
     ));
-    assert!(serde_json::to_value(&legacy)?
-        .get("native_ssh_protocol")
-        .is_none());
+    assert!(
+        serde_json::to_value(&legacy)?
+            .get("native_ssh_protocol")
+            .is_none()
+    );
     Ok(())
 }
 

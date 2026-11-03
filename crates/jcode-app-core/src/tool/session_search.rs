@@ -322,7 +322,7 @@ impl Tool for SessionSearchTool {
                 },
                 "include_tools": {
                     "type": "boolean",
-                    "description": "Include raw tool calls and tool results. Defaults to false to reduce log noise."
+                    "description": "Include raw tool calls and tool results. Defaults to false to reduce log noise. Tool intents and todo task names/descriptions are always searchable."
                 },
                 "include_system": {
                     "type": "boolean",
@@ -1550,9 +1550,6 @@ fn append_session_results(
         if !options.include_system && is_system_like_message(msg) {
             continue;
         }
-        if is_tool_only_message(msg) && !options.include_tools {
-            continue;
-        }
         if !role_filter_allows_message(msg, options) {
             continue;
         }
@@ -1750,9 +1747,6 @@ fn build_jcode_context(
             if !options.include_system && is_system_like_message(msg) {
                 return None;
             }
-            if !options.include_tools && is_tool_only_message(msg) {
-                return None;
-            }
             let text = searchable_message_text(msg, options.include_tools);
             if text.trim().is_empty() {
                 return None;
@@ -1776,25 +1770,8 @@ fn truncate_context_text(text: &str) -> String {
     }
 }
 
-fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {
-    msg.content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.clone()),
-            ContentBlock::ToolResult { content, .. } if include_tools => Some(content.clone()),
-            ContentBlock::ToolUse { name, input, .. } if include_tools => {
-                let input = input.to_string();
-                Some(if input == "null" {
-                    format!("[tool call: {name}]")
-                } else {
-                    format!("[tool call: {name}] {input}")
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+mod searchable_text;
+use searchable_text::searchable_message_text;
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
     msg.display_role.is_some()

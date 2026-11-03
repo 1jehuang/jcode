@@ -4,6 +4,31 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+#[tokio::test]
+async fn silent_background_task_still_publishes_started_activity() {
+    let mut events = Bus::global().subscribe();
+    BackgroundTaskManager::publish_task_started_activity(
+        "silent-start",
+        "bash",
+        Some("silent work"),
+        "silent-session",
+        false,
+    );
+    let activity = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(BusEvent::UiActivity(activity)) = events.recv().await {
+                if activity.session_id.as_deref() == Some("silent-session") {
+                    break activity;
+                }
+            }
+        }
+    })
+    .await
+    .expect("silent start must be published");
+    assert!(activity.message.contains("`silent-start`"));
+    assert!(activity.message.contains("`silent work`"));
+}
+
 struct SignalDrop(Option<tokio::sync::oneshot::Sender<()>>);
 
 impl Drop for SignalDrop {

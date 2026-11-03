@@ -1875,6 +1875,19 @@ pub(super) async fn update_member_status_with_report_tldr(
                     .unwrap_or(&session_id[..8.min(session_id.len())]);
                 let msg =
                     completion_notification_message(name, status, completion_report.as_deref());
+                // Display notifications alone never enter the owner's model
+                // context. Deliver reports through the reliable runtime bus,
+                // which wakes idle owners and queues reports for busy ones.
+                // Explicit stops are cancellation, not permission to restart.
+                if report_back_to_session_id.is_some() && status != "stopped" {
+                    crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
+                        crate::bus::SwarmWorkerReported {
+                            session_id: recipient_session_id.clone(),
+                            worker_session_id: session_id.to_string(),
+                            notification: msg.clone(),
+                        },
+                    ));
+                }
                 let _ = fanout_session_event(
                     swarm_members,
                     &recipient_session_id,

@@ -270,7 +270,7 @@ fn config_set(path: &Path, key: &str, raw: &str) -> Result<()> {
     }
     let parsed = format!("value = {raw}")
         .parse::<toml::Value>()
-        .ok()
+        .map_or_else(|_| Some(toml::Value::String(raw.into())), Some)
         .and_then(|v| v.get("value").cloned())
         .unwrap_or_else(|| toml::Value::String(raw.into()));
     *target = serde_json::to_value(&parsed)?;
@@ -331,8 +331,13 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::rename(&temporary, path)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    if result.is_err()
+        && let Err(error) = std::fs::remove_file(&temporary)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::debug(&format!(
+            "Could not remove failed SSH edit temporary file: {error}"
+        ));
     }
     result
 }
@@ -600,6 +605,11 @@ mod tests {
 
     #[test]
     fn viewer_bounds_and_rejects_private_content() {
+        // Jcode's agent environment can set TMPDIR inside ~/.jcode, which
+        // this viewer intentionally rejects regardless of the file name.
+        #[cfg(unix)]
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        #[cfg(not(unix))]
         let dir = tempfile::tempdir().unwrap();
         let normal = dir.path().join("readme.txt");
         std::fs::write(&normal, "hello").unwrap();

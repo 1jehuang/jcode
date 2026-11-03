@@ -4093,6 +4093,9 @@ impl App {
         // Send expanded content (with actual pasted text) to model
         let images = self.take_pending_image_payloads();
         if !images.is_empty() {
+            self.invalidate_side_pane_images_signature();
+        }
+        if !images.is_empty() {
             crate::logging::info(&format!(
                 "Submitting with {} image(s): {}",
                 images.len(),

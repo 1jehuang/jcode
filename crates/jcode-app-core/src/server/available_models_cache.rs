@@ -2,6 +2,7 @@
 use super::available_models_dedup::available_models_dedup_key;
 use crate::agent::Agent;
 use crate::protocol::ServerEvent;
+use crate::provider::Provider;
 use jcode_provider_core::ModelCatalogSnapshot;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -133,8 +134,8 @@ impl Cache {
 
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
 
-fn key(agent: &Agent) -> Option<String> {
-    let identity = agent.provider_handle().catalog_sharing_identity()?;
+fn key(provider: &dyn Provider) -> Option<String> {
+    let identity = provider.catalog_sharing_identity()?;
     Some(format!(
         "{identity:?}/{:?}",
         crate::model_usage::catalog_usage_revision()
@@ -142,21 +143,101 @@ fn key(agent: &Agent) -> Option<String> {
 }
 
 pub(super) fn for_agent(agent: &Agent) -> Arc<Catalog> {
+    for_provider(agent.provider_handle().as_ref())
+}
+
+fn provider_catalog_snapshot(provider: &dyn Provider) -> ModelCatalogSnapshot {
+    let model = provider.model();
+    let model = provider
+        .explicit_provider_pin_for_current_model()
+        .map(|pin| format!("{model}@{pin}"))
+        .unwrap_or(model);
+    let mut snapshot = ModelCatalogSnapshot::new(
+        Some(provider.display_name()),
+        Some(model),
+        provider.available_models_display(),
+        provider.model_routes(),
+    );
+    crate::model_usage::enrich_routes(&mut snapshot.model_routes);
+    snapshot
+}
+
+fn for_provider(provider: &dyn Provider) -> Arc<Catalog> {
     // Keep the mutex across the build: concurrent clients wait for one leader
     // instead of each enriching/encoding the same catalog on a miss.
     for _ in 0..3 {
-        let before = key(agent);
+        let before = key(provider);
         let catalog = CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(before.clone(), || agent.model_catalog_snapshot());
+            .get(before.clone(), || provider_catalog_snapshot(provider));
         // Provider/catalog refreshes and usage writes can race the build. Never
         // return a memo whose declared inputs changed while it was being built.
-        if before == key(agent) {
+        if before == key(provider) {
             return catalog;
         }
     }
-    Arc::new(Catalog::new(agent.model_catalog_snapshot()))
+    Arc::new(Catalog::new(provider_catalog_snapshot(provider)))
+}
+
+// A cloned handle is not a frozen provider: selection mutates it in place.
+// Include model and display name even for providers without a sharing identity.
+#[derive(PartialEq, Eq)]
+struct BuildToken {
+    identity: Option<String>,
+    name: String,
+    model: String,
+    pin: Option<String>,
+    usage: crate::model_usage::CatalogUsageRevision,
+}
+
+impl BuildToken {
+    fn new(provider: &dyn Provider) -> Self {
+        Self {
+            identity: provider.catalog_sharing_identity(),
+            name: provider.display_name(),
+            model: provider.model(),
+            pin: provider.explicit_provider_pin_for_current_model(),
+            usage: crate::model_usage::catalog_usage_revision(),
+        }
+    }
+}
+
+/// Build without holding the agent or blocking the async worker. Capture reply
+/// metadata only after revalidating under the agent lock, so a model switch
+/// cannot combine old catalog fields with a new serving credential/tier. A busy
+/// agent preserves the caller's existing fallback or skip behavior. Changed
+/// inputs retry, with a bound so continuous refreshes cannot starve a request.
+/// A failed blocking task is an error, not an authoritative empty catalog.
+pub(super) async fn try_for_agent<T>(
+    agent: &Arc<tokio::sync::Mutex<Agent>>,
+    capture: impl FnOnce(&Agent) -> T,
+) -> anyhow::Result<Option<(Arc<Catalog>, T)>> {
+    for _ in 0..3 {
+        let (provider, generation, token) = {
+            let Ok(guard) = agent.try_lock() else {
+                return Ok(None);
+            };
+            let provider = guard.provider_handle();
+            let token = BuildToken::new(provider.as_ref());
+            (provider, guard.provider_model_selection_generation(), token)
+        };
+        let build_provider = Arc::clone(&provider);
+        let catalog =
+            tokio::task::spawn_blocking(move || for_provider(build_provider.as_ref())).await?;
+        let Ok(guard) = agent.try_lock() else {
+            return Ok(None);
+        };
+        let current = guard.provider_handle();
+        if !Arc::ptr_eq(&provider, &current)
+            || guard.provider_model_selection_generation() != generation
+            || BuildToken::new(current.as_ref()) != token
+        {
+            continue;
+        }
+        return Ok(Some((catalog, capture(&guard))));
+    }
+    anyhow::bail!("Model catalog changed repeatedly while building; retry the request")
 }
 
 pub(super) fn stats() -> serde_json::Value {
@@ -280,3 +361,7 @@ mod tests {
         assert_eq!(catalog.snapshot().model_routes.len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "available_models_cache_tests.rs"]
+mod offload_tests;

@@ -292,7 +292,7 @@ impl DaemonSession {
         }
         let event = serde_json::from_str(&line)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
-        Ok(event)
+        Ok(super::commands::unwrap_turn_event(event))
     }
 }
 
@@ -840,6 +840,7 @@ impl AcpRuntime {
                 supports_pdf_panels: false,
                 supports_user_response: false,
                 supports_server_failover: true,
+                supports_turn_identity: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -917,6 +918,7 @@ impl AcpRuntime {
                 supports_pdf_panels: false,
                 supports_user_response: false,
                 supports_server_failover: true,
+                supports_turn_identity: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -1526,7 +1528,7 @@ impl EventMapper {
     }
 
     fn map_event(&mut self, event: ServerEvent) -> Vec<Value> {
-        match event {
+        match super::commands::unwrap_turn_event(event) {
             ServerEvent::TextDelta { text } => vec![agent_message_chunk(text)],
             ServerEvent::TextReplace { text } => vec![agent_message_chunk(text)],
             // ACP chunks cannot retract prior output. Surface the corrected
@@ -1991,6 +1993,61 @@ pub(crate) async fn run_acp_command(
     AcpRuntime::new(profile, provider_choice, model, provider_profile)
         .run()
         .await
+}
+
+#[cfg(test)]
+mod turn_envelope_tests {
+    use super::*;
+    use crate::protocol::TurnIdentity;
+
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn mapper_preserves_explicit_wrapped_text_and_tool_events() {
+        for event in [
+            ServerEvent::TextDelta {
+                text: "hello".into(),
+            },
+            ServerEvent::ToolStart {
+                id: "tool-1".into(),
+                name: "read".into(),
+            },
+        ] {
+            let plain =
+                EventMapper::new("session".into(), AcpProfile::Standard).map_event(event.clone());
+            let wrapped = EventMapper::new("session".into(), AcpProfile::Standard)
+                .map_event(envelope(envelope(event)));
+            assert!(!plain.is_empty());
+            assert_eq!(wrapped, plain);
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_unwraps_terminal_events_before_request_waiters() {
+        let (client, peer) = crate::transport::stream_pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let session = DaemonSession::new("session".into(), reader, writer, 1);
+        let (_, mut peer_writer) = peer.into_split();
+        let event = envelope(envelope(ServerEvent::Done { id: 42 }));
+        let mut json = serde_json::to_string(&event).unwrap();
+        json.push('\n');
+        peer_writer.write_all(json.as_bytes()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_done(&session, 42),
+        )
+        .await
+        .expect("wrapped Done must terminate request waiter")
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
