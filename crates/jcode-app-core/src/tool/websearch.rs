@@ -42,6 +42,11 @@ struct BingSearchOptions<'a> {
     api_key_env: &'a str,
 }
 
+struct BackendClients<'a> {
+    custom: &'a reqwest::Client,
+    kagi: &'a reqwest::Client,
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -105,8 +110,10 @@ impl Tool for WebSearchTool {
             let allow_bing_api = index == 0;
             match tool
                 .search_with_engine(
-                    custom_client,
-                    kagi_client,
+                    BackendClients {
+                        custom: custom_client,
+                        kagi: kagi_client,
+                    },
                     engine,
                     &params.query,
                     num_results,
@@ -161,8 +168,7 @@ impl Tool for WebSearchTool {
 impl WebSearchTool {
     async fn search_with_engine(
         &self,
-        custom_client: &reqwest::Client,
-        kagi_client: &reqwest::Client,
+        clients: BackendClients<'_>,
         engine: WebSearchEngine,
         query: &str,
         num_results: usize,
@@ -179,7 +185,7 @@ impl WebSearchTool {
             WebSearchEngine::Kagi => {
                 let config = crate::config::config();
                 kagi::search(
-                    kagi_client,
+                    clients.kagi,
                     query,
                     num_results,
                     &config.websearch.kagi_api_key_env,
@@ -191,7 +197,7 @@ impl WebSearchTool {
                 let custom = config.websearch.custom.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("Custom search requires [websearch.custom] configuration")
                 })?;
-                search_custom_with_client(custom_client, custom, query, num_results).await
+                search_custom_with_client(clients.custom, custom, query, num_results).await
             }
             // Provider-native search never reaches the local tool: engine order
             // filters it out. Kept for exhaustiveness.
@@ -572,7 +578,7 @@ async fn search_custom_with_client(
     count: usize,
 ) -> Result<Vec<SearchResult>> {
     // The selected profile preserves the no-redirect policy and 30s timeout.
-    let request = custom_request(&client, config, query, count, |name| {
+    let request = custom_request(client, config, query, count, |name| {
         match std::env::var(name) {
             Ok(value) => Some(value),
             Err(error) => {
