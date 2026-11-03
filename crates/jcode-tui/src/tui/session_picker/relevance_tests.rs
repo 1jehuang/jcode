@@ -361,3 +361,43 @@ fn opening_prompt_evidence_requires_a_local_multiword_match() {
         ) > 0
     );
 }
+
+#[test]
+fn mxabox_literal_transcript_hit_beats_recent_fuzzy_metadata_and_transcripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let literal = temp.path().join("literal.json");
+    let fuzzy = temp.path().join("fuzzy.json");
+    std::fs::write(&literal, r#"{"text":"repair mxabox integration"}"#).unwrap();
+    std::fs::write(&fuzzy, r#"{"text":"repair maxbox integration"}"#).unwrap();
+    let mut picker = SessionPicker::new(vec![
+        session("metadata", "maxbox", 0, &fuzzy),
+        session("transcript", "unrelated", 1, &fuzzy),
+        session("literal", "old integration work", 1000, &literal),
+    ]);
+    picker.search_query = "mxabox".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker).first().map(String::as_str), Some("literal"));
+}
+
+#[test]
+fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
+    let temp = tempfile::tempdir().unwrap();
+    let close = temp.path().join("close.json");
+    let loose = temp.path().join("loose.json");
+    std::fs::write(&close, r#"{"text":"maxbox"}"#).unwrap();
+    std::fs::write(&loose, r#"{"text":"maxboxes"}"#).unwrap();
+    let tokens = search_query_tokens("mxabox");
+    let cancel = AtomicBool::new(false);
+    let close_score = paths_match_scored(&[close.clone()], &tokens, &cancel).unwrap();
+    let loose_score = paths_match_scored(&[loose.clone()], &tokens, &cancel).unwrap();
+    assert!(close_score > loose_score, "{close_score} <= {loose_score}");
+    let mut picker = SessionPicker::new(vec![
+        session("loose", "unrelated", 0, &loose),
+        session("close", "unrelated", 1000, &close),
+    ]);
+    picker.search_query = "mxabox".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["close", "loose"]);
+}

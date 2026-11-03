@@ -372,10 +372,15 @@ impl TranscriptSearch {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        if paths_match(&candidate.paths, &missing, &cancel)
-                            && sender.send((candidate.id, rank)).is_err()
+                        if let Some(score) = paths_match_scored(&candidate.paths, &missing, &cancel)
                         {
-                            return;
+                            let rank = SearchRank {
+                                score: rank.score + score,
+                                ..rank
+                            };
+                            if sender.send((candidate.id, rank)).is_err() {
+                                return;
+                            }
                         }
                     }
                 }) {
@@ -447,6 +452,7 @@ struct Scan<'a> {
     found: Vec<bool>,
     cancel: &'a AtomicBool,
     fuzzy: bool,
+    score: i64,
 }
 
 impl Scan<'_> {
@@ -461,9 +467,36 @@ impl Scan<'_> {
         let lower = text.to_lowercase();
         for (token, found) in self.tokens.iter().zip(&mut self.found) {
             if !*found {
-                *found = lower.contains(token)
-                    || (self.fuzzy
-                        && jcode_fuzzy::PreparedTokenQuery::new(token).matches_search_text(&lower));
+                if lower.contains(token) {
+                    *found = true;
+                    if self.fuzzy {
+                        self.score +=
+                            i64::from(jcode_fuzzy::fuzzy_score(token, token).unwrap_or(0));
+                    }
+                } else if self.fuzzy
+                    && token.chars().count() >= 4
+                    && token.chars().all(char::is_alphabetic)
+                {
+                    let query = jcode_fuzzy::PreparedTokenQuery::new(token);
+                    // Score the words that actually matched, not unrelated
+                    // metadata. Bound DP work for URLs and minified output.
+                    if let Some(score) = lower
+                        .split_whitespace()
+                        .filter(|word| word.chars().count() <= 128)
+                        .filter_map(|word| {
+                            query.score(word).map(|score| {
+                                // The shared matcher intentionally treats suffixes
+                                // like prefixes. Transcript search should prefer
+                                // the closest word over an incidental longer one.
+                                score - word.chars().count().abs_diff(token.chars().count()) as i32
+                            })
+                        })
+                        .max()
+                    {
+                        *found = true;
+                        self.score += i64::from(score);
+                    }
+                }
             }
         }
         if self.complete() {
@@ -536,8 +569,13 @@ impl Read for CancellableReader<'_> {
     }
 }
 
+#[cfg(test)]
 fn paths_match(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool) -> bool {
     paths_match_mode(paths, tokens, cancel, true)
+}
+
+fn paths_match_scored(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool) -> Option<i64> {
+    scan_paths(paths, tokens, cancel, true)
 }
 
 fn paths_match_mode(
@@ -546,22 +584,32 @@ fn paths_match_mode(
     cancel: &AtomicBool,
     fuzzy: bool,
 ) -> bool {
+    scan_paths(paths, tokens, cancel, fuzzy).is_some()
+}
+
+fn scan_paths(
+    paths: &[PathBuf],
+    tokens: &[String],
+    cancel: &AtomicBool,
+    fuzzy: bool,
+) -> Option<i64> {
     let mut scan = Scan {
         tokens,
         found: vec![false; tokens.len()],
         cancel,
         fuzzy,
+        score: 0,
     };
     for path in paths {
         if cancel.load(Ordering::Relaxed) {
-            return false;
+            return None;
         }
         scan_file(path, &mut scan);
         if scan.complete() {
-            return true;
+            return Some(scan.score);
         }
     }
-    false
+    None
 }
 
 fn scan_file(path: &Path, scan: &mut Scan<'_>) {
