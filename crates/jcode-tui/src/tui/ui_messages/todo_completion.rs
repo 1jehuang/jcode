@@ -49,17 +49,19 @@ fn render_with_gate_diagnostics(
     let width = width.max(1) as usize;
     let mut lines =
         render_finished_todo_summary(&snapshot.todos, "", width, Some("Todo completion"));
-    if let Some(completed_at) = snapshot.completed_at {
-        lines.push(super::super::truncate_line_with_ellipsis_to_width(
-            &Line::from(Span::styled(
-                format!(
-                    "  finished {}",
-                    crate::tui::session_picker::format_time_ago(completed_at)
-                ),
-                Style::default().fg(todo_meta_color()),
-            )),
-            width,
+    // Keep the age on the summary row itself so the report stays one line.
+    if let Some(completed_at) = snapshot.completed_at
+        && let Some(last) = lines.last_mut()
+    {
+        let mut spans = last.spans.clone();
+        spans.push(Span::styled(
+            format!(
+                "  finished {}",
+                crate::tui::session_picker::format_time_ago(completed_at)
+            ),
+            Style::default().fg(todo_meta_color()),
         ));
+        *last = super::super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width);
     }
     if show_gate_diagnostics {
         lines.extend(render_gate_categories(&snapshot.observations, width));
