@@ -38,6 +38,9 @@ pub struct SubscriptionUsage {
 pub struct SubscriptionCapabilities {
     #[serde(default)]
     pub voice_transcription: bool,
+    /// Server-verified entitlement for mobile transcript sync.
+    #[serde(default)]
+    pub mobile_sync: bool,
     /// Server-verified entitlement and configured isolated build service.
     #[serde(default)]
     pub remote_compile: bool,

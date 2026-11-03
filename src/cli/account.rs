@@ -134,3 +134,69 @@ mod tests {
         );
     }
 }
+
+pub(crate) async fn run_mobile(action: super::args::MobileCommand) -> Result<()> {
+    use super::args::MobileCommand;
+    use crate::mobile_sync;
+    let client = crate::provider::shared_http_client();
+    match action {
+        MobileCommand::Enable => {
+            let Some(api_key) = crate::subscription_catalog::configured_api_key() else {
+                anyhow::bail!(
+                    "Mobile sync needs a Jcode account. Run `jcode account login` first."
+                );
+            };
+            let api_base = subscription_api::configured_api_base();
+            let me = subscription_api::fetch_subscription_me_with(&client, &api_base, &api_key)
+                .await
+                .map_err(|err| anyhow::anyhow!("could not check your Jcode account: {err}"))?;
+            if !me.capabilities.mobile_sync {
+                anyhow::bail!(
+                    "Mobile sync requires an active Jcode subscription. Subscribe at https://jcode.sh/pricing"
+                );
+            }
+            let mut state = mobile_sync::load_state();
+            state.enabled = true;
+            mobile_sync::save_state(&state)?;
+            println!("Mobile sync is on for {}.", me.email);
+            println!("Uploading recent sessions…");
+            let report = mobile_sync::sync_once(&client).await?;
+            println!(
+                "Synced {} sessions ({} messages{}). New activity syncs automatically while jcode runs.",
+                report.sessions_uploaded,
+                report.messages_uploaded,
+                if report.errors > 0 {
+                    format!(", {} errors", report.errors)
+                } else {
+                    String::new()
+                }
+            );
+            println!("Sign in to the jcode iOS app with the same email to see them.");
+        }
+        MobileCommand::Disable => {
+            mobile_sync::save_state(&mobile_sync::MobileSyncState::default())?;
+            match mobile_sync::wipe_remote(&client).await {
+                Ok(()) => println!("Mobile sync is off and stored transcripts were deleted."),
+                Err(err) => println!(
+                    "Mobile sync is off. Deleting stored transcripts failed ({err}); rerun `jcode mobile disable` to retry."
+                ),
+            }
+        }
+        MobileCommand::Status => {
+            let state = mobile_sync::load_state();
+            println!(
+                "Mobile sync: {} ({} sessions tracked)",
+                if state.enabled { "on" } else { "off" },
+                state.sessions.len()
+            );
+        }
+        MobileCommand::Sync => {
+            let report = mobile_sync::sync_once(&client).await?;
+            println!(
+                "Synced {} sessions, {} messages, {} errors",
+                report.sessions_uploaded, report.messages_uploaded, report.errors
+            );
+        }
+    }
+    Ok(())
+}

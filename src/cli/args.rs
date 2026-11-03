@@ -281,6 +281,12 @@ pub(crate) enum Command {
         action: AccountCommand,
     },
 
+    /// Sync session transcripts to your Jcode account for the iOS app
+    Mobile {
+        #[command(subcommand)]
+        action: MobileCommand,
+    },
+
     /// Run in simple REPL mode (no TUI)
     Repl,
 
@@ -638,6 +644,18 @@ pub(crate) enum TelemetryCommand {
     Enable,
     /// Disable all telemetry persistently
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum MobileCommand {
+    /// Turn on transcript sync to your Jcode account (requires a subscription)
+    Enable,
+    /// Turn off sync and delete transcripts stored for mobile
+    Disable,
+    /// Show whether mobile sync is on
+    Status,
+    /// Run one sync pass now
+    Sync,
 }
 
 #[derive(Subcommand, Debug)]

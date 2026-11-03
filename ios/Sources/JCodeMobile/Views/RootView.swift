@@ -1,19 +1,22 @@
 import JCodeKit
 import SwiftUI
 
-/// Top-level router: pairing when no server, chat otherwise.
+/// Top-level router: jcode account sign-in, then synced sessions. The
+/// offline demo keeps the live chat UI.
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var deepLinkError: String?
+    @Environment(CloudModel.self) private var cloud
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 Theme.background.ignoresSafeArea()
-                if model.activeServer == nil && !model.isDemo {
-                    PairingView()
-                } else {
+                if model.isDemo {
                     ChatView()
+                } else if cloud.credential != nil {
+                    CloudSessionsView()
+                } else {
+                    SignInView()
                 }
             }
             .environment(\.compactEdgePads, CompactEdgePads(safeArea: proxy.safeAreaInsets))
@@ -53,32 +56,6 @@ struct RootView: View {
                 }
                 return
             }
-            // Auto-connect to the most recent server on launch.
-            if let server = model.activeServer, !model.isConnected {
-                model.connect(to: server)
-            }
-        }
-        .onOpenURL { url in
-            guard let payload = PairURI.parse(url.absoluteString) else { return }
-            Task {
-                do {
-                    try await model.pair(
-                        gateway: payload.gateway,
-                        code: payload.code,
-                        deviceName: UIDevice.current.name
-                    )
-                } catch {
-                    deepLinkError = "Pairing failed: \(error.localizedDescription)"
-                }
-            }
-        }
-        .alert("Pairing", isPresented: .init(
-            get: { deepLinkError != nil },
-            set: { if !$0 { deepLinkError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(deepLinkError ?? "")
         }
     }
 }

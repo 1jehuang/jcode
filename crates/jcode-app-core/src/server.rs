@@ -1555,6 +1555,9 @@ impl Server {
             Arc::clone(&self.swarm_state.members),
         );
 
+        // Upload transcripts for the iOS app when the user enabled mobile sync.
+        crate::mobile_sync::spawn_background_sync();
+
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
             tokio::spawn(async {

@@ -364,6 +364,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             super::args::AccountCommand::Manage => account::run_manage()?,
             super::args::AccountCommand::Logout => account::run_logout().await?,
         },
+        Some(Command::Mobile { action }) => account::run_mobile(action).await?,
         Some(Command::Repl) => {
             let (provider, registry) =
                 provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
