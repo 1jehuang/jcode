@@ -114,27 +114,6 @@ fn public_manage_url(candidate: Option<&str>) -> &str {
         .unwrap_or(crate::subscription_catalog::JCODE_ACCOUNT_URL)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn manage_url_accepts_only_public_allowlisted_https_origins() {
-        assert_eq!(
-            public_manage_url(Some("https://jcode.sh/account")),
-            "https://jcode.sh/account"
-        );
-        assert_eq!(
-            public_manage_url(Some("https://evil.example/?key=jck_live_secret")),
-            crate::subscription_catalog::JCODE_ACCOUNT_URL
-        );
-        assert_eq!(
-            public_manage_url(Some("https://user:pass@jcode.sh/account")),
-            crate::subscription_catalog::JCODE_ACCOUNT_URL
-        );
-    }
-}
-
 pub(crate) async fn run_mobile(action: super::args::MobileCommand) -> Result<()> {
     use super::args::MobileCommand;
     use crate::mobile_sync;
@@ -217,4 +196,25 @@ pub(crate) async fn run_mobile(action: super::args::MobileCommand) -> Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manage_url_accepts_only_public_allowlisted_https_origins() {
+        assert_eq!(
+            public_manage_url(Some("https://jcode.sh/account")),
+            "https://jcode.sh/account"
+        );
+        assert_eq!(
+            public_manage_url(Some("https://evil.example/?key=jck_live_secret")),
+            crate::subscription_catalog::JCODE_ACCOUNT_URL
+        );
+        assert_eq!(
+            public_manage_url(Some("https://user:pass@jcode.sh/account")),
+            crate::subscription_catalog::JCODE_ACCOUNT_URL
+        );
+    }
 }
