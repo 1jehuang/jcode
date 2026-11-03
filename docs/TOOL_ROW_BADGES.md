@@ -1,12 +1,13 @@
 # Tool Row Badges: Duration and Timestamp
 
-Completed tool transcript rows can carry two optional badges after the token
-count:
+Completed tool transcript rows can carry two optional badges: the timestamp
+leads the row in a fixed left clock column, and the duration rides with the
+right-side measurements after the token count:
 
 ```
-✓ bash · Прогон acceptance-тестов · 223 tok · 2m 3s · 17:32:05
-                             ^^^^^^^    ^^^^^    ^^^^^^^^
-                             tokens     duration timestamp
+17:32:05   ✓ bash · Прогон acceptance-тестов · 223 tok · 2m 3s
+^^^^^^^^                               ^^^^^^^    ^^^^^
+timestamp                              tokens     duration
 ```
 
 Both are strictly opt-in and off by default, and each has its own config key,
@@ -29,8 +30,10 @@ how long the call took.
 
 ## How the timestamp stamp works
 
-`display.show_tool_timestamp` (default `false`) adds `· 17:32:05` to a tool
-row: the wall-clock time when the call completed (#1454).
+`display.show_tool_timestamp` (default `false`) prefixes a tool row with
+`17:32:05`: the wall-clock time when the call completed (#1454). The stamp
+sits before the tool name at a fixed column, so a column of rows reads as a
+timeline; the measurements stay on the right.
 
 - Every stored message already records a wall-clock `StoredMessage.timestamp`;
   the stamp renders it through `RenderedMessage` -> `DisplayMessage` -> the
@@ -49,15 +52,16 @@ row: the wall-clock time when the call completed (#1454).
 
 ## Narrow terminals
 
-Both badges ride with the preserved right-side suffix of the tool row. When
-the transcript is narrow, the summary truncates first; token count, duration,
-and timestamp stay visible (checked at 40/56/72/120 columns).
+The timestamp is part of the reserved left prefix, and the duration rides
+with the preserved right-side suffix of the tool row. When the transcript is
+narrow, the summary truncates first; the timestamp, tool name, token count,
+and duration stay visible (checked at 40/56/72/120 columns).
 
 ## Config
 
 ```toml
 [display]
 show_tool_duration = false   # · 2m 3s   (how long the call took)
-show_tool_timestamp = false  # · 17:32:05 (when the call ran)
+show_tool_timestamp = false  # 17:32:05 ✓ bash · ... (when the call ran)
 timestamp_tz = "local"       # or "UTC+3", "utc-5", "UTC+05:30", "3"
 ```

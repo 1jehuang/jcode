@@ -1,7 +1,8 @@
 //! #1454 acceptance tests: the opt-in tool row time badge. When
 //! `display.show_tool_timestamp` is enabled, completed tool rows carry an
-//! " · HH:MM:SS" stamp after the token count (and any duration badge),
-//! honoring `display.timestamp_tz`; the clock span is always neutral.
+//! HH:MM:SS stamp in the LEFT prefix, before the tool name, so every stamp
+//! starts at the same column (a fixed clock column the eye can scan).
+//! Honors `display.timestamp_tz`; the clock span is always neutral.
 
 use super::*;
 
@@ -38,8 +39,8 @@ fn rendered_first_row(msg: &DisplayMessage, width: u16) -> String {
         .unwrap_or_default()
 }
 
-/// The opt-in stamp renders HH:MM:SS after the token count (and the duration
-/// badge) through the real render_tool_message pipeline.
+/// The opt-in stamp renders HH:MM:SS in the left prefix, before the tool
+/// name, through the real render_tool_message pipeline.
 #[test]
 fn test_tool_row_stamp_renders_when_enabled() {
     let _lock = viewport_snapshot_test_lock();
@@ -63,9 +64,14 @@ fn test_tool_row_stamp_renders_when_enabled() {
     let tok_pos = row.find("tok").expect("tokens present");
     let dur_pos = row.find("48.3s").expect("duration present");
     let stamp_pos = row.find(&expected).expect("stamp present");
+    let name_pos = row.find("bash").expect("tool name present");
     assert!(
-        tok_pos < dur_pos && dur_pos < stamp_pos,
-        "order must be token -> duration -> stamp: {row}"
+        stamp_pos < name_pos,
+        "stamp must lead the row, before the tool name: {row}"
+    );
+    assert!(
+        tok_pos < dur_pos,
+        "right suffix order stays token -> duration: {row}"
     );
 }
 
@@ -162,8 +168,8 @@ fn test_tool_row_stamp_stays_neutral_for_any_duration_severity() {
     }
 }
 
-/// The stamp survives narrow widths as part of the preserved suffix: summary
-/// truncates first, token badge, duration badge and stamp all stay.
+/// The stamp survives narrow widths as part of the reserved prefix: summary
+/// truncates first; the stamp, tool name, token and duration badges stay.
 #[test]
 fn test_tool_row_stamp_survives_narrow_width() {
     let _lock = viewport_snapshot_test_lock();
@@ -191,9 +197,10 @@ fn test_tool_row_stamp_survives_narrow_width() {
         assert!(row.contains("tok"), "tokens lost at width {width}: {row}");
         let tok_pos = row.find("tok").expect("tokens present");
         let stamp_pos = row.find("23:15:42").expect("stamp present");
+        let name_pos = row.find("bash").expect("tool name present");
         assert!(
-            tok_pos < stamp_pos,
-            "stamp must trail the token badge at width {width}: {row}"
+            stamp_pos < name_pos,
+            "stamp must lead the row at width {width}: {row}"
         );
     }
 }
