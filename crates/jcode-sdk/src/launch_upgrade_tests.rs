@@ -198,3 +198,21 @@ fn upgrade_negotiation_is_bounded_for_unresponsive_old_runtime() {
     assert!(start.elapsed() < Duration::from_millis(300));
     server.join().unwrap();
 }
+
+#[test]
+fn final_upgrade_acknowledgement_is_read_after_peer_closes() {
+    let (mut stream, mut peer) = UnixStream::pair().unwrap();
+    writeln!(
+        peer,
+        "{}",
+        json!({"type":"reload_progress", "step":"upgrading"})
+    )
+    .unwrap();
+    drop(peer);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(
+        read_frame(&mut stream, deadline).unwrap().unwrap()["step"],
+        "upgrading"
+    );
+    assert_eq!(read_frame(&mut stream, deadline).unwrap(), None);
+}
