@@ -85,7 +85,8 @@ fn session_child_cannot_retain_parent_gate_lock() {
     drop(contender);
     // Darwin flock lifetime can include other open handles to this vnode in
     // the owner process. Close all of them before checking the child alone.
-    let (_, persisted_path) = gate.keep().unwrap();
+    let (gate_file, persisted_path) = gate.keep().unwrap();
+    drop(gate_file);
     drop(owner);
     let contender = std::fs::OpenOptions::new()
         .read(true)
@@ -192,6 +193,10 @@ fn browser_session_liveness_checks_pid_and_listener() {
         is_session_alive(&name),
         "live PID and listener must be reused"
     );
+    // Drain the liveness probe before closing the listener. Darwin may retain
+    // an endpoint while its completed connection is still in the accept queue.
+    let (probe, _) = listener.accept().unwrap();
+    drop(probe);
 
     // Reap a real child to obtain a dead PID without assuming a platform PID limit.
     let mut child = std::process::Command::new("true").spawn().unwrap();

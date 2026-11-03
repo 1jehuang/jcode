@@ -43,7 +43,7 @@ fn keep_recent_from_env() -> Option<usize> {
 
 /// Versions that must never be removed: active channels, the build manifest's
 /// canary/stable/pending-activation rollback targets.
-fn protected_versions() -> HashSet<String> {
+fn protected_versions() -> Result<HashSet<String>> {
     let mut protected = HashSet::new();
     for version in [
         read_current_version(),
@@ -63,7 +63,8 @@ fn protected_versions() -> HashSet<String> {
             }
         }
     }
-    if let Ok(manifest) = BuildManifest::load() {
+    let manifest = BuildManifest::load()?;
+    {
         protected.extend(manifest.stable.clone());
         protected.extend(manifest.canary.clone());
         if let Some(pending) = manifest.pending_activation.as_ref() {
@@ -72,7 +73,7 @@ fn protected_versions() -> HashSet<String> {
             protected.extend(pending.previous_shared_server_version.clone());
         }
     }
-    protected
+    Ok(protected)
 }
 
 /// Resolve `<channel>/jcode -> versions/<v>/jcode` to `<v>`.
@@ -96,29 +97,6 @@ fn version_from_binary_path(path: &Path) -> Option<String> {
     (parent == "versions").then_some(version)
 }
 
-/// Versions whose binary is the executable of a live process.
-#[cfg(target_os = "linux")]
-fn running_versions() -> HashSet<String> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return HashSet::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| std::fs::read_link(entry.path().join("exe")).ok())
-        .filter_map(|exe| {
-            // A deleted-but-running binary reads as "<path> (deleted)".
-            let text = exe.to_string_lossy();
-            let trimmed = text.strip_suffix(" (deleted)").unwrap_or(&text);
-            version_from_binary_path(Path::new(trimmed))
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn running_versions() -> HashSet<String> {
-    HashSet::new()
-}
-
 /// Remove old unreferenced version directories. Best-effort, rate limited to
 /// one pass per day per machine, safe to call from a startup thread.
 pub fn prune_old_versions() {
@@ -139,12 +117,13 @@ pub fn prune_old_versions() {
     let Some(running) = crate::prune::running_executable_ids() else {
         return;
     };
-    let mut protected = protected_versions();
+    let Ok(mut protected) = protected_versions() else {
+        return;
+    };
     let Ok(rollback) = crate::prune::ghe_backup_versions(&dir.join("versions")) else {
         return;
     };
     protected.extend(rollback);
-    protected.extend(running_versions());
     if let Ok(entries) = std::fs::read_dir(dir.join("versions")) {
         for entry in entries.flatten() {
             if crate::prune::contains_running_file(&entry.path(), &running) {
@@ -152,13 +131,18 @@ pub fn prune_old_versions() {
             }
         }
     }
-    let _ = prune_old_versions_in(
+    let _ = prune_and_mark(&dir, &protected, keep_recent);
+}
+
+fn prune_and_mark(dir: &Path, protected: &HashSet<String>, keep_recent: usize) -> Result<()> {
+    prune_old_versions_in(
         &dir.join("versions"),
-        &protected,
+        protected,
         keep_recent,
         SystemTime::now(),
-    );
-    mark_pruned(&dir);
+    )?;
+    mark_pruned(dir);
+    Ok(())
 }
 
 /// True when the last completed pass is older than the interval. The marker
@@ -190,10 +174,9 @@ pub fn prune_old_versions_in(
     now: SystemTime,
 ) -> Result<VersionPruneReport> {
     let mut candidates: Vec<(SystemTime, String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(versions_dir)?.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
         if !kind.is_dir() {
             continue;
         }
@@ -225,11 +208,8 @@ pub fn prune_old_versions_in(
             report.kept.push(name);
             continue;
         }
-        if std::fs::remove_dir_all(&path).is_ok() {
-            report.removed.push(name);
-        } else {
-            report.kept.push(name);
-        }
+        std::fs::remove_dir_all(&path)?;
+        report.removed.push(name);
     }
     Ok(report)
 }
@@ -349,6 +329,17 @@ mod tests {
             assert!(!versions.join("unreferenced").exists());
             assert!(builds.join(PRUNE_MARKER).is_file());
         });
+    }
+
+    #[test]
+    fn failed_daily_pass_does_not_stamp_success() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(prune_and_mark(temp.path(), &HashSet::new(), 0).is_err());
+        assert!(!temp.path().join(PRUNE_MARKER).exists());
+        assert!(prune_due(temp.path()));
+        fs::create_dir(temp.path().join("versions")).unwrap();
+        prune_and_mark(temp.path(), &HashSet::new(), 0).unwrap();
+        assert!(!prune_due(temp.path()));
     }
 
     #[test]

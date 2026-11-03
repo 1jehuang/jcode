@@ -356,7 +356,6 @@ struct ModelPickerBuildContext {
     current_provider: String,
     remote_provider_name: Option<String>,
     current_api_method: Option<String>,
-    current_effort: Option<String>,
     recent_authenticated_provider: Option<String>,
 }
 

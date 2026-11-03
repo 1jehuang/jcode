@@ -3514,6 +3514,8 @@ server_resumes: false,
 
 #[path = "client_processing.rs"]
 mod client_processing;
+#[cfg(test)]
+pub(super) use client_processing::complete_client_turn;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,

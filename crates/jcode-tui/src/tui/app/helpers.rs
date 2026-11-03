@@ -589,6 +589,7 @@ pub(super) fn inferred_reasoning_efforts(
 /// Return the named OpenAI-compatible profile's actual effort ladder, or None
 /// when `provider_name` is not a configured named profile. `Some(vec![])`
 /// means the profile explicitly disables effort for this model.
+
 pub(super) fn named_profile_reasoning_efforts(
     config: &crate::config::Config,
     provider_name: Option<&str>,
@@ -671,6 +672,7 @@ pub(super) fn named_profile_reasoning_efforts(
     if openai_style {
         return Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec());
     }
+
     Some(Vec::new())
 }
 

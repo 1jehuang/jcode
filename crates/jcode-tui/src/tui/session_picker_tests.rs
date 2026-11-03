@@ -168,7 +168,7 @@ fn resume_hides_spawned_sessions_by_default_and_toggle_shows_parent_label() {
 #[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
-    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    let (_sender, _receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
     terminal
@@ -2726,12 +2726,6 @@ fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
         sessions: vec![cloud, saved_cloud],
     };
     let mut picker = SessionPicker::new_grouped(vec![cloud_group], vec![old_local, local]);
-    let ids = |picker: &SessionPicker| {
-        picker
-            .visible_session_iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
         picker
             .visible_sessions

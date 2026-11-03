@@ -126,7 +126,6 @@ fn seed(status: &str, waiting: bool, assigned: bool) -> Result<String> {
         runtime: Default::default(),
     };
     let mut plan = VersionedPlan::new();
-    plan.mode = "light".into();
     if assigned {
         plan.items.push(crate::plan::PlanItem {
             id: "original-node".into(),
@@ -420,7 +419,11 @@ async fn manual_resume_all_completes_original_assigned_plan_once() -> Result<()>
     let agent = Arc::new(tokio::sync::Mutex::new(
         crate::agent::Agent::new_with_session(provider.clone(), registry, session, None),
     ));
-    server.sessions.write().await.insert(id.clone(), agent);
+    server
+        .sessions
+        .write_for_test()
+        .await
+        .insert(id.clone(), agent);
     assert_eq!(resume_all(&server).await, 1);
     assert_eq!(resume_all(&server).await, 0);
     wait_status(&server, &id, "ready").await;
@@ -590,7 +593,7 @@ async fn manual_resume_all_stop_during_assignment_capture_never_runs_orphan() ->
     ));
     server
         .sessions
-        .write()
+        .write_for_test()
         .await
         .insert(id.clone(), agent.clone());
     let plans = server.swarm_state.plans.write().await;

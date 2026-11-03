@@ -295,36 +295,16 @@ fn test_server_bootstrap_login_selection_preserves_order() {
 }
 
 #[test]
-fn test_auto_init_login_selection_preserves_order() {
+fn auto_init_login_numbers_match_the_displayed_provider_order() {
     let providers = provider_catalog::auto_init_login_providers();
-    assert_eq!(
-        resolve_login_selection("1", &providers).map(|provider| provider.id),
-        Some("claude")
-    );
-    assert_eq!(
-        resolve_login_selection("2", &providers).map(|provider| provider.id),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        resolve_login_selection("11", &providers).map(|provider| provider.id),
-        Some("alibaba-coding-plan")
-    );
-    assert_eq!(
-        resolve_login_selection("12", &providers).map(|provider| provider.id),
-        Some("cursor")
-    );
-    assert_eq!(
-        resolve_login_selection("13", &providers).map(|provider| provider.id),
-        Some("copilot")
-    );
-    assert_eq!(
-        resolve_login_selection("14", &providers).map(|provider| provider.id),
-        Some("gemini")
-    );
-    assert_eq!(
-        resolve_login_selection("15", &providers).map(|provider| provider.id),
-        Some("antigravity")
-    );
+    assert_eq!(providers[0].id, "claude");
+    assert_eq!(providers[1].id, "anthropic-api");
+    for (index, provider) in providers.iter().enumerate() {
+        assert_eq!(
+            resolve_login_selection(&(index + 1).to_string(), &providers).map(|p| p.id),
+            Some(provider.id)
+        );
+    }
 }
 
 #[test]

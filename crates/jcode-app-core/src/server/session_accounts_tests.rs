@@ -133,7 +133,7 @@ struct TestServer {
 }
 
 fn test_server(provider_template: Arc<dyn Provider>) -> TestServer {
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));

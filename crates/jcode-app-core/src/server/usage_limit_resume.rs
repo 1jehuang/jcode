@@ -333,6 +333,30 @@ pub(super) fn has_pending_resume(session_id: &str) -> bool {
 }
 
 impl ResumeTicket {
+    fn is_current(&self) -> bool {
+        !self.token.is_cancelled()
+            && PENDING
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&self.session_id)
+                .is_some_and(|(id, _)| *id == self.id)
+    }
+
+    async fn run_if_current<T>(
+        &self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        if !self.is_current() {
+            return None;
+        }
+        let result = tokio::select! {
+            biased;
+            _ = self.token.cancelled() => return None,
+            result = operation => result,
+        };
+        self.is_current().then_some(result)
+    }
+
     /// Sleep `delay`. Returns false when the resume was cancelled or replaced.
     pub(super) async fn wait(&self, delay: Duration) -> bool {
         tokio::select! {
@@ -353,6 +377,46 @@ impl Drop for ResumeTicket {
         {
             pending.remove(&self.session_id);
         }
+    }
+}
+
+#[cfg(test)]
+struct ResumeWaitTestGate {
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static RESUME_WAIT_TEST_GATES: LazyLock<Mutex<HashMap<String, ResumeWaitTestGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Pause exactly after the timer wakes and before the agent is reacquired.
+#[cfg(test)]
+pub(super) fn gate_next_resume_wait_for_test(
+    session_id: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let previous = RESUME_WAIT_TEST_GATES.lock().unwrap().insert(
+        session_id.to_string(),
+        ResumeWaitTestGate {
+            reached: reached_tx,
+            release: release_rx,
+        },
+    );
+    assert!(previous.is_none(), "only one test gate per session");
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+async fn pause_after_resume_wait_for_test(session_id: &str) {
+    let gate = RESUME_WAIT_TEST_GATES.lock().unwrap().remove(session_id);
+    if let Some(gate) = gate {
+        let _ = gate.reached.send(());
+        let _ = gate.release.await;
     }
 }
 
@@ -691,6 +755,8 @@ async fn resume_turn_after_usage_limit_inner(
             ));
             return ResumeOutcome::Superseded;
         }
+        #[cfg(test)]
+        pause_after_resume_wait_for_test(session_id).await;
         // A status inspection can briefly hold this mutex at the deadline;
         // contention alone does not prove that a new turn superseded us.
         // Real supersession cancels the ticket/publication instead.
@@ -735,12 +801,19 @@ async fn resume_turn_after_usage_limit_inner(
             Some(&swarm.event_counter),
             Some(&swarm.event_tx),
         );
-        if let Some(publication) = publication {
-            if !publication.publish_start(status).await {
-                return ResumeOutcome::Superseded;
-            }
-        } else {
-            status.await;
+        if ticket
+            .run_if_current(async {
+                if let Some(publication) = publication {
+                    publication.publish_start(status).await
+                } else {
+                    status.await;
+                    true
+                }
+            })
+            .await
+            != Some(true)
+        {
+            return ResumeOutcome::Superseded;
         }
         let start_message_index = guard.message_count();
         let signal = guard.graceful_shutdown_signal();
@@ -762,19 +835,25 @@ async fn resume_turn_after_usage_limit_inner(
                 }
             }
         };
-        let result = std::panic::AssertUnwindSafe(async {
-            match publication {
-                Some(publication) => publication.run(signal, turn).await,
-                None => Some(turn.await),
-            }
-        })
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| {
-            Some(Err(anyhow::anyhow!(
-                "Processing task panicked while resuming"
-            )))
-        });
+        let result = ticket
+            .run_if_current(
+                std::panic::AssertUnwindSafe(async {
+                    match publication {
+                        Some(publication) => publication.run(signal, turn).await,
+                        None => Some(turn.await),
+                    }
+                })
+                .catch_unwind(),
+            )
+            .await
+            .map(|result| {
+                result.unwrap_or_else(|_| {
+                    Some(Err(anyhow::anyhow!(
+                        "Processing task panicked while resuming"
+                    )))
+                })
+            })
+            .flatten();
         let Some(result) = result else {
             return ResumeOutcome::Superseded;
         };
@@ -812,6 +891,17 @@ mod tests {
     use jcode_provider_core::usage_limit_resume::{
         PAST_RESET_RESUME_DELAY, UNKNOWN_RESET_RESUME_DELAY, with_usage_limit_reset,
     };
+
+    #[tokio::test]
+    async fn cancelled_or_replaced_ticket_cannot_run_a_continuation() {
+        let session_id = format!("ticket-continuation-{}", uuid::Uuid::new_v4());
+        let first = register_pending_resume(&session_id);
+        let second = register_pending_resume(&session_id);
+        assert_eq!(first.run_if_current(async { 1 }).await, None);
+        assert_eq!(second.run_if_current(async { 2 }).await, Some(2));
+        second.token.cancel();
+        assert_eq!(second.run_if_current(async { 3 }).await, None);
+    }
 
     fn limit(reset_in: Option<Duration>) -> anyhow::Error {
         with_usage_limit_reset(

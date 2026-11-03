@@ -38,10 +38,9 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     )));
     let busy = agent.lock().await;
     let session_id = busy.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let connections = Arc::new(RwLock::new(HashMap::from([(
         "desktop".into(),
         ClientConnectionInfo {

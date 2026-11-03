@@ -472,11 +472,6 @@ impl MultiProvider {
         }
     }
 
-    #[cfg(test)]
-    fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
-        account_failover::same_provider_account_candidates(provider)
-    }
-
     async fn complete_with_failover(
         &self,
         messages: &[Message],
@@ -519,15 +514,7 @@ impl MultiProvider {
         // members may propose another exact account after a startup failure.
         if let Some(bound_label) = self.selected_account_for_provider(active) {
             let key = Self::provider_key(active);
-            let exists = match active {
-                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
-                    .iter()
-                    .any(|a| a.label == bound_label),
-                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
-                    .iter()
-                    .any(|a| a.label == bound_label),
-                _ => false,
-            };
+            let exists = self.saved_account_binding_exists(active, &bound_label)?;
             if !exists {
                 anyhow::bail!(
                     "Saved account '{}' no longer exists. Select an account with /model.",
@@ -538,6 +525,7 @@ impl MultiProvider {
                 .await;
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+                    .or_else(|| self.session_account_exhausted(active))
             {
                 self.try_same_provider_account_failover(
                     active,

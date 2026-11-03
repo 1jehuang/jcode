@@ -242,6 +242,9 @@ async fn report_roundtrip(subscribed: bool) {
     if subscribed {
         connection
             .send(Request::Subscribe {
+                history_base: None,
+                supports_server_failover: false,
+                supports_turn_identity: false,
                 agent_profile_name: None,
                 id: 1,
                 system_prompt: None,

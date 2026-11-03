@@ -250,7 +250,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         // Drop the actual owner connection and evict the live cache, so the
         // reconnect must restore the persisted snapshot, not reread the file.
         owner.close().await;
-        fixture.sessions.write().await.remove(&parent_id);
+        fixture.sessions.write_for_test().await.remove(&parent_id);
         let mut reconnected = ProfileClient::connect(&fixture);
         reconnected.send(json!({"type":"subscribe", "id":8, "working_dir":project.path(), "target_session_id":parent_id})).await;
         reconnected.done(8).await;
@@ -268,7 +268,7 @@ async fn agent_profile_socket_creation_snapshot_resume_fork_and_isolation() {
         assert!(!cleared.contains(expected));
         assert!(cleared.contains("SOCKET_NORMAL_OVERLAY_34189"));
         assert!(!cleared.contains("SOCKET_MUTATED_PROFILE_V2_47291"));
-        fixture.sessions.write().await.remove(&parent_id);
+        fixture.sessions.write_for_test().await.remove(&parent_id);
         reconnected
             .send(json!({"type":"resume_session", "id":13, "session_id":parent_id}))
             .await;

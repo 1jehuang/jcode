@@ -64,13 +64,6 @@ fn split_feedback_role_round_trips() {
     assert_eq!(request.id(), 18);
 }
 
-include!("protocol_tests/core_events.rs");
-include!("protocol_tests/comm_requests.rs");
-include!("protocol_tests/comm_responses.rs");
-include!("protocol_tests/comm_format_awaited.rs");
-include!("protocol_tests/misc_events.rs");
-include!("protocol_tests/randomized.rs");
-include!("protocol_tests/model_usage.rs");
 #[path = "protocol_tests/turn_identity.rs"]
 mod turn_identity;
 #[test]

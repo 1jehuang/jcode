@@ -1241,7 +1241,7 @@ mod tests {
 
     #[test]
     fn cloud_enumerates_all_accounts_without_selecting_or_exporting_extra_fields() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         assert!(cloud_accounts_at(home.path()).unwrap().is_empty());
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             for label in ["first", "second"] {
@@ -1278,7 +1278,7 @@ mod tests {
     #[test]
     fn cloud_handoff_replaces_stale_rotated_copy_but_not_other_identity() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let original = cloud_fixture(provider, "chosen");
             import_cloud_at(home.path(), provider, "chosen", &original).unwrap();
             let (_, _, access, refresh) = cloud_keys(provider);
@@ -1315,7 +1315,7 @@ mod tests {
         // cloud copy can lack hints the laptop still has. That must not block
         // the handoff, while a hint that is present and different still does.
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let full = cloud_fixture(provider, "chosen");
             let stripped = revised(
                 &revised(&full, "email", Value::Null),
@@ -1347,8 +1347,8 @@ mod tests {
     #[test]
     fn cloud_roundtrip_preserves_exact_label_and_expired_refreshable_account() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let bytes = cloud_fixture(provider, "my original account");
             import_cloud_at(local.path(), provider, "my original account", &bytes).unwrap();
             let before = fs::read(local.path().join(provider.store_name())).unwrap();
@@ -1396,7 +1396,7 @@ mod tests {
     fn cloud_merge_preserves_unrelated_accounts_fields_and_active_selection() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             for active_value in [json!("second"), Value::Null] {
-                let home = tempfile::tempdir().unwrap();
+                let home = tempdir();
                 let source_bytes = source(home.path(), provider);
                 let selected = export_cloud_account_at(home.path(), provider, None).unwrap();
                 assert_eq!(selected.label(), "second");
@@ -1448,7 +1448,7 @@ mod tests {
     #[test]
     fn cloud_refresh_requires_same_identity_and_preserves_unknown_account_fields() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let bytes = cloud_fixture(provider, "selected");
             import_cloud_at(home.path(), provider, "selected", &bytes).unwrap();
             let path = home.path().join(provider.store_name());
@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn cloud_identityless_return_requires_original_departure_and_no_intervening_update() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let identity = if provider == TransferProvider::OpenAi {
                 "account_id"
             } else {
@@ -1534,7 +1534,7 @@ mod tests {
     #[test]
     fn cloud_validation_is_bounded_and_does_not_modify_existing_store() {
         let provider = TransferProvider::OpenAi;
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let valid = cloud_fixture(provider, "chosen");
         import_cloud_at(home.path(), provider, "chosen", &valid).unwrap();
         let before = fs::read(home.path().join(provider.store_name())).unwrap();
@@ -1594,7 +1594,7 @@ mod tests {
     fn cloud_rejects_unsafe_files_and_ancestors_without_touching_targets() {
         let provider = TransferProvider::Claude;
         let bytes = cloud_fixture(provider, "chosen");
-        let target = tempfile::tempdir().unwrap();
+        let target = tempdir();
         import_cloud_at(target.path(), provider, "chosen", &bytes).unwrap();
         let before = fs::read(target.path().join(provider.store_name())).unwrap();
         fs::set_permissions(
@@ -1612,7 +1612,7 @@ mod tests {
         )
         .unwrap();
         for hardlink in [false, true] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let path = home.path().join(provider.store_name());
             if hardlink {
                 fs::hard_link(target.path().join(provider.store_name()), &path).unwrap();
@@ -1622,7 +1622,7 @@ mod tests {
             assert!(import_cloud_at(home.path(), provider, "chosen", &bytes).is_err());
             assert!(export_cloud_account_at(home.path(), provider, None).is_err());
         }
-        let parent = tempfile::tempdir().unwrap();
+        let parent = tempdir();
         symlink(target.path(), parent.path().join("linked")).unwrap();
         assert!(
             import_cloud_at(&parent.path().join("linked"), provider, "chosen", &bytes).is_err()
@@ -1632,7 +1632,7 @@ mod tests {
             fs::read(target.path().join(provider.store_name())).unwrap(),
             before
         );
-        let untouched = tempfile::tempdir().unwrap();
+        let untouched = tempdir();
         fs::write(untouched.path().join("sentinel"), b"unchanged").unwrap();
         symlink(untouched.path(), parent.path().join("fresh-link")).unwrap();
         assert!(
@@ -1654,7 +1654,7 @@ mod tests {
     #[test]
     fn cloud_concurrent_imports_do_not_lose_unrelated_accounts() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let barrier = Arc::new(Barrier::new(8));
             let threads: Vec<_> = (0..8)
                 .map(|i| {
@@ -1680,7 +1680,7 @@ mod tests {
 
     #[test]
     fn cloud_rejects_unlabeled_legacy_and_duplicate_labels() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let path = home.path().join("auth.json");
         let legacy = br#"{"anthropic":{"access":"synthetic","refresh":"synthetic","expires":1}}"#;
         fs::write(&path, legacy).unwrap();

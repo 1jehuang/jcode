@@ -216,6 +216,29 @@ fn native_stage_rejection_preserves_concurrently_revoked_trust() {
     assert!(!auth::claude::native_source_allowed());
 }
 
+fn fail_import_with_corrupt_store(fixture: &NativeStageFixture) {
+    let path = auth::claude::jcode_path().unwrap();
+    reuse_claude_code_native_snapshot(&fixture.file, NativeStageFixture::snapshot(), || {
+        // Staged validation does not read the store; the import does, and has no backup.
+        std::fs::write(&path, "{").unwrap();
+        let backup = path.with_extension("bak");
+        if backup.exists() {
+            std::fs::remove_file(backup).unwrap();
+        }
+    })
+    .unwrap_err();
+}
+
+#[test]
+fn native_stage_failed_import_revokes_only_new_native_trust() {
+    let _guard = crate::storage::lock_test_env();
+    for trusted_before in [false, true] {
+        let fixture = NativeStageFixture::new(trusted_before);
+        fail_import_with_corrupt_store(&fixture);
+        assert_eq!(auth::claude::native_source_allowed(), trusted_before);
+    }
+}
+
 #[test]
 fn native_stage_repeated_import_matches_existing_snapshot() {
     let _guard = crate::storage::lock_test_env();

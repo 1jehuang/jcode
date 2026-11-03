@@ -52,8 +52,15 @@ impl MultiProvider {
             },
             async {
                 match openai {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
+                    Some(provider) if force => {
+                        refresh_child_catalog(provider.as_ref(), force).await
+                    }
+                    provider => {
+                        prefetch_openai_or_web_catalog(provider, async {
+                            chatgpt_web::refresh_models().await.map(|_| ())
+                        })
+                        .await
+                    }
                 }
             },
             async {

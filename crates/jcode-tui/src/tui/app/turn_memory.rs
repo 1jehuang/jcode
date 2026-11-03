@@ -19,7 +19,7 @@ impl App {
         // system prompt, so skill changes cannot invalidate the cache.
         let skill_prompt: Option<String> = None;
         let available_skills = crate::skill_overrides::model_skill_infos(&skills);
-        let (mut split, context_info) = crate::prompt::build_system_prompt_split(
+        let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,

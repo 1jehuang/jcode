@@ -776,7 +776,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         }
     }
 
-    let (done_id, result, _, _, _) =
+    let (done_id, result, _, _, _, _) =
         tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
             .await
             .expect("processing should complete promptly")
@@ -1014,7 +1014,9 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
             // Delayed duplicates, including errors, must not clear the new
             // turn's handle or session and must not emit duplicate terminals.
             let stale_owner = tokio::spawn(async {}).id();
-            done_tx.send((2, Ok(()), None, stale_owner, None)).unwrap();
+            done_tx
+                .send((2, Ok(()), None, stale_owner, None, false))
+                .unwrap();
             done_tx
                 .send((
                     2,
@@ -1022,6 +1024,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
                     None,
                     stale_owner,
                     None,
+                    false,
                 ))
                 .unwrap();
             reconcile_processing_completions(
@@ -1095,7 +1098,7 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
                 Ok(())
             };
             done_tx
-                .send((7, result, None, tokio::task::id(), None))
+                .send((7, result, None, tokio::task::id(), None, false))
                 .unwrap();
             // Deterministically simulate preemption between the two sends.
             release_rx.await.unwrap();
@@ -1125,6 +1128,7 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "connection".into(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "connection".into(),
                 session_id: "session_terminal_enqueue_gap".into(),
                 client_instance_id: None,
@@ -1276,7 +1280,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             "server acceptance of the exact hidden continuation should consume the durable intent"
         );
 
-        let (done_id, result, _report, _, _) =
+        let (done_id, result, _report, _, _, _) =
             tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                 .await
                 .expect("processing task should finish")
@@ -1390,7 +1394,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             .await;
             assert!(client_is_processing);
             assert_eq!(processing_message_id, Some(id));
-            let (done_id, result, _, _, _) =
+            let (done_id, result, _, _, _, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                     .await?
                     .expect("accepted turn completion");
@@ -1714,7 +1718,7 @@ async fn sdk_socket_workflow(response_only: bool) {
     let home = IsolatedReloadRecoveryEnv::new();
     let provider_template: Arc<dyn Provider> = Arc::new(SdkCallbackProvider::default());
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -1843,7 +1847,7 @@ async fn sdk_socket_workflow(response_only: bool) {
         }
         // This test exercises catalog gating, not the 30-second retention of
         // idle unsaved sessions. Remove the isolated fixture before detaching.
-        sessions.write().await.clear();
+        sessions.clear_for_test().await;
         drop(client_writer);
         drop(client_reader);
         tokio::time::timeout(Duration::from_secs(5), server_task)
@@ -1977,7 +1981,7 @@ async fn sdk_socket_workflow(response_only: bool) {
     other_session.save_prepared().unwrap();
     assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
-    sessions.write().await.insert(
+    sessions.write_for_test().await.insert(
         "sdk_other_session".into(),
         Arc::new(Mutex::new(Agent::new_with_session(
             provider_template.clone(),
@@ -2078,7 +2082,7 @@ async fn lone_notify_auth_changed_is_applied_without_subscribe() {
     });
     let mut bus_rx = crate::bus::Bus::global().subscribe();
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let (global_event_tx, _) = broadcast::channel(8);
     let (debug_response_tx, _) = broadcast::channel(8);
@@ -2229,6 +2233,7 @@ async fn client_turn_usage_limit_error_carries_retry_after_secs() {
     start_processing_message(
         ProcessingMessage {
             id: 91,
+            server_failover: false,
             content: "hello".to_string(),
             images: Vec::new(),
             system_reminder: None,

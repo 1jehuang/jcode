@@ -316,7 +316,12 @@ async fn fetch_anthropic_usage_data_uncached(
         last_error: None,
     };
 
-    if let Some(label) = cache_key.strip_prefix("label:")
+    if let Some((label, _)) = cache_key
+        .strip_prefix("label:")
+        .and_then(|key| key.rsplit_once(':'))
+        && auth::claude::load_credentials_for_account(label).is_ok_and(|credentials| {
+            anthropic_usage_cache_key(&credentials.access_token, Some(label)) == cache_key
+        })
         && quota_known
         && !usage.is_stale()
         && [usage.five_hour, usage.seven_day]
@@ -325,7 +330,7 @@ async fn fetch_anthropic_usage_data_uncached(
             .chain(usage.model_scoped.iter().map(|window| window.utilization))
             .all(|ratio| ratio.is_finite() && (0.0..0.99).contains(&ratio))
     {
-        crate::provider::models::clear_quota_unavailability_after_probe(
+        crate::provider::models::clear_quota_unavailability_observed_before(
             "claude",
             label,
             probe_started,

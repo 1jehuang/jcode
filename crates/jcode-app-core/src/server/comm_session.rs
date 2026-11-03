@@ -653,8 +653,7 @@ pub(super) async fn complete_headless_turn(
     completion_report: Option<String>,
     swarm: &super::live_turn::LiveTurnSwarmContext,
 ) {
-    let event_tx =
-        super::session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
+    let (event_tx, mut events) = mpsc::unbounded_channel();
     super::live_turn::complete_live_turn(
         session_id,
         publication,
@@ -665,6 +664,9 @@ pub(super) async fn complete_headless_turn(
         swarm,
     )
     .await;
+    while let Ok(event) = events.try_recv() {
+        super::state::fanout_session_event(&swarm.members, session_id, event).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

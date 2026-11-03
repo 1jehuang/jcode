@@ -350,8 +350,6 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
 
 #[path = "ui_messages/kv_cache_footer.rs"]
 mod kv_cache_footer;
-#[cfg(test)]
-use kv_cache_footer::kv_cache_footer_summary;
 use kv_cache_footer::{kv_cache_footer_body, render_kv_cache_footer};
 
 /// Cache diagnostics belong to the preceding message, not a new transcript block.

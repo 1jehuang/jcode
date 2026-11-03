@@ -1,5 +1,3 @@
-use super::*;
-
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
     jcode_provider_core::is_chatgpt_web_model(model)
 }

@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use tokio::sync::RwLock;
 
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -109,7 +110,7 @@ async fn notify_auth_changed_clears_renewed_claude_login_failure() {
     let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
     handle_notify_auth_changed(
         72,
@@ -253,7 +254,13 @@ async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_ident
     let agent = Arc::new(Mutex::new(session_agent));
     let (tx, mut rx) = mpsc::unbounded_channel();
     for label in ["second", "third", "first"] {
-        spawn_account_switch_refresh(81, "openai", label.into(), Arc::clone(&agent), tx.clone());
+        spawn_account_switch_refresh(
+            81,
+            "openai",
+            Some(label.into()),
+            Arc::clone(&agent),
+            tx.clone(),
+        );
         let mut acknowledged = false;
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Some(event) = rx.recv().await {
@@ -1467,10 +1474,10 @@ async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
     let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed(
@@ -1515,10 +1522,12 @@ async fn one_shot_auth_change_refreshes_every_session_without_model_switch() {
     let idle_agent = Arc::new(Mutex::new(Agent::new(idle_provider, Registry::empty())));
     let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, Registry::empty())));
     let busy_guard = busy_agent.lock().await;
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([
-        ("idle".to_string(), Arc::clone(&idle_agent)),
-        ("busy".to_string(), Arc::clone(&busy_agent)),
-    ])));
+    let sessions: SessionAgents = Arc::new(
+        crate::server::session_manager::SessionManager::from_agents(HashMap::from([
+            ("idle".to_string(), Arc::clone(&idle_agent)),
+            ("busy".to_string(), Arc::clone(&busy_agent)),
+        ])),
+    );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed_process_wide(

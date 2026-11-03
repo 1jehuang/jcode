@@ -121,6 +121,7 @@ voice_jev_model = "typesafe/jev-1.14"
 }
 
 const CONFIG_ENV_KEYS: &[&str] = &[
+    "JCODE_BROWSER_HANDOFF",
     "JCODE_HIBERNATION_IDLE_SECS",
     "JCODE_HIBERNATION_MODE",
     "JCODE_REQUEST_COMPRESSION",

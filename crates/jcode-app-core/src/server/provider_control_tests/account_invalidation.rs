@@ -78,7 +78,7 @@ async fn account_switch_clears_only_selected_login_failure_even_when_agent_is_bu
         let agent = Arc::new(Mutex::new(Agent::new(provider, Registry::empty())));
         let busy = agent.lock().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_account_switch_refresh(71, kind, target.to_string(), Arc::clone(&agent), tx);
+        spawn_account_switch_refresh(71, kind, Some(target.to_string()), Arc::clone(&agent), tx);
         assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_some());
         crate::auth::claude::set_active_account_override(Some(target.to_string()));
         crate::auth::codex::set_active_account_override(Some(target.to_string()));

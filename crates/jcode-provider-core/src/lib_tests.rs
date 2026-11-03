@@ -1,5 +1,4 @@
 use super::*;
-use jcode_message_types::{ContentBlock, Role};
 
 #[derive(Clone, Default)]
 struct SimpleFailureProvider {

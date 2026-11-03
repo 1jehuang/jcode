@@ -725,13 +725,6 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Transport for `--provider-profile <name>` (issue #1560: this used to force
-/// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
-/// through `Auto`, the same path as `default_provider = "<name>"`: the env
-/// applied by `apply_named_provider_profile_env` already selects the
-/// Anthropic Messages runtime with the profile's base URL and auth, while
-/// `AnthropicApi` would pin an Anthropic API-key credential the profile may
-/// not have (e.g. `auth = "none"`).
 #[path = "dispatch/named_profiles.rs"]
 mod named_profiles;
 use named_profiles::provider_choice_for_named_profile;

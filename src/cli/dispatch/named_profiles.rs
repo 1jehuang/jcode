@@ -20,7 +20,8 @@ pub(super) fn provider_choice_for_named_profile_in(
                 crate::config::NamedProviderType::AnthropicCompatible
             ) =>
         {
-            ProviderChoice::Auto
+            // Explicit profiles take precedence over saved provider defaults.
+            ProviderChoice::AnthropicApi
         }
         _ => ProviderChoice::OpenaiCompatible,
     }

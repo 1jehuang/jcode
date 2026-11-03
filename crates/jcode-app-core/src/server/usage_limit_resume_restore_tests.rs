@@ -105,14 +105,15 @@ async fn disk_only_wait_restores_deadline_and_original_transcript() {
     let run_agent = agent.clone();
     let task = tokio::spawn(async move {
         restore_turn_after_provider_wait(
-            run_agent,
-            Some(held),
-            restored,
-            &event_tx,
-            &swarm,
-            &no_wait_hook,
-            None,
-        )
+run_agent,
+Some(held),
+restored,
+&event_tx,
+&swarm,
+&no_wait_hook,
+None,
+None,
+)
         .await
     });
     let event = events.recv().await.unwrap();
@@ -278,16 +279,17 @@ async fn superseded_driver_cleanup_preserves_successor_durable_record() {
     let (tx, _events) = mpsc::unbounded_channel();
     let old = super::super::swarm::begin_turn_publication(&session_id).await;
     let mut resume = Box::pin(resume_turn_after_usage_limit_with_publication(
-        agent.clone(),
-        Some(held),
-        &session_id,
-        limit(Some(Duration::from_secs(7200))),
-        None,
-        &tx,
-        &swarm,
-        &no_wait_hook,
-        Some(&old),
-    ));
+agent.clone(),
+Some(held),
+&session_id,
+limit(Some(Duration::from_secs(7200))),
+None,
+&tx,
+&swarm,
+&no_wait_hook,
+Some(&old),
+None,
+));
     assert!(futures::poll!(resume.as_mut()).is_pending());
     let original = pending_state(&session_id).unwrap().unwrap();
     let successor = super::super::swarm::begin_turn_publication(&session_id).await;

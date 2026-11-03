@@ -391,7 +391,7 @@ pub(super) async fn start_processing_message(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn complete_client_turn(
+pub(in crate::server) async fn complete_client_turn(
     id: u64,
     session_id: &str,
     publication: &crate::server::swarm::TurnPublication,

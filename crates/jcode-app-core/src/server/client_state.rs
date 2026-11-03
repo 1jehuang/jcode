@@ -1211,9 +1211,7 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
-        agent_model_overrides: crate::session::Session::load_startup_stub(session_id)
-            .map(|session| session.agent_model_overrides)
-            .unwrap_or_default(),
+        agent_model_overrides,
         account_labels,
         autoreview_enabled,
         autojudge_enabled,

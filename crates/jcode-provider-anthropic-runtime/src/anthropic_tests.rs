@@ -94,6 +94,48 @@ fn named_profile_runtime_captures_transport_and_credential_immutably() {
 }
 
 #[test]
+fn named_profile_api_mode_validates_captured_credentials_after_env_cleanup() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"
+[providers.no-auth]
+type = "anthropic-compatible"
+base_url = "http://localhost:12345/v1"
+auth = "none"
+
+[providers.with-key]
+type = "anthropic-compatible"
+base_url = "http://localhost:12346/v1"
+auth = "header"
+api_key_env = "PROFILE_KEY"
+"#,
+    )
+    .expect("write config");
+    jcode_base::config::Config::invalidate_cache();
+
+    for (profile, key) in [("no-auth", None), ("with-key", Some("profile-secret"))] {
+        let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", profile);
+        let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "PROFILE_KEY");
+        let _key = EnvVarGuard::set("PROFILE_KEY", key.unwrap_or(""));
+        jcode_base::provider_catalog::apply_named_provider_profile_env(profile)
+            .expect("apply named profile");
+        let provider = AnthropicProvider::new();
+
+        // Startup clears profile env after constructing the runtime. The
+        // explicit API-mode check must use the captured profile credential.
+        jcode_base::provider_catalog::clear_anthropic_profile_env();
+        provider
+            .set_credential_mode(jcode_provider_core::CredentialMode::ApiKey)
+            .expect("profile credential should survive env cleanup");
+    }
+
+    jcode_base::config::Config::invalidate_cache();
+}
+
+#[test]
 fn named_anthropic_profile_accepts_its_configured_custom_model() {
     let _lock = jcode_base::storage::lock_test_env();
     let _home = tempfile::TempDir::new().expect("temp home");
