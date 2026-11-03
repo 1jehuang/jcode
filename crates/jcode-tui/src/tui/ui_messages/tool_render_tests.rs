@@ -183,7 +183,7 @@ fn render_tool_message_colors_high_token_badge() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -250,7 +250,7 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
             intent: Some("Update example behavior".to_string()),
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -376,7 +376,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
                 intent: None,
                 thought_signature: None,
             }),
-        
+
             tool_duration_ms: None,
         };
 
@@ -453,7 +453,7 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -519,7 +519,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -596,7 +596,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -652,7 +652,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -699,7 +699,7 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -741,7 +741,7 @@ fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
             intent: None,
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -899,7 +899,7 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
             intent: Some("Read the todo list".to_string()),
             thought_signature: None,
         }),
-    
+
         tool_duration_ms: None,
     };
 
@@ -936,7 +936,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
                 intent: intent.map(str::to_string),
                 thought_signature: None,
             }),
-        
+
             tool_duration_ms: None,
         };
 
