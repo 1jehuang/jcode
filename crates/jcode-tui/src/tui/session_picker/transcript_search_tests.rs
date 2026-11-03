@@ -2,6 +2,79 @@ use super::super::{SessionPicker, SessionSource, SessionStatus};
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[test]
+fn repeated_search_and_reopened_picker_observe_transcript_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("session.jsonl");
+    std::fs::write(&path, "{\"text\":\"cachealpha cachebeta\"}\n").unwrap();
+    let session = external_session("cache-flow", &path);
+    let run = |query: &str| {
+        let mut search = TranscriptSearch::default();
+        search.reset(query, std::iter::once(&session));
+        search.started_at = Some(Instant::now() - DEBOUNCE);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while search.pending() {
+            assert!(Instant::now() < deadline);
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        search.contains("cache-flow")
+    };
+    assert!(run("cachealpha"));
+    assert!(run("cachebeta"));
+    assert!(run("cachealpha"));
+    std::fs::write(
+        &path,
+        "{\"text\":\"replacement content with a different length\"}\n",
+    )
+    .unwrap();
+    assert!(!run("cachealpha"));
+    assert!(run("replacement"));
+    std::fs::remove_file(&path).unwrap();
+    assert!(!run("replacement"));
+}
+
+#[test]
+#[ignore = "manual cold versus warm transcript search measurement"]
+fn benchmark_reusable_transcript_search() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("search.jsonl");
+    let record = format!(
+        "{{\"text\":\"{}\"}}\n",
+        "ordinary transcript words ".repeat(30)
+    );
+    std::fs::write(&path, record.repeat(1000)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let paths = vec![path];
+    // Absent terms force a complete scan rather than a lucky early match.
+    let cold = Instant::now();
+    assert!(!paths_match_mode(
+        &paths,
+        &["missingcoldneedle".into()],
+        &cancel,
+        false
+    ));
+    let cold = cold.elapsed();
+    let mut samples = Vec::new();
+    for index in 0..30 {
+        let start = Instant::now();
+        assert!(!paths_match_mode(
+            &paths,
+            &[format!("missingwarmneedle{index}")],
+            &cancel,
+            false
+        ));
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "reusable transcript search: cold_ms={:.3} warm_p50_ms={:.3} warm_p95_ms={:.3} samples=30 (scan only, debounce excluded)",
+        cold.as_secs_f64() * 1000.0,
+        samples[15],
+        samples[28]
+    );
+}
+
 fn external_session(id: &str, path: &Path) -> SessionInfo {
     let now = chrono::Utc::now();
     SessionInfo {

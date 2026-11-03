@@ -13,6 +13,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod text_cache;
+
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
@@ -506,7 +508,13 @@ impl Scan<'_> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(E::custom("search cancelled"));
         }
-        let lower = text.to_lowercase();
+        self.normalized_text(&text.to_lowercase())
+    }
+
+    fn normalized_text<E: serde::de::Error>(&mut self, lower: &str) -> Result<(), E> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(E::custom("search cancelled"));
+        }
         for (token, found) in self.tokens.iter().zip(&mut self.found) {
             if !*found {
                 if lower.contains(token) {
@@ -655,6 +663,17 @@ fn scan_paths(
 }
 
 fn scan_file(path: &Path, scan: &mut Scan<'_>) {
+    if let Some(segments) = text_cache::segments(path, scan.cancel) {
+        for segment in segments.iter() {
+            if scan.normalized_text::<serde_json::Error>(segment).is_err() {
+                break;
+            }
+        }
+        return;
+    }
+    if scan.cancel.load(Ordering::Relaxed) {
+        return;
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         // Snapshot and journal paths are alternatives and may not both exist.
