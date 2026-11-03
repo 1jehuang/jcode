@@ -555,6 +555,36 @@ fn test_loading_picker_esc_clears_query_then_closes() {
 }
 
 #[test]
+fn loading_search_keeps_word_delete_and_clear_shortcuts() {
+    for (code, modifiers, expected) in [
+        (KeyCode::Char('w'), KeyModifiers::CONTROL, "héllo "),
+        (KeyCode::Backspace, KeyModifiers::CONTROL, "héllo "),
+        (KeyCode::Char('\u{8}'), KeyModifiers::empty(), "héllo "),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL, ""),
+    ] {
+        let mut picker = SessionPicker::loading();
+        picker.focus_search_input();
+        picker.search_query = "héllo 世界 ".into();
+        let action = picker.handle_overlay_key(code, modifiers).unwrap();
+        assert!(matches!(action, OverlayAction::Continue));
+        assert_eq!(picker.search_query, expected);
+        assert!(picker.search_active);
+        assert!(picker.loading_message.is_some());
+        picker.reseed_grouped(
+            Vec::new(),
+            vec![make_session(
+                "session_hello",
+                "héllo world",
+                false,
+                SessionStatus::Closed,
+            )],
+        );
+        assert_eq!(picker.search_query, expected);
+        assert_eq!(visible_ids(&picker), vec!["session_hello"]);
+    }
+}
+
+#[test]
 fn test_search_bar_always_rendered_with_placeholder() {
     let mut picker = type_to_search_picker();
     let backend = ratatui::backend::TestBackend::new(120, 30);

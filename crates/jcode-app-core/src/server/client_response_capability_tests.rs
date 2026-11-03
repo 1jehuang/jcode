@@ -1,3 +1,4 @@
+use super::socket_tests::{SdkCallbackProvider, sdk_socket_workflow};
 use super::*;
 use crate::server::client_session::response_capability::refresh_session;
 use serde_json::{Value, json};
@@ -7,7 +8,7 @@ type Writer = crate::transport::WriteHalf;
 
 #[tokio::test]
 async fn user_response_socket_registration_follows_explicit_capability() {
-    sdk_socket_workflow(true).await;
+    sdk_socket_workflow(true, false, false).await;
 }
 
 #[tokio::test]
