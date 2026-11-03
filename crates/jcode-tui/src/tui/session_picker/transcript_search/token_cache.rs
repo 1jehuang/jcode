@@ -9,6 +9,7 @@ use std::sync::{
 const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 4096;
+const MAX_PREFIX_PROBES: usize = 64;
 
 struct Evidence {
     outcome: Option<i64>,
@@ -52,6 +53,9 @@ impl Cache {
         }
     }
     fn get(&mut self, text: &Arc<Vec<String>>, token: &str, fuzzy: bool) -> Option<Option<i64>> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return None;
+        }
         let generation = self.generations.get_mut(&(Arc::as_ptr(text) as usize))?;
         if !generation.text.ptr_eq(&Arc::downgrade(text)) {
             return None;
@@ -63,15 +67,17 @@ impl Cache {
             entry.used = self.clock;
             return Some(entry.outcome);
         }
-        if !fuzzy {
+        if !fuzzy && !mode.is_empty() {
             // Only shorter literal prefixes imply absence. Check UTF-8
             // boundaries, including the empty prefix, with borrowed map keys.
-            for (end, _) in token.char_indices().rev() {
-                if let Some(entry) = mode.get_mut(&token[..end]) {
-                    if entry.outcome.is_none() {
-                        entry.used = self.clock;
-                        return Some(None);
-                    }
+            // Bound probes for pasted/minified queries. Missing a longer cached
+            // prefix only causes a fresh scan, never an incorrect exclusion.
+            for (end, _) in token.char_indices().take(MAX_PREFIX_PROBES) {
+                if let Some(entry) = mode.get_mut(&token[..end])
+                    && entry.outcome.is_none()
+                {
+                    entry.used = self.clock;
+                    return Some(None);
                 }
             }
         }
@@ -103,6 +109,7 @@ impl Cache {
             for generation in self.generations.values_mut() {
                 for mode in &mut generation.modes {
                     mode.retain(|_, entry| entry.used > cutoff);
+                    mode.shrink_to_fit();
                 }
             }
             self.prune();
@@ -162,6 +169,7 @@ fn cache() -> &'static Mutex<Cache> {
 
 /// Validate the text generation before consulting evidence. None requests the
 /// streaming fallback, or signals cancellation. No lock spans IO or matching.
+#[cfg(test)]
 pub(super) fn matches(
     path: &Path,
     tokens: &[String],
@@ -196,6 +204,7 @@ pub(super) fn matches_with_scores(
 }
 
 /// Resolve evidence only for validated resident text, without hydrating files.
+#[cfg(test)]
 pub(super) fn matches_cached(
     path: &Path,
     tokens: &[String],
@@ -316,6 +325,21 @@ mod tests {
     use super::*;
     fn tokens(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn long_queries_bound_prefix_probes_and_fall_back_safely() {
+        let mut cache = Cache::default();
+        let text = Arc::new(Vec::new());
+        cache.insert(&text, "x", false, None);
+        assert_eq!(
+            cache.get(&text, &"x".repeat(MAX_TOKEN_BYTES + 1), false),
+            None
+        );
+        let prefix = "界".repeat(MAX_PREFIX_PROBES + 1);
+        cache.insert(&text, &prefix, false, None);
+        assert_eq!(cache.get(&text, &format!("{prefix}面"), false), None);
+        assert_eq!(cache.get(&text, &prefix, false), Some(None));
     }
 
     #[test]
