@@ -32,6 +32,7 @@ pub(super) fn session(id: usize, turns: usize) -> SessionInfo {
         status: SessionStatus::Closed,
         needs_catchup: false,
         estimated_tokens: turns * 1000,
+        todo_statuses: Vec::new(),
         first_user_prompt: Some("improve resume responsiveness".into()),
         messages_preview,
         search_index: String::new(),
@@ -403,7 +404,7 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     let picker = SessionPicker::new(vec![item.clone()]);
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
-    assert!(rows[0].to_string().contains("tok"));
+    assert!(!rows[0].to_string().contains("tok"));
     assert!(rows[1].to_string().contains("resume-layout"));
     assert!(rows[1].to_string().contains("ago"));
     assert!(!rows[1].to_string().contains("active"));
@@ -423,7 +424,7 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
     assert!(rows[1].to_string().contains("No directory"));
-    assert!(rows[0].to_string().contains("tok"));
+    assert!(!rows[0].to_string().contains("tok"));
 
     item.status = SessionStatus::Crashed {
         message: Some("connection failed".into()),
@@ -439,39 +440,35 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
 }
 
 #[test]
-fn resume_token_colors_follow_usage_tiers() {
-    for (tokens, expected) in [
-        (0, rgb(100, 100, 100)),
-        (1, rgb(129, 199, 132)),
-        (9_999, rgb(129, 199, 132)),
-        (10_000, rgb(255, 213, 79)),
-        (49_999, rgb(255, 213, 79)),
-        (50_000, rgb(255, 167, 38)),
-        (99_999, rgb(255, 167, 38)),
-        (100_000, rgb(255, 167, 38)),
-        (999_999, rgb(255, 167, 38)),
-        (1_000_000, rgb(255, 167, 38)),
-        (1_000_001, rgb(239, 115, 115)),
-        (usize::MAX, rgb(239, 115, 115)),
-    ] {
-        let mut item = session(0, 1);
-        item.estimated_tokens = tokens;
-        let picker = SessionPicker::new(vec![item.clone()]);
-        for selected in [false, true] {
-            let rows = picker.render_session_item_lines(&item, selected);
-            let count = rows[0].spans.last().unwrap();
-            assert!(count.content.contains("tok"));
-            assert_eq!(count.style.fg, Some(expected), "tokens={tokens}");
-        }
+fn resume_todo_dots_follow_item_statuses() {
+    let mut item = session(0, 1);
+    item.todo_statuses = ["completed", "in_progress", "pending", "cancelled"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let dots = SessionPicker::todo_dot_spans(&item, 20);
+    assert_eq!(dots.len(), 4);
+    for (dot, color) in dots.iter().zip([
+        rgb(129, 199, 132),
+        rgb(255, 213, 79),
+        rgb(140, 140, 140),
+        rgb(80, 80, 80),
+    ]) {
+        assert_eq!(dot.content, "●");
+        assert_eq!(dot.style.fg, Some(color));
     }
+    assert_eq!(SessionPicker::todo_dot_spans(&item, 2)[1].content, "…");
+    assert!(SessionPicker::todo_dot_spans(&item, 0).is_empty());
+    item.todo_statuses.clear();
+    assert!(SessionPicker::todo_dot_spans(&item, 20).is_empty());
 }
 
 #[test]
-fn session_entry_reserves_tokens_and_activity_for_long_names_and_directories() {
+fn session_entry_reserves_todo_dots_and_activity_for_long_names_and_directories() {
     let mut item = session(0, 1);
     item.title = "界".repeat(60);
     item.working_dir = Some(format!("/{}", "界".repeat(80)));
-    item.estimated_tokens = 12_000;
+    item.todo_statuses = vec!["completed".into(); 5];
     item.last_active_at = Some(chrono::Utc::now());
     let mut picker = SessionPicker::new(vec![item]);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 12)).unwrap();
@@ -484,7 +481,8 @@ fn session_entry_reserves_tokens_and_activity_for_long_names_and_directories() {
         .map(|y| (2..47).map(|x| buffer[(x, y)].symbol()).collect())
         .collect();
     assert_eq!(rows.len(), 2);
-    assert!(rows[0].trim_end().ends_with("~12k tok"), "{}", rows[0]);
+    assert!(rows[0].trim_end().ends_with("●●●●●"), "{}", rows[0]);
+    assert!(!rows[0].contains("tok"));
     assert!(rows[1].contains("ago"), "{}", rows[1]);
     assert!(rows.iter().all(|row| row.contains('…')));
 }
@@ -514,6 +512,7 @@ fn compact_rows_truncate_wide_text_without_wrapping() {
     for width in [8, 20, 42] {
         let mut item = session(0, 1);
         item.title = "界".repeat(60);
+        item.todo_statuses = vec!["pending".into(); 1_000];
         item.working_dir = Some(format!("/{}", "界".repeat(80)));
         let mut picker = SessionPicker::new(vec![item]);
         let mut terminal =
