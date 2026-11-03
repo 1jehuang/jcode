@@ -63,7 +63,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 2;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 3;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -1882,7 +1882,7 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     // or making an SSH connection just to open the picker.
     include_cloud_sessions(&sessions_dir, &catchup_seen, &mut sessions);
 
-    sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    limit_sessions_by_recency(&mut sessions, scan_limit);
 
     #[cfg(test)]
     run_before_session_list_cache_publish_hook();
@@ -1900,6 +1900,25 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     }
 
     Ok(sessions)
+}
+
+/// Apply a single visible budget after merging every source. Hidden test sessions
+/// have their own bounded budget so toggling them remains useful without pushing
+/// ordinary conversations out of the most recent results. Saved and cloud
+/// sessions compete by recency too, rather than reserving extra visible slots.
+fn limit_sessions_by_recency(sessions: &mut Vec<SessionInfo>, limit: usize) {
+    sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    let mut visible = 0;
+    let mut debug = 0;
+    sessions.retain(|session| {
+        let count = if session.is_debug {
+            &mut debug
+        } else {
+            &mut visible
+        };
+        *count += 1;
+        *count <= limit
+    });
 }
 
 /// Scan every supported foreign agent CLI in parallel, or nothing at all when

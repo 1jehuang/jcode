@@ -69,7 +69,7 @@ pub use loading::{
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 500;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
