@@ -322,6 +322,7 @@ impl MultiProvider {
         // An explicit CLI/environment provider selection owns startup routing.
         // Applying the configured default model here can reactivate its configured
         // provider/profile before the caller pins a dual-auth credential mode.
+        let mut preserve_config_default = false;
         if result.initial_provider.is_none()
             && let Some(model) = provider_state.default_model()
         {
@@ -333,6 +334,10 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
+                preserve_config_default = !result.config_default_allows_pool_selection(
+                    model,
+                    provider_state.default_provider_key(),
+                );
                 crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
@@ -342,7 +347,9 @@ impl MultiProvider {
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.select_fresh_session_pool_route();
+        if !preserve_config_default {
+            result.select_fresh_session_pool_route();
+        }
         let route_ms = route_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
@@ -392,6 +399,60 @@ impl MultiProvider {
             provider_init_start.elapsed().as_millis()
         ));
         result
+    }
+
+    /// Classify only a successfully applied default. Explicit model specs take
+    /// precedence over provider hints, just as in `set_config_default_model`.
+    /// Named profiles and API keys are deliberate routes, not pool identities.
+    fn config_default_allows_pool_selection(
+        &self,
+        model: &str,
+        default_provider: Option<&str>,
+    ) -> bool {
+        let model = model.trim();
+        if Self::named_provider_profile_model_prefix(model).is_some() {
+            return false;
+        }
+        let explicit = explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
+            || Self::openai_compatible_model_prefix(model).is_some();
+        // Never resolve the active provider name as a config hint: an unused
+        // [providers.openai] must not shadow a native bare-model selection.
+        if !explicit
+            && let Some(selection::ConfigProviderSelection::NamedProfile(..)) = default_provider
+                .and_then(|hint| {
+                    Self::resolve_config_provider_selection(hint, crate::config::config())
+                })
+        {
+            return false;
+        }
+
+        let pool = crate::auth::account_pool::AccountPool::load();
+        if self.active_provider() == ActiveProvider::OpenRouter {
+            // A catalog profile can represent a saved login explicitly enrolled
+            // in the pool. User-defined profiles must never inherit membership
+            // merely because they share the OpenRouter execution slot.
+            return ProviderRegistry::new(self)
+                .active_compatible_profile_id()
+                .and_then(|id| crate::provider_catalog::openai_compatible_profile_by_id(&id))
+                .is_some_and(|profile| pool.is_member(profile.id, false));
+        }
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return false;
+        }
+        let (provider, active_label) = match self.active_provider() {
+            ActiveProvider::OpenAI => ("openai", auth::codex::active_account_label()),
+            ActiveProvider::Claude => ("claude", auth::claude::active_account_label()),
+            _ => return false,
+        };
+        let label = self.oauth_account_label().or(active_label);
+        pool.is_member(
+            &crate::auth::account_pool::account_key(provider, label.as_deref()),
+            true,
+        )
     }
 
     /// Fresh sessions choose the first ready account in priority order. A saved

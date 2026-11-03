@@ -143,6 +143,7 @@ async fn test_agent() -> Arc<Mutex<Agent>> {
     Arc::new(Mutex::new(Agent::new(provider, registry)))
 }
 
+include!("comm_control_tests/progress_publication.rs");
 include!("comm_control_tests/assign_task.rs");
 include!("comm_control_tests/assign_blocked.rs");
 include!("comm_control_tests/assign_double.rs");

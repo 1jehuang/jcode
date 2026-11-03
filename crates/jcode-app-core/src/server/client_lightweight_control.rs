@@ -1071,7 +1071,7 @@ mod lightweight_swarm_member_tests {
 
     fn empty_state() -> (SessionAgents, Members, Swarms) {
         (
-            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(crate::server::session_manager::SessionManager::new()),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )

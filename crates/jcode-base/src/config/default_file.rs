@@ -204,6 +204,10 @@ reasoning_display = "full"
 # Markdown spacing style: "compact" (chat/TUI) or "document" (docs-like)
 # markdown_spacing = "compact"
 
+# Append destinations after Markdown link labels, e.g. label (https://example.com).
+# Link labels remain visible and styled when disabled (default: false).
+# show_link_urls = false
+
 # LaTeX rendering: "none" (show source), "unicode" (terminal text), or "image" (typeset PNG, default).
 # Image mode uses `latex` + `dvipng`, or `pdflatex` + `pdftocairo` as a fallback.
 # When neither toolchain is available, formulas fall back to Unicode.
@@ -905,14 +909,14 @@ desktop_notifications = true
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
 
 # [sponsors] # Legacy config section name retained for compatibility.
-# Integration discovery (enabled by default; set enabled = false to opt out).
-# When enabled, the agent gains a `discover_tools` tool listing third-party
+# Integration discovery (disabled by default; set enabled = true to opt in).
+# When enabled, the agent gains an `integration_tools` tool listing third-party
 # developer tools from Jcode's hosted integration directory. These providers
 # have integrated with the agent to make setup and use seamless. Some providers
 # may share revenue with Jcode when a referred user becomes a customer, but
 # commercial relationships never influence recommendations.
 # See https://jcode.sh/discovery-tools
-# enabled = true
+# enabled = false
 # endpoint = "https://api.jcode.sh/v1/discovery"
 	"##;
 

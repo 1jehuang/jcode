@@ -136,6 +136,9 @@ pub struct SessionInfo {
     pub saved: bool,
     pub save_label: Option<String>,
     pub status: SessionStatus,
+    /// Persisted todo statuses for local Jcode sessions, in todo order.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub todo_statuses: Vec<String>,
     pub needs_catchup: bool,
     pub estimated_tokens: usize,
     /// First visible user prompt in the session, shown in compact list rows.
@@ -174,6 +177,10 @@ pub struct PreviewMessage {
     pub content: String,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub duration_secs: Option<f32>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub title: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
 }
 

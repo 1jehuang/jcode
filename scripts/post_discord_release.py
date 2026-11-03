@@ -50,7 +50,7 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
         header = (
             f"## v1 Preview · opt-in: {tag[:120]}\n"
             "Experimental preview, not a stable release. Stable users are not upgraded automatically.\n"
-            f"Download binaries and notes: <{download_url}>\n"
+            f"Download binaries and notes: {download_url}\n"
         )
         setup = (
             "First time: current stable has no `--channel` option. Download your OS/architecture "
@@ -69,6 +69,9 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
             flags=re.MULTILINE | re.DOTALL,
         )
         summary = changes.group(1).strip() if changes else ""
+        # Keep secondary links clickable without generating a card per commit.
+        # The release/download page in the header is the one useful preview.
+        summary = re.sub(r"(?<!<)https?://[^\s<>()]+", r"<\g<0>>", summary)
         if summary:
             prefix = "## What changed\n"
             budget = DISCORD_LIMIT - len(header) - len(setup) - len(prefix) - 2

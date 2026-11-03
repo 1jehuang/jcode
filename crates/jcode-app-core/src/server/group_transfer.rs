@@ -237,7 +237,7 @@ fn validate_bundle(bundle: &GroupTransferBundle) -> Result<()> {
 /// Operations fence the selected sessions and their complete swarm closure.
 /// Unknown-owner mutation remains globally exclusive with transfers. Snapshot
 /// expansion is verified again under admission and per-swarm operation locks.
-pub async fn handle(
+pub(super) async fn handle(
     cmd: &str,
     sessions: &SessionAgents,
     state: &SwarmState,
@@ -416,7 +416,7 @@ async fn handle_with_gate(
                 }
                 // Evict only transferred agents. Any outstanding Arc remains
                 // harmless because its durable away lease denies turns/saves.
-                sessions.write().await.retain(|id, _| !ids.contains(id));
+                sessions.retain(|id, _| !ids.contains(id)).await;
                 let mut members = state.members.write().await;
                 for id in &ids {
                     if let Some(member) = members.get_mut(id) {

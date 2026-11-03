@@ -121,11 +121,16 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions.write().await.insert(
-        "req".to_string(),
-        test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
-    );
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    sessions
+        .register_new(
+            "req".to_string(),
+            test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
+        )
+        .await
+        .unwrap();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
 
     assert_eq!(
@@ -149,7 +154,9 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (mut req_member, _rx) = member("req", Some("swarm-1"), "coordinator");
     req_member.working_dir = Some(std::path::PathBuf::from("/tmp/member-dir"));
@@ -804,11 +811,13 @@ fn resolve_swarm_spawn_model_blank_requested_model_inherits_when_unconfigured() 
 async fn coordinator_identity_uses_live_agent_when_lock_is_available() {
     let agent = test_agent_with_working_dir("coord", "/tmp/coord").await;
     let live_model = agent.lock().await.provider_model();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     sessions
-        .write()
+        .register_new("coord".to_string(), Arc::clone(&agent))
         .await
-        .insert("coord".to_string(), Arc::clone(&agent));
+        .unwrap();
 
     let identity = resolve_coordinator_spawn_identity("coord", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some(live_model.as_str()));
@@ -835,13 +844,15 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
-    let _held = agent.lock().await;
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     sessions
-        .write()
+        .register_new("coord_busy".to_string(), Arc::clone(&agent))
         .await
-        .insert("coord_busy".to_string(), Arc::clone(&agent));
+        .unwrap();
 
+    let _held = agent.lock().await;
     let identity = resolve_coordinator_spawn_identity("coord_busy", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(identity.provider_key.as_deref(), Some("claude-api"));
@@ -909,10 +920,9 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     session.provider_key = Some("claude-api".into());
     session.route_api_method = Some("claude-api".into());
     session.save_prepared().unwrap();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        "routing_busy".to_string(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([("routing_busy".to_string(), agent.clone())]),
+    ));
     let held = agent.lock().await;
     tokio::time::timeout(
         std::time::Duration::from_millis(250),
