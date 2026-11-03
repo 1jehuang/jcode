@@ -1591,6 +1591,8 @@ pub(super) fn build_messages_preview_with_offset(
             content: msg.content,
             tool_calls: msg.tool_calls,
             tool_data: msg.tool_data,
+            duration_secs: msg.duration_secs,
+            title: msg.title,
             timestamp: msg.timestamp,
         })
         .collect();

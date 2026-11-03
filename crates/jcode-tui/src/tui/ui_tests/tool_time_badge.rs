@@ -195,7 +195,6 @@ fn test_tool_row_stamp_survives_narrow_width() {
             "duration lost at width {width}: {row}"
         );
         assert!(row.contains("tok"), "tokens lost at width {width}: {row}");
-        let tok_pos = row.find("tok").expect("tokens present");
         let stamp_pos = row.find("23:15:42").expect("stamp present");
         let name_pos = row.find("bash").expect("tool name present");
         assert!(
