@@ -252,14 +252,12 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
-pub(super) async fn handle_get_model_catalog(
+async fn build_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    writer: &Arc<Mutex<WriteHalf>>,
-) -> Result<()> {
-    let started = Instant::now();
+) -> Result<(ServerEvent, &'static str, u128)> {
     let build_started = Instant::now();
     let live = super::available_models_cache::try_for_agent(agent, |agent_guard| {
         let provider = agent_guard.provider_handle();
@@ -355,7 +353,6 @@ pub(super) async fn handle_get_model_catalog(
     };
     let build_ms = build_started.elapsed().as_millis();
 
-    let encode_started = Instant::now();
     let event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -400,6 +397,39 @@ pub(super) async fn handle_get_model_catalog(
         side_panel: Default::default(),
         applets: Default::default(),
     };
+    Ok((event, source, build_ms))
+}
+
+pub(super) async fn handle_get_model_catalog(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    provider: &Arc<dyn Provider>,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let started = Instant::now();
+    // Catalog discovery is ancillary to this attachment. A refresh racing the
+    // build (or a failed blocking worker) must not close the transport and
+    // revoke an otherwise healthy cloud session's owner.
+    let built = build_model_catalog(id, session_id, agent, provider).await;
+    let (event, source, build_ms) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Model catalog request failed without disconnecting session {session_id}: {error:#}"
+            ));
+            return super::client_writer::write_direct_event(
+                writer,
+                &ServerEvent::Error {
+                    id,
+                    message: format!("Could not refresh model catalog: {error}"),
+                    retry_after_secs: None,
+                },
+            )
+            .await;
+        }
+    };
+    let encode_started = Instant::now();
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
     let write_started = Instant::now();
