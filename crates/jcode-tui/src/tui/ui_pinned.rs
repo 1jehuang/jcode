@@ -88,6 +88,7 @@ struct SidePanelMarkdownKey {
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
+    show_link_urls: bool,
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
 }
@@ -106,6 +107,7 @@ struct SidePanelRenderKey {
     inner_height: u16,
     has_protocol: bool,
     centered: bool,
+    show_link_urls: bool,
     image_zoom_percent: u8,
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
@@ -115,6 +117,43 @@ struct SidePanelRenderKey {
 struct SidePanelRenderCacheState {
     entries: HashMap<SidePanelRenderKey, RenderedSidePanelCache>,
     order: VecDeque<SidePanelRenderKey>,
+}
+
+#[test]
+fn side_panel_cache_keys_include_link_url_visibility() {
+    let markdown_key = SidePanelMarkdownKey {
+        page_id: "links".into(),
+        content_signature: 1,
+        inner_width: 40,
+        has_protocol: false,
+        centered: false,
+        show_link_urls: false,
+        mermaid_epoch: 0,
+        mermaid_aspect_bucket: None,
+    };
+    let expanded_markdown_key = SidePanelMarkdownKey {
+        show_link_urls: true,
+        ..markdown_key.clone()
+    };
+    assert_ne!(markdown_key, expanded_markdown_key);
+
+    let render_key = SidePanelRenderKey {
+        page_id: markdown_key.page_id,
+        content_signature: markdown_key.content_signature,
+        inner_width: markdown_key.inner_width,
+        inner_height: 20,
+        has_protocol: markdown_key.has_protocol,
+        centered: markdown_key.centered,
+        show_link_urls: false,
+        image_zoom_percent: 100,
+        mermaid_epoch: markdown_key.mermaid_epoch,
+        mermaid_aspect_bucket: markdown_key.mermaid_aspect_bucket,
+    };
+    let expanded_render_key = SidePanelRenderKey {
+        show_link_urls: true,
+        ..render_key.clone()
+    };
+    assert_ne!(render_key, expanded_render_key);
 }
 
 #[path = "ui_pinned_mermaid_debug.rs"]
@@ -677,6 +716,7 @@ pub(super) fn draw_side_panel_markdown(
         .get(clamped_scroll..visible_end.min(rendered.left_margins.len()))
         .unwrap_or(&[]);
     record_side_pane_snapshot_precomputed(
+        &rendered.lines,
         rendered.wrapped_plain_lines.clone(),
         rendered.wrapped_copy_offsets.clone(),
         rendered.raw_plain_lines.clone(),
@@ -951,6 +991,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
         inner_height: inner.height,
         has_protocol,
         centered,
+        show_link_urls: crate::config::config().display.show_link_urls,
         image_zoom_percent,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
         mermaid_aspect_bucket,
@@ -1094,6 +1135,7 @@ fn render_side_panel_markdown_lines_cached(
         inner_width,
         has_protocol,
         centered,
+        show_link_urls: crate::config::config().display.show_link_urls,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
         mermaid_aspect_bucket,
     };
@@ -1181,88 +1223,10 @@ fn render_side_panel_markdown_lines_cached(
     rendered
 }
 
-fn wrap_side_panel_markdown_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    lines
-        .into_iter()
-        .flat_map(|line| {
-            if is_rendered_table_line(&line)
-                || mermaid::parse_image_placeholder(&line).is_some()
-                || mermaid::parse_inline_image_placeholder(&line).is_some()
-            {
-                vec![line]
-            } else {
-                markdown::wrap_line(line, width)
-            }
-        })
-        .collect()
-}
-
-fn markdown_image_line_to_placeholder(
-    page: &crate::side_panel::SidePanelPage,
-    line: Line<'static>,
-) -> Result<Line<'static>, Line<'static>> {
-    let text = super::line_plain_text(&line);
-    let Some(path_text) = parse_rendered_markdown_image_path(&text) else {
-        return Err(line);
-    };
-    let path = resolve_side_panel_image_path(page, path_text);
-    let Ok((width, height)) = ::image::image_dimensions(&path) else {
-        return Err(line);
-    };
-
-    let hash = mermaid::register_external_image(&path, width, height);
-    let marker = mermaid::image_widget_placeholder_markdown(hash)
-        .trim_end()
-        .to_string();
-    Ok(Line::from(Span::styled(
-        marker,
-        Style::default().fg(Color::Black).bg(Color::Black),
-    )))
-}
-
-fn parse_rendered_markdown_image_path(text: &str) -> Option<&str> {
-    let text = text.trim();
-    if !text.starts_with("[image:") || !text.ends_with(')') {
-        return None;
-    }
-
-    let start = text.rfind("] (")? + 3;
-    let path = text.get(start..text.len().saturating_sub(1))?.trim();
-    if path.is_empty()
-        || path.starts_with("http://")
-        || path.starts_with("https://")
-        || path.starts_with("data:")
-    {
-        return None;
-    }
-
-    let lower = path.to_ascii_lowercase();
-    if matches!(
-        std::path::Path::new(&lower)
-            .extension()
-            .and_then(|extension| extension.to_str()),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico")
-    ) {
-        Some(path)
-    } else {
-        None
-    }
-}
-
-fn resolve_side_panel_image_path(
-    page: &crate::side_panel::SidePanelPage,
-    path_text: &str,
-) -> std::path::PathBuf {
-    let path = std::path::Path::new(path_text);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-
-    std::path::Path::new(&page.file_path)
-        .parent()
-        .map(|parent| parent.join(path))
-        .unwrap_or_else(|| path.to_path_buf())
-}
+#[path = "ui_pinned/image_paths.rs"]
+mod image_paths;
+use image_paths::markdown_image_line_to_placeholder;
+use image_paths::wrap_side_panel_markdown_lines;
 
 #[cfg(test)]
 #[path = "ui_pinned_tests.rs"]

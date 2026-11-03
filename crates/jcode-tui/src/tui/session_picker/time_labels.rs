@@ -1,4 +1,4 @@
-//! Compact session age and duration labels.
+//! Compact session age labels.
 
 pub(crate) fn format_time_ago(time: chrono::DateTime<chrono::Utc>) -> String {
     let now = chrono::Utc::now();
@@ -29,17 +29,4 @@ pub(crate) fn format_time_ago(time: chrono::DateTime<chrono::Utc>) -> String {
     }
 
     format!("{}mo ago", days / 30)
-}
-
-/// Compact duration for the "working Ns" badge in the Active view.
-pub(crate) fn format_short_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs < 60 {
-        return format!("{}s", secs);
-    }
-    let minutes = secs / 60;
-    if minutes < 60 {
-        return format!("{}m", minutes);
-    }
-    format!("{}h{}m", minutes / 60, minutes % 60)
 }

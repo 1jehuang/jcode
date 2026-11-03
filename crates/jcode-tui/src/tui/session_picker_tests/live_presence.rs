@@ -43,7 +43,7 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
 }
 
 #[test]
-fn test_active_rows_render_working_and_ready_badges() {
+fn test_active_rows_render_age_without_status_badges() {
     let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
     let live_ready = make_session("session_ready", "beta", false, SessionStatus::Closed);
     let mut picker = SessionPicker::new(vec![live_working, live_ready]);
@@ -70,10 +70,8 @@ fn test_active_rows_render_working_and_ready_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        working_text.contains("working 1m"),
-        "expected working badge with duration, got: {working_text}"
-    );
+    assert!(working_text.contains("ago"), "{working_text}");
+    assert!(!working_text.contains("working"), "{working_text}");
 
     let first_frame = picker
         .render_session_item_lines_at_frame(&working, false, 0)
@@ -87,9 +85,8 @@ fn test_active_rows_render_working_and_ready_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(first_frame.contains('⠋'));
-    assert!(second_frame.contains('⠙'));
-    assert_ne!(first_frame, second_frame, "running glyph should animate");
+    assert!(!first_frame.contains('⠋'));
+    assert!(!second_frame.contains('⠙'));
     assert!(picker.has_visible_running_sessions());
 
     let ready_lines = picker.render_session_item_lines(&ready, false);
@@ -99,14 +96,20 @@ fn test_active_rows_render_working_and_ready_badges() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        ready_text.contains("ready"),
-        "expected ready badge, got: {ready_text}"
+        !ready_text.contains("ready"),
+        "unexpected ready badge: {ready_text}"
     );
     // Live presence overrides the stale persisted "closed" status.
     assert!(
         !ready_text.contains("closed"),
         "live session must not render as closed: {ready_text}"
     );
+    for row in [working_lines[1].to_string(), ready_lines[1].to_string()] {
+        for status in ["✓", "●", "▶", "active", "ready", "working"] {
+            assert!(!row.contains(status), "unexpected {status}: {row}");
+        }
+        assert!(row.contains("ago"), "{row}");
+    }
 }
 
 #[test]
@@ -149,7 +152,8 @@ fn test_recent_window_close_boosts_old_transcript_above_newer_messages_and_saved
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("just closed"), "{text}");
+    assert!(!text.contains("just closed"), "{text}");
+    assert!(text.contains("ago"), "{text}");
     assert!(!picker.session_recently_closed(picker.visible_session_iter().nth(1).unwrap()));
 }
 

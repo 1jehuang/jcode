@@ -35,11 +35,12 @@ fn selected_session() -> SessionInfo {
             session_id: "selected".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 
 #[test]
-fn chrome_matches_shared_header_and_overscroll_buffers() {
+fn chrome_matches_shared_idle_composer_and_overscroll_buffers() {
     let session = selected_session();
     for width in [1, 4, 12, 40, 100] {
         let area = Rect::new(0, 0, width, 12);
@@ -52,9 +53,11 @@ fn chrome_matches_shared_header_and_overscroll_buffers() {
             .unwrap();
         expected
             .draw(|frame| {
-                let lines = crate::tui::ui::header::build_preview_header(&session, width);
-                let height = lines.len() as u16;
-                frame.render_widget(Paragraph::new(lines), Rect { height, ..area });
+                crate::tui::ui::input_ui::draw_preview_input(
+                    frame,
+                    Rect::new(0, 10, width, 1),
+                    next_prompt_number(&session, None),
+                );
                 frame.render_widget(
                     Paragraph::new(crate::tui::ui::input_ui::preview_overscroll_line(
                         &selected_info(&session, None),
@@ -70,6 +73,42 @@ fn chrome_matches_shared_header_and_overscroll_buffers() {
             "width={width}"
         );
     }
+}
+
+#[test]
+fn cloud_preview_overscroll_shows_selected_host_without_live_telemetry() {
+    let mut session = selected_session();
+    session.server_icon = Some("☁".into());
+    for width in [1, 12, 40, 100] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, Rect::new(0, 0, width, 12), &session, None);
+            })
+            .unwrap();
+        let footer: String = (0..width)
+            .map(|x| terminal.backend().buffer()[(x, 11)].symbol())
+            .collect();
+        if width == 100 {
+            assert!(footer.contains("☁ dev-cloud:"), "{footer}");
+            assert!(footer.contains("project"), "{footer}");
+        }
+        assert!(unicode_width::UnicodeWidthStr::width(footer.as_str()) <= width as usize);
+    }
+    session.server_icon = None;
+    let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, Rect::new(0, 0, 100, 12), &session, None);
+        })
+        .unwrap();
+    let footer: String = (0..100)
+        .map(|x| terminal.backend().buffer()[(x, 11)].symbol())
+        .collect();
+    assert!(
+        !footer.contains('☁'),
+        "local rows must not inherit a cloud host: {footer}"
+    );
 }
 
 #[test]
@@ -89,7 +128,7 @@ fn selected_facts_do_not_invent_live_telemetry() {
     assert!(
         lines
             .iter()
-            .any(|line| line.to_string().contains("cloud: dev-cloud"))
+            .any(|line| line.to_string().contains("Cloud: dev-cloud"))
     );
 }
 
@@ -137,7 +176,7 @@ fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
     let mut actual = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let mut expected = Terminal::new(TestBackend::new(120, 30)).unwrap();
     actual
-        .draw(|frame| draw_widgets(frame, area, &lines, &session, Some(&extras)))
+        .draw(|frame| draw_widgets(frame, area, &lines, &session, Some(&extras), &[], 0))
         .unwrap();
     expected
         .draw(|frame| info_widget::render_all(frame, &placements.visible, &data))
@@ -150,6 +189,37 @@ fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
             .content
             .iter()
             .any(|cell| cell.symbol() != " ")
+    );
+    let image_regions = [jcode_tui_messages::ImageRegion {
+        abs_line_idx: 0,
+        end_line: 100,
+        hash: 0,
+        height: 100,
+        width: 120,
+        render: jcode_tui_messages::ImageRegionRender::Crop,
+    }];
+    let mut occupied = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    occupied
+        .draw(|frame| {
+            draw_widgets(
+                frame,
+                area,
+                &[],
+                &session,
+                Some(&extras),
+                &image_regions,
+                10,
+            )
+        })
+        .unwrap();
+    assert!(
+        occupied
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .all(|cell| cell.symbol() == " "),
+        "widgets must not dock over image rows after scrolling"
     );
     if !was_enabled {
         info_widget::toggle_enabled();

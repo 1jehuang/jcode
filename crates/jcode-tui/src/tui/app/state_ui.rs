@@ -34,6 +34,45 @@ pub(super) struct RestoredReloadInput {
 }
 
 impl App {
+    /// Publish attachments immediately, without waiting for a history refresh.
+    /// The user prompt must already have been echoed into the transcript.
+    pub(super) fn publish_user_image_previews(&mut self, images: &[(String, String)]) {
+        let Some(ordinal) = self
+            .display_messages
+            .iter()
+            .filter(|message| {
+                message.effective_role() == "user"
+                    && !crate::session::is_attached_image_label_text(&message.content)
+            })
+            .count()
+            .checked_sub(1)
+        else {
+            return;
+        };
+        let anchor = Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal });
+        let previews = images
+            .iter()
+            .filter(|(media_type, data)| {
+                !media_type.is_empty()
+                    && !data.is_empty()
+                    && !self.remote_side_pane_images.iter().any(|existing| {
+                        existing.anchor == anchor
+                            && existing.media_type == *media_type
+                            && existing.data == *data
+                    })
+            })
+            .map(|(media_type, data)| crate::session::RenderedImage {
+                media_type: media_type.clone(),
+                data: data.clone(),
+                label: None,
+                source: crate::session::RenderedImageSource::UserInput,
+                anchor: anchor.clone(),
+                history_message_index: None,
+            })
+            .collect();
+        self.append_live_inline_images(previews);
+    }
+
     pub(super) fn append_live_inline_images(
         &mut self,
         images: Vec<crate::session::RenderedImage>,

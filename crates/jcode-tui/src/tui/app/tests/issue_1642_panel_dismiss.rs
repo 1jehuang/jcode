@@ -60,6 +60,11 @@ fn test_side_panel_dismiss_rendered_click_preserves_pages_and_reopens() {
         assert!(app.side_panel.focused_page_id.is_none());
         let hidden_frame = render_and_snap(&app, &mut terminal);
         assert!(!hidden_frame.contains("[close]"));
+        assert!(hidden_frame.contains("[show side panel]"));
+        assert_eq!(
+            app.status_notice().as_deref(),
+            Some(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT)
+        );
         app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
             .unwrap();
         assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
@@ -67,6 +72,49 @@ fn test_side_panel_dismiss_rendered_click_preserves_pages_and_reopens() {
         assert!(!app.side_panel_fullscreen);
         assert!(render_and_snap(&app, &mut terminal).contains("[close]"));
     }
+}
+
+#[test]
+fn test_side_panel_restore_button_click_and_expiry() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    app.dismiss_side_panel();
+    render_and_snap(&app, &mut terminal);
+    let target = crate::tui::ui::side_panel_restore_area().unwrap();
+    assert_eq!(target.right(), 100);
+    assert_eq!(target.y, 0);
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.x + 1,
+        row: target.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(!render_and_snap(&app, &mut terminal).contains("[show side panel]"));
+    assert!(crate::tui::ui::side_panel_restore_area().is_none());
+
+    app.dismiss_side_panel();
+    render_and_snap(&app, &mut terminal);
+    app.status_notice.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(4);
+    // Expired feedback must not accept stale clicks even before another draw.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.x + 1,
+        row: target.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.side_panel.focused_page_id.is_none());
+    assert!(!render_and_snap(&app, &mut terminal).contains("[show side panel]"));
+    assert!(crate::tui::ui::side_panel_restore_area().is_none());
+
+    app.dismiss_side_panel();
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(15, 10)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    assert!(crate::tui::ui::side_panel_restore_area().is_none());
 }
 
 #[test]

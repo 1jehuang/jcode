@@ -13,9 +13,9 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::turn_failover::process_locked_message_with_server_failover;
+use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::{
-    SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
+    SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
 use crate::agent::Agent;
@@ -24,9 +24,11 @@ use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
@@ -111,6 +113,9 @@ pub(super) async fn spawn_tracked_live_turn(
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };
+    let Ok(turn_lease) = agent.claim_server_turn() else {
+        return false;
+    };
     if swarm
         .members
         .read()
@@ -132,7 +137,14 @@ pub(super) async fn spawn_tracked_live_turn(
     )
     .await;
 
-    let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = super::state::TurnEventChannel::new(
+        session_id.to_string(),
+        Arc::clone(&swarm.members),
+        fallback,
+        &turn_lease,
+    );
+    let event_tx = events.sender();
     let session_id = session_id.to_string();
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
@@ -140,7 +152,8 @@ pub(super) async fn spawn_tracked_live_turn(
         let (result, stop_reason) = catch_live_turn_panic(async {
             if let Some(display_role) = display_role {
                 agent
-                    .run_once_streaming_mpsc_with_display_role(
+                    .run_reserved_streaming_mpsc(
+                        &turn_lease,
                         &message,
                         vec![],
                         system_reminder,
@@ -149,8 +162,9 @@ pub(super) async fn spawn_tracked_live_turn(
                     )
                     .await
             } else {
-                process_locked_message_with_server_failover(
+                process_reserved_locked_message_with_server_failover(
                     &mut agent,
+                    &turn_lease,
                     &message,
                     vec![],
                     system_reminder,
@@ -224,6 +238,8 @@ pub(super) async fn spawn_tracked_live_turn(
             }
         }
         drop(reservation);
+        events.finish().await;
+        drop(turn_lease);
     })
     .is_some()
 }
@@ -418,6 +434,22 @@ mod durable_error_tests {
             &event_counter,
             &swarm_event_tx,
         );
+        let accepted = agent.lock().await.claim_server_turn().unwrap();
+        assert!(
+            !spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "must not compete".into(),
+                None,
+                Some(crate::session::StoredDisplayRole::System),
+                None,
+                swarm.clone(),
+            )
+            .await,
+            "system display-role path must respect the accepted turn"
+        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+        drop(accepted);
         assert!(
             spawn_tracked_live_turn(
                 &session_id,
@@ -434,7 +466,12 @@ mod durable_error_tests {
         let mut stopped = false;
         let error_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                match event_rx.recv().await.expect("live turn event stream") {
+                let event = event_rx.recv().await.expect("live turn event stream");
+                let payload = match event {
+                    ServerEvent::TurnEvent { event, .. } => *event,
+                    event => event,
+                };
+                match payload {
                     ServerEvent::TurnStopped {
                         reason, message, ..
                     } => {

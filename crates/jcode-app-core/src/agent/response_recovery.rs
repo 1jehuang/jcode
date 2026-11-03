@@ -1,18 +1,4 @@
-use super::tool_markup_recovery::{
-    MarkupScan, scan_tool_call_markup, unparsed_markup_notice, unparsed_markup_reminder,
-};
 use super::*;
-
-/// Outcome of [`Agent::recover_text_wrapped_tool_call`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TextToolRecovery {
-    /// Nothing tool-call shaped in the text.
-    None,
-    /// One or more tool calls were recovered and appended.
-    Recovered,
-    /// The text holds a tool-call envelope that could not be parsed.
-    Unparseable { reason: String },
-}
 
 /// A tool call that failed schema validation, kept so the correction and
 /// terminal error can repeat exactly what the model did wrong.
@@ -25,211 +11,6 @@ pub(crate) struct MalformedToolCallInfo {
 }
 
 impl Agent {
-    fn parse_text_wrapped_tool_call(
-        text: &str,
-    ) -> Option<(String, String, serde_json::Value, String)> {
-        let marker = "to=functions.";
-        let marker_idx = text.find(marker)?;
-        let after_marker = &text[marker_idx + marker.len()..];
-
-        let mut tool_name_end = 0usize;
-        for (idx, ch) in after_marker.char_indices() {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                tool_name_end = idx + ch.len_utf8();
-            } else {
-                break;
-            }
-        }
-        if tool_name_end == 0 {
-            return None;
-        }
-
-        let tool_name = after_marker[..tool_name_end].to_string();
-        let remaining = &after_marker[tool_name_end..];
-        let mut fallback: Option<(String, String, serde_json::Value, String)> = None;
-
-        for (brace_idx, ch) in remaining.char_indices() {
-            if ch != '{' {
-                continue;
-            }
-            let slice = &remaining[brace_idx..];
-            let mut stream =
-                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
-            let parsed = match stream.next() {
-                Some(Ok(value)) => value,
-                Some(Err(_)) | None => continue,
-            };
-            let consumed = stream.byte_offset();
-            if !parsed.is_object() {
-                continue;
-            }
-
-            let prefix = text[..marker_idx].trim_end().to_string();
-            let suffix = remaining[brace_idx + consumed..].trim().to_string();
-            if suffix.is_empty() {
-                return Some((prefix, tool_name.clone(), parsed, suffix));
-            }
-            if fallback.is_none() {
-                fallback = Some((prefix, tool_name.clone(), parsed, suffix));
-            }
-        }
-
-        fallback
-    }
-
-    /// Recover a tool call the model wrote into its assistant text instead of
-    /// emitting it as a structured tool call. Only runs when the response has
-    /// no structured tool calls, so structured arguments are never touched.
-    ///
-    /// Handles the `to=functions.NAME {json}` form and XML/DSML-style
-    /// `invoke`/`parameter` envelopes (issue #1702). Recovered calls get ids
-    /// starting with `fallback_text_call_`.
-    pub(super) fn recover_text_wrapped_tool_call(
-        &self,
-        text_content: &mut String,
-        tool_calls: &mut Vec<ToolCall>,
-    ) -> TextToolRecovery {
-        Self::recover_text_tool_calls(text_content, tool_calls)
-    }
-
-    pub(super) fn recover_text_tool_calls(
-        text_content: &mut String,
-        tool_calls: &mut Vec<ToolCall>,
-    ) -> TextToolRecovery {
-        if !tool_calls.is_empty() || text_content.trim().is_empty() {
-            return TextToolRecovery::None;
-        }
-
-        let Some((prefix, tool_name, arguments, suffix)) =
-            Self::parse_text_wrapped_tool_call(text_content)
-        else {
-            return Self::recover_markup_tool_calls(text_content, tool_calls);
-        };
-
-        let mut sanitized = String::new();
-        if !prefix.is_empty() {
-            sanitized.push_str(&prefix);
-        }
-        if !suffix.is_empty() {
-            if !sanitized.is_empty() {
-                sanitized.push('\n');
-            }
-            sanitized.push_str(&suffix);
-        }
-        *text_content = sanitized;
-
-        let call_id = format!("fallback_text_call_{}", id::new_id("call"));
-        let recovered_total = RECOVERED_TEXT_WRAPPED_TOOL_CALLS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        logging::warn(&format!(
-            "[agent] Recovered text-wrapped tool call for '{}' ({}, total={})",
-            tool_name, call_id, recovered_total
-        ));
-        let intent = ToolCall::intent_from_input(&arguments);
-        tool_calls.push(ToolCall {
-            id: call_id,
-            name: tool_name,
-            input: arguments,
-            intent,
-            thought_signature: None,
-        });
-
-        TextToolRecovery::Recovered
-    }
-
-    fn recover_markup_tool_calls(
-        text_content: &mut String,
-        tool_calls: &mut Vec<ToolCall>,
-    ) -> TextToolRecovery {
-        match scan_tool_call_markup(text_content) {
-            MarkupScan::None => TextToolRecovery::None,
-            MarkupScan::Unparseable { reason } => {
-                logging::warn(&format!(
-                    "[agent] Assistant text contains an unparseable tool-call markup envelope ({reason})"
-                ));
-                logging::debug(&format!(
-                    "[agent] Unparsed tool-call markup envelope (raw): {}",
-                    text_content
-                ));
-                TextToolRecovery::Unparseable { reason }
-            }
-            MarkupScan::Parsed {
-                calls,
-                sanitized_text,
-            } => {
-                *text_content = sanitized_text;
-                for call in calls {
-                    let call_id = format!("fallback_text_call_{}", id::new_id("call"));
-                    let recovered_total = RECOVERED_TEXT_WRAPPED_TOOL_CALLS
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1;
-                    logging::warn(&format!(
-                        "[agent] Recovered tool-call markup envelope for '{}' ({}, total={})",
-                        call.name, call_id, recovered_total
-                    ));
-                    let intent = ToolCall::intent_from_input(&call.arguments);
-                    tool_calls.push(ToolCall {
-                        id: call_id,
-                        name: call.name,
-                        input: call.arguments,
-                        intent,
-                        thought_signature: None,
-                    });
-                }
-                TextToolRecovery::Recovered
-            }
-        }
-    }
-
-    /// Cap on recovery nudges per turn for unparseable tool-call markup.
-    pub(crate) const MAX_UNPARSED_TOOL_MARKUP_NUDGES: u32 = 2;
-
-    /// When the response ended with an unparseable tool-call envelope as its
-    /// only output, ask the model to re-issue the call instead of silently
-    /// ending the turn (issue #1702). Returns the user-visible notice when a
-    /// nudge was injected and the caller should re-issue the request.
-    pub(crate) fn maybe_nudge_unparsed_tool_markup(
-        &mut self,
-        recovery: &TextToolRecovery,
-        stop_reason: Option<&str>,
-        attempts: &mut u32,
-    ) -> Result<Option<String>> {
-        let TextToolRecovery::Unparseable { reason } = recovery else {
-            return Ok(None);
-        };
-        // A truncated response (max_tokens etc.) is handled by the
-        // incomplete-response continuation, which resumes mid-output.
-        if stop_reason
-            .map(str::trim)
-            .is_some_and(Self::should_continue_after_stop_reason)
-        {
-            return Ok(None);
-        }
-        if *attempts >= Self::MAX_UNPARSED_TOOL_MARKUP_NUDGES {
-            logging::warn(&format!(
-                "Unparseable tool-call markup persisted after {} nudges; ending turn",
-                attempts
-            ));
-            return Ok(None);
-        }
-        *attempts += 1;
-        logging::warn(&format!(
-            "Requesting re-issue of unparseable tool-call markup (attempt {}/{})",
-            attempts,
-            Self::MAX_UNPARSED_TOOL_MARKUP_NUDGES
-        ));
-        self.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: unparsed_markup_reminder(reason),
-                cache_control: None,
-            }],
-        );
-        self.session.save()?;
-        Ok(Some(unparsed_markup_notice(reason)))
-    }
-
     pub(crate) fn should_continue_after_stop_reason(stop_reason: &str) -> bool {
         let reason = stop_reason.trim().to_ascii_lowercase();
         if reason.is_empty() {
@@ -1041,6 +822,95 @@ mod malformed_tool_call_recovery_tests {
             agent.run_turn_streaming_mpsc(tx).await
         } else {
             agent.run_turn(false).await.map(|_| ())
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_examples_remain_literal_text_in_both_turn_loops() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let examples = [
+            "to=functions.capture {\"value\":true}",
+            "Example:\n```text\nto=functions.capture {\"value\":true}\n```\nKeep this suffix.",
+            "> to=functions.capture {\"value\":true}\nQuoted example, not an action.",
+            "<invoke name=\"capture\"><parameter name=\"value\">true</parameter></invoke>",
+            "<｜DSML｜function_calls><｜DSML｜invoke name=\"capture\"><｜DSML｜parameter name=\"value\">true</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+            "<parameter name=\"value\">true</parameter></invoke></calls>",
+            "<invoke name=\"capture\"><parameter name=\"value\">true",
+            "Unicode résumé 🔄 before +#+# and to=functions.capture {\"value\":true} after.",
+        ];
+        for streaming in [false, true] {
+            for text in examples {
+                // Single-character deltas exercise markers split across chunks.
+                let mut round: Vec<_> = text
+                    .chars()
+                    .map(|ch| StreamEvent::TextDelta(ch.to_string()))
+                    .collect();
+                round.push(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                });
+                let (mut agent, requests, executions) = scripted_agent(vec![round]).await;
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                if streaming {
+                    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+                } else {
+                    assert_eq!(agent.run_turn(false).await.unwrap(), text);
+                }
+                assert!(executions.lock().unwrap().is_empty(), "{text}");
+                assert_eq!(
+                    requests.lock().unwrap().len(),
+                    1,
+                    "no text-based retries: {text}"
+                );
+                let assistant = agent
+                    .session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == Role::Assistant)
+                    .last()
+                    .unwrap();
+                assert!(assistant.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text { text: stored, .. } if stored == text)
+                ));
+                assert!(
+                    !assistant
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                );
+                let mut streamed = String::new();
+                while let Ok(event) = rx.try_recv() {
+                    if let ServerEvent::TextDelta { text } = &event {
+                        streamed.push_str(text);
+                    }
+                    assert!(!matches!(
+                        event,
+                        ServerEvent::ToolStart { .. }
+                            | ServerEvent::ToolExec { .. }
+                            | ServerEvent::TextReplace { .. }
+                    ));
+                }
+                if streaming {
+                    assert_eq!(streamed, text);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_tools_keep_literal_examples_in_arguments() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let input = json!({"value": true, "content": "to=functions.capture {\"value\":false}\n<invoke name=\"capture\"><parameter name=\"value\">false</parameter></invoke>"});
+        for streaming in [false, true] {
+            let mut round = valid_round("structured", true, None);
+            round[1] = StreamEvent::ToolInputDeltaFor {
+                id: "structured".into(),
+                delta: input.to_string(),
+            };
+            let (mut agent, requests, executions) =
+                scripted_agent(vec![round, final_text_round()]).await;
+            run_scripted_turn(&mut agent, streaming).await.unwrap();
+            assert_eq!(*executions.lock().unwrap(), vec![input.clone()]);
+            assert_eq!(requests.lock().unwrap().len(), 2);
         }
     }
 

@@ -1,4 +1,8 @@
 use super::*;
+
+mod cloud_directories;
+mod preview_redraw_schedule;
+mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
 
@@ -199,6 +203,8 @@ fn native_scrollbar_visibility_requires_overflow() {
 
 #[derive(Clone, Default)]
 struct TestState {
+    session_picker: Option<std::rc::Rc<std::cell::RefCell<session_picker::SessionPicker>>>,
+    unfocused: bool,
     input: String,
     cursor_pos: usize,
     provider_name: Option<String>,
@@ -248,6 +254,9 @@ struct TestState {
 }
 
 impl crate::tui::TuiState for TestState {
+    fn client_focused(&self) -> bool {
+        !self.unfocused
+    }
     fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
         self.justrust_status.as_ref()
     }
@@ -547,7 +556,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
-        None
+        self.session_picker.as_deref()
     }
     fn login_picker_overlay(
         &self,

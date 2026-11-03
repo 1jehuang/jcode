@@ -485,6 +485,69 @@ fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     assert!(app.pending_startup_prompt_echo.is_none());
 }
 
+#[test]
+fn hidden_reload_continuation_stays_busy_after_initial_history() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // The tick path can dispatch a hidden reload reminder before History arrives.
+    rt.block_on(super::input_dispatch::begin_remote_send(
+        &mut app,
+        &mut remote,
+        String::new(),
+        vec![],
+        true,
+        Some("Reload complete, continue working".to_string()),
+        true,
+        0,
+    ))
+    .expect("hidden continuation sent");
+    let request_id = app.current_message_id.expect("hidden continuation sent");
+    let started = app.processing_started.expect("processing timer started");
+    assert!(app.pending_startup_prompt_echo.is_none());
+    assert!(!remote.has_loaded_history());
+
+    handle_server_event(&mut app, startup_history("reload-session"), &mut remote);
+
+    assert!(app.is_processing, "history must not suppress the spinner");
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    assert_eq!(app.processing_started, Some(started));
+    assert_eq!(app.current_message_id, Some(request_id));
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("retry payload retained");
+    assert!(pending.is_system);
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some("Reload complete, continue working")
+    );
+
+    handle_server_event(
+        &mut app,
+        ServerEvent::TextDelta {
+            text: "Continuing".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(app.is_processing);
+    assert!(matches!(
+        app.status,
+        crate::tui::ProcessingStatus::Streaming
+    ));
+    // Drain the paced buffer so Done exercises the terminal state immediately.
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
+    handle_server_event(&mut app, ServerEvent::Done { id: request_id }, &mut remote);
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
+}
+
 fn startup_history(session_id: &str) -> ServerEvent {
     ServerEvent::History {
         id: 1,

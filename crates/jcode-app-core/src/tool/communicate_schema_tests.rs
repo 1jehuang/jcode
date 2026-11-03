@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn model_facing_swarm_definition_stays_compact() {
+    fn description_bytes(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| {
+                    if key == "description" && value.is_string() {
+                        value.as_str().unwrap().len()
+                    } else {
+                        description_bytes(value)
+                    }
+                })
+                .sum(),
+            serde_json::Value::Array(values) => values.iter().map(description_bytes).sum(),
+            _ => 0,
+        }
+    }
+
+    let tool = CommunicateTool::new();
+    let mut schema = tool.parameters_schema();
+    // Budget schema prose, not user-owned prompt overrides or model allowlists.
+    super::super::apply_swarm_model_policy(&mut schema, &crate::config::AgentsConfig::default());
+    let prose_bytes = description_bytes(&schema);
+    let definition_bytes = serde_json::to_vec(&json!({
+        "name": tool.name(), "description": tool.description(), "parameters": schema
+    }))
+    .unwrap()
+    .len();
+    println!(
+        "swarm: schema description bytes={prose_bytes}, default prompt bytes={}, definition bytes={definition_bytes}",
+        crate::prompt::DEFAULT_SWARM_PROMPT.trim().len()
+    );
+    assert!(
+        prose_bytes < 1_150,
+        "swarm field descriptions grew to {prose_bytes} bytes"
+    );
+    for field in ["action", "working_dir", "session_ids", "delivery"] {
+        assert!(
+            schema["properties"][field].get("description").is_none(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn schema_still_requires_action() {
     let schema = CommunicateTool::new().parameters_schema();
     assert_eq!(schema["required"], json!(["action"]));
@@ -121,12 +166,7 @@ fn schema_requires_a_nonblank_label_for_spawn() {
             .expect("label description")
             .contains("Required for spawn")
     );
-    assert!(
-        schema["properties"]["action"]["description"]
-            .as_str()
-            .expect("action description")
-            .contains("spawn requires label")
-    );
+    assert!(schema["properties"]["action"].get("description").is_none());
 
     let branches = schema["anyOf"]
         .as_array()
@@ -139,8 +179,8 @@ fn schema_requires_a_nonblank_label_for_spawn() {
     let prompt_description = schema["properties"]["prompt"]["description"]
         .as_str()
         .expect("prompt description");
-    assert!(prompt_description.contains("Optional extra context"));
-    assert!(prompt_description.contains("do not repeat its tasks"));
+    assert!(prompt_description.contains("Extra spawn context"));
+    assert!(prompt_description.contains("not lane tasks"));
     assert!(
         schema["properties"]["label"]["description"]
             .as_str()

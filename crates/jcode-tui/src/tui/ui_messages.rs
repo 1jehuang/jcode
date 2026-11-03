@@ -1023,7 +1023,10 @@ fn render_todos_message_with_cap(
     };
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    let centered = markdown::center_code_blocks();
+    // Pinned todos are viewport chrome, not a centered transcript card. Using
+    // the code-block preference here makes short plans float in the middle of
+    // wide terminals, detached from the conversation's left edge.
+    let centered = cap_width && markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
     let card_width = match (centered, cap_width) {
         (true, true) => (width.saturating_sub(4) as usize).min(120),
@@ -1756,7 +1759,7 @@ fn render_todo_plan_update(
                     inner_width,
                 )
             }
-            crate::todo::TodoPlanField::UserIntention => {}
+            crate::todo::TodoPlanField::UserIntention | crate::todo::TodoPlanField::Title => {}
         }
     }
 
@@ -4519,6 +4522,17 @@ fn tool_row_duration_suffix(
         return None;
     }
     let duration_ms = msg.tool_duration_ms.filter(|ms| *ms > 0)?;
+    // Skip the badge when the usage label already carries this call's elapsed
+    // time: `tool_usage_label` folds `duration_secs` (live rows) or the
+    // stored "[tool timing: ...]" header (restored rows) into the label
+    // before the token count, e.g. "48s, 14 tok". Appending " · 48.3s" on
+    // top of that duplicated the elapsed time on one row (Greptile finding).
+    let already_labeled = msg.duration_secs.is_some()
+        || msg.content.trim_start().starts_with("[tool timing:")
+        || msg.content.contains("] [tool timing:");
+    if already_labeled {
+        return None;
+    }
     Some((
         format!(" · {}", format_tool_row_duration(duration_ms)),
         crate::util::tool_duration_severity(duration_ms),
