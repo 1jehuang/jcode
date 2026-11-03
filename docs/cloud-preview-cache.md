@@ -38,6 +38,15 @@ statistical latency guarantee or a cold-disk benchmark.
 | Compressed first cloud load plus projection | 11,016 ms |
 | Cached local load plus projection | 252 ms and 272 ms |
 | Cached load, projection, and first 120x40 preview frame | 367 ms, 304 ms, 310 ms |
+| Real 160x45 terminal, startup search input to visible cloud transcript | 1,168 ms and 1,279 ms |
+
+The terminal acceptance check launched the deployed `820e7e913` build twice in
+separate PTYs, opened the actual `--resume` picker, searched for the exact swan
+session ID, and verified substantive transcript rows and the cloud host/icon in
+the rendered screen. These end-to-end samples include session-list startup and
+terminal I/O, unlike the narrower renderer benchmark. Both runs reused the
+persistent local replica across processes and exited without resuming or
+modifying the remote conversation.
 
 The first-frame benchmark uses the real downloaded transcript and the real
 picker renderer with Ratatui's test backend. It asserts that the cloud footer is
