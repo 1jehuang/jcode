@@ -174,8 +174,9 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
 fn cloud_environment_hydrates_commands_without_transcript_values() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().join("state");
-    let repo = temp.path().join("repo");
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let state = root.join("state");
+    let repo = root.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir(repo.join("subdir")).unwrap();
     let original_home = std::env::var_os("JCODE_HOME");

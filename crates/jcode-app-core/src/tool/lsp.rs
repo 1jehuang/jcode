@@ -889,13 +889,13 @@ impl Tool for LspTool {
         "lsp"
     }
     fn description(&self) -> &str {
-        "Query a language server supplied by an enabled plugin. Supports hover, definition, references, documentSymbols and diagnostics. Positions are 1-based lines and UTF-16 characters. Starts a fresh isolated stdio server per call."
+        "Query enabled plugin language servers."
     }
     fn parameters_schema(&self) -> Value {
         json!({"type":"object","properties":{
             "intent":super::intent_schema_property(),
             "operation":{"type":"string","enum":["hover","definition","references","documentSymbols","diagnostics"]},
-            "file_path":{"type":"string"},"line":{"type":"integer","minimum":1},"character":{"type":"integer","minimum":1},
+            "file_path":{"type":"string"},"line":{"type":"integer","minimum":1,"description":"1-based line."},"character":{"type":"integer","minimum":1,"description":"1-based UTF-16 column."},
             "server":{"type":"string","description":"Exact marketplace/plugin:server name, required if multiple servers match."}
         },"required":["operation","file_path"]})
     }

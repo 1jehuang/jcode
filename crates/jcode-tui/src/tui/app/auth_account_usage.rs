@@ -430,16 +430,14 @@ mod tests {
             },
         );
         assert!(
-            state
+            !state
                 .accounts
-                .get(&("openai".into(), "work".into()))
-                .is_none()
+                .contains_key(&("openai".into(), "work".into()))
         );
         assert!(
-            state
+            !state
                 .accounts
-                .get(&("claude".into(), "personal".into()))
-                .is_none()
+                .contains_key(&("claude".into(), "personal".into()))
         );
     }
 }

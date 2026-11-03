@@ -76,13 +76,10 @@ async fn profile_policy_reset_starts_new_native_session_with_changed_instruction
             .iter()
             .any(|arg| arg.as_str().unwrap().starts_with("--resume"))
     );
-    let reply = run_turn_with_system(
-        &provider,
-        "NEW_PROFILE_ONLY_58231",
-        &[Message::user("system")],
-        None,
-    )
-    .await;
+    let mut followup = history.to_vec();
+    followup.push(Message::assistant_text(&sent));
+    followup.push(Message::user("system"));
+    let reply = run_turn_with_system(&provider, "NEW_PROFILE_ONLY_58231", &followup, None).await;
     assert!(text(&reply).contains("NEW_PROFILE_ONLY_58231"));
     assert!(!text(&reply).contains("OLD_PROFILE_AND_FILES_58231"));
     assert_eq!(

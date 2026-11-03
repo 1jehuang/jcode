@@ -729,7 +729,8 @@ fn remerge_keeps_split_part_when_other_anchor_holds_the_only_pocket() {
 fn remerge_keeps_swarm_and_compaction_boxes() {
     let data = contended_data();
     let area = Rect::new(0, 0, 140, 40);
-    for kind in [WidgetKind::Compaction] {
+    {
+        let kind = WidgetKind::Compaction;
         assert!(data.has_data_for(kind), "precondition: {kind:?} has data");
         let anchors = vec![
             right_anchor(WidgetKind::ModelInfo, 1, 4),
