@@ -5,11 +5,6 @@ pub(crate) fn copy_pane_vertical_edge_point(
     column: u16,
     row: u16,
 ) -> Option<(crate::tui::CopySelectionPoint, bool)> {
-    // The prompt composer cannot be wheel-scrolled, so it has no browser-style
-    // edge auto-scroll. Drags past its edge clamp via `copy_pane_drag_point`.
-    if pane == crate::tui::CopySelectionPane::Input {
-        return None;
-    }
     let snapshot = copy_snapshot_for_pane(pane)?;
     let area = snapshot.content_area;
     if area.width == 0 || area.height == 0 {
@@ -24,7 +19,13 @@ pub(crate) fn copy_pane_vertical_edge_point(
     // edge of a browser window. The horizontal position is clamped into the pane
     // so the selection extends no matter where along the edge the cursor sits.
     let last_row = area.y.saturating_add(area.height).saturating_sub(1);
-    let zone = edge_autoscroll_zone_rows(area.height);
+    // A composer can be only a few rows tall. Keep its interior precise and
+    // engage scrolling only on the actual boundary rows.
+    let zone = if pane == crate::tui::CopySelectionPane::Input {
+        0
+    } else {
+        edge_autoscroll_zone_rows(area.height)
+    };
     let top_trigger = area.y.saturating_add(zone);
     let bottom_trigger = last_row.saturating_sub(zone);
     // Only engage the hot zone when there is actually more transcript to pull in

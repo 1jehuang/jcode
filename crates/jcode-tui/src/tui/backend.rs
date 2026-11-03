@@ -330,6 +330,43 @@ mod auth;
 mod cloud;
 
 impl RemoteConnection {
+    async fn verify_ssh_ready(&mut self, deadline: Duration) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        tokio::time::timeout(deadline, async {
+            self.send_request(Request::Ping { id }).await?;
+            // Before Subscribe, only our Pong is valid. Bound the frame and
+            // preserve bytes buffered after its newline for the event reader.
+            let mut frame = Vec::new();
+            loop {
+                let available = self.reader.fill_buf().await?;
+                if available.is_empty() {
+                    anyhow::bail!("SSH transport closed before the remote daemon was ready");
+                }
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let count = newline.map_or(available.len(), |index| index + 1);
+                if frame.len() + count > 8192 {
+                    anyhow::bail!("SSH readiness reply exceeds 8192 bytes");
+                }
+                frame.extend_from_slice(&available[..count]);
+                self.reader.consume(count);
+                if newline.is_some() {
+                    break;
+                }
+            }
+            match serde_json::from_slice::<ServerEvent>(&frame)? {
+                ServerEvent::Pong {
+                    id: reply_id,
+                    native_ssh_protocol: Some(1),
+                    ..
+                } if reply_id == id => Ok(()),
+                _ => anyhow::bail!("invalid SSH daemon readiness reply"),
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH daemon readiness timed out"))?
+    }
+
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
         Self::connect_with_session(None, None, false, None, false, None).await
@@ -384,6 +421,12 @@ impl RemoteConnection {
             call_output_tokens_seen: 0,
         };
 
+        // The local SSH adapter accepts before OpenSSH authenticates. A Unix
+        // connect/write alone must not reset reconnect backoff or show success.
+        if super::is_ssh_remote() {
+            conn.verify_ssh_ready(Duration::from_secs(35)).await?;
+        }
+
         // Subscribe to events
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
@@ -397,6 +440,7 @@ impl RemoteConnection {
             supports_pdf_panels: false,
             supports_user_response: false,
             supports_server_failover: false,
+            supports_turn_identity: true,
             id: conn.next_request_id,
             working_dir,
             selfdev,
@@ -1517,101 +1561,8 @@ impl RemoteConnection {
     }
 }
 
-impl RemoteEventState for RemoteConnection {
-    fn finish_runtime_command(&mut self, id: u64) -> bool {
-        Self::finish_runtime_command(self, id)
-    }
-
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        Self::handle_tool_start(self, id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        Self::handle_tool_input(self, id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        Self::get_tool_input(self, id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        Self::handle_tool_exec(self, id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        Self::handle_tool_done(self, id, name, output)
-    }
-
-    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
-        self.tool_diff.take_tool_duration(id)
-    }
-
-    fn clear_pending(&mut self) {
-        Self::clear_pending(self);
-    }
-
-    fn call_output_tokens_seen(&mut self) -> &mut u64 {
-        Self::call_output_tokens_seen(self)
-    }
-
-    fn reset_call_output_tokens_seen(&mut self) {
-        Self::reset_call_output_tokens_seen(self);
-    }
-
-    fn set_session_id(&mut self, id: String) {
-        Self::set_session_id(self, id);
-    }
-
-    fn has_loaded_history(&self) -> bool {
-        Self::has_loaded_history(self)
-    }
-
-    fn mark_history_loaded(&mut self) {
-        Self::mark_history_loaded(self);
-    }
-}
-
-impl RemoteEventState for ReplayRemoteState {
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
-    }
-
-    fn clear_pending(&mut self) {
-        self.tool_diff.clear();
-    }
-
-    fn call_output_tokens_seen(&mut self) -> &mut u64 {
-        &mut self.call_output_tokens_seen
-    }
-
-    fn reset_call_output_tokens_seen(&mut self) {
-        self.call_output_tokens_seen = 0;
-    }
-
-    fn set_session_id(&mut self, _id: String) {}
-
-    fn has_loaded_history(&self) -> bool {
-        true
-    }
-
-    fn mark_history_loaded(&mut self) {}
-}
+#[path = "backend/event_state.rs"]
+mod event_state;
 
 #[cfg(test)]
 #[path = "backend_tests.rs"]

@@ -125,6 +125,8 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
             intent: None,
             thought_signature: None,
         }),
+        duration_secs: None,
+        title: None,
         timestamp: None,
     });
     let mut picker = SessionPicker::new(vec![session]);

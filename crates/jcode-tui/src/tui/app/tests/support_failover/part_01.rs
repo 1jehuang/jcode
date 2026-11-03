@@ -336,6 +336,27 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
     );
 }
 
+#[test]
+fn debug_state_exposes_pending_interrupt_lifecycle() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.current_message_id = Some(88);
+    app.pending_soft_interrupts = vec!["correction".to_string()];
+    app.pending_soft_interrupt_requests = vec![(89, "correction".to_string())];
+    app.pending_queued_dispatch = true;
+    app.remote_session_id = Some("session_test".to_string());
+
+    let state: serde_json::Value =
+        serde_json::from_str(&app.handle_debug_command("state")).unwrap();
+    assert_eq!(state["processing"], true);
+    assert_eq!(state["current_message_id"], 88);
+    assert_eq!(state["pending_soft_interrupts"], 1);
+    assert_eq!(state["pending_soft_interrupt_requests"], 1);
+    assert_eq!(state["pending_queued_dispatch"], true);
+    assert_eq!(state["remote_session_id"], "session_test");
+    assert!(state["processing_status"].is_string());
+}
+
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
         focus_revision: 0,

@@ -1,6 +1,6 @@
 # Dependency Security Triage
 
-Last reviewed: 2026-05-14
+Last reviewed: 2026-11-03
 
 This file tracks the current `cargo audit` findings for jcode and the intended remediation path.
 It is not an allowlist. It is a triage record so advisories are visible and actionable.
@@ -20,6 +20,31 @@ It is not an allowlist. It is a triage record so advisories are visible and acti
 | `RUSTSEC-2026-0049` | `rustls-webpki` | `rustls` dependency stack (`aws-smithy` rustls 0.21, `imap`/`rustls-connector` rustls 0.22) | TLS certificate revocation list handling | CRLs not considered authoritative by Distribution Point due to faulty matching logic. Transitive via the older rustls stacks; fix needs rustls-webpki >=0.103.10, which requires major bumps of the `aws-sdk`/`imap` stacks. | Upgrade rustls/webpki stack when compatible releases are available. |
 | `RUSTSEC-2026-0187` | `lopdf` | `jcode-pdf -> pdf-extract 0.8.2 -> lopdf 0.34` | PDF text extraction (`/pdf`, image/PDF reads) | Stack overflow parsing deeply nested PDF objects. Only reached when extracting text from a (potentially malicious) PDF the user opens; not in the auth/provider/network path. `pdf-extract 0.8.2` pins `lopdf 0.34`, so it cannot be bumped to the fixed `>=0.42` without an upstream `pdf-extract` release. | Upgrade once `pdf-extract` ships a release depending on `lopdf >=0.42`; remove the ignore then. |
 | `RUSTSEC-2023-0086` | `lexical-core` | `imap -> imap-proto -> lexical-core` | Gmail/IMAP support path | Old unsound transitive dependency in the mail stack. Higher priority than the UI-only findings because it touches network-parsed data. | Investigate upgrading or replacing `imap` / `imap-proto`. If no maintained path exists, isolate or remove the IMAP dependency. |
+
+## Resolved native SSH advisories (2026-11-03)
+
+- Upgraded `jcode-sdk`'s optional native SSH transport from `russh 0.54.5`
+  to `0.65.0`. The lockfile now selects `russh-cryptovec 0.62.0` and
+  `crypto-bigint 0.7.10`, above the patched thresholds for
+  `RUSTSEC-2026-0154`, `RUSTSEC-2026-0153`, and `RUSTSEC-2026-0387`.
+- `rsa` and `internal-russh-forked-ssh-key` are no longer in the lockfile,
+  removing `RUSTSEC-2023-0071` rather than suppressing it. Keep russh default
+  features disabled and enable only `ring`. Native SSH already generates
+  Ed25519 authentication keys, and CloudTarget accepts only Ed25519 and P-256
+  host keys. RSA-only native SSH endpoints are not supported, and the external
+  OpenSSH transport is unchanged.
+- Migrated key generation to `rand 0.10`'s cryptographically secure thread RNG.
+  The new certificate-aware host-key callback explicitly rejects certificates,
+  preserving raw pinned-key verification with no TOFU or CA trust fallback.
+- Regression coverage includes a real loopback encrypted SSH handshake,
+  Ed25519 public-key authentication, session exec/data, and wrong-pin rejection.
+  Run `justrust check -p jcode-sdk --all-features` and
+  `justrust test -p jcode-sdk --all-features` on hosted infrastructure.
+- `cargo audit --json` reports zero vulnerabilities with advisory database
+  commit `263a4d951a0867d4bddc29dddd6d59427c78f9a7` (updated 2026-11-02).
+  All four repaired advisory IDs are absent. Unmaintained, unsound, and yanked
+  dependency warnings remain. `scripts/security_preflight.sh --strict` passes
+  with its existing, unchanged triage list.
 
 ## Priority order
 
