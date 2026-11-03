@@ -1304,7 +1304,7 @@ impl Tool for TodoTool {
                             "waiting_on": {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
-                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
+                                "description": "Session background/await_members IDs; blocks while running, wakes on completion. []/null clears."
                             },
                             "completely_blocked": {
                                 "type": ["object", "null"],

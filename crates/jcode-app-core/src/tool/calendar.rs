@@ -293,7 +293,7 @@ impl Tool for CalendarTool {
                 },
                 "end": {
                     "type": "string",
-                    "description": "Same formats as start. Create default: start +30 minutes, or next day for all-day. Start-only update preserves the existing duration."
+                    "description": "Start formats. Create default: +30m, or next day if all-day. Start-only updates preserve duration."
                 },
                 "time_zone": {
                     "type": "string",

@@ -482,7 +482,7 @@ fn transcript_search_tolerates_transposed_query_words() {
     )
     .unwrap();
     assert!(paths_match(
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &search_query_tokens("clodu tood"),
         &AtomicBool::new(false),
     ));
@@ -527,12 +527,12 @@ fn full_text_ignores_json_keys_and_cancellation_stops_scan() {
     )
     .unwrap();
     assert!(!paths_match(
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &search_query_tokens("notprose"),
         &AtomicBool::new(false)
     ));
     assert!(!paths_match(
-        &[path.clone()],
+        std::slice::from_ref(&path),
         &search_query_tokens("real"),
         &AtomicBool::new(true)
     ));

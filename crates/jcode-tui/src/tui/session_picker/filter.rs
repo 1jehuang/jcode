@@ -31,38 +31,6 @@ impl SearchSelection {
     }
 }
 
-#[cfg(test)]
-mod search_selection_tests {
-    use super::*;
-
-    #[test]
-    fn follows_for_one_second_without_extending_on_rebuild() {
-        let mut selection = SearchSelection::default();
-        selection.update_query("needle");
-        assert!(selection.following());
-        let deadline = selection.follow_until.unwrap();
-        selection.update_query("needle");
-        assert_eq!(selection.follow_until, Some(deadline));
-        selection.follow_until = Some(std::time::Instant::now());
-        assert!(!selection.following());
-        selection.update_query("needle");
-        assert!(
-            !selection.following(),
-            "same query must not restart an expired window"
-        );
-        selection.update_query("another query");
-        assert!(selection.following());
-        selection.stop();
-        selection.update_query("another query");
-        assert!(
-            !selection.following(),
-            "refresh must not undo a manual override"
-        );
-        selection.update_query("");
-        assert!(!selection.following());
-    }
-}
-
 impl SessionPicker {
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
@@ -599,5 +567,37 @@ impl SessionPicker {
             self.refresh_live_presence();
         }
         self.rebuild_items();
+    }
+}
+
+#[cfg(test)]
+mod search_selection_tests {
+    use super::*;
+
+    #[test]
+    fn follows_for_one_second_without_extending_on_rebuild() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(selection.following());
+        let deadline = selection.follow_until.unwrap();
+        selection.update_query("needle");
+        assert_eq!(selection.follow_until, Some(deadline));
+        selection.follow_until = Some(std::time::Instant::now());
+        assert!(!selection.following());
+        selection.update_query("needle");
+        assert!(
+            !selection.following(),
+            "same query must not restart an expired window"
+        );
+        selection.update_query("another query");
+        assert!(selection.following());
+        selection.stop();
+        selection.update_query("another query");
+        assert!(
+            !selection.following(),
+            "refresh must not undo a manual override"
+        );
+        selection.update_query("");
+        assert!(!selection.following());
     }
 }

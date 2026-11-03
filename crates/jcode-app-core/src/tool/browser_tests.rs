@@ -288,11 +288,18 @@ async fn macos_bridge_public_tool_denies_before_dispatch_despite_live_session() 
         }
     }
     let _restore = RestoreEnv(
-        ["XDG_RUNTIME_DIR", "BROWSER_SESSION"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect(),
+        [
+            "XDG_RUNTIME_DIR",
+            "BROWSER_SESSION",
+            "JCODE_BROWSER_HANDOFF",
+            "JCODE_BROWSER_HANDOFF_DISABLED",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect(),
     );
+    jcode_base::env::set_var("JCODE_BROWSER_HANDOFF", "1");
+    jcode_base::env::remove_var("JCODE_BROWSER_HANDOFF_DISABLED");
     let temp = tempfile::Builder::new()
         .prefix("jcode-tab-guard-")
         .tempdir_in("/tmp")

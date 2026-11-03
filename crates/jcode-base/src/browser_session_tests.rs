@@ -58,8 +58,10 @@ fn session_child_cannot_retain_parent_gate_lock() {
     );
     let owner_fd = owner.as_raw_fd();
     let other_fds = [gate.as_file().as_raw_fd(), contender.as_raw_fd()];
-    let mut command = std::process::Command::new("/bin/sleep");
-    command.arg("1");
+    let mut command = std::process::Command::new("/bin/cat");
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
     unsafe {
         command.pre_exec(move || {
             for fd in other_fds.into_iter().chain(std::iter::once(owner_fd)) {
@@ -93,12 +95,23 @@ fn session_child_cannot_retain_parent_gate_lock() {
         .write(true)
         .open(&path)
         .unwrap();
-    assert!(child.try_wait().unwrap().is_none());
-    assert_eq!(
-        unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0,
-        "child must not retain the gate after owner exits"
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "probe child must remain alive"
+        );
+        if unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child must not retain the gate after owner exits"
+        );
+        // Other fixture threads can briefly fork this inode before exec closes
+        // their descriptors. The probe child stays alive throughout this check.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     child.kill().unwrap();
     child.wait().unwrap();
     drop(contender);

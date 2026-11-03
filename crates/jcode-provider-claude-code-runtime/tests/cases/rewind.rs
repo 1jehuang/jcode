@@ -82,7 +82,10 @@ async fn rewind_reset_starts_fresh_and_seeds_only_retained_history() {
     assert_eq!(provider.model(), model);
     assert_eq!(provider.account_pin(AccountProviderKind::ClaudeCode), pin);
 
-    let followup = run_turn(&provider, &[Message::user("echo-prompt")], None).await;
+    let mut followup_history = retained.to_vec();
+    followup_history.push(Message::assistant_text(&sent));
+    followup_history.push(Message::user("echo-prompt"));
+    let followup = run_turn(&provider, &followup_history, None).await;
     assert!(!text(&followup).contains("previous_conversation"));
     assert_eq!(fake.launches().len(), 2, "new history must be seeded once");
     provider.shutdown().await;

@@ -384,9 +384,15 @@ mod tests {
         app.toggle_next_prompt_new_session_routing();
         assert!(app.session_picker_overlay.is_none());
         assert!(app.pending_session_picker_load.is_none());
-        assert!(app.remote_login.is_some(), "SSH login stays on the host");
-        app.cancel_ssh_login();
-        assert!(app.inline_interactive_state.is_none());
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("remote agent controls");
+        assert!(picker.entries.iter().all(|entry| matches!(
+            entry.action,
+            crate::tui::PickerAction::AgentTarget(_) | crate::tui::PickerAction::AgentProfiles
+        )));
+        app.inline_interactive_state = None;
         assert!(!app.route_next_prompt_to_new_session);
 
         let image = tempfile::Builder::new().suffix(".png").tempfile().unwrap();

@@ -1556,7 +1556,6 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         ],
         blocked_by: Vec::new(),
         assigned_to: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -1618,7 +1617,6 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         assigned_to: None,
         stage: None,
         details: None,
-        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(long_text.to_string()),
@@ -1706,7 +1704,6 @@ fn render_todos_message_uses_readable_semantic_colors() {
         assigned_to: None,
         stage: None,
         details: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -1907,7 +1904,6 @@ fn render_todos_message_collapses_passing_quality_gates() {
         assigned_to: None,
         stage: None,
         details: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("quality".to_string()),
@@ -1964,7 +1960,6 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         assigned_to: None,
         stage: None,
         details: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -2010,7 +2005,6 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         assigned_to: None,
         stage: None,
         details: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
@@ -2085,7 +2079,6 @@ fn render_todo_tool_result_uses_boxed_card_with_goal_scores() {
         ],
         blocked_by: Vec::new(),
         assigned_to: None,
-        ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
