@@ -4,7 +4,7 @@
 
 The coordinator collected the verified baseline below before wiring the optimization.
 The benchmark author deliberately did not run Rust builds concurrently with the coordinator.
-The verified final candidate comparison is recorded below. Broader picker validation was still pending when this comparison was written.
+The verified final candidate comparison is recorded below. The coordinator subsequently confirmed that all 269 picker tests and strict fuzzy-crate Clippy passed, with run IDs recorded below.
 
 ## Wiring and commands
 
@@ -80,7 +80,7 @@ These are a short baseline, not robust tail estimates. With two samples, the emi
 ## Verified final candidate comparison
 
 - Benchmark run: `20261102-192422604-2989590`, hosted justrust, same default test profile, same two samples per case and `nightly-2026-10-08`. Evidence: `/tmp/jcode-bg-tasks/254405xn67.output`, exit code 0, one benchmark passed. Search suite time was **347.492251 ms**, while total hosted time was 7.4 s including compilation and synchronization.
-- The same task log records **17 scorer tests passed** in run `20261102-192414531-2986532`. The full picker test suite was still running when these numbers were supplied. Passing this benchmark and the scorer tests is not a claim that the entire picker suite or a live TUI acceptance workflow passed.
+- The same task log records **17 scorer tests passed** in run `20261102-192414531-2986532`. The coordinator subsequently confirmed **all 269 picker tests passed** in hosted run `20261102-192504444-2994712`, and **strict fuzzy-crate Clippy passed** in run `20261102-192506201-2994711`. These test and lint results do not by themselves establish a live TUI acceptance workflow or a successful runtime reload.
 - Candidate source context supplied by the coordinator: bounded query-local word-score reuse, with the cache's hot loop moved from the opt-level-0 TUI into the existing opt-level-3 `jcode-fuzzy` crate. No build-profile settings were changed. Concurrent token-evidence cache and warmup implementation changes were present in the same tree. The task log does not embed the complete source snapshot, dirty state or hosted CPU identity.
 
 The following are observed p50 ratios from these short runs, not robust population estimates or a guarantee for real user histories. An absent query has no first result in either run. Worker measurements exclude debounce in both runs.
