@@ -16,6 +16,10 @@
 
 ## Development Workflow
 
+- **Commit and push as you go** - Make small, scoped commits and push them to
+  the current branch's remote as meaningful work is completed, rather than
+  waiting until the end of the task. Preserve unrelated changes and never
+  force-push unless the user explicitly authorizes it.
 - **Use the user's Git identity** - Create commits with the configured
   `user.name` and `user.email`. Do not override them with `Jcode`, `Jcode agent`,
   or a fabricated agent email. Preserve existing contributor attribution when

@@ -83,7 +83,7 @@ test("error frames reject as HarnessError", async () => {
   await server.close();
 });
 
-test("run() collects a full turn and auto-approves permissions", async () => {
+test("run() collects a full turn and auto-approves permissions", async (t) => {
   const server = await startMockHarness({
     onRequest(request, send) {
       if (request.req === "send_message") {
@@ -119,16 +119,18 @@ test("run() collects a full turn and auto-approves permissions", async () => {
       }
     },
   });
+  t.after(() => server.close());
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
   const turn = await client.run("s1", "hi", { autoApprove: true });
   assert.equal(turn.text, "hello world");
   assert.equal(turn.reasoning, "think");
   assert.deepEqual(turn.toolCalls, [
     { callId: "c1", name: "bash", output: "ok", error: undefined },
   ]);
-  assert.deepEqual(turn.usage, { input: 10, output: 4, cacheReadInput: undefined });
-  client.close();
-  await server.close();
+  assert.deepEqual(turn.usage, {
+    input: 10, output: 4, cacheReadInput: undefined, effectiveBudget: undefined,
+  });
 });
 
 test("softInterrupt preserves images and the legacy text-only wire shape", async () => {
@@ -154,6 +156,26 @@ test("softInterrupt preserves images and the legacy text-only wire shape", async
     client.close();
     await server.close();
   }
+});
+
+test("run() includes the effective context budget from token usage", async (t) => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req !== "send_message") return;
+      send({ v: 1, reply_to: request.id, ev: "ok" });
+      send({ v: 1, ev: "message_accepted", session_id: "s1" });
+      send({ v: 1, ev: "token_usage", session_id: "s1", input: 10, output: 4,
+        cache_read_input: 5, effective_budget: 90_000 });
+      send({ v: 1, ev: "turn_done", session_id: "s1" });
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  const turn = await client.run("s1", "hi");
+  assert.deepEqual(turn.usage, {
+    input: 10, output: 4, cacheReadInput: 5, effectiveBudget: 90_000,
+  });
 });
 
 test("soft interrupt ids: tag, cancel by id, and background result", async () => {

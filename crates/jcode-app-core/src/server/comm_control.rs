@@ -11,9 +11,9 @@ use super::swarm_mutation_state::{
 use super::{
     ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
-    broadcast_swarm_plan_with_previous, broadcast_swarm_status, fanout_session_event,
-    persist_swarm_state_for, queue_soft_interrupt_for_session, record_swarm_event,
-    set_member_task_label, truncate_detail, update_member_status, update_member_status_with_report,
+    broadcast_swarm_plan_with_previous, broadcast_swarm_status, persist_swarm_state_for,
+    queue_soft_interrupt_for_session, record_swarm_event, set_member_task_label, truncate_detail,
+    update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::plan::{
@@ -28,151 +28,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
-/// Eligible auto-assignment targets for a swarm task.
-///
-/// Auto-pick must only land on sessions that will actually *execute* the work
-/// without further human action. In a shared swarm there can be many foreign
-/// members: independent human TUIs and stale "zombie" sessions left over from
-/// other runs. Assigning to those silently strands the task (a human session is
-/// never auto-driven; a zombie has no live agent at all) and stalls `run_plan`.
-///
-/// So a member is only a free worker for *automatic* selection when it is a
-/// worker this run owns and can drive:
-///
-/// - `is_headless`: a spawned in-process worker (always auto-driven), or
-/// - owned by the requester (`report_back_to_session_id == req`): a worker this
-///   coordinator spawned, including reusable ones that already returned `ready`.
-///
-/// Everything else (foreign humans, zombies) must be addressed with an explicit
-/// `target_session`, which bypasses this filter; this only governs auto-pick.
-fn filter_swarm_agent_candidates<'a>(
-    members: &'a HashMap<String, SwarmMember>,
-    req_session_id: &str,
-    swarm_id: &str,
-) -> Vec<&'a SwarmMember> {
-    members
-        .values()
-        .filter(|member| {
-            member.session_id != req_session_id
-                && member.swarm_id.as_deref() == Some(swarm_id)
-                && member.role == "agent"
-                && matches!(member.status.as_str(), "ready" | "completed")
-                && is_drivable_auto_worker(member, req_session_id)
-        })
-        .collect()
-}
-
-/// Whether `member` can be auto-assigned a task and be relied on to run it.
-/// See [`filter_swarm_agent_candidates`] for the rationale.
-fn is_drivable_auto_worker(member: &SwarmMember, req_session_id: &str) -> bool {
-    member.is_headless || member.report_back_to_session_id.as_deref() == Some(req_session_id)
-}
-
-/// Whether a candidate already holds an incomplete plan assignment.
-///
-/// Auto-pick must treat such a member as busy rather than reusable: assigning
-/// more work to it queues large tasks serially on one agent while the swarm
-/// still has spawn capacity (`spawn_if_needed` exists precisely to spawn a
-/// fresh agent in that case). `loads` counts non-terminal plan items per
-/// assignee (see [`assignment_loads`]).
-fn member_has_active_assignment(session_id: &str, loads: &HashMap<String, usize>) -> bool {
-    loads.get(session_id).copied().unwrap_or(0) > 0
-}
-
-/// Safety-net expiry for auto-pick claims that never reach an explicit
-/// release (e.g. a request that dies between the pick and the plan write).
-const AUTO_ASSIGN_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// In-process claims for auto-picked assignment targets, keyed by
-/// `swarm_id\nsession_id`.
-///
-/// The busy check reads the *plan* (`assignment_loads`), but the plan only
-/// records an assignment at a write that happens several awaits after the
-/// target is picked. Concurrent `assign_task`/`assign_next` requests resolve
-/// their targets inside that window (observed live: three auto-picks within
-/// ~100ms all stacking onto the same worker), so the pick itself must be a
-/// claim: the first resolver wins the member, later ones skip it and fall
-/// back to another candidate or to `spawn_if_needed`. Claims are released
-/// once the plan write records (or abandons) the assignment; the TTL only
-/// reaps leaked claims.
-fn auto_assign_claims() -> &'static std::sync::Mutex<HashMap<String, std::time::Instant>> {
-    static CLAIMS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
-        std::sync::OnceLock::new();
-    CLAIMS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn auto_assign_claim_key(swarm_id: &str, session_id: &str) -> String {
-    format!("{swarm_id}\n{session_id}")
-}
-
-/// Claim `session_id` as an auto-pick target. Returns false when another
-/// in-flight request already picked it (and that claim has not expired).
-fn try_claim_auto_assign_target(swarm_id: &str, session_id: &str) -> bool {
-    let mut claims = auto_assign_claims()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let now = std::time::Instant::now();
-    claims.retain(|_, claimed_at| now.duration_since(*claimed_at) < AUTO_ASSIGN_CLAIM_TTL);
-    match claims.entry(auto_assign_claim_key(swarm_id, session_id)) {
-        std::collections::hash_map::Entry::Occupied(_) => false,
-        std::collections::hash_map::Entry::Vacant(vacant) => {
-            vacant.insert(now);
-            true
-        }
-    }
-}
-
-fn release_auto_assign_claim(swarm_id: &str, session_id: &str) {
-    let mut claims = auto_assign_claims()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    claims.remove(&auto_assign_claim_key(swarm_id, session_id));
-}
-
-/// Error for an auto-pick that found no assignable worker. The leading
-/// sentence is a stable contract: `spawn_if_needed`/`run_plan` match on it to
-/// decide to spawn a fresh agent instead of failing the assignment.
-fn no_auto_target_error(busy_skipped: usize) -> String {
-    let mut message =
-        "No ready or completed swarm agents are available for automatic task assignment."
-            .to_string();
-    if busy_skipped > 0 {
-        message.push_str(&format!(
-            " Skipped {busy_skipped} worker(s) that already have an active assignment or an \
-             in-flight pick; spawn a fresh agent (spawn_if_needed/prefer_spawn) or wait for one \
-             to finish."
-        ));
-    }
-    message
-}
-
-/// Pick the first idle, unclaimed candidate from `candidates` (already ranked
-/// by the caller) and claim it.
-///
-/// Members that already hold an incomplete plan assignment are skipped, as are
-/// members another in-flight request just picked, so repeated auto-assignments
-/// fan out across workers (or trigger a fresh spawn) instead of stacking
-/// serially on one agent.
-fn select_and_claim_auto_target(
-    swarm_id: &str,
-    candidates: &[&SwarmMember],
-    loads: &HashMap<String, usize>,
-) -> Result<String, String> {
-    let mut busy_skipped = 0usize;
-    for member in candidates {
-        if member_has_active_assignment(&member.session_id, loads) {
-            busy_skipped += 1;
-            continue;
-        }
-        if try_claim_auto_assign_target(swarm_id, &member.session_id) {
-            return Ok(member.session_id.clone());
-        }
-        busy_skipped += 1;
-    }
-    Err(no_auto_target_error(busy_skipped))
-}
+#[path = "assignment_targets.rs"]
+mod assignment_targets;
+use assignment_targets::{
+    filter_swarm_agent_candidates, release_auto_assign_claim, select_and_claim_auto_target,
+};
+#[cfg(test)]
+use assignment_targets::{is_drivable_auto_worker, member_has_active_assignment};
 
 /// A double-assignment conflict: the task is already assigned and its
 /// assignee shows recent activity.
@@ -554,6 +418,23 @@ fn spawn_assigned_task_run(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
     crate::runtime_activity::spawn(async move {
+        let mut agent = agent_arc.lock().await;
+        let turn_lease = match agent.claim_server_turn() {
+            Ok(lease) => lease,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Assigned task {task_id} could not reserve {target_session}: {error}"
+                ));
+                return;
+            }
+        };
+        let (fallback, _) = mpsc::unbounded_channel();
+        let events = Arc::new(super::state::TurnEventChannel::new(
+            target_session.clone(),
+            Arc::clone(&swarm_members),
+            fallback,
+            &turn_lease,
+        ));
         {
             let now_ms = now_unix_ms();
             let mut plans = swarm_plans.write().await;
@@ -653,7 +534,7 @@ fn spawn_assigned_task_run(
             })
         };
 
-        let event_tx = task_progress_event_sender(
+        let progress_events = task_progress_event_sender(
             target_session.clone(),
             swarm_id.clone(),
             task_id.clone(),
@@ -664,25 +545,30 @@ fn spawn_assigned_task_run(
             Arc::clone(&event_history),
             Arc::clone(&event_counter),
             swarm_event_tx.clone(),
+            Arc::clone(&events),
+            turn_lease.publication_pin(),
         );
-        let start_message_index = {
-            let agent = agent_arc.lock().await;
-            agent.message_count()
-        };
-        let result = super::turn_failover::process_server_initiated_message(
-            Arc::clone(&agent_arc),
+        let event_tx = progress_events.sender();
+        let start_message_index = agent.message_count();
+        let result = super::turn_failover::process_reserved_locked_message_with_server_failover(
+            &mut agent,
+            &turn_lease,
             &assignment_text,
             vec![],
             None,
             event_tx,
         )
         .await;
-        let completion_report = {
-            let agent = agent_arc.lock().await;
-            agent.recent_assistant_output_tail_after(start_message_index)
-        };
-        let _ = heartbeat_stop_tx.send(true);
-        let _ = heartbeat_task.await;
+        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
+        // The lease preserves ownership without holding Agent across queue drains.
+        drop(agent);
+        if let Err(error) = heartbeat_stop_tx.send(true) {
+            crate::logging::debug(&format!("Task heartbeat already stopped: {error}"));
+        }
+        if let Err(error) = heartbeat_task.await {
+            crate::logging::warn(&format!("Task heartbeat failed: {error}"));
+        }
+        progress_events.finish().await;
 
         match result {
             Ok(_) => {
@@ -747,6 +633,7 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                let _ = events.sender().send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
                 {
@@ -795,8 +682,17 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                let _ = events.sender().send(ServerEvent::Error {
+                    id: 0,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
             }
         }
+        let events =
+            Arc::try_unwrap(events).unwrap_or_else(|_| unreachable!("progress tap drained"));
+        events.finish().await;
+        drop(turn_lease);
     });
 }
 
@@ -835,6 +731,35 @@ fn format_salvage_message(
     output
 }
 
+/// A cancellation-safe progress tap. Its task retains the scoped channel and a
+/// publication pin until every accepted raw event is forwarded.
+struct TaskProgressEvents {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TaskProgressEvents {
+    fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Task progress event drain failed: {error}"));
+        }
+    }
+}
+
+impl Drop for TaskProgressEvents {
+    fn drop(&mut self) {
+        self.close.take();
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "task progress fanout needs plan state, swarm membership, and event sinks together"
@@ -850,10 +775,24 @@ fn task_progress_event_sender(
     event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
-) -> mpsc::UnboundedSender<ServerEvent> {
+    events: Arc<super::state::TurnEventChannel>,
+    publication: crate::agent::TurnPublicationPin,
+) -> TaskProgressEvents {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
+    let (close, mut closed) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _publication = publication;
+        let output = events.sender();
+        let mut closing = false;
+        while let Some(event) = if closing {
+            rx.recv().await
+        } else {
+            tokio::select! {
+                biased;
+                _ = &mut closed => { closing = true; rx.close(); rx.recv().await }
+                event = rx.recv() => event,
+            }
+        } {
             let (detail, checkpoint_summary) = match &event {
                 ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
                 ServerEvent::ToolStart { name, .. } => {
@@ -909,10 +848,16 @@ fn task_progress_event_sender(
                 }
             }
 
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
+            let _ = output.send(event);
         }
+        // Keep the scoped channel alive through the tap drain, including abort.
+        drop(events);
     });
-    tx
+    TaskProgressEvents {
+        tx,
+        close: Some(close),
+        task: Some(task),
+    }
 }
 
 #[expect(

@@ -36,6 +36,7 @@ mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
 mod info_widget_cloud;
+mod info_widget_cloud_directories;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
@@ -1171,6 +1172,11 @@ pub trait TuiState {
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
     /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
+
+    /// The composer follows the selection endpoint only during a mouse drag.
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        None
+    }
     /// Whether the first-run onboarding empty state is being previewed in this session.
     // ---- Onboarding ----
     fn onboarding_preview_mode(&self) -> bool {
@@ -2050,6 +2056,19 @@ pub(crate) fn ssh_remote_host() -> Option<String> {
         .filter(|host| !host.trim().is_empty())
 }
 
+// A submitted prompt is an explicit retry request, not an automatic retry.
+// The native SSH adapter consumes this once on the next socket connection.
+static USER_REQUESTED_SSH_RECONNECT: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_immediate_ssh_reconnect() {
+    USER_REQUESTED_SSH_RECONNECT.store(true, Ordering::Release);
+}
+
+#[doc(hidden)]
+pub fn take_immediate_ssh_reconnect_request() -> bool {
+    USER_REQUESTED_SSH_RECONNECT.swap(false, Ordering::AcqRel)
+}
+
 pub(crate) fn is_ssh_remote() -> bool {
     ssh_remote_host().is_some()
 }
@@ -2064,7 +2083,15 @@ pub(crate) fn subscribe_metadata(
             jcode_selfdev_types::client_selfdev_requested().then_some(true),
         );
     }
-    let working_dir = std::env::current_dir().ok();
+    let working_dir = std::env::current_dir().map_or_else(
+        |error| {
+            crate::logging::debug(&format!(
+                "Could not read working directory for session subscription: {error}"
+            ));
+            None
+        },
+        Some,
+    );
     resolve_subscribe_metadata(
         working_dir.as_deref(),
         remote_working_dir,

@@ -45,8 +45,8 @@ struct BgInput {
     #[serde(default)]
     action: Option<String>,
     /// Short display label describing why this tool call is being made.
-    #[serde(default)]
-    intent: Option<String>,
+    #[serde(deserialize_with = "deserialize_intent")]
+    intent: String,
     /// Task ID (for single-task actions)
     #[serde(default)]
     task_id: Option<String>,
@@ -101,6 +101,18 @@ struct BgInput {
     graceful_timeout_ms: Option<u64>,
 }
 
+fn deserialize_intent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let intent = String::deserialize(deserializer)?;
+    if intent.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "bg intent must be a nonblank string",
+        ));
+    }
+    Ok(intent)
+}
+
 fn infer_action_from_intent(intent: Option<&str>) -> Option<&'static str> {
     let intent = intent?.trim().to_ascii_lowercase();
     if intent.is_empty() {
@@ -136,7 +148,7 @@ fn resolve_action(params: &BgInput) -> Result<String> {
         return Ok(action.to_ascii_lowercase());
     }
 
-    if let Some(action) = infer_action_from_intent(params.intent.as_deref()) {
+    if let Some(action) = infer_action_from_intent(Some(&params.intent)) {
         return Ok(action.to_string());
     }
 
@@ -476,11 +488,14 @@ impl Tool for BgTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        let mut intent_schema = super::intent_schema_property();
+        intent_schema["minLength"] = json!(1);
+        intent_schema["pattern"] = json!("\\S");
         json!({
             "type": "object",
-            "required": ["action"],
+            "required": ["action", "intent"],
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema,
                 "action": {
                     "type": "string",
                     "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
@@ -942,6 +957,63 @@ mod tests {
         assert_eq!(branches[1]["type"], json!("array"));
         assert_eq!(branches[1]["items"]["type"], json!("string"));
         Ok(())
+    }
+
+    #[test]
+    fn bg_intent_is_required_and_nonblank() {
+        for action in [
+            "list",
+            "status",
+            "output",
+            "tail",
+            "cancel",
+            "cleanup",
+            "watch",
+            "delivery",
+            "subscribe",
+            "wait",
+        ] {
+            assert!(serde_json::from_value::<BgInput>(json!({"action": action})).is_err());
+            for intent in [
+                Value::Null,
+                json!(""),
+                json!(" \t\n"),
+                json!("\u{2003}"),
+                json!(7),
+                json!(false),
+                json!([]),
+                json!({}),
+            ] {
+                assert!(
+                    serde_json::from_value::<BgInput>(json!({"action": action, "intent": intent}))
+                        .is_err(),
+                    "accepted invalid intent for {action}"
+                );
+            }
+            let params: BgInput = serde_json::from_value(
+                json!({"action": action, "intent": " Inspect background work "}),
+            )
+            .unwrap();
+            assert_eq!(resolve_action(&params).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn bg_schema_requires_nonblank_intent() {
+        for schema in [
+            BgTool::new().parameters_schema(),
+            BgTool::new().to_definition().input_schema,
+        ] {
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("intent"))
+            );
+            assert_eq!(schema["properties"]["intent"]["type"], "string");
+            assert_eq!(schema["properties"]["intent"]["minLength"], 1);
+            assert_eq!(schema["properties"]["intent"]["pattern"], "\\S");
+        }
     }
 
     #[test]

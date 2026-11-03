@@ -349,10 +349,9 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             &source_id,
             Vec::new(),
         )));
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
-            target_id.clone(),
-            Arc::clone(&target_agent),
-        )])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(target_id.clone(), Arc::clone(&target_agent))]),
+        ));
         let now = Instant::now();
         let (disconnect_tx, _disconnect_rx) = mpsc::unbounded_channel();
         let connections = Arc::new(RwLock::new(HashMap::from([(

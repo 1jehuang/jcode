@@ -293,7 +293,8 @@ impl App {
             });
             return true;
         }
-        let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(target) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -390,7 +391,8 @@ impl App {
         F: FnMut(&str) -> Result<(), E>,
         E: std::fmt::Display,
     {
-        let Some(url) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(url) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -1462,6 +1464,16 @@ impl App {
         let mut terminal_width: u16 = 0;
         let mut terminal_height: u16 = 0;
         if let Some(layout) = layout {
+            if crate::tui::TuiState::status_notice(self).as_deref()
+                == Some(super::super::ui::SIDE_PANEL_DISMISSED_HINT)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && super::super::ui::side_panel_restore_area().is_some_and(|area| {
+                    super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                })
+            {
+                self.toggle_side_panel();
+                finish_mouse_event!(false, "side_panel_restore");
+            }
             if self.side_panel.focused_page().is_some()
                 && !crate::tui::TuiState::swarm_panel_full_page(self)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

@@ -5,6 +5,9 @@
 //! consecutive, boundary, and prefix matches receive bonuses, so typo tolerance
 //! does not displace stronger literal matches.
 
+mod search_scores;
+pub use search_scores::CachedWordScores;
+
 fn is_boundary(c: char) -> bool {
     matches!(c, '/' | '-' | '_' | ' ' | '.' | ':')
 }

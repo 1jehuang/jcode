@@ -18,9 +18,22 @@ fn actionable_reminder_contains_only_header_and_list() {
     let message = build_actionable_poke_message(&todos);
     assert_eq!(
         message,
-        "You have 3 incomplete todos. Continue working, or update the todo tool.\nActionable todos:\n- standalone-capture: \"Capture standalone native source CLI\"\n- standalone-gates: \"Validate standalone capture and ship\"\n- complete-input-capture: \"Complete consistent native input capture\""
+        "You have 3 incomplete todos. Continue working, or update the todo tool.\nActionable todos:\n- \"Capture standalone native source CLI\"\n- \"Validate standalone capture and ship\"\n- \"Complete consistent native input capture\""
     );
     assert!(is_auto_poke_message(&message));
+}
+
+#[test]
+fn actionable_reminder_preserves_exact_public_name_without_internal_id() {
+    let name = format!("{} \"quoted\"\nname", "long task ".repeat(12));
+    let todo = TodoItem {
+        id: "private-internal-id".into(),
+        content: name.clone(),
+        ..Default::default()
+    };
+    let message = build_actionable_poke_message(&[todo]);
+    assert!(message.ends_with(&format!("\n- {}", serde_json::json!(name))));
+    assert!(!message.contains("private-internal-id"));
 }
 
 #[test]

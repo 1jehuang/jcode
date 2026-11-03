@@ -49,8 +49,11 @@ pub fn record_window_closed(session_id: &str) {
 
 /// Reattaching invalidates the previous closure, even if no new message is sent.
 pub fn clear_window_closed(session_id: &str) {
-    if let Some(path) = marker_path(&directory(), session_id) {
-        let _ = std::fs::remove_file(path);
+    if let Some(path) = marker_path(&directory(), session_id)
+        && let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::debug(&format!("Could not clear window closure: {error}"));
     }
 }
 
@@ -68,16 +71,71 @@ fn snapshot(dir: &Path, now: DateTime<Utc>, window: Duration) -> HashMap<String,
             // replace an expired marker concurrently with a new close.
             if let Some(age) = entry
                 .metadata()
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|modified| modified.elapsed().ok())
+                .map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )
+                .and_then(|metadata| {
+                    metadata.modified().map_or_else(
+                        |error| {
+                            crate::logging::debug(&format!(
+                                "Skipping unavailable window closure: {error}"
+                            ));
+                            None
+                        },
+                        Some,
+                    )
+                })
+                .and_then(|modified| {
+                    modified.elapsed().map_or_else(
+                        |error| {
+                            crate::logging::debug(&format!(
+                                "Skipping unavailable window closure: {error}"
+                            ));
+                            None
+                        },
+                        Some,
+                    )
+                })
                 && age > window
             {
                 return None;
             }
-            let closure: Closure =
-                serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
-            let age = now.signed_duration_since(closure.closed_at).to_std().ok()?;
+            let closure: Closure = serde_json::from_slice(
+                &std::fs::read(entry.path()).map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )?,
+            )
+            .map_or_else(
+                |error| {
+                    crate::logging::debug(&format!("Skipping unavailable window closure: {error}"));
+                    None
+                },
+                Some,
+            )?;
+            let age = now
+                .signed_duration_since(closure.closed_at)
+                .to_std()
+                .map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )?;
             (age <= window).then_some((closure.session_id, closure.closed_at))
         })
         .collect()

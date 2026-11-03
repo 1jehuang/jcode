@@ -1071,6 +1071,8 @@ fn parse_leading_usize(text: &str) -> Option<(usize, &str)> {
         .take_while(|(_, ch)| ch.is_ascii_digit())
         .map(|(idx, ch)| idx + ch.len_utf8())
         .last()?;
-    let value = text[..end].parse().ok()?;
+    let Ok(value) = text[..end].parse() else {
+        return None;
+    };
     Some((value, &text[end..]))
 }

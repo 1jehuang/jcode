@@ -1,7 +1,7 @@
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::state::{
-    SessionControlHandle, SessionInterruptQueues, queue_soft_interrupt_for_session,
-    session_event_fanout_sender,
+    SessionControlHandle, SessionInterruptQueues, TurnEventChannel,
+    queue_soft_interrupt_for_session,
 };
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
@@ -1018,7 +1018,10 @@ async fn ensure_success(response: reqwest::Response, action: &str) -> Result<req
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.unwrap_or_else(|error| {
+        crate::logging::debug(&format!("Jade response body unavailable: {error}"));
+        String::new()
+    });
     anyhow::bail!("jade relay {action} failed ({status}): {body}")
 }
 
@@ -1214,17 +1217,7 @@ async fn deliver_to_session(
         anyhow::bail!("session '{session_id}' is busy and could not accept a queued interrupt")
     }
 
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
-    };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
-    Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
+    run_relay_turn(agent, session_id, text, swarm_members).await
 }
 
 async fn deliver_to_launched_session(
@@ -1245,16 +1238,42 @@ async fn deliver_to_launched_session(
     // and restores history. For launch commands, wait for that startup work and
     // run the first prompt as a normal turn instead of falling back to a soft
     // interrupt queue that may not be processed until a later turn.
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
+    run_relay_turn(agent, session_id, text, swarm_members).await
+}
+
+async fn run_relay_turn(
+    agent: Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    session_id: &str,
+    text: &str,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String> {
+    let mut agent = agent.lock().await;
+    let lease = agent.claim_server_turn()?;
+    let start_message_index = agent.message_count();
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = TurnEventChannel::new(session_id.into(), swarm_members, fallback, &lease);
+    let result = process_reserved_message_streaming_mpsc(
+        &mut agent,
+        &lease,
+        text,
+        Vec::new(),
+        None,
+        events.sender(),
+    )
+    .await;
+    let reply = agent.latest_assistant_text_after(start_message_index);
+    let terminal = match &result {
+        Ok(()) => crate::protocol::ServerEvent::Done { id: 0 },
+        Err(error) => crate::protocol::ServerEvent::Error {
+            id: 0,
+            message: crate::util::format_error_chain(error),
+            retry_after_secs: None,
+        },
     };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
+    let _ = events.sender().send(terminal);
+    drop(agent);
+    events.finish().await;
+    result?;
     Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
 }
 
@@ -1315,115 +1334,5 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn relay_listener_config_is_opt_in_and_requires_credentials() {
-        let cfg = SafetyConfig::default();
-        assert!(RelayListenerConfig::from_safety(&cfg).is_none());
-
-        let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_reply_enabled: true,
-            ..SafetyConfig::default()
-        };
-        assert!(RelayListenerConfig::from_safety(&cfg).is_none());
-    }
-
-    #[test]
-    fn relay_listener_config_accepts_complete_opt_in_config() {
-        let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_reply_enabled: true,
-            jade_relay_api_base: Some("https://example.com/api".to_string()),
-            jade_relay_token: Some("tok".to_string()),
-            jade_relay_token_id: Some("alice-token".to_string()),
-            jade_relay_user_id: Some("alice".to_string()),
-            jade_relay_session_id: Some("sess-1".to_string()),
-            ..SafetyConfig::default()
-        };
-        let parsed = RelayListenerConfig::from_safety(&cfg).expect("complete config");
-        assert_eq!(parsed.api.api_base, "https://example.com/api/");
-        assert_eq!(parsed.api.token, "tok");
-        assert_eq!(parsed.api.token_id.as_deref(), Some("alice-token"));
-        assert_eq!(parsed.api.user_id.as_deref(), Some("alice"));
-        assert_eq!(parsed.session_id, "sess-1");
-    }
-
-    #[test]
-    fn relay_launch_config_is_separately_opt_in() {
-        let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_api_base: Some("https://example.com".to_string()),
-            jade_relay_token: Some("tok".to_string()),
-            ..SafetyConfig::default()
-        };
-        assert!(RelayLaunchConfig::from_safety(&cfg).is_none());
-
-        let cfg = SafetyConfig {
-            jade_relay_launch_enabled: true,
-            jade_relay_launch_working_dir: Some("/tmp/project".to_string()),
-            ..cfg
-        };
-        let parsed = RelayLaunchConfig::from_safety(&cfg).expect("launch opt-in config");
-        assert_eq!(parsed.api.api_base, "https://example.com/");
-        assert_eq!(parsed.default_working_dir.as_deref(), Some("/tmp/project"));
-    }
-
-    #[test]
-    fn launch_request_reads_structured_data() {
-        let event = RelayEvent {
-            seq: 7,
-            event_type: "launch".to_string(),
-            text: Some("hello from web".to_string()),
-            data: Some(serde_json::json!({
-                "working_dir": "/tmp/repo",
-                "model": "openai:gpt-test",
-                "provider": "openai",
-                "selfdev": true,
-            })),
-        };
-        let parsed = LaunchRequest::from_event(&event, Some("/fallback")).expect("launch request");
-        assert_eq!(parsed.text, "hello from web");
-        assert_eq!(parsed.working_dir.as_deref(), Some("/tmp/repo"));
-        assert_eq!(parsed.model.as_deref(), Some("openai:gpt-test"));
-        assert_eq!(parsed.provider_key.as_deref(), Some("openai"));
-        assert!(parsed.selfdev);
-    }
-
-    #[test]
-    fn relay_session_listener_polls_prompt_and_cancel_commands() {
-        assert_eq!(session_command_event_types_param(), "types=prompt,cancel");
-    }
-
-    #[test]
-    fn relay_event_type_defaults_to_prompt_for_legacy_events() {
-        let legacy = RelayEvent {
-            seq: 1,
-            event_type: String::new(),
-            text: Some("hello".to_string()),
-            data: None,
-        };
-        assert_eq!(legacy.event_type(), "prompt");
-
-        let cancel = RelayEvent {
-            event_type: "cancel".to_string(),
-            ..legacy
-        };
-        assert_eq!(cancel.event_type(), "cancel");
-    }
-
-    #[test]
-    fn relay_url_encoding_matches_jade_api_expectations() {
-        assert_eq!(urlencoding_encode("sess-relay-test"), "sess-relay-test");
-        assert_eq!(urlencoding_encode("a/b c"), "a%2Fb%20c");
-        assert_eq!(urlencoding_encode("user.name~1_2"), "user.name~1_2");
-    }
-
-    #[test]
-    fn truncation_preserves_short_text_and_marks_long_text() {
-        assert_eq!(truncate_chars("hello", 10), "hello");
-        assert_eq!(truncate_chars("abcdef", 4), "abc…");
-    }
-}
+#[path = "jade_relay_tests.rs"]
+mod tests;
