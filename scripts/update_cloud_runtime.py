@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 
 
 def bundle(binary, directory):
@@ -127,11 +128,20 @@ def main():
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="jcode-runtime-", dir=scratch) as directory:
         archive, checksum = bundle(args.binary, directory)
-        with archive.open("rb") as stream:
-            subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ForwardAgent=no",
-                            "-F", str(args.ssh_config), "--", args.host,
-                            "bash -c " + shlex.quote(install_script(checksum, args.activate_launcher))],
-                           stdin=stream, check=True)
+        command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ForwardAgent=no",
+                   "-F", str(args.ssh_config), "--", args.host,
+                   "bash -c " + shlex.quote(install_script(checksum, args.activate_launcher))]
+        # Staging is immutable and safe to repeat after a dropped SSH channel.
+        # Do not retry explicit activation: a disconnect may hide a successful switch.
+        attempts = 1 if args.activate_launcher else 3
+        for attempt in range(attempts):
+            with archive.open("rb") as stream:
+                result = subprocess.run(command, stdin=stream)
+            if result.returncode != 255 or attempt + 1 == attempts:
+                result.check_returncode()
+                break
+            print("SSH dropped while staging, retrying verified bundle", flush=True)
+            time.sleep(2 * (attempt + 1))
 
 
 if __name__ == "__main__":

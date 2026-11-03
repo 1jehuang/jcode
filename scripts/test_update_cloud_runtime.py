@@ -8,7 +8,9 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import update_cloud_runtime as runtime
 from update_cloud_runtime import install_script
 
 
@@ -112,6 +114,40 @@ class RuntimeUpdateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(backend.resolve(), old)
         self.assertIn(b"restored previous backend", result.stderr)
+
+    def invoke_cli(self, returncodes, activate=False):
+        archive = self.home / "archive.tar.gz"
+        archive.write_bytes(b"verified bundle bytes")
+        uploaded = []
+        codes = iter(returncodes)
+
+        def ssh(command, stdin):
+            uploaded.append(stdin.read())
+            return subprocess.CompletedProcess(command, next(codes))
+
+        args = ["update_cloud_runtime.py", "unused-binary"]
+        if activate:
+            args.append("--activate-launcher")
+        with patch("sys.argv", args), patch.dict(os.environ, {"JCODE_SCRATCH_DIR": str(self.home)}), \
+                patch.object(runtime, "bundle", return_value=(archive, "a" * 64)), \
+                patch.object(runtime.subprocess, "run", side_effect=ssh), \
+                patch.object(runtime.time, "sleep"):
+            runtime.main()
+        return uploaded
+
+    def test_cli_retries_only_transport_failure_and_rewinds_bundle(self):
+        uploaded = self.invoke_cli([255, 0])
+        self.assertEqual(uploaded, [b"verified bundle bytes"] * 2)
+
+    def test_cli_does_not_retry_remote_validation_failure(self):
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.invoke_cli([1])
+        self.assertEqual(error.exception.returncode, 1)
+
+    def test_cli_does_not_repeat_activation_after_transport_failure(self):
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.invoke_cli([255], activate=True)
+        self.assertEqual(error.exception.returncode, 255)
 
     def test_invalid_digest_rejected(self):
         with self.assertRaises(ValueError):
