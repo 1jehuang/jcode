@@ -1149,14 +1149,14 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
     // A writable existing file may live in a directory where creating the
     // rewind staging sibling is forbidden. Preserve the ordinary write
     // contract and make this path unavailable for future file restoration.
-    let result = match result {
-        Err(error)
+    let result = match (result, content) {
+        (Err(error), Some(bytes))
             if error
                 .root_cause()
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
         {
-            match fs::write(&path, content.unwrap_or_default()) {
+            match fs::write(&path, bytes) {
                 Ok(()) => {
                     for checkpoint in &mut history.checkpoints {
                         checkpoint.blocked.insert(path.clone());
@@ -1166,7 +1166,7 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
                 Err(write_error) => Err(write_error.into()),
             }
         }
-        result => result,
+        (result, _) => result,
     };
     let actual = state(&dir, &path)?;
     if (result.is_ok() && !change.after.matches(&actual))
