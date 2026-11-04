@@ -499,6 +499,13 @@ pub(super) async fn spawn_swarm_agent(
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
+                // Registered before the worker's `session_start` hook fires.
+                Some(super::swarm::swarm_hooks::worker_identity(
+                    swarm_id,
+                    req_session_id,
+                    label.as_deref(),
+                    definition.as_ref().map(|d| d.name.as_str()),
+                )),
             )
             .await
             .and_then(|result_json| {
@@ -563,17 +570,36 @@ pub(super) async fn spawn_swarm_agent(
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
-    super::swarm::swarm_agent_defs::StartedWorker {
-        sessions,
-        session_id: &new_session_id,
-        swarm_id,
-        coordinator_session_id: req_session_id,
-        label: label.as_deref(),
-        headless: is_headless_fallback,
-        working_dir: resolved_working_dir.as_deref(),
+    if is_headless_fallback {
+        super::swarm::swarm_agent_defs::apply_to_headless_worker(
+            sessions,
+            &new_session_id,
+            definition.as_ref(),
+            &applied_policy,
+        )
+        .await;
     }
-    .finish(definition.as_ref(), &applied_policy)
-    .await;
+    // Observers run in the coordinator's context, so use its directory rather
+    // than the worker's.
+    let coordinator_working_dir =
+        resolve_spawn_working_dir(None, req_session_id, sessions, swarm_members).await;
+    super::swarm::swarm_hooks::worker_spawned(&super::swarm::swarm_hooks::SpawnedWorker::new(
+        &new_session_id,
+        swarm_id,
+        req_session_id,
+        label.as_deref(),
+        definition.as_ref().map(|d| d.name.as_str()),
+        if is_headless_fallback {
+            if resolved_spawn_mode == SwarmSpawnMode::Inline {
+                "inline"
+            } else {
+                "headless"
+            }
+        } else {
+            "visible"
+        },
+        coordinator_working_dir.as_deref(),
+    ));
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
         swarms_by_id: Arc::clone(swarms_by_id),
@@ -946,6 +972,35 @@ pub(super) async fn handle_comm_stop(
     else {
         return;
     };
+
+    // Removing the session forgets its hook identity, so fire
+    // `swarm_member_end` first. Stopping publishes no status update of its own.
+    let stopping_transition = {
+        let members = swarm_members.read().await;
+        members.get(&target_session).map(|member| {
+            (
+                member.status.clone(),
+                member.last_status_change.elapsed().as_millis() as u64,
+                members
+                    .get(&req_session_id)
+                    .and_then(|coordinator| coordinator.working_dir.as_ref())
+                    .map(|dir| dir.display().to_string()),
+            )
+        })
+    };
+    if let Some((old_status, running_ms, coordinator_working_dir)) = stopping_transition {
+        super::swarm::swarm_hooks::member_status_changed(
+            &super::swarm::swarm_hooks::StatusTransition {
+                session_id: &target_session,
+                old_status: &old_status,
+                new_status: "stopped",
+                status_changed: true,
+                duration_ms: running_ms,
+                completion_report: None,
+                coordinator_working_dir: coordinator_working_dir.as_deref(),
+            },
+        );
+    }
 
     let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();

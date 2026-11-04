@@ -9,14 +9,16 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 /// Who a worker session is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SwarmIdentity {
     pub swarm_id: String,
     pub coordinator_session_id: String,
     /// Session that receives the worker's report (usually the coordinator).
     pub parent_session_id: String,
+    #[serde(default)]
     pub label: Option<String>,
     /// Agent definition name when spawned with one, else the label.
+    #[serde(default)]
     pub agent_type: Option<String>,
 }
 

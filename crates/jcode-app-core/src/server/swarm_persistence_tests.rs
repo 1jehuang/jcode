@@ -1054,3 +1054,50 @@ fn member_listed_in_several_snapshots_loads_only_into_its_newest_swarm() {
     let reloaded = load_runtime_state();
     assert_eq!(reloaded.swarms_by_id.len(), 1);
 }
+
+#[test]
+fn hook_identity_survives_a_persisted_member_reload() {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let session_id = "session-hook-identity-reload";
+    let member = SwarmMember {
+        session_id: session_id.to_string(),
+        event_tx,
+        event_txs: HashMap::new(),
+        working_dir: None,
+        swarm_id: Some("swarm-hook-identity".to_string()),
+        swarm_enabled: true,
+        status: "completed".to_string(),
+        detail: None,
+        friendly_name: None,
+        report_back_to_session_id: None,
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: false,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+        task_label: None,
+    };
+    let identity = crate::hooks::SwarmIdentity {
+        swarm_id: "swarm-hook-identity".into(),
+        coordinator_session_id: "coord".into(),
+        parent_session_id: "coord".into(),
+        label: Some("task".into()),
+        agent_type: Some("reviewer".into()),
+    };
+    crate::hooks::register_swarm_identity(session_id, identity.clone());
+    let persisted = to_persisted_member(&member, 1_000);
+    // Simulate a daemon restart: the in-memory registry is empty again.
+    crate::hooks::forget_swarm_identity(session_id);
+    let json = serde_json::to_string(&persisted).unwrap();
+    let reloaded: PersistedSwarmMember = serde_json::from_str(&json).unwrap();
+    assert_eq!(reloaded.hook_identity.as_ref(), Some(&identity));
+    // Legacy snapshots without the field still load.
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value.as_object_mut().unwrap().remove("hook_identity");
+    let legacy: PersistedSwarmMember = serde_json::from_value(value).unwrap();
+    assert!(legacy.hook_identity.is_none());
+}

@@ -71,6 +71,7 @@ fn member(id: &str, swarm: &str) -> PersistedSwarmMember {
             is_headless: true,
         },
         terminal_since_unix_ms: None,
+        hook_identity: None,
     }
 }
 fn swarm(id: &str, ids: &[&str]) -> PersistedSwarmState {
