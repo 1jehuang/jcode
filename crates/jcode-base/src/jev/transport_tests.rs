@@ -1,5 +1,59 @@
 use super::{tests::*, *};
 
+#[test]
+fn max_len_only_for_loopback_laya_endpoints() {
+    for (endpoint, local) in [
+        ("http://localhost:8000/v1/systemone", true),
+        ("https://127.0.0.1/v1/systemone", true),
+        ("http://127.2.3.4/v1/systemone", true),
+        ("http://192.168.1.2/v1/systemone", false),
+        ("https://100.64.0.1/v1/systemone", false),
+        ("https://node.ts.net/v1/systemone", false),
+        ("https://node.local/v1/systemone", false),
+        ("https://[::1]/v1/systemone", true),
+        ("https://[fd00::1]/v1/systemone", false),
+        ("https://example.com/v1/systemone", false),
+        ("https://localhost.example.com/v1/systemone", false),
+        ("not a url", false),
+    ] {
+        for provider in [
+            JevProvider::Laya,
+            JevProvider::OpenRouter,
+            JevProvider::TypeSafe,
+            JevProvider::Aimlapi,
+            JevProvider::Jcode,
+        ] {
+            let body = request_body_with_model(
+                JevPurpose::Memory,
+                provider,
+                provider.model(),
+                endpoint,
+                json!("state"),
+                &questions(),
+            )
+            .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body.get("max_len"),
+                (local && provider == JevProvider::Laya).then_some(&json!(4096)),
+                "{provider:?} {endpoint}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_laya_sends_max_len_on_wire() {
+    let (base, worker) = mock_server(vec![(200, response().to_string(), vec![])]);
+    mock_client(&base, JevProvider::Laya)
+        .evaluate(json!("state"), questions())
+        .await
+        .unwrap();
+    let requests = worker.join().unwrap();
+    let body: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["max_len"], 4096);
+}
+
 #[tokio::test]
 async fn browser_subscription_checks_browser_capability_and_posts_choice() {
     let answer =

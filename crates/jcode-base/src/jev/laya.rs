@@ -49,6 +49,15 @@ pub(super) fn configured_laya_base() -> String {
     LAYA_DEFAULT_BASE.to_owned()
 }
 
+pub(super) fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 pub(super) fn is_trusted_local_or_private_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
     lower == "localhost"

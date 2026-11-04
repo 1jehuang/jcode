@@ -10,7 +10,9 @@ use serde_json::{Map, Value, json};
 use std::time::Duration;
 
 mod laya;
-use laya::{configured_laya_base, laya_endpoint, resolve_laya_with, should_bypass_proxy};
+use laya::{
+    configured_laya_base, is_loopback_host, laya_endpoint, resolve_laya_with, should_bypass_proxy,
+};
 
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
@@ -306,6 +308,7 @@ impl JevClient {
             self.purpose,
             self.provider,
             &self.model_id,
+            &self.endpoint,
             state,
             &questions,
         )?;
@@ -628,13 +631,14 @@ fn request_body_for(
     state: Value,
     questions: &Map<String, Value>,
 ) -> Result<Vec<u8>> {
-    request_body_with_model(purpose, provider, provider.model(), state, questions)
+    request_body_with_model(purpose, provider, provider.model(), "", state, questions)
 }
 
 fn request_body_with_model(
     purpose: JevPurpose,
     provider: JevProvider,
     model: &str,
+    endpoint: &str,
     state: Value,
     questions: &Map<String, Value>,
 ) -> Result<Vec<u8>> {
@@ -708,10 +712,18 @@ fn request_body_with_model(
         } else {
             state
         };
-    let body = serde_json::to_vec(&json!({
+    let mut payload = json!({
         "model": model, "state": state, "questions": questions
-    }))
-    .map_err(|_| anyhow!("Could not encode Jev request"))?;
+    });
+    if provider == JevProvider::Laya
+        && reqwest::Url::parse(endpoint)
+            .ok()
+            .and_then(|url| url.host_str().map(is_loopback_host))
+            == Some(true)
+    {
+        payload["max_len"] = json!(4096);
+    }
+    let body = serde_json::to_vec(&payload).map_err(|_| anyhow!("Could not encode Jev request"))?;
     ensure!(
         body.len() <= MAX_REQUEST_BYTES,
         "Jev request exceeds the bounded context size"
@@ -1437,6 +1449,7 @@ mod tests {
             JevPurpose::Memory,
             JevProvider::OpenRouter,
             "typesafe/jev-1.14",
+            "",
             json!("query"),
             &questions(),
         )
