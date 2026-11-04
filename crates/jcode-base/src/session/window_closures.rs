@@ -71,16 +71,71 @@ fn snapshot(dir: &Path, now: DateTime<Utc>, window: Duration) -> HashMap<String,
             // replace an expired marker concurrently with a new close.
             if let Some(age) = entry
                 .metadata()
-                .map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some)
-                .and_then(|metadata| metadata.modified().map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some))
-                .and_then(|modified| modified.elapsed().map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some))
+                .map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )
+                .and_then(|metadata| {
+                    metadata.modified().map_or_else(
+                        |error| {
+                            crate::logging::debug(&format!(
+                                "Skipping unavailable window closure: {error}"
+                            ));
+                            None
+                        },
+                        Some,
+                    )
+                })
+                .and_then(|modified| {
+                    modified.elapsed().map_or_else(
+                        |error| {
+                            crate::logging::debug(&format!(
+                                "Skipping unavailable window closure: {error}"
+                            ));
+                            None
+                        },
+                        Some,
+                    )
+                })
                 && age > window
             {
                 return None;
             }
-            let closure: Closure =
-                serde_json::from_slice(&std::fs::read(entry.path()).map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some)?).map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some)?;
-            let age = now.signed_duration_since(closure.closed_at).to_std().map_or_else(|error| { crate::logging::debug(&format!("Skipping unavailable window closure: {error}")); None }, Some)?;
+            let closure: Closure = serde_json::from_slice(
+                &std::fs::read(entry.path()).map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )?,
+            )
+            .map_or_else(
+                |error| {
+                    crate::logging::debug(&format!("Skipping unavailable window closure: {error}"));
+                    None
+                },
+                Some,
+            )?;
+            let age = now
+                .signed_duration_since(closure.closed_at)
+                .to_std()
+                .map_or_else(
+                    |error| {
+                        crate::logging::debug(&format!(
+                            "Skipping unavailable window closure: {error}"
+                        ));
+                        None
+                    },
+                    Some,
+                )?;
             (age <= window).then_some((closure.session_id, closure.closed_at))
         })
         .collect()

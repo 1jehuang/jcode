@@ -37,6 +37,53 @@ Subprocesses inherit ordinary daemon environment variables unless overridden,
 and OS process inspection or another program running as the same user may expose
 secrets. Only supply credentials to trusted commands and trusted child agents.
 
+## Session tool HTTP proxies
+
+`SetSessionEnv` also controls proxy routing for session-owned `webfetch` and all
+local `websearch` engines: DuckDuckGo, Bing (HTML and API), SearXNG, custom HTTP
+backends, and Kagi. This does not change API-key or endpoint resolution, which
+still uses the existing tool configuration and daemon environment.
+
+Recognized keys are `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`, plus
+their lowercase aliases. Each exact key resolves from the session first, then
+the daemon environment. Reqwest's uppercase-first alias precedence is applied
+after that layering. Consequently a lowercase session alias does not override an
+inherited uppercase alias. Scheme-specific proxies take precedence over
+`ALL_PROXY`. Empty scheme-specific values fall back to `ALL_PROXY`, while an
+empty uppercase alias still masks its lowercase alias. `NO_PROXY` retains
+reqwest's host/domain/IP/CIDR/wildcard matching. Setting only `NO_PROXY` preserves
+the inherited proxies for other hosts. As in the current reqwest system matcher,
+CGI mode (`REQUEST_METHOD` present) disables proxy routing.
+
+No proxy keys, or clearing the session map, restores the original daemon-client
+behavior. Otherwise each tool invocation selects immutable effective proxy
+settings before making requests. Updates affect only new invocations, not an
+in-flight response, redirects, or a search invocation's fallback engines. The
+existing user agents, connection/pool settings, fetch timeout overrides, and
+custom/Kagi redirect and timeout policies are preserved. Invalid proxy settings
+fail closed with a redacted error, never silently retry via daemon credentials.
+Reqwest's existing redirect authentication behavior is unchanged: a cross-host
+plain-HTTP redirect strips `Proxy-Authorization`, although it keeps the selected
+proxy route. HTTPS CONNECT authentication and same-host redirects retain the
+selected proxy credentials. Proxies requiring authentication on every redirected
+plain-HTTP hop may reject that cross-host hop.
+
+Clients share connection pools by effective proxy configuration and HTTP policy,
+not session ID. The process-wide LRU holds at most 32 configurations/policies.
+Replacement, inheritance, clearing, and session teardown remove cached clients
+whose effective configuration is no longer referenced by any live session.
+In-flight client clones survive eviction and cleanup. Proxy cache debug output
+and transport errors do not expose proxy credentials or retain unsafe error
+source chains. The ephemeral environment registry is still not a sandbox.
+
+Provider/model requests (including provider-native web search) and daemon-internal
+updates, telemetry, usage, authentication refresh, and catalogs remain on daemon
+configuration. OpenAI's raw WebSocket transport is unchanged and does not gain
+HTTP proxy support here. Remote HTTP/SSE MCP clients also remain daemon-scoped.
+Stdio MCP servers are shared/pool-scoped processes inheriting daemon environment,
+not per-session overrides. Do not use session credentials to configure shared MCP
+servers without a separate per-session transport/process isolation design.
+
 ## Session context ceilings
 
 The harness API supports a persistent compaction ceiling for each session:

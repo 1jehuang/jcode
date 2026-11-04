@@ -20,7 +20,7 @@ struct MarkdownText: View {
                     Text(attributed(prose))
                         .font(.body)
                         .foregroundStyle(Theme.textPrimary)
-                        .tint(Theme.mint)
+                        .tint(Theme.link)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 case .code(let code, let language):
@@ -103,7 +103,7 @@ private struct CodeBlock: View {
                     Image(systemName: "doc.on.doc")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 32, height: 28)
+                        .frame(width: 44, height: 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PressableButtonStyle(scale: 0.9))
@@ -112,18 +112,17 @@ private struct CodeBlock: View {
             .padding(.leading, 12)
             .padding(.trailing, 4)
             .padding(.vertical, 2)
-            .background(Theme.surfaceElevated)
-            Hairline()
+            .background(Theme.surface)
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(Theme.mono(12))
-                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
+                    .foregroundStyle(Theme.textPrimary)
                     .padding(12)
                     .textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Theme.codeBackground)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)

@@ -7,7 +7,8 @@
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
 pub use super::cloud_status::{
-    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState, CloudStatusInfo,
+    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState,
+    CloudStatusInfo,
 };
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
@@ -678,6 +679,8 @@ pub struct InfoWidgetData {
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
+    /// Resume previews show a measured past request, not the active prompt.
+    pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
     pub model: Option<String>,
@@ -1481,7 +1484,12 @@ fn overview_footer(data: &InfoWidgetData) -> String {
                 ""
             };
             format!(
-                "{estimate}{} ctx left",
+                "{}{estimate}{} ctx left",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
                 crate::kv_cache_monitor::format_token_count(left)
             )
         }

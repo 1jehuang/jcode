@@ -853,10 +853,7 @@ pub fn decay_old_user_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]
     decay_images_in_contents(contents, false)
 }
 
-fn decay_images_in_contents(
-    contents: &mut [&mut Vec<ContentBlock>],
-    tool_results: bool,
-) -> usize {
+fn decay_images_in_contents(contents: &mut [&mut Vec<ContentBlock>], tool_results: bool) -> usize {
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {

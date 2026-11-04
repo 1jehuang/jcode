@@ -35,7 +35,10 @@ from reward.interaction.model import (
 # States: the UI contexts a mobile user occupies.
 _STATES = [
     UserState(id="chat", label="Chat / composer", screen="chat"),
-    UserState(id="settings_sheet", label="Settings sheet", screen="settings_sheet"),
+    # Sessions is the primary navigation sheet (header, leading edge). Settings
+    # is nested one level under it, so it is not a top-level state any more.
+    UserState(id="sessions_sheet", label="Sessions sheet", screen="sessions_sheet"),
+    UserState(id="model_picker", label="Model picker", screen="model_picker"),
     UserState(id="pairing", label="Pairing", screen="pairing"),
     UserState(id="qr_scanner", label="QR scanner sheet", screen="qr_scanner"),
 ]
@@ -121,9 +124,16 @@ def build_user_model(
             response_s=0.0,
         ),
         Action(
-            id="open_settings", label="Open the settings sheet",
-            src="chat", dst="settings_sheet", weight=wt("open_settings", 0.02),
-            target_id="settings",
+            id="open_sessions", label="Open the sessions sheet",
+            src="chat", dst="sessions_sheet", weight=wt("open_settings", 0.02),
+            target_id="sessions",
+            operators=["M", "TAP"],
+            response_s=0.35,  # sheet present animation
+        ),
+        Action(
+            id="open_model_picker", label="Tap the header model label",
+            src="chat", dst="model_picker", weight=wt("change_model", 0.03),
+            target_id="model_label",
             operators=["M", "TAP"],
             response_s=0.35,  # sheet present animation
         ),
@@ -158,21 +168,23 @@ def build_user_model(
         # --- from the settings sheet ----------------------------------------
         Action(
             id="switch_session", label="Switch to another session",
-            src="settings_sheet", dst="chat", weight=wt("switch_session", 0.05),
+            src="sessions_sheet", dst="chat", weight=wt("switch_session", 0.05),
             target_id="session_row_1",
             operators=["M", "TAP"],
             response_s=0.30,  # dismiss + reconnect/resubscribe
         ),
         Action(
-            id="change_model", label="Change the model",
-            src="settings_sheet", dst="settings_sheet", weight=wt("change_model", 0.03),
+            # Picking a model dismisses the picker and returns to chat, so the
+            # whole flow is: tap label -> tap model. Two taps, no "Done".
+            id="change_model", label="Pick a model",
+            src="model_picker", dst="chat", weight=1.0,
             target_id="model_row_1",
             operators=["M", "TAP"],
-            response_s=0.0,
+            response_s=0.30,  # dismiss + server set_model
         ),
         Action(
             id="rename_session", label="Rename the current session",
-            src="settings_sheet", dst="settings_sheet", weight=wt("rename_session", 0.01),
+            src="sessions_sheet", dst="sessions_sheet", weight=wt("rename_session", 0.01),
             target_id="rename_session",
             # tap row -> alert -> type ~10 chars -> confirm
             operators=["M", "TAP"] + ["K"] * 10 + ["TAP"],
@@ -180,29 +192,29 @@ def build_user_model(
         ),
         Action(
             id="new_session", label="Start a new (cleared) session",
-            src="settings_sheet", dst="chat", weight=wt("new_session", 0.01),
+            src="sessions_sheet", dst="chat", weight=wt("new_session", 0.01),
             target_id="new_session",
             operators=["M", "TAP"],
             response_s=0.30,  # dismiss + server clear
         ),
         Action(
             id="remove_server", label="Remove a paired server (swipe)",
-            src="settings_sheet", dst="settings_sheet", weight=wt("remove_server", 0.002),
+            src="sessions_sheet", dst="sessions_sheet", weight=wt("remove_server", 0.002),
             target_id="server_row_0",
             # swipe (priced like a tap-move) + confirm tap
             operators=["M", "TAP", "TAP"],
             response_s=0.0,
         ),
         Action(
-            id="close_settings", label="Dismiss settings back to chat",
-            src="settings_sheet", dst="chat", weight=max(wt("open_settings", 0.02), 0.02),
+            id="close_sessions", label="Dismiss sessions back to chat",
+            src="sessions_sheet", dst="chat", weight=max(wt("open_settings", 0.02), 0.02),
             target_id="settings_done",
             operators=["TAP"],
             response_s=0.30,
         ),
         Action(
             id="pair_server", label="Pair a new server",
-            src="settings_sheet", dst="pairing", weight=wt("pair_server", 0.01),
+            src="sessions_sheet", dst="pairing", weight=wt("pair_server", 0.01),
             target_id="pair_new_server",
             operators=["M", "TAP"],
             response_s=0.35,  # nested sheet present
@@ -240,18 +252,19 @@ def build_user_model(
         Task(id="t_send", label="Send a message",
              action_ids=["send_message"], frequency=wt("send_message", 0.45)),
         Task(id="t_switch", label="Switch session",
-             action_ids=["open_settings", "switch_session"],
+             action_ids=["open_sessions", "switch_session"],
              frequency=wt("switch_session", 0.05)),
+        # Two taps total: header model label -> the model row (which dismisses).
         Task(id="t_model", label="Change model",
-             action_ids=["open_settings", "change_model", "close_settings"],
+             action_ids=["open_model_picker", "change_model"],
              frequency=wt("change_model", 0.03)),
         Task(id="t_interrupt", label="Interrupt a run",
              action_ids=["interrupt"], frequency=wt("interrupt", 0.05)),
         Task(id="t_pair", label="Pair a new server (manual code)",
-             action_ids=["open_settings", "pair_server", "confirm_pair"],
+             action_ids=["open_sessions", "pair_server", "confirm_pair"],
              frequency=wt("pair_server", 0.01) * 0.5),
         Task(id="t_pair_qr", label="Pair a new server (QR scan)",
-             action_ids=["open_settings", "pair_server", "open_qr_scanner", "scan_pair"],
+             action_ids=["open_sessions", "pair_server", "open_qr_scanner", "scan_pair"],
              frequency=wt("pair_server", 0.01) * 0.5),
         Task(id="t_inspect_tool", label="Inspect a tool call",
              action_ids=["expand_tool_card"],
@@ -260,10 +273,10 @@ def build_user_model(
              action_ids=["scroll", "read_idle", "jump_to_latest"],
              frequency=wt("jump_to_latest", 0.03)),
         Task(id="t_rename", label="Rename the session",
-             action_ids=["open_settings", "rename_session", "close_settings"],
+             action_ids=["open_sessions", "rename_session", "close_sessions"],
              frequency=wt("rename_session", 0.01)),
         Task(id="t_new_session", label="Start a new session",
-             action_ids=["open_settings", "new_session"],
+             action_ids=["open_sessions", "new_session"],
              frequency=wt("new_session", 0.01)),
     ]
 

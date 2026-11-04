@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn reasoning_summary_parts_preserve_boundaries_without_splitting_chunks() {
+    let mut saw_text = false;
+    let mut saw_thinking = false;
+    let mut tools = HashMap::new();
+    let mut completed = HashSet::new();
+    let mut pending = VecDeque::new();
+    let mut thinking = String::new();
+    for value in [
+        serde_json::json!({"type":"response.reasoning_summary_part.added","summary_index":0,"part":{"type":"summary_text","text":""}}),
+        serde_json::json!({"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":"**Inspecting "}),
+        serde_json::json!({"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":"source**"}),
+        serde_json::json!({"type":"response.reasoning_summary_text.done","summary_index":0,"text":"**Inspecting source**"}),
+        serde_json::json!({"type":"response.reasoning_summary_part.done","summary_index":0,"part":{"type":"summary_text","text":"**Inspecting source**"}}),
+        serde_json::json!({"type":"response.reasoning_summary_part.added","summary_index":1,"part":{"type":"summary_text","text":""}}),
+        serde_json::json!({"type":"response.reasoning_summary_text.delta","summary_index":1,"delta":"**Logging results**"}),
+        serde_json::json!({"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Inspecting source**"},{"type":"summary_text","text":"**Logging results**"}]}}),
+    ] {
+        let event = parse_openai_response_event(
+            &value.to_string(),
+            &mut saw_text,
+            &mut saw_thinking,
+            &mut tools,
+            &mut completed,
+            &mut pending,
+        );
+        for event in event.into_iter().chain(pending.drain(..)) {
+            if let StreamEvent::ThinkingDelta(text) = event {
+                thinking.push_str(&text);
+            }
+        }
+    }
+    assert_eq!(thinking, "**Inspecting source**\n**Logging results**");
+}
+
+#[test]
+fn summary_boundary_without_streamed_text_does_not_create_reasoning() {
+    for summary_index in [None, Some(0), Some(1)] {
+        let event = parse_openai_response_event(
+            &serde_json::json!({"type":"response.reasoning_summary_part.added","summary_index":summary_index}).to_string(),
+            &mut false,
+            &mut false,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &mut VecDeque::new(),
+        );
+        assert!(event.is_none());
+    }
+}
+
+#[test]
 fn output_item_completion_frames_messages_not_reasoning_or_text_chunks() {
     let mut saw_text = false;
     let mut saw_thinking = false;

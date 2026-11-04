@@ -36,7 +36,18 @@ fn list_sessions(current: Value, command: &str, args: &[String]) -> Result<(Valu
                     && let Ok(metadata) = entry.metadata()
                     && metadata.is_file()
                 {
-                    candidates.push((metadata.modified().map_or_else(|error| { crate::logging::debug(&format!("Remote session timestamp unavailable: {error}")); None }, Some), path));
+                    candidates.push((
+                        metadata.modified().map_or_else(
+                            |error| {
+                                crate::logging::debug(&format!(
+                                    "Remote session timestamp unavailable: {error}"
+                                ));
+                                None
+                            },
+                            Some,
+                        ),
+                        path,
+                    ));
                 }
             }
         }

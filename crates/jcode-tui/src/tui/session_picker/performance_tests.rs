@@ -1,7 +1,7 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-fn session(id: usize, turns: usize) -> SessionInfo {
+pub(super) fn session(id: usize, turns: usize) -> SessionInfo {
     let now = chrono::Utc::now();
     let messages_preview = (0..turns * 2).map(|i| PreviewMessage {
         role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
@@ -32,6 +32,7 @@ fn session(id: usize, turns: usize) -> SessionInfo {
         status: SessionStatus::Closed,
         needs_catchup: false,
         estimated_tokens: turns * 1000,
+        todo_statuses: Vec::new(),
         first_user_prompt: Some("improve resume responsiveness".into()),
         messages_preview,
         search_index: String::new(),
@@ -48,6 +49,82 @@ fn session(id: usize, turns: usize) -> SessionInfo {
 fn median(mut samples: Vec<Duration>) -> Duration {
     samples.sort();
     samples[samples.len() / 2]
+}
+
+#[test]
+fn cold_preview_viewport_matches_full_wide_then_narrow_layout() {
+    let mode = crate::config::DiffDisplayMode::Inline;
+    for turns in [0, 1, 8] {
+        let item = session(0, turns);
+        let picker = SessionPicker::new(vec![item.clone()]);
+        let messages: Vec<DisplayMessage> = item
+            .messages_preview
+            .iter()
+            .map(|msg| DisplayMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_data: msg.tool_data.clone(),
+                title: msg.title.clone(),
+                duration_secs: msg.duration_secs,
+            })
+            .collect();
+        for width in [1, 2, 3, 20, 80, 120] {
+            for height in [0, 1, 2, 5, 30, 200] {
+                let area = Rect::new(0, 0, width, height);
+                let wide = width
+                    .saturating_sub(super::super::ui::left_aligned_content_inset(width, false));
+                let mut prepared =
+                    super::super::ui::prepare::prepare_history_preview(&messages, 0, wide, mode);
+                let mut header = super::super::ui::header::build_preview_header(&item, wide);
+                let mut padding =
+                    super::super::ui::prepare::initial_header_pad_top(height, header.len());
+                let scrollbar = super::super::ui::native_scrollbar_visible(
+                    width > 1,
+                    padding + header.len() + prepared.wrapped_lines.len(),
+                    height as usize,
+                );
+                if scrollbar {
+                    let render_width = width.saturating_sub(1);
+                    let narrow = render_width.saturating_sub(
+                        super::super::ui::left_aligned_content_inset(render_width, false),
+                    );
+                    prepared = super::super::ui::prepare::prepare_history_preview(
+                        &messages, 0, narrow, mode,
+                    );
+                    header = super::super::ui::header::build_preview_header(&item, narrow);
+                    padding =
+                        super::super::ui::prepare::initial_header_pad_top(height, header.len());
+                }
+                let body_empty = prepared.wrapped_lines.is_empty();
+                let mut expected = vec![Line::default(); padding];
+                expected.extend(header);
+                expected.extend(prepared.wrapped_lines);
+                if body_empty {
+                    expected.push(Line::styled(
+                        "(empty session)",
+                        Style::default().fg(rgb(80, 80, 80)),
+                    ));
+                }
+                let actual = picker.build_preview_cache(
+                    &item,
+                    area,
+                    area,
+                    tiny_cache(0, 0).key,
+                    Alignment::Left,
+                    mode,
+                );
+                assert_eq!(
+                    actual.show_scrollbar, scrollbar,
+                    "turns={turns} width={width} height={height}"
+                );
+                assert_eq!(
+                    actual.wrapped_lines, expected,
+                    "turns={turns} width={width} height={height}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -301,14 +378,38 @@ fn retained_previews_have_byte_and_entry_bounds_and_evict_lru() {
 }
 
 #[test]
+fn self_dev_entries_keep_here_marker_on_directory_row() {
+    let mut item = session(0, 1);
+    item.is_canary = true;
+    item.working_dir = Some("/project/picker-layout".into());
+    let mut picker = SessionPicker::new(vec![item.clone()]);
+    picker.current_dir = item.working_dir.clone();
+    for selected in [false, true] {
+        let rows = picker.render_session_item_lines(&item, selected);
+        assert!(!rows[0].to_string().contains("🔬"));
+        assert!(!rows[0].to_string().contains("▸ here"));
+        assert!(rows[1].to_string().contains("picker-layout  ▸ here"));
+        assert!(rows[1].spans.last().unwrap().content.contains("ago"));
+    }
+    picker.current_dir = Some("/different-project".into());
+    picker.current_repo = None;
+    let rows = picker.render_session_item_lines(&item, false);
+    assert!(!rows[1].to_string().contains("▸ here"));
+}
+
+#[test]
 fn compact_session_entries_keep_context_without_spacer_rows() {
     let mut item = session(0, 1);
     item.working_dir = Some("/project/resume-layout".into());
     let picker = SessionPicker::new(vec![item.clone()]);
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
+    assert!(!rows[0].to_string().contains("tok"));
+    assert!(rows[1].to_string().contains("resume-layout"));
+    assert!(rows[1].to_string().contains("ago"));
+    assert!(!rows[1].to_string().contains("active"));
     assert!(
-        rows[1]
+        !rows[1]
             .to_string()
             .contains("improve resume responsiveness")
     );
@@ -322,8 +423,8 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     item.working_dir = None;
     let rows = picker.render_session_item_lines(&item, false);
     assert_eq!(rows.len(), 2);
-    assert!(rows[1].to_string().contains("2 messages"));
-    assert!(rows[1].to_string().contains("tok"));
+    assert!(rows[1].to_string().contains("No directory"));
+    assert!(!rows[0].to_string().contains("tok"));
 
     item.status = SessionStatus::Crashed {
         message: Some("connection failed".into()),
@@ -336,6 +437,54 @@ fn compact_session_entries_keep_context_without_spacer_rows() {
     );
     assert!(rows[2].to_string().contains("connection failed"));
     assert!(rows.iter().all(|row| !row.to_string().trim().is_empty()));
+}
+
+#[test]
+fn resume_todo_dots_follow_item_statuses() {
+    let mut item = session(0, 1);
+    item.todo_statuses = ["completed", "in_progress", "pending", "cancelled"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let dots = SessionPicker::todo_dot_spans(&item, 20);
+    assert_eq!(dots.len(), 4);
+    for (dot, color) in dots.iter().zip([
+        rgb(129, 199, 132),
+        rgb(255, 213, 79),
+        rgb(140, 140, 140),
+        rgb(80, 80, 80),
+    ]) {
+        assert_eq!(dot.content, "●");
+        assert_eq!(dot.style.fg, Some(color));
+    }
+    assert_eq!(SessionPicker::todo_dot_spans(&item, 2)[1].content, "…");
+    assert!(SessionPicker::todo_dot_spans(&item, 0).is_empty());
+    item.todo_statuses.clear();
+    assert!(SessionPicker::todo_dot_spans(&item, 20).is_empty());
+}
+
+#[test]
+fn session_entry_reserves_todo_dots_and_activity_for_long_names_and_directories() {
+    let mut item = session(0, 1);
+    item.title = "界".repeat(60);
+    item.working_dir = Some(format!("/{}", "界".repeat(80)));
+    item.todo_statuses = vec!["completed".into(); 5];
+    item.last_active_at = Some(chrono::Utc::now());
+    let mut picker = SessionPicker::new(vec![item]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 12)).unwrap();
+    terminal
+        .draw(|f| picker.render_session_list_impl(f, f.area(), true))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (1..11)
+        .filter(|&y| buffer[(1, y)].symbol() == "▌")
+        .map(|y| (2..47).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].trim_end().ends_with("●●●●●"), "{}", rows[0]);
+    assert!(!rows[0].contains("tok"));
+    assert!(rows[1].contains("ago"), "{}", rows[1]);
+    assert!(rows.iter().all(|row| row.contains('…')));
 }
 
 #[test]
@@ -363,7 +512,8 @@ fn compact_rows_truncate_wide_text_without_wrapping() {
     for width in [8, 20, 42] {
         let mut item = session(0, 1);
         item.title = "界".repeat(60);
-        item.first_user_prompt = Some("界".repeat(80));
+        item.todo_statuses = vec!["pending".into(); 1_000];
+        item.working_dir = Some(format!("/{}", "界".repeat(80)));
         let mut picker = SessionPicker::new(vec![item]);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
@@ -382,7 +532,7 @@ fn compact_rows_truncate_wide_text_without_wrapping() {
         for y in selected_rows {
             // A double-width glyph may leave one spare cell before the border.
             assert!(
-                (width - 3..=width - 2).any(|x| buffer[(x, y)].symbol() == "…"),
+                (1..width - 1).any(|x| buffer[(x, y)].symbol() == "…"),
                 "missing truncation marker: width={width}, row={y}"
             );
         }

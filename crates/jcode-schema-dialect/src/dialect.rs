@@ -62,6 +62,8 @@ pub struct DialectTransforms {
     /// depth. Needed by validators that accept `allOf` syntactically without
     /// intersecting it.
     pub merge_all_of_branches: bool,
+    /// Encode type unions for Gemini's scalar protobuf type field.
+    pub scalar_types: bool,
 }
 
 /// A provider's accepted JSON Schema subset plus the rewrites needed to reach
@@ -242,6 +244,9 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
                 }
             }
 
+            if spec.transforms.scalar_types {
+                normalize_type_union(&mut out);
+            }
             if spec.transforms.prune_dangling_required {
                 prune_dangling_required(&mut out);
             }
@@ -256,6 +261,41 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(|i| walk(i, spec, quirks)).collect()),
         _ => schema.clone(),
+    }
+}
+
+/// The Gemini schema proto requires a scalar type, with nullability separate.
+fn normalize_type_union(out: &mut Map<String, Value>) {
+    let Some(Value::Array(types)) = out.get("type") else {
+        return;
+    };
+    let nullable = types.iter().any(|t| t.as_str() == Some("null"));
+    let types: Vec<Value> = types
+        .iter()
+        .filter(|t| t.as_str().is_some_and(|t| t != "null"))
+        .cloned()
+        .collect();
+    out.remove("type");
+    if nullable {
+        out.insert("nullable".into(), Value::Bool(true));
+    }
+    match types.as_slice() {
+        [single] => {
+            out.insert("type".into(), single.clone());
+        }
+        [] => {}
+        _ => {
+            let branches = types
+                .into_iter()
+                .map(|ty| {
+                    let mut branch = out.clone();
+                    branch.insert("type".into(), ty);
+                    Value::Object(branch)
+                })
+                .collect();
+            out.clear();
+            out.insert("anyOf".into(), Value::Array(branches));
+        }
     }
 }
 

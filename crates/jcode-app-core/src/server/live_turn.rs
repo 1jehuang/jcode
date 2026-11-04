@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
 
 use super::SessionAgents;
+type ClientConnections = Arc<RwLock<HashMap<String, crate::server::ClientConnectionInfo>>>;
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
@@ -182,7 +183,8 @@ pub(super) async fn spawn_tracked_live_turn(
     );
     let event_tx = events.sender();
     let session_id = session_id.to_string();
-    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
+    let task_session_id = session_id.clone();
+    let live_turn = crate::hooks::with_client_terminal_env(client_terminal_env, async move {
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
@@ -194,6 +196,7 @@ pub(super) async fn spawn_tracked_live_turn(
                         vec![],
                         system_reminder,
                         event_tx.clone(),
+                        Some(display_role),
                     )
                     .await
             } else {
@@ -275,8 +278,8 @@ pub(super) async fn spawn_tracked_live_turn(
         drop(reservation);
         events.finish().await;
         drop(turn_lease);
-    })
-    .is_some()
+    });
+    crate::runtime_activity::spawn_session(&task_session_id, live_turn).is_some()
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and

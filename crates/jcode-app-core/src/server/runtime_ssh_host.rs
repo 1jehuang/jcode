@@ -335,7 +335,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         && let Err(error) = std::fs::remove_file(&temporary)
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        crate::logging::debug(&format!("Could not remove failed SSH edit temporary file: {error}"));
+        crate::logging::debug(&format!(
+            "Could not remove failed SSH edit temporary file: {error}"
+        ));
     }
     result
 }

@@ -2,149 +2,10 @@ use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
 use super::streaming::StreamUsageRecorder;
-
-const TOOL_FOREGROUND_BUDGET: Duration = Duration::from_secs(3);
-
-fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
-    !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
-}
-
-/// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
-pub(super) async fn execute_with_background(
-    registry: Registry,
-    name: String,
-    input: serde_json::Value,
-    ctx: ToolContext,
-) -> Result<crate::tool::ToolOutput> {
-    let auto_background = auto_background_allowed(&name, &input);
-    let session_id = ctx.session_id.clone();
-    let tool_name = name.clone();
-    let mut work = crate::hooks::spawn_with_client_env(async move {
-        registry.execute(&tool_name, input, ctx).await
-    });
-    tokio::select! {
-        biased;
-        result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
-        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => {
-            let info = crate::background::global().adopt(&name, &session_id, work).await;
-            Ok(crate::tool::ToolOutput::new(format!(
-                "Tool '{}' was moved to background automatically after 3 seconds (task_id: {}).\n\n{}",
-                name, info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
-            )))
-        }
-    }
-}
-
-/// Returns true for an automatic handoff, false for a user/reload signal.
-async fn wait_for_tool_handoff(
-    bg: &InterruptSignal,
-    shutdown: &InterruptSignal,
-    auto_background: bool,
-) -> bool {
-    tokio::select! {
-        biased;
-        _ = shutdown.notified() => false,
-        _ = bg.notified() => false,
-        _ = tokio::time::sleep(TOOL_FOREGROUND_BUDGET), if auto_background => true,
-    }
-}
-
-#[cfg(test)]
-mod handoff_tests {
-    use super::*;
-
-    struct WaitProbe;
-
-    #[async_trait::async_trait]
-    impl crate::tool::Tool for WaitProbe {
-        fn name(&self) -> &str {
-            "bg"
-        }
-        fn description(&self) -> &str {
-            "Wait probe"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type":"object"})
-        }
-        async fn execute(
-            &self,
-            _: serde_json::Value,
-            _: ToolContext,
-        ) -> Result<crate::tool::ToolOutput> {
-            tokio::time::sleep(Duration::from_secs(8)).await;
-            Ok(crate::tool::ToolOutput::new("wait finished"))
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn nonstreaming_background_wait_returns_original_result_after_budget() {
-        let registry = Registry::empty();
-        registry.register("bg".into(), Arc::new(WaitProbe)).await;
-        let ctx = ToolContext {
-            session_id: "foreground-wait-probe".into(),
-            message_id: "message".into(),
-            tool_call_id: "wait-probe".into(),
-            working_dir: None,
-            stdin_request_tx: None,
-            graceful_shutdown_signal: None,
-            execution_mode: ToolExecutionMode::Direct,
-        };
-        let start = tokio::time::Instant::now();
-        let result = execute_with_background(
-            registry,
-            "bg".into(),
-            serde_json::json!({"action":"wait"}),
-            ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.output, "wait finished");
-        assert_eq!(start.elapsed(), Duration::from_secs(8));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn background_wait_is_not_automatically_backgrounded() {
-        let input = serde_json::json!({"action": "wait", "task_id": "task"});
-        assert!(!auto_background_allowed("bg", &input));
-        assert!(auto_background_allowed(
-            "bg",
-            &serde_json::json!({"action": "status"})
-        ));
-        assert!(auto_background_allowed("bash", &input));
-        let bg = InterruptSignal::new();
-        let shutdown = InterruptSignal::new();
-        tokio::select! {
-            biased;
-            _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input)) => {
-                panic!("bg wait was backgrounded while waiting for its dependency");
-            }
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-        }
-        // Reloads still interrupt a wait safely, without waiting for its deadline.
-        shutdown.fire();
-        assert!(!wait_for_tool_handoff(&bg, &shutdown, false).await);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() {
-        let bg = InterruptSignal::new();
-        let shutdown = InterruptSignal::new();
-        let mut work = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            42
-        });
-        let start = tokio::time::Instant::now();
-        tokio::select! {
-            biased;
-            _ = &mut work => panic!("slow work completed before handoff"),
-            automatic = wait_for_tool_handoff(&bg, &shutdown, true) => assert!(automatic),
-        }
-        assert_eq!(start.elapsed(), Duration::from_secs(3));
-        assert!(!work.is_finished());
-        assert_eq!(work.await.unwrap(), 42);
-    }
-
-use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
+#[path = "tool_handoff.rs"]
+mod tool_handoff;
+pub(super) use tool_handoff::execute_with_background;
+use tool_handoff::{auto_background_allowed, wait_for_tool_handoff};
 
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
@@ -1325,6 +1186,16 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                if usage_input.is_some() {
+                    crate::session_telemetry::save_context(
+                        &self.session,
+                        total.saturating_sub(output),
+                        Some(self.effective_context_budget().await),
+                        self.provider.name(),
+                        self.provider.active_resolved_credential(),
+                        self.provider.serving_oauth_account_label(),
+                    );
+                }
             }
 
             if usage_input.is_some()

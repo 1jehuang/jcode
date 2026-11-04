@@ -4,293 +4,8 @@ use ratatui::layout::Position;
 use std::io::Write;
 use std::time::{Duration as StdDuration, SystemTime};
 
-#[test]
-fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_regions() {
-    for width in [20, 80, 120] {
-        let session = make_session("right-sidebar", "sidebar", false, SessionStatus::Closed);
-        let mut picker = SessionPicker::new(vec![session]);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
-        terminal.draw(|frame| picker.render(frame)).unwrap();
-        let preview = picker.last_preview_area.unwrap();
-        let sidebar = picker.last_list_area.unwrap();
-        assert_eq!(preview, Rect::new(0, 0, width, 30));
-        assert!(sidebar.x > preview.x);
-        assert!(sidebar.right() < preview.right());
-        assert_eq!(
-            sidebar.right(),
-            preview.right() - 2,
-            "one blank column must separate the card and native scrollbar"
-        );
-        assert!(sidebar.height < preview.height);
-        assert!(sidebar.bottom() < preview.bottom());
-        assert!(picker.mouse_over_preview(sidebar.x + 1, sidebar.bottom() + 1));
-        assert!(picker.mouse_over_preview(preview.x + 1, preview.y + 1));
-        assert!(!picker.mouse_over_preview(sidebar.x + 1, sidebar.y + 1));
-        for key in [KeyCode::Left, KeyCode::Char('h')] {
-            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
-            assert_eq!(picker.focus, PaneFocus::Preview);
-        }
-        for key in [KeyCode::Right, KeyCode::Char('l')] {
-            assert!(picker.handle_focus_navigation_key(key, KeyModifiers::empty()));
-            assert_eq!(picker.focus, PaneFocus::Sessions);
-        }
-    }
-}
-
-#[test]
-fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
-    let _lock = crate::tui::ui::render_state_test_lock();
-    for width in [40, 80, 120] {
-        let mut session = make_session("overlay-parity", "fox", false, SessionStatus::Closed);
-        session.messages_preview.push(PreviewMessage {
-            role: "assistant".into(),
-            content: (0..70)
-                .map(|n| format!("row {n}: {}", "Unicode 界 text ".repeat(12)))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            tool_calls: vec![],
-            duration_secs: None,
-            title: None,
-            tool_data: None,
-            timestamp: None,
-        });
-        let mut actual = SessionPicker::new(vec![session.clone()]);
-        let mut baseline = SessionPicker::new(vec![session]);
-        let area = Rect::new(0, 0, width, 45);
-        // Unbordered conversation canvas, without painting the control card.
-        baseline.reserved_panel_area = Some(Rect::default());
-        let mut expected =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
-        let mut rendered =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 45)).unwrap();
-        expected
-            .draw(|frame| baseline.render_preview(frame, area))
-            .unwrap();
-        rendered.draw(|frame| actual.render(frame)).unwrap();
-        let card = actual.reserved_panel_area.unwrap();
-        assert_eq!(actual.scroll_offset, baseline.scroll_offset);
-        assert_eq!(
-            actual.preview_cache.as_ref().unwrap().wrapped_lines,
-            baseline.preview_cache.as_ref().unwrap().wrapped_lines
-        );
-        for y in 0..area.height {
-            for x in 0..area.width {
-                if !card.contains(Position::new(x, y)) {
-                    assert_eq!(
-                        rendered.backend().buffer()[(x, y)],
-                        expected.backend().buffer()[(x, y)],
-                        "session pixel outside overlay changed at ({x},{y}), width={width}"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn resume_card_stays_anchored_when_preview_bands_change() {
-    let _lock = crate::tui::ui::render_state_test_lock();
-    let session = make_session("pinned-placement", "fox", false, SessionStatus::Closed);
-    let id = session.id.clone();
-    let mut other = session.clone();
-    other.id = "other-placement".into();
-    other.short_name = "other".into();
-    other.server_name = Some("cloud".into());
-    other.model = Some("different-model".into());
-    let mut picker = SessionPicker::new(vec![session, other]);
-    let selected = picker.find_item_index_for_session_id(&id).unwrap();
-    picker.list_state.select(Some(selected));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
-    terminal.draw(|frame| picker.render(frame)).unwrap();
-    let initial_card = picker.reserved_panel_area.unwrap();
-    let initial_list = picker.last_list_area.unwrap();
-    let payload = serde_json::json!({"todos": (0..20).map(|n| serde_json::json!({
-        "id": format!("item-{n}"), "content": format!("Pinned work item {n}"),
-        "status": "pending", "priority": "high", "phase": 1, "lane": format!("lane-{n}")
-    })).collect::<Vec<_>>()})
-    .to_string();
-    picker.preview_extras.insert(
-        id,
-        PreviewExtras {
-            todos_payload: Some(payload.clone()),
-            ..Default::default()
-        },
-    );
-    terminal.draw(|frame| picker.render(frame)).unwrap();
-    let (lines, _) = super::super::ui::viewport::pinned_todo_band_lines_for_payload(
-        Some(&payload),
-        false,
-        crate::config::config().display.diff_mode,
-        119,
-        47,
-    );
-    assert!(
-        !lines.is_empty(),
-        "fixture must exercise the pinned todo band"
-    );
-    let card = picker.reserved_panel_area.unwrap();
-    assert_eq!(card, initial_card, "loaded todos must not move the card");
-    assert_eq!(card.right(), 118);
-    for _ in 0..3 {
-        picker.next();
-        terminal.draw(|frame| picker.render(frame)).unwrap();
-        assert_eq!(picker.reserved_panel_area, Some(initial_card));
-        assert_eq!(picker.last_list_area, Some(initial_list));
-        picker.previous();
-        terminal.draw(|frame| picker.render(frame)).unwrap();
-        assert_eq!(picker.reserved_panel_area, Some(initial_card));
-        assert_eq!(picker.last_list_area, Some(initial_list));
-    }
-}
-
-#[test]
-fn resume_canvas_uses_right_columns_below_search_card() {
-    let mut session = make_session("canvas-flow", "canvas", false, SessionStatus::Closed);
-    session.messages_preview = vec![PreviewMessage {
-        role: "assistant".into(),
-        content: (0..80)
-            .map(|_| "W".repeat(115))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-        timestamp: None,
-    }];
-    let mut picker = SessionPicker::new(vec![session]);
-    picker.auto_scroll_preview = false;
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
-    terminal.draw(|frame| picker.render(frame)).unwrap();
-    let panel = picker.reserved_panel_area.unwrap();
-    let buffer = terminal.backend().buffer();
-    assert!(
-        (panel.bottom()..38).any(|y| (panel.x..115).any(|x| buffer[(x, y)].symbol() == "W")),
-        "Transcript must reclaim the right-side columns below the bounded card"
-    );
-    let search: String = (panel.x..panel.right())
-        .map(|x| buffer[(x, panel.y)].symbol())
-        .collect();
-    assert!(search.contains("Search sessions"));
-}
-
-#[test]
-fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
-    let mut session = make_session(
-        "render-parity",
-        "render-parity",
-        false,
-        SessionStatus::Closed,
-    );
-    session.messages_preview.push(PreviewMessage {
-        role: "tool".into(),
-        content: "Build succeeded".into(),
-        tool_calls: Vec::new(),
-        duration_secs: Some(2.3),
-        title: Some("Saved tool title".into()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "timed-preview".into(),
-            name: "bash".into(),
-            input: serde_json::json!({"command": "echo hello"}),
-            intent: Some("Check saved timing".into()),
-            thought_signature: None,
-        }),
-        timestamp: None,
-    });
-    let picker = SessionPicker::new(vec![session.clone()]);
-    let mode = crate::config::DiffDisplayMode::Off;
-    let hash = picker.preview_content_hash(&session, mode);
-    for width in [8, 30, 80] {
-        let inner = Rect::new(0, 0, width, 20);
-        let key = PreviewCacheKey {
-            content_hash: hash,
-            inner_width: width,
-            inner_height: 20,
-            diff_mode: mode,
-            search_query: String::new(),
-        };
-        let cache = picker.build_preview_cache(&session, inner, inner, key, Alignment::Left, mode);
-        let messages: Vec<_> = session
-            .messages_preview
-            .iter()
-            .map(|msg| DisplayMessage {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-                tool_calls: msg.tool_calls.clone(),
-                duration_secs: msg.duration_secs,
-                title: msg.title.clone(),
-                tool_data: msg.tool_data.clone(),
-            })
-            .collect();
-        let text_width = width - u16::from(cache.show_scrollbar);
-        let text_width = text_width.saturating_sub(super::super::ui::left_aligned_content_inset(
-            text_width, false,
-        ));
-        let live =
-            super::super::ui::prepare::prepare_history_preview(&messages, 0, text_width, mode);
-        let header = super::super::ui::header::build_preview_header(&session, text_width);
-        let offset = header.len()
-            + super::super::ui::prepare::initial_header_pad_top(inner.height, header.len());
-        assert_eq!(
-            cache.wrapped_lines[offset..],
-            live.wrapped_lines,
-            "width={width}"
-        );
-    }
-    session.messages_preview.last_mut().unwrap().duration_secs = Some(4.5);
-    let changed_timing = picker.preview_content_hash(&session, mode);
-    assert_ne!(hash, changed_timing);
-    session.messages_preview.last_mut().unwrap().title = Some("Updated title".into());
-    assert_ne!(changed_timing, picker.preview_content_hash(&session, mode));
-}
-
-#[test]
-fn completed_empty_preview_is_not_loaded_again() {
-    let mut session = make_session("empty_preview", "empty", false, SessionStatus::Closed);
-    session.messages_preview.clear();
-    let mut picker = SessionPicker::new(vec![session]);
-    let (tx, rx) = std::sync::mpsc::channel();
-    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
-        session_id: "empty_preview".into(),
-        receiver: rx,
-    });
-    tx.send(Some(LoadedSessionPreview {
-        messages: vec![],
-        extras: PreviewExtras::default(),
-    }))
-    .unwrap();
-    assert!(picker.poll_preview_load());
-    picker.ensure_selected_preview_loading();
-    assert!(picker.pending_preview_load.is_none());
-}
-
-#[test]
-fn failed_preview_is_not_retried_or_rendered_as_loading() {
-    let mut session = make_session("failed_preview", "failed", false, SessionStatus::Closed);
-    session.messages_preview.clear();
-    let mut picker = SessionPicker::new(vec![session]);
-    let (tx, rx) = std::sync::mpsc::channel();
-    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
-        session_id: "failed_preview".into(),
-        receiver: rx,
-    });
-    tx.send(None).unwrap();
-    assert!(picker.poll_preview_load());
-    picker.ensure_selected_preview_loading();
-    assert!(picker.pending_preview_load.is_none());
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 30)).unwrap();
-    terminal.draw(|frame| picker.render(frame)).unwrap();
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("Preview unavailable"));
-    assert!(!text.contains("Loading preview"));
-}
+#[path = "session_picker_tests/resume_canvas.rs"]
+mod resume_canvas;
 
 fn write_session_file_with_mtime(
     path: impl AsRef<std::path::Path>,
@@ -314,6 +29,9 @@ fn line_text(line: &Line<'_>) -> String {
 fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatus) -> SessionInfo {
     make_session_with_flags(id, short_name, is_debug, false, status)
 }
+
+#[path = "session_picker_tests/identity_search.rs"]
+mod identity_search;
 
 fn make_session_with_flags(
     id: &str,
@@ -389,6 +107,7 @@ fn make_session_with_flags(
             session_id: id.to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 
@@ -519,419 +238,8 @@ fn cloud_session_picker_renders_host_and_preserves_resume_target() {
     assert_eq!(picker.selection_or_current_targets(), vec![target]);
 }
 
-#[test]
-fn standalone_resume_renders_before_list_load_finishes() {
-    let mut picker = SessionPicker::loading();
-    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| picker.render(frame))
-        .expect("loading frame");
-    assert!(matches!(
-        receiver.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-    assert!(picker.loading_message.is_some());
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("Loading sessions"));
-}
-
-#[test]
-fn shortcut_search_accepts_typing_before_sessions_arrive() {
-    let mut picker = SessionPicker::loading();
-    picker.activate_search();
-    picker
-        .handle_overlay_key(KeyCode::Char('b'), KeyModifiers::empty())
-        .expect("search input");
-    assert!(picker.search_active);
-    assert_eq!(picker.search_query, "b");
-    picker.reseed_grouped(Vec::new(), Vec::new());
-    assert!(picker.search_active);
-    assert_eq!(picker.search_query, "b");
-}
-
-#[test]
-fn loading_picker_accepts_and_renders_search_before_sessions_arrive() {
-    let mut picker = SessionPicker::loading();
-    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
-    for code in
-        std::iter::once(KeyCode::Char('/')).chain("query-before-data".chars().map(KeyCode::Char))
-    {
-        assert!(matches!(
-            picker
-                .handle_overlay_key(code, KeyModifiers::empty())
-                .expect("loading search input"),
-            OverlayAction::Continue
-        ));
-    }
-    assert!(matches!(
-        receiver.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-    assert!(picker.loading_message.is_some());
-    assert!(picker.search_active);
-    assert_eq!(picker.search_query, "query-before-data");
-
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| picker.render(frame))
-        .expect("loading search frame");
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("Loading sessions"));
-    assert!(text.contains("query-before-data"));
-}
-
-#[test]
-fn loading_picker_search_is_editable_and_escape_clears_without_closing() {
-    let mut picker = SessionPicker::loading();
-    for code in [
-        KeyCode::Char('/'),
-        KeyCode::Char('q'),
-        KeyCode::Char('x'),
-        KeyCode::Backspace,
-        KeyCode::Char('z'),
-    ] {
-        assert!(matches!(
-            picker
-                .handle_overlay_key(code, KeyModifiers::empty())
-                .expect("edit loading search"),
-            OverlayAction::Continue
-        ));
-    }
-    assert_eq!(picker.search_query, "qz");
-    assert!(picker.search_active);
-    assert!(picker.loading_message.is_some());
-    assert!(matches!(
-        picker
-            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
-            .expect("leave search"),
-        OverlayAction::Continue
-    ));
-    assert!(!picker.search_active);
-    assert!(picker.search_query.is_empty());
-    assert!(picker.loading_message.is_some());
-    assert!(matches!(
-        picker
-            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
-            .expect("close after leaving search"),
-        OverlayAction::Close
-    ));
-}
-
-#[test]
-fn loading_picker_without_search_keeps_escape_and_ctrl_c_cancellation() {
-    for (code, modifiers) in [
-        (KeyCode::Esc, KeyModifiers::empty()),
-        (KeyCode::Char('c'), KeyModifiers::CONTROL),
-    ] {
-        let mut picker = SessionPicker::loading();
-        assert!(!picker.search_active);
-        assert!(matches!(
-            picker
-                .handle_overlay_key(code, modifiers)
-                .expect("cancel loading picker"),
-            OverlayAction::Close
-        ));
-    }
-}
-
-#[test]
-fn loading_picker_search_survives_cached_and_fresh_updates_and_filters_both() {
-    let mut picker = SessionPicker::loading();
-    for code in std::iter::once(KeyCode::Char('/')).chain("needle".chars().map(KeyCode::Char)) {
-        assert!(matches!(
-            picker
-                .handle_overlay_key(code, KeyModifiers::empty())
-                .expect("search before list arrives"),
-            OverlayAction::Continue
-        ));
-    }
-    let matching = make_session("matching", "needle", false, SessionStatus::Closed);
-    let other = make_session("other", "unrelated", false, SessionStatus::Closed);
-    assert!(
-        !picker
-            .apply_session_list_update(SessionListUpdate::Cached((
-                Vec::new(),
-                vec![other.clone(), matching.clone()],
-            )))
-            .expect("cached list")
-    );
-    assert_eq!(picker.search_query, "needle");
-    assert!(picker.search_active);
-    assert_eq!(picker.visible_sessions.len(), 1);
-    assert_eq!(
-        picker.selected_session().map(|s| s.id.as_str()),
-        Some("matching")
-    );
-
-    assert!(
-        picker
-            .apply_session_list_update(SessionListUpdate::Fresh(Ok((
-                Vec::new(),
-                vec![matching, other],
-            ))))
-            .expect("fresh list")
-    );
-    assert_eq!(picker.search_query, "needle");
-    assert!(picker.search_active);
-    assert_eq!(picker.visible_sessions.len(), 1);
-    assert_eq!(
-        picker.selected_session().map(|s| s.id.as_str()),
-        Some("matching")
-    );
-}
-
-#[test]
-fn loading_picker_enter_preserves_search_without_queuing_resume() {
-    let mut picker = SessionPicker::loading();
-    for code in [KeyCode::Char('/'), KeyCode::Char('q'), KeyCode::Enter] {
-        assert!(matches!(
-            picker
-                .handle_overlay_key(code, KeyModifiers::empty())
-                .unwrap(),
-            OverlayAction::Continue
-        ));
-    }
-    assert_eq!(picker.search_query, "q");
-    assert!(picker.search_active);
-    picker
-        .apply_session_list_update(SessionListUpdate::Cached((
-            Vec::new(),
-            vec![make_session("matching", "q", false, SessionStatus::Closed)],
-        )))
-        .unwrap();
-    assert_eq!(picker.search_query, "q");
-    assert!(picker.search_active);
-    assert_eq!(
-        picker.selected_session().map(|s| s.id.as_str()),
-        Some("matching")
-    );
-}
-
-#[test]
-fn loading_picker_filter_choice_survives_refresh() {
-    let mut picker = SessionPicker::loading();
-    picker
-        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
-        .unwrap();
-    let chosen = picker.filter_mode;
-    assert!(picker.filter_mode_user_chosen);
-    assert_eq!(chosen, SessionFilterMode::CurrentDir);
-    picker
-        .apply_session_list_update(SessionListUpdate::Cached((
-            Vec::new(),
-            vec![make_session("first", "first", false, SessionStatus::Closed)],
-        )))
-        .unwrap();
-    assert_eq!(picker.filter_mode, chosen);
-    assert!(picker.filter_mode_user_chosen);
-    picker
-        .apply_session_list_update(SessionListUpdate::Fresh(Ok((Vec::new(), Vec::new()))))
-        .unwrap();
-    assert_eq!(picker.filter_mode, chosen);
-    assert!(picker.filter_mode_user_chosen);
-}
-
-#[test]
-fn standalone_resume_refresh_preserves_cached_selection_and_search() {
-    let mut picker = SessionPicker::loading();
-    let first = make_session("first", "first", false, SessionStatus::Closed);
-    let second = make_session("second", "second", false, SessionStatus::Closed);
-    assert!(
-        !picker
-            .apply_session_list_update(SessionListUpdate::Cached((
-                Vec::new(),
-                vec![first.clone(), second.clone()],
-            )))
-            .expect("cached list")
-    );
-    assert!(picker.loading_message.is_none());
-    let index = picker
-        .find_item_index_for_session_id("second")
-        .expect("second item");
-    picker.list_state.select(Some(index));
-    picker.search_query = "test".to_string();
-    picker.search_active = true;
-    picker.filter_mode_user_chosen = true;
-    assert!(
-        picker
-            .apply_session_list_update(SessionListUpdate::Fresh(Ok((
-                Vec::new(),
-                vec![second, first],
-            ))))
-            .expect("fresh list")
-    );
-    assert_eq!(
-        picker.selected_session().map(|s| s.id.as_str()),
-        Some("second")
-    );
-    assert_eq!(picker.search_query, "test");
-    assert!(picker.search_active);
-    assert!(picker.filter_mode_user_chosen);
-}
-
-#[test]
-fn standalone_resume_load_error_preserves_existing_list() {
-    let mut picker = SessionPicker::loading();
-    picker
-        .apply_session_list_update(SessionListUpdate::Cached((
-            Vec::new(),
-            vec![make_session(
-                "cached",
-                "cached",
-                false,
-                SessionStatus::Closed,
-            )],
-        )))
-        .expect("cached list");
-    let err = picker
-        .apply_session_list_update(SessionListUpdate::Fresh(Err(anyhow::anyhow!(
-            "scan failed"
-        ))))
-        .expect_err("report loader failure");
-    assert_eq!(err.to_string(), "scan failed");
-    assert_eq!(
-        picker.selected_session().map(|s| s.id.as_str()),
-        Some("cached")
-    );
-}
-
-#[test]
-fn standalone_resume_empty_refresh_finishes_loading() {
-    let mut picker = SessionPicker::loading();
-    assert!(
-        picker
-            .apply_session_list_update(SessionListUpdate::Fresh(Ok((Vec::new(), Vec::new(),))))
-            .expect("empty list")
-    );
-    assert!(picker.loading_message.is_none());
-    assert!(picker.selected_session().is_none());
-}
-
-#[test]
-#[ignore = "developer benchmark: profiles real /resume through first rendered picker frame"]
-fn benchmark_real_resume_first_render_reports_timings() {
-    invalidate_session_list_cache();
-
-    let total_start = std::time::Instant::now();
-
-    let loading_render_start = std::time::Instant::now();
-    let mut loading_picker = SessionPicker::loading();
-    let backend = ratatui::backend::TestBackend::new(120, 40);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| loading_picker.render(frame))
-        .expect("render loading picker");
-    let loading_render_elapsed = loading_render_start.elapsed();
-
-    let load_start = std::time::Instant::now();
-    let (server_groups, orphan_sessions) = load_sessions_grouped().expect("load sessions grouped");
-    let load_elapsed = load_start.elapsed();
-    let loaded_count: usize = server_groups
-        .iter()
-        .map(|group| group.sessions.len())
-        .sum::<usize>()
-        + orphan_sessions.len();
-
-    let construct_start = std::time::Instant::now();
-    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-    let selected_before_render = picker.selected_session().map(|session| {
-        (
-            session.id.clone(),
-            session.title.clone(),
-            session.external_path.clone(),
-            session.messages_preview.len(),
-        )
-    });
-    let construct_elapsed = construct_start.elapsed();
-
-    let first_render_start = std::time::Instant::now();
-    terminal
-        .draw(|frame| picker.render(frame))
-        .expect("render loaded picker");
-    let first_render_elapsed = first_render_start.elapsed();
-    let selected_after_first_render = picker
-        .selected_session()
-        .map(|session| (session.id.clone(), session.messages_preview.len()));
-
-    let second_render_start = std::time::Instant::now();
-    terminal
-        .draw(|frame| picker.render(frame))
-        .expect("render loaded picker again");
-    let second_render_elapsed = second_render_start.elapsed();
-
-    eprintln!(
-        "real resume first render: total={}ms loading_render={}ms load_grouped={}ms/{} construct={}ms first_render={}ms second_render={}ms selected_before={:?} selected_after={:?}",
-        total_start.elapsed().as_millis(),
-        loading_render_elapsed.as_millis(),
-        load_elapsed.as_millis(),
-        loaded_count,
-        construct_elapsed.as_millis(),
-        first_render_elapsed.as_millis(),
-        second_render_elapsed.as_millis(),
-        selected_before_render,
-        selected_after_first_render,
-    );
-}
-
-#[test]
-#[ignore = "developer benchmark: profiles cached /resume first render latency"]
-fn benchmark_real_resume_cached_first_render_reports_timings() {
-    invalidate_session_list_cache();
-
-    let refresh_start = std::time::Instant::now();
-    let (_fresh_groups, _fresh_orphans) =
-        load_sessions_grouped().expect("refresh sessions grouped");
-    let refresh_elapsed = refresh_start.elapsed();
-
-    let total_start = std::time::Instant::now();
-    let cache_start = std::time::Instant::now();
-    let (server_groups, orphan_sessions) =
-        load_cached_sessions_grouped().expect("load cached sessions grouped");
-    let cache_elapsed = cache_start.elapsed();
-    let cached_count: usize = server_groups
-        .iter()
-        .map(|group| group.sessions.len())
-        .sum::<usize>()
-        + orphan_sessions.len();
-
-    let construct_start = std::time::Instant::now();
-    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-    let construct_elapsed = construct_start.elapsed();
-
-    let render_start = std::time::Instant::now();
-    let backend = ratatui::backend::TestBackend::new(120, 40);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| picker.render(frame))
-        .expect("render cached picker");
-    let render_elapsed = render_start.elapsed();
-
-    eprintln!(
-        "real resume cached first render: total={}ms cache_read={}ms/{} construct={}ms first_render={}ms cache_refresh={}ms",
-        total_start.elapsed().as_millis(),
-        cache_elapsed.as_millis(),
-        cached_count,
-        construct_elapsed.as_millis(),
-        render_elapsed.as_millis(),
-        refresh_elapsed.as_millis(),
-    );
-}
-
+#[path = "session_picker_tests/loading_and_benchmarks.rs"]
+mod loading_and_benchmarks;
 #[test]
 fn test_format_estimated_tokens_uses_compact_units() {
     assert_eq!(SessionPicker::format_estimated_tokens(0), "~0 tok");
@@ -1753,7 +1061,7 @@ fn live_claude_takeover_requires_explicit_key_and_confirmation() {
 }
 
 #[test]
-fn live_claude_row_is_labeled_and_closed_claude_cannot_take_over() {
+fn live_claude_row_has_age_only_and_closed_claude_cannot_take_over() {
     let mut live = make_claude_session("live-row");
     let mut closed = make_claude_session("closed-row");
     live.last_message_time = Utc::now();
@@ -1767,7 +1075,11 @@ fn live_claude_row_is_labeled_and_closed_claude_cannot_take_over() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("live Claude"), "rendered row: {rendered}");
+    assert!(
+        !rendered.contains("live Claude"),
+        "rendered row: {rendered}"
+    );
+    assert!(rendered.contains("ago"), "rendered row: {rendered}");
 
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
@@ -3099,6 +2411,23 @@ fn test_search_mode_ctrl_u_clears_query() {
         picker.search_active,
         "Ctrl+U clears text but stays in search"
     );
+}
+
+#[test]
+fn cloud_session_directory_uses_cloud_icon() {
+    let mut session = make_session("cloud_repo", "cloud_repo", false, SessionStatus::Closed);
+    session.working_dir = Some("/home/jeremy/justrust-clean-room".into());
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let local_rows = picker.render_session_item_lines(&session, false);
+    assert!(line_text(&local_rows[1]).contains("📁"));
+
+    session.server_icon = Some("☁".into());
+    session.server_name = Some("cloud: jcode-cloud".into());
+    let cloud_rows = picker.render_session_item_lines(&session, false);
+    let directory = line_text(&cloud_rows[1]);
+    assert!(directory.contains("☁"));
+    assert!(!directory.contains("📁"));
+    assert!(directory.contains("justrust-clean-room"));
 }
 
 #[test]

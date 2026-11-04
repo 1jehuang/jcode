@@ -1,5 +1,5 @@
 //! Server-owned remote loop control. Only sessions explicitly opted in through
-//! remote.runtime_command get a state file, so ordinary local clients retain
+//! remote subscription or runtime_command get a state file, so ordinary local clients retain
 //! their existing client-side follow-up behavior.
 use crate::{agent::Agent, protocol::ServerEvent, todo};
 use anyhow::{Context, Result, bail};
@@ -77,6 +77,24 @@ fn read_state(path: &Path) -> Result<LoopState> {
     Ok(state)
 }
 
+/// Remote clients delegate automatic followups to the daemon, including while
+/// disconnected. Initialize once, never re-arm an explicit /poke off or reset
+/// persisted retry budgets when another client attaches.
+pub(super) fn initialize_remote_session(session_id: &str, enabled: bool) -> Result<()> {
+    let _lock = state_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let path = state_path(session_id)?;
+    if path.exists() {
+        return Ok(());
+    }
+    let state = LoopState {
+        poke_enabled: enabled,
+        policy: todo::followup::FollowUpPolicy::new(enabled),
+        ..Default::default()
+    };
+    crate::storage::write_json(&path, &state)?;
+    Ok(())
+}
+
 fn update_state<T>(
     session_id: &str,
     action: impl FnOnce(&mut LoopState) -> Result<T>,
@@ -124,6 +142,21 @@ pub(super) fn control(
         let _lock = state_lock().lock().unwrap_or_else(|p| p.into_inner());
         return status_result(session_id, &read_state(&state_path(session_id)?)?).map(Some);
     }
+    if command == "poke" && action == "on" {
+        return update_state(session_id, |state| {
+            if !state.poke_enabled {
+                state.poke_enabled = true;
+                state.policy = todo::followup::FollowUpPolicy::new(true);
+            }
+            if let Some(workflow) = state.workflow.as_mut() {
+                workflow.active = true;
+            }
+            let message = "Remote auto-poke enabled. Continuation will be checked at the next turn boundary. Use /poke to continue now.".to_string();
+            state.last_notice = Some(message.clone());
+            let data = status_data(session_id, state)?;
+            Ok(Some((data, message)))
+        });
+    }
     if !matches!(action.as_str(), "off" | "stop") {
         return Ok(None);
     }
@@ -145,7 +178,10 @@ pub(super) fn control(
             "Stopped /{command} at the next turn boundary. The current turn is not cancelled."
         ));
         let data = status_data(session_id, state)?;
-        Ok(Some((data, state.last_notice.as_deref().unwrap_or("").to_owned())))
+        Ok(Some((
+            data,
+            state.last_notice.as_deref().unwrap_or("").to_owned(),
+        )))
     })
 }
 

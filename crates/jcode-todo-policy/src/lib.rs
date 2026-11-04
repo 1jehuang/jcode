@@ -895,6 +895,10 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
             .map(str::to_string)
     }
 
+    if let Some(title) = non_empty(plan.title.as_deref()) {
+        return Some(title);
+    }
+
     let current = todos
         .iter()
         .rev()

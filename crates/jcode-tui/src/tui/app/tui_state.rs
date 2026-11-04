@@ -1848,6 +1848,7 @@ impl crate::tui::TuiState for App {
             ),
             context_info,
             context_info_stale: !context_snapshot.fresh,
+            historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
             model,
@@ -2254,6 +2255,12 @@ impl crate::tui::TuiState for App {
 
     fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
         self.normalized_copy_selection()
+    }
+
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        self.copy_selection_dragging
+            .then_some(self.input_selection_scroll)
+            .flatten()
     }
 
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {

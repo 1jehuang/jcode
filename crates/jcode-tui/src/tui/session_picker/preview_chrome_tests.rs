@@ -35,6 +35,7 @@ fn selected_session() -> SessionInfo {
             session_id: "selected".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 
@@ -72,6 +73,42 @@ fn chrome_matches_shared_idle_composer_and_overscroll_buffers() {
             "width={width}"
         );
     }
+}
+
+#[test]
+fn cloud_preview_overscroll_shows_selected_host_without_live_telemetry() {
+    let mut session = selected_session();
+    session.server_icon = Some("☁".into());
+    for width in [1, 12, 40, 100] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, Rect::new(0, 0, width, 12), &session, None);
+            })
+            .unwrap();
+        let footer: String = (0..width)
+            .map(|x| terminal.backend().buffer()[(x, 11)].symbol())
+            .collect();
+        if width == 100 {
+            assert!(footer.contains("☁ dev-cloud:"), "{footer}");
+            assert!(footer.contains("project"), "{footer}");
+        }
+        assert!(unicode_width::UnicodeWidthStr::width(footer.as_str()) <= width as usize);
+    }
+    session.server_icon = None;
+    let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, Rect::new(0, 0, 100, 12), &session, None);
+        })
+        .unwrap();
+    let footer: String = (0..100)
+        .map(|x| terminal.backend().buffer()[(x, 11)].symbol())
+        .collect();
+    assert!(
+        !footer.contains('☁'),
+        "local rows must not inherit a cloud host: {footer}"
+    );
 }
 
 #[test]

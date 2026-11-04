@@ -58,7 +58,16 @@ impl SessionPicker {
                 if incoming.messages_preview.is_empty() {
                     incoming.messages_preview.clone_from(&old.messages_preview);
                 }
-                unchanged.insert(incoming.id.clone());
+                // Transcript reuse does not authorize reusing another
+                // workspace/account route's metadata after a chdir or switch.
+                if old.working_dir == incoming.working_dir
+                    && old.model == incoming.model
+                    && old.provider_key == incoming.provider_key
+                    && old.server_name == incoming.server_name
+                    && old.server_icon == incoming.server_icon
+                {
+                    unchanged.insert(incoming.id.clone());
+                }
             }
         }
         self.preview_extras.retain(|id, _| unchanged.contains(id));

@@ -1109,6 +1109,13 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     };
 
+    let line = status_with_background_tasks(
+        line,
+        app.background_task_rows(),
+        area.width as usize,
+        app.is_processing(),
+    );
+
     crate::memory::check_staleness();
 
     if app.centered_mode() {
@@ -1116,6 +1123,46 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         return;
     }
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Background launches finish their tool call immediately, but the work and
+/// its intent must remain visible while the agent moves on to another tool.
+fn status_with_background_tasks(
+    foreground: Line<'static>,
+    tasks: &[crate::tui::BackgroundTaskRow],
+    width: usize,
+    processing: bool,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus;
+    use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
+
+    let running: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
+        .collect();
+    if running.is_empty() {
+        return fit(&foreground, width);
+    }
+    let labels = running
+        .iter()
+        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let background = Line::from(Span::styled(
+        format!("bg {}: {}", running.len(), labels),
+        Style::default().fg(ai_color()),
+    ));
+    // Idle tips must not displace actual work. While processing, reserve space
+    // for both activities rather than letting a long foreground intent hide bg.
+    if !processing || foreground.width() == 0 || width < 24 {
+        return fit(&background, width);
+    }
+    let background_width = background.width().min(width / 2);
+    let mut line = fit(&foreground, width.saturating_sub(background_width + 3));
+    line.spans
+        .push(Span::styled(" · ", Style::default().fg(dim_color())));
+    line.spans.extend(fit(&background, background_width).spans);
+    line
 }
 
 fn running_tool_header_spans(
@@ -1513,12 +1560,24 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
 
 /// Render only the supplied session facts. Unlike the live adapter this never
 /// falls back to the current App, process directory, SSH host or credentials.
+#[cfg(test)]
 pub(crate) fn preview_overscroll_line(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
 ) -> Line<'static> {
+    preview_overscroll_line_for_host(data, width, None)
+}
+
+/// The host belongs to the selected preview, never the attached live session.
+pub(crate) fn preview_overscroll_line_for_host(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+    host: Option<&str>,
+) -> Line<'static> {
     let facts = OverscrollFacts {
-        machine: None,
+        machine: host
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_owned),
         dir: overscroll_directory_transition(
             data.original_working_dir.as_deref(),
             data.working_dir.as_deref(),
@@ -1544,7 +1603,17 @@ pub(crate) fn preview_overscroll_line(
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
     };
-    Line::from(overscroll_fit_facts(&facts, width as usize).0).alignment(Alignment::Right)
+    let label = if data.historical_context {
+        "saved · "
+    } else {
+        ""
+    };
+    let label_width = unicode_width::UnicodeWidthStr::width(label);
+    let mut spans = overscroll_fit_facts(&facts, (width as usize).saturating_sub(label_width)).0;
+    if !label.is_empty() && width as usize > label_width {
+        spans.insert(0, Span::styled(label, Style::default().fg(dim_color())));
+    }
+    Line::from(spans).alignment(Alignment::Right)
 }
 
 /// Model name color on the overscroll status line.
@@ -2170,7 +2239,11 @@ pub(super) fn draw_input(
     let total_input_lines = all_lines.len();
     let visible_height = area.height as usize;
 
-    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
+    let scroll_offset = if let Some(scroll) = app.input_drag_scroll_offset() {
+        // Selection scrolling is independent of the editing caret.
+        let available = visible_height.saturating_sub(suggestions_offset).max(1);
+        scroll.min(total_input_lines.saturating_sub(available))
+    } else if total_input_lines + suggestions_offset <= visible_height {
         0
     } else {
         let available_for_input = visible_height.saturating_sub(suggestions_offset);
@@ -2293,8 +2366,11 @@ pub(super) fn draw_input(
     };
 
     let cursor = Position::new(cursor_x, cursor_y);
-    frame.set_cursor_position(cursor);
     draw_send_mode_indicator(frame, app, area);
+    if app.input_drag_scroll_offset().is_some() {
+        return None;
+    }
+    frame.set_cursor_position(cursor);
     Some(cursor)
 }
 

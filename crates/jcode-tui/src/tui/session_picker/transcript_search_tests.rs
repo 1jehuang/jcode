@@ -2,6 +2,353 @@ use super::super::{SessionPicker, SessionSource, SessionStatus};
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[test]
+fn warm_queries_complete_immediately_across_edits_and_backspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.jsonl");
+    std::fs::write(&path, "{\"text\":\"deploy configuration cloud\"}\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&path, &cancel).unwrap();
+    let session = external_session("warm", &path);
+    let mut search = TranscriptSearch::default();
+    for query in [
+        "dep",
+        "deploy",
+        "deploy conf",
+        "deploy configuration",
+        "deploy",
+        "clodu",
+    ] {
+        search.reset(query, std::iter::once(&session));
+        // A future timestamp verifies scheduling does not consult a timer.
+        search.started_at = Some(Instant::now() + Duration::from_secs(60));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while search.pending() {
+            assert!(
+                Instant::now() < deadline,
+                "warm query {query} waited for cold work"
+            );
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(search.contains("warm"), "query {query} lost its match");
+        if query == "clodu" {
+            assert!(!search.contains_literal("warm"));
+        }
+    }
+}
+
+#[test]
+fn typing_prepares_cold_text_for_the_latest_query_without_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("during-typing.jsonl");
+    std::fs::write(&path, "{\"text\":\"deploy configuration\"}\n".repeat(200)).unwrap();
+    let session = external_session("typing", &path);
+    assert!(!text_cache::is_cached_hint(&path));
+    let mut search = TranscriptSearch::default();
+    search.reset("dep", std::iter::once(&session));
+    let old_cancel = search.cancel.clone();
+    search.reset("deploy conf", std::iter::once(&session));
+    assert!(old_cancel.load(Ordering::Relaxed));
+    search.started_at = Some(Instant::now() + Duration::from_secs(60));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !search.contains("typing") {
+        assert!(
+            Instant::now() < deadline,
+            "preparation failed to serve latest query"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(search.contains_literal("typing"));
+}
+
+#[test]
+fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.jsonl");
+    // Too large for warmup or decoded-text caching, so this must use cold IO.
+    let mut text = format!("{}\n", r#"{"text":"needle"}"#);
+    text.push_str(&" ".repeat(2 * 1024 * 1024));
+    std::fs::write(&path, text).unwrap();
+    let session = external_session("cold", &path);
+    let mut search = TranscriptSearch::default();
+    search.reset("needle", std::iter::once(&session));
+    search.started_at = Some(Instant::now() + Duration::from_secs(60));
+    search.poll();
+    assert!(search.started_at.is_none());
+    assert!(search.candidates.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search.pending() {
+        assert!(
+            Instant::now() < deadline,
+            "cold search waited for typing timer"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(search.contains_literal("cold"));
+    assert!(!text_cache::is_cached_hint(&path));
+}
+
+#[test]
+fn cached_literal_exclusions_do_not_hide_future_fuzzy_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fuzzy.json");
+    std::fs::write(&path, r#"{"text":"cloud"}"#).unwrap();
+    let cancel = AtomicBool::new(false);
+    assert!(!paths_match_mode(
+        std::slice::from_ref(&path),
+        &["clod".into()],
+        &cancel,
+        false
+    ));
+    assert!(!paths_match_mode(
+        std::slice::from_ref(&path),
+        &["clodu".into()],
+        &cancel,
+        false
+    ));
+    assert!(paths_match_scored(&[path], &["clodu".into()], &cancel).is_some());
+}
+
+#[test]
+fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.json");
+    let second = dir.path().join("second.json");
+    std::fs::write(&first, r#"{"text":"configuration deploy"}"#).unwrap();
+    std::fs::write(&second, r#"{"text":"config cloud"}"#).unwrap();
+    let paths = vec![first, second];
+    let cancel = AtomicBool::new(false);
+    for path in &paths {
+        text_cache::segments(path, &cancel).unwrap();
+    }
+    for (query, fuzzy) in [
+        ("deploy cloud", false),
+        ("conifg clodu", true),
+        ("absent", false),
+    ] {
+        let tokens = search_query_tokens(query);
+        let mut reference = Scan {
+            tokens: &tokens,
+            found: vec![false; tokens.len()],
+            cancel: &cancel,
+            fuzzy,
+            score: 0,
+            scores: &mut WordScores::default(),
+        };
+        for path in &paths {
+            scan_file_streaming(path, &mut reference);
+            if reference.complete() {
+                break;
+            }
+        }
+        assert_eq!(
+            cached_paths_scan(&paths, &tokens, &cancel, fuzzy),
+            Some(reference.complete().then_some(reference.score))
+        );
+    }
+}
+
+#[test]
+fn missing_native_alternative_does_not_delay_resident_fuzzy_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join("session.json");
+    let missing_journal = dir.path().join("session.journal.jsonl");
+    std::fs::write(&snapshot, r#"{"text":"cloud deployment"}"#).unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&snapshot, &cancel).unwrap();
+    let tokens = search_query_tokens("clodu");
+    let paths = vec![missing_journal, snapshot];
+    let expected = scan_paths(&paths, &tokens, &cancel, true);
+    assert!(expected.is_some());
+    assert_eq!(
+        cached_paths_scan(&paths, &tokens, &cancel, true),
+        Some(expected)
+    );
+}
+
+#[test]
+fn incremental_token_sequences_match_fresh_streaming_results_and_scores() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("equivalence.jsonl");
+    std::fs::write(&path, "{\"text\":\"deployment café clod configuration\"}\n{broken\n{\"text\":\"deploy cloud config βeta\"}\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    text_cache::segments(&path, &cancel).unwrap();
+    let words = [
+        "dep", "deploy", "deply", "cloud", "clodu", "café", "cafe", "βeta", "absent",
+    ];
+    for fuzzy in [false, true] {
+        for first in words {
+            for second in words {
+                let tokens = vec![first.to_string(), second.to_string()];
+                let mut scores = WordScores::default();
+                let mut reference = Scan {
+                    tokens: &tokens,
+                    found: vec![false; tokens.len()],
+                    cancel: &cancel,
+                    fuzzy,
+                    score: 0,
+                    scores: &mut scores,
+                };
+                scan_file_streaming(&path, &mut reference);
+                let expected = reference.complete().then_some(reference.score);
+                assert_eq!(
+                    cached_paths_scan(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
+                    Some(expected),
+                    "tokens={tokens:?} fuzzy={fuzzy}"
+                );
+                assert_eq!(
+                    scan_paths(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn warm_hint_cannot_publish_stale_content_after_file_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("changed.json");
+    let cancel = AtomicBool::new(false);
+    std::fs::write(&path, r#"{"text":"oldneedle"}"#).unwrap();
+    text_cache::segments(&path, &cancel).unwrap();
+    std::fs::write(&path, r#"{"text":"replacement words"}"#).unwrap();
+    assert!(text_cache::is_cached_hint(&path));
+    assert_eq!(
+        cached_paths_scan(
+            std::slice::from_ref(&path),
+            &["oldneedle".into()],
+            &cancel,
+            false
+        ),
+        None
+    );
+    assert!(!paths_match_mode(
+        &[path],
+        &["oldneedle".into()],
+        &cancel,
+        false
+    ));
+}
+
+#[test]
+#[ignore = "manual incremental typing readiness measurement"]
+fn benchmark_incremental_query_readiness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incremental.jsonl");
+    let record = format!(
+        "{{\"text\":\"{} searchalpha betabravo\"}}\n",
+        "ordinary text ".repeat(40)
+    );
+    std::fs::write(&path, record.repeat(300)).unwrap();
+    let session = external_session("incremental", &path);
+    // Prepare the query-independent text exactly as a preceding search would.
+    assert!(paths_match_mode(
+        &[path],
+        &["searchalpha".into()],
+        &AtomicBool::new(false),
+        false
+    ));
+    let mut search = TranscriptSearch::default();
+    let mut samples = Vec::new();
+    for query in [
+        "searchal",
+        "searchalpha",
+        "searchalpha bet",
+        "searchalpha beta",
+        "searchalpha",
+    ] {
+        let start = Instant::now();
+        search.reset(query, std::iter::once(&session));
+        let deadline = start + Duration::from_secs(5);
+        while !search.contains("incremental") {
+            assert!(Instant::now() < deadline, "query {query} timed out");
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    eprintln!(
+        "incremental query first-result readiness_ms={samples:?} (warm transcript, immediate scheduling, modeled 1ms polling, includes query edits and backspace)"
+    );
+}
+
+#[test]
+fn repeated_search_and_reopened_picker_observe_transcript_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("session.jsonl");
+    std::fs::write(&path, "{\"text\":\"cachealpha cachebeta\"}\n").unwrap();
+    let session = external_session("cache-flow", &path);
+    let run = |query: &str| {
+        let mut search = TranscriptSearch::default();
+        search.reset(query, std::iter::once(&session));
+        search.started_at = Some(Instant::now());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while search.pending() {
+            assert!(Instant::now() < deadline);
+            search.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        search.contains("cache-flow")
+    };
+    assert!(run("cachealpha"));
+    assert!(run("cachebeta"));
+    assert!(run("cachealpha"));
+    std::fs::write(
+        &path,
+        "{\"text\":\"replacement content with a different length\"}\n",
+    )
+    .unwrap();
+    assert!(!run("cachealpha"));
+    assert!(run("replacement"));
+    std::fs::remove_file(&path).unwrap();
+    assert!(!run("replacement"));
+}
+
+#[test]
+#[ignore = "manual cold versus warm transcript search measurement"]
+fn benchmark_reusable_transcript_search() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("search.jsonl");
+    let record = format!(
+        "{{\"text\":\"{}\"}}\n",
+        "ordinary transcript words ".repeat(30)
+    );
+    std::fs::write(&path, record.repeat(1000)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let paths = vec![path];
+    // Absent terms force a complete scan rather than a lucky early match.
+    let cold = Instant::now();
+    assert!(!paths_match_mode(
+        &paths,
+        &["missingcoldneedle".into()],
+        &cancel,
+        false
+    ));
+    let cold = cold.elapsed();
+    let mut samples = Vec::new();
+    for index in 0..30 {
+        let start = Instant::now();
+        assert!(!paths_match_mode(
+            &paths,
+            &[format!("missingwarmneedle{index}")],
+            &cancel,
+            false
+        ));
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "reusable transcript search: cold_ms={:.3} warm_p50_ms={:.3} warm_p95_ms={:.3} samples=30 (scan only, debounce excluded)",
+        cold.as_secs_f64() * 1000.0,
+        samples[15],
+        samples[28]
+    );
+}
+
 fn external_session(id: &str, path: &Path) -> SessionInfo {
     let now = chrono::Utc::now();
     SessionInfo {
@@ -37,12 +384,13 @@ fn external_session(id: &str, path: &Path) -> SessionInfo {
             session_path: path.to_string_lossy().into_owned(),
         },
         external_path: Some(path.to_string_lossy().into_owned()),
+        todo_statuses: Vec::new(),
     }
 }
 
 fn wait_for_search(picker: &mut SessionPicker) {
     if picker.transcript_search.started_at.is_some() {
-        picker.transcript_search.started_at = Some(Instant::now() - DEBOUNCE);
+        picker.transcript_search.started_at = Some(Instant::now());
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while picker.transcript_search.pending() {
@@ -50,6 +398,78 @@ fn wait_for_search(picker: &mut SessionPicker) {
         picker.poll_transcript_search();
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+#[test]
+fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
+    let query = "repair the broken search";
+    let candidate = |id: &str, intent: &str, opening: &str| Candidate {
+        id: id.into(),
+        paths: Vec::new(),
+        search_index: query.into(),
+        missing_tokens: Vec::new(),
+        exact_field: false,
+        opening_prompt: opening.into(),
+        intent_text: intent.into(),
+    };
+    let candidates = vec![
+        candidate("weak-first", "unrelated", ""),
+        candidate("weak-second", "unrelated", ""),
+        candidate("intent", "Repair Search", ""),
+        candidate("opening", query, query),
+    ];
+    let ranked = prioritize_candidates(
+        candidates,
+        query,
+        &search_query_tokens(query),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        ranked
+            .iter()
+            .map(|(candidate, _)| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        ["opening", "intent", "weak-first", "weak-second"]
+    );
+}
+
+#[test]
+fn progressive_search_publishes_best_opening_in_first_batch_and_keeps_weak_matches() {
+    let query = "repair the broken search";
+    let mut sessions: Vec<_> = (0..130)
+        .map(|index| {
+            let mut session = external_session(&format!("weak-{index}"), Path::new("unused"));
+            session.search_index = query.into();
+            session.first_user_prompt = Some("unrelated opening request".into());
+            session
+        })
+        .collect();
+    let mut best = external_session("best", Path::new("unused"));
+    best.search_index = query.into();
+    best.first_user_prompt = Some(query.into());
+    sessions.push(best);
+    let mut search = TranscriptSearch::default();
+    search.reset(query, sessions.iter());
+    search.started_at = Some(Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search.ranks.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "search did not publish a first batch"
+        );
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        search.contains("best"),
+        "strongest opening must arrive in the first batch"
+    );
+    while search.pending() {
+        assert!(Instant::now() < deadline, "search did not finish");
+        search.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(search.ranks.len(), sessions.len());
 }
 
 #[test]
@@ -156,7 +576,7 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
     let mut picker = SessionPicker::new(vec![external_session("one", &path)]);
     picker.search_query = "oldneedle".into();
     picker.rebuild_items();
-    picker.transcript_search.started_at = Some(Instant::now() - DEBOUNCE);
+    picker.transcript_search.started_at = Some(Instant::now());
     picker.poll_transcript_search();
     let cancelled = picker.transcript_search.cancel.clone();
     picker.search_query = "absentneedle".into();
@@ -171,15 +591,15 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
 }
 
 #[test]
-fn typing_debounces_disk_work_and_metadata_search_stays_immediate() {
+fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
     let temp = tempfile::tempdir().unwrap();
     let session = external_session("one", &temp.path().join("absent.jsonl"));
     let mut picker = SessionPicker::new(vec![session]);
     picker.search_query = "needle".into();
     picker.rebuild_items();
     picker.poll_transcript_search();
-    assert!(picker.transcript_search.started_at.is_some());
-    assert!(picker.transcript_search.receiver.is_none());
+    assert!(picker.transcript_search.started_at.is_none());
+    assert!(picker.transcript_search.candidates.is_empty());
     picker.search_query = "TITLE metadata".into();
     picker.rebuild_items();
     assert_eq!(picker.visible_sessions.len(), 1);
@@ -187,7 +607,7 @@ fn typing_debounces_disk_work_and_metadata_search_stays_immediate() {
 }
 
 #[test]
-fn fuzzy_metadata_matching_is_debounced_and_never_runs_on_keystroke() {
+fn fuzzy_metadata_matching_runs_on_worker_not_on_keystroke() {
     let temp = tempfile::tempdir().unwrap();
     let mut session = external_session("one", &temp.path().join("absent.jsonl"));
     session.search_index = "config deploy".into();
@@ -400,4 +820,80 @@ fn progressive_results_preserve_selected_preview_scroll() {
     assert_eq!(picker.selected_session().unwrap().id, "direct");
     assert_eq!(picker.scroll_offset, 17);
     assert!(!picker.auto_scroll_preview);
+}
+
+fn picker_with_pending_better_match() -> SessionPicker {
+    let mut direct = external_session("direct", Path::new("unused"));
+    direct.search_index = "needle".into();
+    let discovered = external_session("discovered", Path::new("unused"));
+    let mut picker = SessionPicker::new(vec![direct, discovered]);
+    picker.search_query = "needle".into();
+    picker.rebuild_items();
+    assert_eq!(picker.selected_session().unwrap().id, "direct");
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send((
+            "discovered".into(),
+            SearchRank {
+                opening_prompt: 10,
+                literal: true,
+                ..SearchRank::default()
+            },
+        ))
+        .unwrap();
+    picker.transcript_search.started_at = None;
+    picker.transcript_search.receiver = Some(receiver);
+    picker
+}
+
+#[test]
+fn early_progressive_results_follow_best_match_and_reset_preview() {
+    let mut picker = picker_with_pending_better_match();
+    picker.scroll_offset = 17;
+    picker.auto_scroll_preview = false;
+    picker.poll_transcript_search();
+    assert_eq!(picker.selected_session().unwrap().id, "discovered");
+    assert_eq!(picker.scroll_offset, 0);
+    assert!(picker.auto_scroll_preview);
+}
+
+#[test]
+fn late_progressive_results_reorder_without_switching_or_resetting_preview() {
+    let mut picker = picker_with_pending_better_match();
+    picker.search_selection.expire_for_test();
+    picker.scroll_offset = 17;
+    picker.auto_scroll_preview = false;
+    picker.poll_transcript_search();
+    assert_eq!(picker.selected_session().unwrap().id, "direct");
+    assert_eq!(picker.scroll_offset, 17);
+    assert!(!picker.auto_scroll_preview);
+    assert_eq!(
+        picker
+            .session_by_ref(picker.visible_sessions[0])
+            .unwrap()
+            .id,
+        "discovered"
+    );
+}
+
+#[test]
+fn manual_navigation_or_preview_scroll_stops_early_best_match_following() {
+    for scroll in [false, true] {
+        let mut picker = picker_with_pending_better_match();
+        if scroll {
+            picker.scroll_preview_up(1);
+        } else {
+            // Even pressing Up at the top means the user has taken control.
+            picker.previous();
+        }
+        picker.poll_transcript_search();
+        assert_eq!(picker.selected_session().unwrap().id, "direct");
+        assert_eq!(
+            picker
+                .session_by_ref(picker.visible_sessions[0])
+                .unwrap()
+                .id,
+            "discovered"
+        );
+    }
 }

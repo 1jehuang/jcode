@@ -33,9 +33,15 @@ pub use jcode_tui_session_picker::{
     SessionSource,
 };
 
+#[cfg(test)]
+mod benchmark_io;
+#[cfg(test)]
+mod benchmark_matrix;
 mod canvas;
 mod cloud_preview;
 mod filter;
+mod identity_search;
+mod latency;
 mod loading;
 mod memory;
 mod navigation;
@@ -43,7 +49,11 @@ mod performance;
 #[cfg(test)]
 mod performance_tests;
 mod preview_chrome;
+mod preview_io;
+use preview_io::preview_result;
+mod preview_metadata;
 mod preview_refresh;
+mod progressive_preview;
 mod render;
 mod saved_placement;
 mod transcript_search;
@@ -61,7 +71,7 @@ pub use loading::{
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 500;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
@@ -153,7 +163,7 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// Format duration since a time in a human-readable way
 #[path = "session_picker/time_labels.rs"]
 mod time_labels;
-pub(super) use time_labels::{format_short_duration, format_time_ago};
+pub(crate) use time_labels::format_time_ago;
 
 /// Which pane has keyboard focus
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +209,8 @@ struct PreviewExtras {
     todos_payload: Option<String>,
     /// Durable selected-session widget facts, never the current App snapshot.
     info_data: Option<super::info_widget::InfoWidgetData>,
+    /// Freshness of the selected-session facts, not the transcript render cache.
+    loaded_at: Option<std::time::Instant>,
 }
 
 struct LoadedSessionPreview {
@@ -293,9 +305,14 @@ pub struct SessionPicker {
     cached_search_refs: Vec<SessionRef>,
     /// Cancellable full-text scan, separate from the bounded display cache.
     transcript_search: transcript_search::TranscriptSearch,
+    /// Briefly follow new best matches, unless the user starts browsing.
+    search_selection: filter::SearchSelection,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
+    resume_latency: latency::Latency,
+    latency_transcript_rendered: bool,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
+    pending_workspace_load: Option<progressive_preview::PendingWorkspaceLoad>,
     preview_load_failures: HashSet<String>,
     /// Pinned todos + prompt offset per loaded preview, keyed by session id.
     preview_extras: HashMap<String, PreviewExtras>,
@@ -380,8 +397,12 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: None,
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
@@ -434,8 +455,12 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: Some("Loading sessions…".to_string()),
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
@@ -520,8 +545,12 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: None,
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
@@ -752,6 +781,7 @@ impl SessionPicker {
         // session across a reordered/extended refresh.
         let restored = selected_id
             .as_deref()
+            .filter(|_| !self.search_selection.following())
             .and_then(|id| self.find_item_index_for_session_id(id));
         if let Some(idx) = restored {
             self.list_state.select(Some(idx));
@@ -865,6 +895,7 @@ impl SessionPicker {
     }
 
     fn toggle_selected_session(&mut self) {
+        self.search_selection.stop();
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return;
         };
@@ -973,10 +1004,15 @@ impl SessionPicker {
             let cloud_host = crate::storage::read_session_lease(session_id)
                 .and_then(|lease| lease.away_host)
                 .filter(|host| !host.trim().is_empty());
-            let session = if let Some(host) = cloud_host {
-                cloud_preview::load(session_id, &host)?
+            let (session, remote_snapshot) = if let Some(host) = cloud_host.as_deref() {
+                cloud_preview::load(session_id, host)?
             } else {
-                Session::load(session_id).ok()?
+                (Session::load(session_id).ok()?, None)
+            };
+            let info_data = if cloud_host.is_some() {
+                preview_chrome::persisted_info_from_snapshot(&session, remote_snapshot)
+            } else {
+                preview_chrome::persisted_info(&session)
             };
             let (messages, hidden_prompts) = build_messages_preview_with_offset(&session);
             return Some(LoadedSessionPreview {
@@ -984,7 +1020,8 @@ impl SessionPicker {
                 extras: PreviewExtras {
                     hidden_prompts,
                     todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
-                    info_data: Some(preview_chrome::persisted_info(&session)),
+                    info_data: Some(info_data),
+                    loaded_at: None,
                 },
             });
         }
@@ -1070,6 +1107,7 @@ impl SessionPicker {
             }
             Ok(None) => {
                 if let Some(pending) = self.pending_preview_load.take() {
+                    self.resume_latency.fail(&pending.session_id);
                     self.preview_load_failures.insert(pending.session_id);
                 }
                 true
@@ -1077,6 +1115,7 @@ impl SessionPicker {
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 if let Some(pending) = self.pending_preview_load.take() {
+                    self.resume_latency.fail(&pending.session_id);
                     self.preview_load_failures.insert(pending.session_id);
                 }
                 true
@@ -1088,27 +1127,28 @@ impl SessionPicker {
         let Some(session_ref) = self.selected_session_ref() else {
             return;
         };
-        let needs_preview = self
-            .session_by_ref(session_ref)
-            .map(|s| s.messages_preview.is_empty())
-            .unwrap_or(false);
-        if !needs_preview {
-            return;
-        }
-
-        let Some((cache_session_id, resume_target, external_path)) =
+        let Some((cache_session_id, resume_target, external_path, working_dir, is_cloud)) =
             self.session_by_ref(session_ref).map(|s| {
                 (
                     s.id.clone(),
                     s.resume_target.clone(),
                     s.external_path.clone(),
+                    s.working_dir.clone(),
+                    s.server_icon.as_deref() == Some("☁"),
                 )
             })
         else {
             return;
         };
 
-        if self.preview_extras.contains_key(&cache_session_id)
+        if self
+            .preview_extras
+            .get(&cache_session_id)
+            .is_some_and(|extras| {
+                extras
+                    .loaded_at
+                    .is_none_or(|at| at.elapsed() < Duration::from_secs(15))
+            })
             || self.preview_load_failures.contains(&cache_session_id)
             || self
                 .pending_preview_load
@@ -1119,13 +1159,33 @@ impl SessionPicker {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
+        let (workspace_tx, workspace_rx) = std::sync::mpsc::channel();
         let thread_session_id = cache_session_id.clone();
-        let _ = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("jcode-session-preview-loader".to_string())
             .spawn(move || {
+                let session_id = match &resume_target {
+                    ResumeTarget::JcodeSession { session_id } => Some(session_id.clone()),
+                    _ => None,
+                };
                 let preview = Self::load_preview_for_target(resume_target, external_path);
-                let _ = tx.send(preview);
+                progressive_preview::publish_then_hydrate(preview, tx, workspace_tx, |data| {
+                    let target = preview_metadata::WorkspaceTarget::for_identity(
+                        session_id.as_deref(),
+                        working_dir,
+                        is_cloud,
+                    );
+                    preview_metadata::hydrate_workspace(data, &target);
+                });
             });
+        if preview_result(worker, "loader worker startup").is_none() {
+            self.preview_load_failures.insert(cache_session_id);
+            return;
+        }
+        self.pending_workspace_load = Some(progressive_preview::PendingWorkspaceLoad {
+            session_id: cache_session_id,
+            receiver: workspace_rx,
+        });
         self.pending_preview_load = Some(PendingSessionPreviewLoad {
             session_id: thread_session_id,
             receiver: rx,
@@ -1276,6 +1336,18 @@ impl SessionPicker {
     /// - `None` if the overlay should close (Esc/q/Ctrl+C)
     /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
     pub fn handle_overlay_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<OverlayAction> {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
+        let result = self.handle_overlay_key_inner(code, modifiers);
+        self.latency_input_complete(before, at);
+        result
+    }
+
+    fn handle_overlay_key_inner(
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
@@ -1445,6 +1517,7 @@ impl SessionPicker {
         }
 
         let _ = self.poll_preview_load();
+        let _ = self.poll_workspace_load();
         self.ensure_selected_preview_loading();
 
         let selected = self.selected_session_ref().and_then(|session_ref| {
@@ -1519,7 +1592,9 @@ impl SessionPicker {
             diff_mode,
             search_query: self.search_query.trim().to_lowercase(),
         };
-        if !self.reuse_preview(&key) {
+        let cache_hit = self.reuse_preview(&key);
+        self.resume_latency.cache_lookup(cache_hit);
+        if !cache_hit {
             let Some(session) = self.session_by_ref(session_ref) else {
                 return;
             };
@@ -1699,6 +1774,13 @@ impl SessionPicker {
                 self.focus == PaneFocus::Preview,
             );
         }
+        self.latency_transcript_rendered = !preview_still_loading
+            && !self.pending_preview_load.as_ref().is_some_and(|pending| {
+                Some(&pending.session_id) == self.selected_session().map(|s| &s.id)
+            })
+            && !self
+                .preview_load_failures
+                .contains(&self.latency_selection_id().unwrap_or_default());
     }
 
     /// Fingerprint everything that affects the *content* of the preview pane so
@@ -1738,8 +1820,7 @@ impl SessionPicker {
                 .pending_preview_load
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
-        self.preview_load_failures
-            .contains(&session.id)
+        (session.messages_preview.is_empty() && self.preview_load_failures.contains(&session.id))
             .hash(&mut h);
         is_loading.hash(&mut h);
         diff_mode.hash(&mut h);
@@ -1789,30 +1870,44 @@ impl SessionPicker {
         let wide_width = inner
             .width
             .saturating_sub(super::ui::left_aligned_content_inset(inner.width, false));
-        let mut prepared = super::ui::prepare::prepare_history_preview(
-            &messages,
-            hidden_prompts,
-            wide_width,
-            diff_mode,
-        );
         let mut header = super::ui::header::build_preview_header(session, wide_width);
         let mut padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
-        let show_scrollbar = super::ui::native_scrollbar_visible(
-            inner.width > 1,
-            padding + header.len() + prepared.wrapped_lines.len(),
-            inner.height as usize,
-        );
-        if show_scrollbar {
-            let render_width = inner.width.saturating_sub(1);
-            let width = render_width
-                .saturating_sub(super::ui::left_aligned_content_inset(render_width, false));
-            prepared = super::ui::prepare::prepare_history_preview(
+        let render_width = inner.width.saturating_sub(1);
+        let narrow_width =
+            render_width.saturating_sub(super::ui::left_aligned_content_inset(render_width, false));
+        let header_height = padding + header.len();
+        let (prepared, show_scrollbar) = if inner.width <= 1 || inner.height == 0 {
+            (
+                super::ui::prepare::prepare_history_preview(
+                    &messages,
+                    hidden_prompts,
+                    wide_width,
+                    diff_mode,
+                ),
+                false,
+            )
+        } else if header_height > inner.height as usize {
+            (
+                super::ui::prepare::prepare_history_preview(
+                    &messages,
+                    hidden_prompts,
+                    narrow_width,
+                    diff_mode,
+                ),
+                true,
+            )
+        } else {
+            super::ui::prepare::prepare_history_preview_for_viewport(
                 &messages,
                 hidden_prompts,
-                width,
+                wide_width,
+                narrow_width,
                 diff_mode,
-            );
-            header = super::ui::header::build_preview_header(session, width);
+                inner.height as usize - header_height,
+            )
+        };
+        if show_scrollbar {
+            header = super::ui::header::build_preview_header(session, narrow_width);
             padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
         }
         // The real startup header is a scrolling transcript section. Never
@@ -2072,6 +2167,26 @@ impl SessionPicker {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        let at = std::time::Instant::now();
+        let initial_id = self.latency_selection_id();
+        self.resume_latency.initial_selection(initial_id);
+        self.latency_transcript_rendered = false;
+        self.render_inner(frame);
+        let id = if frame.area().width > 0 && frame.area().height > 0 {
+            self.latency_selection_id()
+        } else {
+            None
+        };
+        if let Some(id) = id.as_ref()
+            && self.preview_load_failures.contains(id)
+        {
+            self.resume_latency.fail(id);
+        }
+        self.resume_latency
+            .frame(id, self.latency_transcript_rendered, at.elapsed());
+    }
+
+    fn render_inner(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
         let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
@@ -2288,7 +2403,7 @@ impl SessionPicker {
             // Always paint before polling, including on a cold cache. Neither
             // disk-cache parsing nor the full transcript scan may hold up the
             // first frame or prevent Escape from cancelling the picker.
-            let mut input_poll_timeout = Duration::from_millis(100);
+            let mut input_poll_timeout = self.preview_poll_interval();
             if let Some(receiver) = updates.as_ref() {
                 match receiver.try_recv() {
                     Ok(update) => match self.apply_session_list_update(update) {
@@ -2326,7 +2441,7 @@ impl SessionPicker {
                     },
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
+                            self.handle_overlay_mouse(mouse);
                         }
                         _ => {}
                     },

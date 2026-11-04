@@ -237,6 +237,70 @@ fn trivial_hidden_only_snapshot_detector_keeps_system_plus_visible_message() {
 }
 
 #[test]
+fn global_recency_budget_merges_sources_without_counting_test_sessions() {
+    let make = |id: &str, age: i64, source: SessionSource, debug: bool| {
+        let now = chrono::Utc::now() - chrono::Duration::seconds(age);
+        SessionInfo {
+            id: id.into(),
+            parent_id: None,
+            short_name: id.into(),
+            icon: String::new(),
+            title: id.into(),
+            message_count: 1,
+            user_message_count: 1,
+            assistant_message_count: 0,
+            created_at: now,
+            last_message_time: now,
+            last_active_at: Some(now),
+            working_dir: None,
+            model: None,
+            provider_key: None,
+            is_canary: false,
+            is_debug: debug,
+            saved: id == "old-saved",
+            save_label: None,
+            status: SessionStatus::Closed,
+            needs_catchup: false,
+            estimated_tokens: 0,
+            first_user_prompt: None,
+            messages_preview: Vec::new(),
+            search_index: String::new(),
+            server_name: None,
+            server_icon: None,
+            source,
+            resume_target: ResumeTarget::JcodeSession {
+                session_id: id.into(),
+            },
+            external_path: None,
+            todo_statuses: Vec::new(),
+        }
+    };
+    let mut sessions = vec![
+        make("old-claude", 100, SessionSource::ClaudeCode, false),
+        make("new-jcode", 1, SessionSource::Jcode, false),
+        make("test", 0, SessionSource::Jcode, true),
+        make("new-codex", 2, SessionSource::Codex, false),
+        make("old-saved", 90, SessionSource::Jcode, false),
+    ];
+    limit_sessions_by_recency(&mut sessions, 2);
+    let visible: Vec<_> = sessions
+        .iter()
+        .filter(|s| !s.is_debug)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(visible, ["new-jcode", "new-codex"]);
+    assert!(sessions.iter().any(|s| s.id == "test"));
+
+    let mut sessions: Vec<_> = (0..501)
+        .map(|i| make(&format!("jcode-{i}"), i, SessionSource::Jcode, false))
+        .chain([make("older-codex", 1000, SessionSource::Codex, false)])
+        .collect();
+    limit_sessions_by_recency(&mut sessions, super::super::DEFAULT_SESSION_SCAN_LIMIT);
+    assert_eq!(sessions.len(), 500);
+    assert!(sessions.iter().all(|s| s.source == SessionSource::Jcode));
+}
+
+#[test]
 fn cached_grouped_sessions_round_trip_from_disk() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
@@ -279,6 +343,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
             session_id: "session_cache_test_1770000000000".to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     };
     let cache = GroupedSessionListDiskCache {
         version: SESSION_LIST_DISK_CACHE_VERSION,
@@ -793,6 +858,14 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         token_usage: None,
     });
     session.save().expect("save session");
+    let sessions_dir = temp.path().join("sessions");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    assert!(
+        parse_jcode_session_info(&sessions_dir, session_id, &catchup)
+            .expect("session without todos")
+            .todo_statuses
+            .is_empty()
+    );
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
@@ -823,7 +896,37 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         .find(|session| session.id == session_id)
         .expect("todo-titled session present");
     assert_eq!(loaded.title, "Improve resume session names");
+    assert_eq!(loaded.todo_statuses, ["in_progress"]);
     assert!(loaded.search_index.contains("improve resume session names"));
+
+    let mut legacy = serde_json::to_value(loaded).expect("serialize picker session");
+    legacy.as_object_mut().unwrap().remove("todo_statuses");
+    let legacy: SessionInfo = serde_json::from_value(legacy).expect("legacy picker session");
+    assert!(legacy.todo_statuses.is_empty());
+
+    let mut todos = crate::todo::load_todos(session_id).expect("load todos");
+    for (index, status) in ["pending", "completed", "cancelled", "future_status"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut todo = todos[0].clone();
+        todo.id = format!("status-{index}");
+        todo.status = status.to_string();
+        todos.push(todo);
+    }
+    crate::todo::save_todos(session_id, &todos).expect("save mixed statuses");
+    let loaded = parse_jcode_session_info(&sessions_dir, session_id, &catchup)
+        .expect("session with mixed todo statuses");
+    assert_eq!(
+        loaded.todo_statuses,
+        [
+            "in_progress",
+            "pending",
+            "completed",
+            "cancelled",
+            "future_status"
+        ]
+    );
 }
 
 #[test]
@@ -885,7 +988,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
 }
 
 #[test]
-fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
+fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -937,8 +1040,8 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
     assert!(
         sessions
             .iter()
-            .any(|session| session.id == "session_saved_beyond_scan_limit"),
-        "saved sessions should remain visible even when the recency scan limit is full"
+            .all(|session| session.id != "session_saved_beyond_scan_limit"),
+        "old saved sessions must not bypass the combined recency budget"
     );
 }
 

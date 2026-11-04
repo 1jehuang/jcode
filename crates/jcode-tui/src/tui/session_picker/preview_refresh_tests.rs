@@ -35,6 +35,7 @@ fn fixture() -> SessionInfo {
             session_id: "faithful_refresh".into(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     }
 }
 
@@ -48,6 +49,80 @@ fn message(role: &str, content: &str) -> PreviewMessage {
         title: None,
         timestamp: None,
     }
+}
+
+#[test]
+fn populated_transcript_still_loads_missing_preview_metadata() {
+    let mut snapshot = fixture();
+    snapshot
+        .messages_preview
+        .push(message("assistant", "Already cached"));
+    let mut picker = SessionPicker::new(vec![snapshot]);
+    picker.ensure_selected_preview_loading();
+    assert!(picker.pending_preview_load.is_some());
+}
+
+#[test]
+fn preview_metadata_refreshes_after_freshness_window() {
+    let snapshot = fixture();
+    let mut picker = SessionPicker::new(vec![snapshot.clone()]);
+    picker.preview_extras.insert(
+        snapshot.id.clone(),
+        PreviewExtras {
+            loaded_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        },
+    );
+    picker.ensure_selected_preview_loading();
+    assert!(picker.pending_preview_load.is_none());
+    picker
+        .preview_extras
+        .get_mut(&snapshot.id)
+        .unwrap()
+        .loaded_at = Some(std::time::Instant::now() - Duration::from_secs(16));
+    picker.ensure_selected_preview_loading();
+    assert!(picker.pending_preview_load.is_some());
+}
+
+#[test]
+fn metadata_failure_does_not_invalidate_a_populated_transcript() {
+    let mut snapshot = fixture();
+    snapshot
+        .messages_preview
+        .push(message("assistant", "Cached conversation"));
+    let mut picker = SessionPicker::new(vec![snapshot.clone()]);
+    let mode = crate::config::config().display.diff_mode;
+    let before = picker.preview_content_hash(&snapshot, mode);
+    picker.preview_load_failures.insert(snapshot.id.clone());
+    assert_eq!(before, picker.preview_content_hash(&snapshot, mode));
+}
+
+#[test]
+fn workspace_change_keeps_transcript_but_rejects_old_metadata_and_pending_result() {
+    let snapshot = fixture();
+    let mut picker = SessionPicker::new(vec![snapshot.clone()]);
+    deliver(
+        &mut picker,
+        vec![message("assistant", "Retained conversation")],
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
+        session_id: snapshot.id.clone(),
+        receiver,
+    });
+    let mut changed = snapshot;
+    changed.working_dir = Some("/different/workspace".into());
+    picker.reseed_grouped(vec![], vec![changed]);
+    assert!(!picker.preview_extras.contains_key("faithful_refresh"));
+    assert!(picker.pending_preview_load.is_none());
+    assert!(
+        sender.send(None).is_err(),
+        "obsolete loader receiver must be dropped"
+    );
+    assert_eq!(
+        picker.all_sessions[0].messages_preview[0].content,
+        "Retained conversation"
+    );
 }
 
 #[test]

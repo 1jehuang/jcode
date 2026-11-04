@@ -1172,6 +1172,11 @@ pub trait TuiState {
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
     /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
+
+    /// The composer follows the selection endpoint only during a mouse drag.
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        None
+    }
     /// Whether the first-run onboarding empty state is being previewed in this session.
     // ---- Onboarding ----
     fn onboarding_preview_mode(&self) -> bool {
@@ -2049,6 +2054,19 @@ pub(crate) fn ssh_remote_host() -> Option<String> {
     std::env::var("JCODE_SSH_REMOTE")
         .ok()
         .filter(|host| !host.trim().is_empty())
+}
+
+// A submitted prompt is an explicit retry request, not an automatic retry.
+// The native SSH adapter consumes this once on the next socket connection.
+static USER_REQUESTED_SSH_RECONNECT: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_immediate_ssh_reconnect() {
+    USER_REQUESTED_SSH_RECONNECT.store(true, Ordering::Release);
+}
+
+#[doc(hidden)]
+pub fn take_immediate_ssh_reconnect_request() -> bool {
+    USER_REQUESTED_SSH_RECONNECT.swap(false, Ordering::AcqRel)
 }
 
 pub(crate) fn is_ssh_remote() -> bool {

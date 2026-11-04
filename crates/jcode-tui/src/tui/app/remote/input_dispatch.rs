@@ -730,6 +730,51 @@ mod ssh_slash_tests {
     }
 
     #[test]
+    fn ssh_poke_hotkey_controls_daemon_instead_of_local_todos() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_poke_hotkey_controls_daemon_instead_of_local_todos",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut remote = RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            for (enabled, busy, args) in [
+                (true, false, vec!["off"]),
+                (true, true, vec!["off"]),
+                (false, true, vec!["on"]),
+                (false, false, vec![]),
+            ] {
+                app.auto_poke_incomplete_todos = enabled;
+                app.is_processing = busy;
+                app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote)
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "runtime_command");
+                assert_eq!(request["command"], "poke");
+                assert_eq!(request["args"], serde_json::json!(args));
+                assert!(app.queued_messages.is_empty());
+                assert_eq!(
+                    app.auto_poke_incomplete_todos, enabled,
+                    "wait for daemon acknowledgement"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn ssh_host_loop_and_usage_commands_send_structured_requests() {
         if app_mod::commands_dispatch::ssh_test_runs_in_child(
             "ssh_host_loop_and_usage_commands_send_structured_requests",

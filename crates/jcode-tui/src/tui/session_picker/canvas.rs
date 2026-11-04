@@ -11,11 +11,10 @@ pub(super) fn panel_area(area: Rect) -> Rect {
     // Leave room for the shared product/session header, but never follow the
     // selected transcript's variable prompt and todo bands. This is a control
     // overlay: its position and size must stay put while browsing sessions.
-    let top = 5.min(area.height.saturating_sub(4));
-    let available = area.height.saturating_sub(top).saturating_sub(2).max(1);
-    let height = ((area.height as u32 * 3 / 5) as u16)
-        .clamp(6, 24)
-        .min(available);
+    let min_top = 5.min(area.height.saturating_sub(4));
+    let available = area.height.saturating_sub(min_top).saturating_sub(2).max(1);
+    let height = ((area.height as u32 * 4 / 5) as u16).max(6).min(available);
+    let top = ((area.height - height) / 2).max(min_top);
     Rect::new(
         area.right()
             .saturating_sub(width + area.width.saturating_sub(width).min(2)),
@@ -23,6 +22,38 @@ pub(super) fn panel_area(area: Rect) -> Rect {
         width,
         height,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_card_uses_eighty_percent_height_without_a_row_cap() {
+        for height in [40, 50, 80, 100, 160] {
+            let area = Rect::new(3, 7, 120, height);
+            let panel = panel_area(area);
+            assert_eq!(panel.height, height * 4 / 5);
+            assert_eq!(panel.y - area.y, ((height - panel.height) / 2).max(5));
+            assert!(panel.x > area.x + area.width / 2);
+        }
+    }
+
+    #[test]
+    fn resume_card_stays_within_small_terminal_bounds() {
+        for width in 0..65 {
+            for height in 0..50 {
+                let area = Rect::new(3, 7, width, height);
+                let panel = panel_area(area);
+                assert!(panel.x >= area.x && panel.right() <= area.right());
+                assert!(panel.y >= area.y && panel.bottom() <= area.bottom());
+                if width > 0 && height >= 9 {
+                    assert!(panel.y >= area.y + 5);
+                    assert!(panel.bottom() <= area.bottom() - 2);
+                }
+            }
+        }
+    }
 }
 
 impl SessionPicker {

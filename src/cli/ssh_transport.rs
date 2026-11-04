@@ -23,6 +23,7 @@ const PROTOCOL: u32 = 1;
 const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CLOUD_WAKE_TIMEOUT: Duration = Duration::from_secs(150);
 const MAX_CONNECTIONS: usize = 32;
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
@@ -42,6 +43,9 @@ impl ReconnectBackoff {
     }
     fn blocked(&self, now: std::time::Instant) -> bool {
         self.retry_after.is_some_and(|at| now < at)
+    }
+    fn should_defer(&self, now: std::time::Instant, user_requested_retry: bool) -> bool {
+        !user_requested_retry && self.blocked(now)
     }
     /// Record a failure. Returns true when it should be logged (first failure,
     /// then every power of two) so long outages produce a handful of lines.
@@ -315,9 +319,25 @@ struct SshConnection {
 
 impl SshConnection {
     async fn connect(options: &SshOptions) -> Result<Self> {
-        Self::spawn(options.command(), STARTUP_TIMEOUT)
-            .await
-            .with_context(|| format!("connecting native Jcode on {}", options.host))
+        // Jcode Cloud hosts may be asleep: waking the VM and starting the
+        // remote daemon routinely exceeds the plain SSH startup deadline.
+        let cloud = super::cloud_managed::is_managed(&options.host)
+            || super::cloud_ephemeral::host_id(&options.host).is_some();
+        let (deadline, attempts) = if cloud {
+            (CLOUD_WAKE_TIMEOUT, 2)
+        } else {
+            (STARTUP_TIMEOUT, 1)
+        };
+        let mut last = None;
+        for _ in 0..attempts {
+            match Self::spawn(options.command(), deadline).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last
+            .expect("at least one attempt")
+            .context(format!("connecting native Jcode on {}", options.host)))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {
@@ -500,7 +520,8 @@ async fn accept_connections(
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { break; };
                 if connections.len() >= MAX_CONNECTIONS { continue; }
-                if backoff.lock().map(|b| b.blocked(std::time::Instant::now())).unwrap_or(false) {
+                let user_requested_retry = crate::tui::take_immediate_ssh_reconnect_request();
+                if backoff.lock().map(|b| b.should_defer(std::time::Instant::now(), user_requested_retry)).unwrap_or(false) {
                     // Drop the stream: the client sees a closed connection and retries later.
                     continue;
                 }
@@ -650,6 +671,19 @@ mod tests {
         assert_eq!(b.succeed(), Some(8));
         assert!(!b.blocked(now));
         assert_eq!(b.succeed(), None);
+    }
+
+    #[test]
+    fn reconnect_backoff_user_submission_bypasses_only_one_attempt() {
+        let now = std::time::Instant::now();
+        let mut backoff = ReconnectBackoff::default();
+        for _ in 0..8 {
+            backoff.fail(now);
+        }
+        assert!(backoff.should_defer(now, false));
+        assert!(!backoff.should_defer(now, true));
+        assert!(backoff.should_defer(now, false));
+        assert_eq!(backoff.failures, 8);
     }
 
     fn hello() -> String {
@@ -949,6 +983,109 @@ mod tests {
             .unwrap();
         // client_write deliberately remains open: daemon EOF must still exit.
         drop(client_write);
+    }
+
+    #[tokio::test]
+    async fn bridge_forwards_background_tool_before_busy_tool_completes() {
+        use crate::protocol::{Request, ServerEvent};
+
+        // Exercise the production remote stdio bridge, not a JSON echo. The
+        // mock daemon deliberately keeps its tool unfinished until the client
+        // receives the background acknowledgement. Waiting for tool completion
+        // (or EOF) before forwarding either direction therefore deadlocks.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (client, bridge) = tokio::io::duplex(4096);
+            let (input, output) = tokio::io::split(bridge);
+            let bridge_task = tokio::spawn(bridge_stream(input, output, socket));
+            let (finished, finish_tool) = tokio::sync::oneshot::channel();
+
+            let daemon = async {
+                let (daemon, _) = listener.accept().await.unwrap();
+                let (read, mut write) = daemon.into_split();
+                let mut read = BufReader::new(read);
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::Ping { id: 0 }
+                ));
+                write
+                    .write_all(b"{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n")
+                    .await
+                    .unwrap();
+                let event = ServerEvent::ToolExec {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+
+                // No ToolDone or further output: the download copy is pending
+                // while the upload must still deliver the control request.
+                line.clear();
+                assert!(read.read_line(&mut line).await.unwrap() > 0);
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::BackgroundTool { id: 73 }
+                ));
+                let event = ServerEvent::BackgroundToolResult {
+                    id: 73,
+                    moved: true,
+                    tool_call_id: Some("busy-tool".into()),
+                    tool_name: Some("bash".into()),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                finish_tool.await.unwrap();
+                let event = ServerEvent::ToolDone {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                    output: "finished after background acknowledgement".into(),
+                    error: None,
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+            };
+            let client = async {
+                let (read, mut write) = tokio::io::split(client);
+                let mut read = BufReader::new(read);
+                read_handshake(&mut read).await.unwrap();
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolExec { id, .. } if id == "busy-tool"
+                ));
+                let frame =
+                    serde_json::to_string(&Request::BackgroundTool { id: 73 }).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                // Keep stdin open throughout: interactive requests cannot rely
+                // on EOF to flush, and the tool is still blocked on our signal.
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::BackgroundToolResult {
+                        id: 73, moved: true, tool_call_id: Some(id), tool_name: Some(name)
+                    } if id == "busy-tool" && name == "bash"
+                ));
+                finished.send(()).unwrap();
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolDone { id, .. } if id == "busy-tool"
+                ));
+                bridge_task.await.unwrap().unwrap();
+                drop(write);
+            };
+            tokio::join!(daemon, client);
+        })
+        .await
+        .expect("native SSH must forward BackgroundTool and its reply while the tool is busy");
     }
 
     #[tokio::test]
