@@ -490,6 +490,13 @@ pub(super) async fn spawn_swarm_agent(
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
+                // Registered before the worker's `session_start` hook fires.
+                Some(super::swarm::swarm_hooks::worker_identity(
+                    swarm_id,
+                    req_session_id,
+                    label.as_deref(),
+                    definition.as_ref().map(|d| d.name.as_str()),
+                )),
             )
             .await
             .and_then(|result_json| {
@@ -955,6 +962,35 @@ pub(super) async fn handle_comm_stop(
     else {
         return;
     };
+
+    // Removing the session forgets its hook identity, so fire
+    // `swarm_member_end` first. Stopping publishes no status update of its own.
+    let stopping_transition = {
+        let members = swarm_members.read().await;
+        members.get(&target_session).map(|member| {
+            (
+                member.status.clone(),
+                member.last_status_change.elapsed().as_millis() as u64,
+                members
+                    .get(&req_session_id)
+                    .and_then(|coordinator| coordinator.working_dir.as_ref())
+                    .map(|dir| dir.display().to_string()),
+            )
+        })
+    };
+    if let Some((old_status, running_ms, coordinator_working_dir)) = stopping_transition {
+        super::swarm::swarm_hooks::member_status_changed(
+            &super::swarm::swarm_hooks::StatusTransition {
+                session_id: &target_session,
+                old_status: &old_status,
+                new_status: "stopped",
+                status_changed: true,
+                duration_ms: running_ms,
+                completion_report: None,
+                coordinator_working_dir: coordinator_working_dir.as_deref(),
+            },
+        );
+    }
 
     let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();

@@ -78,15 +78,30 @@ pub(in crate::server) fn spawn_context(
     }
 }
 
+/// The hook identity of a worker spawned into `swarm_id` by the coordinator.
+pub(in crate::server) fn worker_identity(
+    swarm_id: &str,
+    coordinator_session_id: &str,
+    label: Option<&str>,
+    agent_type: Option<&str>,
+) -> SwarmIdentity {
+    SwarmIdentity {
+        swarm_id: swarm_id.to_string(),
+        coordinator_session_id: coordinator_session_id.to_string(),
+        parent_session_id: coordinator_session_id.to_string(),
+        label: label.map(str::to_string),
+        agent_type: agent_type.map(str::to_string),
+    }
+}
+
 /// Register the worker's identity and fire `swarm_member_start`.
 pub(in crate::server) fn worker_spawned(worker: &SpawnedWorker<'_>) {
-    let identity = SwarmIdentity {
-        swarm_id: worker.swarm_id.to_string(),
-        coordinator_session_id: worker.coordinator_session_id.to_string(),
-        parent_session_id: worker.coordinator_session_id.to_string(),
-        label: worker.label.map(str::to_string),
-        agent_type: worker.agent_type.map(str::to_string),
-    };
+    let identity = worker_identity(
+        worker.swarm_id,
+        worker.coordinator_session_id,
+        worker.label,
+        worker.agent_type,
+    );
     hooks::register_swarm_identity(worker.session_id, identity.clone());
     if !hooks::hook_configured("swarm_member_start") {
         return;

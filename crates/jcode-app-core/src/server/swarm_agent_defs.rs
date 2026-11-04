@@ -6,6 +6,7 @@
 //! prompt (and prompt caching) stays untouched.
 
 use crate::agent_def::{AgentDefinition, find_agent_definition, load_agent_definitions};
+use crate::server::SessionAgents;
 use anyhow::Result;
 use std::path::Path;
 
@@ -45,12 +46,6 @@ pub(in crate::server) fn persona_text(definition: &AgentDefinition) -> String {
     )
 }
 
-pub(in crate::server) type SessionAgents = std::sync::Arc<
-    tokio::sync::RwLock<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<crate::agent::Agent>>>,
-    >,
->;
-
 /// Add the persona to a freshly created headless worker, if a definition was
 /// requested.
 pub(in crate::server) async fn deliver_headless_persona(
@@ -74,6 +69,10 @@ pub(in crate::server) async fn deliver_headless_persona(
 /// the headed client finds it at the start of the transcript on attach.
 pub(in crate::server) fn persist_persona(session_id: &str, definition: &AgentDefinition) {
     let result = crate::session::Session::load(session_id).and_then(|mut session| {
+        // Attaching skips the opening context once the transcript is nonempty,
+        // so create it first, as the headless path does, and keep it ahead of
+        // the persona.
+        session.ensure_initial_session_context_message();
         session.add_message_with_display_role(
             crate::message::Role::User,
             vec![crate::message::ContentBlock::Text {
@@ -130,5 +129,53 @@ mod tests {
         let text = persona_text(&found);
         assert!(text.starts_with("<system-reminder>\n# Agent persona: reviewer"));
         assert!(text.contains("Be strict."));
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    #[test]
+    fn visible_persona_follows_the_opening_session_context() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let mut session = crate::session::Session::create(None, None);
+        session.working_dir = Some(project.path().display().to_string());
+        session.save_prepared().unwrap();
+        let id = session.id.clone();
+        std::fs::create_dir_all(project.path().join(".git")).unwrap();
+        std::fs::create_dir_all(project.path().join(".jcode/agents")).unwrap();
+        std::fs::write(
+            project.path().join(".jcode/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Reviews code\n---\nBe strict.\n",
+        )
+        .unwrap();
+        let cwd = project.path().display().to_string();
+        let definition = resolve(Some("reviewer"), Some(&cwd)).unwrap().unwrap();
+        persist_persona(&id, &definition);
+        let mut loaded = crate::session::Session::load(&id).unwrap();
+        // What the headed client does on attach: must not add a second one.
+        let added_on_attach = loaded.ensure_initial_session_context_message();
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        let texts: Vec<String> = loaded
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!added_on_attach);
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[0].contains("# Session Context"), "{texts:?}");
+        assert!(texts[1].contains("# Agent persona: reviewer"), "{texts:?}");
     }
 }
