@@ -2,16 +2,43 @@ use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
 use crate::tui::app as app_mod;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "remote send needs explicit message payload, reminders, retry metadata, and image attachments"
-)]
 pub(in crate::tui::app) async fn begin_remote_send(
     app: &mut App,
     remote: &mut RemoteConnection,
     content: String,
     images: Vec<(String, String)>,
     is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+) -> Result<u64> {
+    begin_remote_send_with_origin(
+        app,
+        remote,
+        content,
+        images,
+        is_system,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+    )
+    .await
+}
+
+/// Like [`begin_remote_send`], but the hook prompt origin is chosen separately from
+/// `is_system`. Queued follow-ups are sent as `is_system` yet may carry text a person typed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "remote send needs explicit message payload, origin, reminders, retry metadata, and image attachments"
+)]
+pub(in crate::tui::app) async fn begin_remote_send_with_origin(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    is_system: bool,
+    auto_origin: bool,
     system_reminder: Option<String>,
     auto_retry: bool,
     retry_attempts: u8,
@@ -23,7 +50,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
         (None, Some(recovery)) => Some(recovery.clone()),
         (reminder, None) => reminder,
     };
-    if is_system {
+    if auto_origin {
         remote.mark_next_message_auto();
     }
     let msg_id = remote
