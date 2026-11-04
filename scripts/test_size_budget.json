@@ -38,7 +38,7 @@
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_03.rs": 1716,
     "crates/jcode-tui/src/tui/app/tests/state_model_poke_01/part_01.rs": 1377,
     "crates/jcode-tui/src/tui/app/tests/state_model_poke_02/part_01.rs": 1564,
-    "crates/jcode-tui/src/tui/app/tests/state_model_poke_03.rs": 3117,
+    "crates/jcode-tui/src/tui/app/tests/state_model_poke_03.rs": 3118,
     "crates/jcode-tui/src/tui/app/tests/swarm_plan_graph_inline.rs": 1857,
     "crates/jcode-tui/src/tui/info_widget_tests.rs": 1938,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1533,
