@@ -1187,3 +1187,24 @@ fn queued_system_reminders_reach_agent_before_handoff() {
     assert!(app.cloud_handoff_blocks_work());
     assert!(app.take_ready_cloud_handoff().is_some());
 }
+
+#[test]
+fn prepared_handoff_interrupts_running_turn_once() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = super::super::commands::active_session_id(&app);
+    let mut request = pending(CloudCommand::Move { host: None }, &session);
+    app.is_processing = true;
+    app.pending_cloud_handoff = Some(request.clone());
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.cancel_requested, "unprepared host must not interrupt");
+
+    request.prepared = true;
+    app.pending_cloud_handoff = Some(request);
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(app.cancel_requested, "ready host interrupts the turn");
+    assert!(app.take_cloud_remote_interrupt());
+    assert!(!app.cancel_requested, "remote mode clears the local flag");
+
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.take_cloud_remote_interrupt(), "interrupts only once");
+}
