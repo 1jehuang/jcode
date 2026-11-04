@@ -268,3 +268,22 @@ fn summaries_and_lookup() {
     assert!(find_agent_definition("zzz", Some(f.project.path())).is_none());
     assert!(load_agent_definitions(None).is_empty());
 }
+
+#[test]
+fn user_directories_reached_by_the_ancestor_walk_stay_user_definitions() {
+    let f = fx();
+    // `user_home_path` redirects under JCODE_HOME/external when JCODE_HOME is set.
+    let user_home = f.home.path().join("external");
+    write(
+        &user_home,
+        ".claude/agents/global.md",
+        &def("global", "user claude", "model: opus\n", "g"),
+    );
+    std::fs::create_dir_all(user_home.join("work")).unwrap();
+    // Launched from the user's home and from a non-git directory below it.
+    for cwd in [user_home.clone(), user_home.join("work")] {
+        let defs = load_agent_definitions(Some(&cwd));
+        assert_eq!(defs["global"].origin, DefinitionOrigin::User, "{cwd:?}");
+        assert!(project_policy_definitions(Some(&cwd)).is_empty(), "{cwd:?}");
+    }
+}

@@ -252,25 +252,41 @@ fn scan_dir(dir: &Path, origin: DefinitionOrigin, out: &mut Vec<AgentDefinition>
 
 /// Directories to scan, highest priority first.
 fn search_dirs(working_dir: Option<&Path>) -> Vec<(PathBuf, DefinitionOrigin)> {
+    let mut user_dirs = Vec::new();
+    if let Ok(jcode) = crate::storage::jcode_dir() {
+        user_dirs.push(jcode.join("agents"));
+    }
+    if let Ok(claude) = crate::storage::user_home_path(".claude/agents") {
+        user_dirs.push(claude);
+    }
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let user_canonical: Vec<PathBuf> = user_dirs.iter().map(|dir| canonical(dir)).collect();
     let mut dirs = Vec::new();
     if let Some(cwd) = working_dir {
-        let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let start = canonical(cwd);
         // Walk up to the project root: the nearest ancestor with a `.git`.
         for dir in start.ancestors() {
             for sub in [".jcode/agents", ".claude/agents"] {
-                dirs.push((dir.join(sub), DefinitionOrigin::Project));
+                let candidate = dir.join(sub);
+                // From the home directory (or a non-git directory below it) the
+                // walk reaches the user's own agent directories. They are user
+                // definitions, not project ones, so they must not need trust.
+                if user_canonical.contains(&canonical(&candidate)) {
+                    continue;
+                }
+                dirs.push((candidate, DefinitionOrigin::Project));
             }
             if dir.join(".git").exists() {
                 break;
             }
         }
     }
-    if let Ok(jcode) = crate::storage::jcode_dir() {
-        dirs.push((jcode.join("agents"), DefinitionOrigin::User));
-    }
-    if let Ok(claude) = crate::storage::user_home_path(".claude/agents") {
-        dirs.push((claude, DefinitionOrigin::User));
-    }
+    dirs.extend(
+        user_dirs
+            .into_iter()
+            .map(|dir| (dir, DefinitionOrigin::User)),
+    );
     dirs
 }
 

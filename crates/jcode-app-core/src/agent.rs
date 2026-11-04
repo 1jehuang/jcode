@@ -683,11 +683,23 @@ impl Agent {
         } else {
             crate::config::config().tools.selection()
         };
+        // A restriction an agent definition put on this session survives a
+        // resume, and only ever narrows the selection.
+        let allowed_tools = match (&session.tool_allowlist, tool_selection.allowed_tools) {
+            (Some(restricted), Some(selected)) => Some(
+                selected
+                    .into_iter()
+                    .filter(|name| restricted.contains(name))
+                    .collect(),
+            ),
+            (Some(restricted), None) => Some(restricted.iter().cloned().collect()),
+            (None, selected) => selected,
+        };
         let mut agent = Self::build_base(
             provider,
             registry,
             session,
-            tool_selection.allowed_tools,
+            allowed_tools,
             tool_selection.disabled_tools,
         );
         // begin_concurrency_tracking below writes the presence markers.

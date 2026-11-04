@@ -186,7 +186,7 @@ async fn spawn_with_agent_delivers_persona_first_and_sets_agent_type() {
 }
 
 struct PolicyFx {
-    sessions: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<crate::agent::Agent>>>>>,
+    sessions: crate::server::SessionAgents,
     provider: Arc<dyn Provider>,
     state: crate::server::SwarmState,
     mcp: Arc<crate::mcp::SharedMcpPool>,
@@ -196,7 +196,9 @@ struct PolicyFx {
 impl PolicyFx {
     fn new(cwd: String) -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(crate::server::session_manager::SessionManager::from_agents(
+                HashMap::new(),
+            )),
             provider: Arc::new(QuietProvider::default()),
             state: crate::server::SwarmState::new(
                 HashMap::new(),
@@ -286,6 +288,37 @@ async fn definition_model_effort_and_tools_apply_to_a_user_level_worker() {
     assert_eq!(effort.as_deref(), Some("high"));
     assert!(tools.iter().all(|t| t == "read"), "tools: {tools:?}");
     assert!(tools.contains(&"read".to_string()), "tools: {tools:?}");
+}
+
+#[tokio::test]
+async fn definition_tool_restriction_survives_a_resume() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    write_definition(
+        home.path(),
+        "agents",
+        "---\nname: policy-agent\ndescription: d\ntools: [read]\n---\nbody\n",
+    );
+    let fx = PolicyFx::new(project.path().to_string_lossy().into_owned());
+    let id = fx.spawn("policy-agent").await;
+    // What worker revival does after a daemon restart: rebuild the agent from
+    // the session file alone.
+    let session = crate::session::Session::load(&id).unwrap();
+    let registry = crate::tool::Registry::new(fx.provider.clone()).await;
+    let revived =
+        crate::agent::Agent::new_with_session(fx.provider.clone(), registry, session, None);
+    let mut tools = revived.tool_names().await;
+    tools.sort();
+    crate::hooks::forget_swarm_identity(&id);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    assert_eq!(tools, vec!["read".to_string()], "tools: {tools:?}");
 }
 
 #[tokio::test]

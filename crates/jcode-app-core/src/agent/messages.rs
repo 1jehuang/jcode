@@ -34,6 +34,10 @@ impl Agent {
         for denied in deny {
             names.remove(denied);
         }
+        // Persist the restriction so a revived or resumed worker keeps it.
+        let mut persisted: Vec<String> = names.iter().cloned().collect();
+        persisted.sort();
+        self.session.tool_allowlist = Some(persisted);
         self.allowed_tools = Some(names);
         self.locked_tools = None;
         // Nested calls (batch and friends) are checked against the registered
@@ -43,6 +47,7 @@ impl Agent {
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
         );
+        self.persist_session_best_effort("agent tool restriction");
     }
 
     /// Add a hidden persona message (an agent definition body) to the
