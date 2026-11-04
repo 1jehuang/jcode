@@ -10,8 +10,9 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-/// Bytes kept per output stream. Anything beyond is drained and discarded.
-const OUTPUT_CAPTURE_LIMIT: usize = 1024 * 1024;
+/// Default bytes kept per output stream. Anything beyond is drained and
+/// discarded, and reported through [`RunOutput::stdout_truncated`].
+pub(super) const OUTPUT_CAPTURE_LIMIT: usize = 1024 * 1024;
 
 /// What to do with the child's stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub(super) struct RunOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// True when stdout exceeded the capture limit and was cut short.
+    pub stdout_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -45,15 +48,20 @@ impl std::fmt::Display for RunError {
     }
 }
 
-async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R) -> std::io::Result<Vec<u8>> {
+async fn read_bounded<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
     let mut kept = Vec::new();
+    let mut truncated = false;
     let mut chunk = [0u8; 8192];
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
-            return Ok(kept);
+            return Ok((kept, truncated));
         }
-        let room = OUTPUT_CAPTURE_LIMIT.saturating_sub(kept.len());
+        let room = limit.saturating_sub(kept.len());
+        truncated |= read > room;
         kept.extend_from_slice(&chunk[..read.min(room)]);
     }
 }
@@ -78,6 +86,17 @@ pub(super) async fn run_command(
     stdin: &[u8],
     timeout: Duration,
     stderr_mode: StderrMode,
+) -> Result<RunOutput, RunError> {
+    run_command_with_limit(std_cmd, stdin, timeout, stderr_mode, OUTPUT_CAPTURE_LIMIT).await
+}
+
+/// Like [`run_command`], keeping up to `capture_limit` bytes per stream.
+pub(super) async fn run_command_with_limit(
+    std_cmd: std::process::Command,
+    stdin: &[u8],
+    timeout: Duration,
+    stderr_mode: StderrMode,
+    capture_limit: usize,
 ) -> Result<RunOutput, RunError> {
     let mut std_cmd = std_cmd;
     #[cfg(unix)]
@@ -109,22 +128,24 @@ pub(super) async fn run_command(
         };
         let read_stdout = async {
             match stdout_pipe {
-                Some(pipe) => read_bounded(pipe).await,
-                None => Ok(Vec::new()),
+                Some(pipe) => read_bounded(pipe, capture_limit).await,
+                None => Ok((Vec::new(), false)),
             }
         };
         let read_stderr = async {
             match stderr_pipe {
-                Some(pipe) => read_bounded(pipe).await,
-                None => Ok(Vec::new()),
+                Some(pipe) => read_bounded(pipe, capture_limit).await,
+                None => Ok((Vec::new(), false)),
             }
         };
         let (_, stdout, stderr, status) =
             tokio::join!(write_stdin, read_stdout, read_stderr, child.wait());
+        let (stdout, stdout_truncated) = stdout?;
         Ok::<_, std::io::Error>(RunOutput {
             status: status?,
-            stdout: stdout?,
-            stderr: stderr?,
+            stdout,
+            stderr: stderr?.0,
+            stdout_truncated,
         })
     };
 

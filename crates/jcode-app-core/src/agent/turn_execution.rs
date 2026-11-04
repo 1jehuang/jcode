@@ -56,6 +56,7 @@ impl Agent {
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
         }
+        Self::print_hook_notices(&prompt_hook.notices);
         if let Some(context) = prompt_hook.context {
             self.append_turn_system_reminder(&context)?;
         }
@@ -110,6 +111,7 @@ impl Agent {
         if !user_message.trim().is_empty() {
             self.begin_model_usage_turn(&input_id);
         }
+        Self::print_hook_notices(&prompt_hook.notices);
         if let Some(context) = prompt_hook.context {
             self.append_turn_system_reminder(&context)?;
         }
@@ -222,6 +224,12 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
+        for notice in &prompt_hook.notices {
+            let _ = event_tx.send(hook_notice_event(
+                &self.session.id,
+                notice,
+            ));
+        }
         if let Some(context) = prompt_hook.context {
             self.append_turn_system_reminder(&context)?;
         }
@@ -293,7 +301,7 @@ impl Agent {
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let prompt_hook = self
             .run_user_prompt_submit_hook(user_message, PromptOrigin::User, "context")
             .await?;
@@ -301,7 +309,7 @@ impl Agent {
         if let Some(context) = prompt_hook.context {
             self.append_turn_system_reminder(&context)?;
         }
-        Ok(())
+        Ok(prompt_hook.notices)
     }
 
     fn append_user_context_message_with_display_role(
@@ -1646,6 +1654,7 @@ impl Agent {
 mod prompt_hooks;
 #[path = "stop_hook.rs"]
 mod stop_hook;
+pub(crate) use prompt_hooks::hook_notice_event;
 #[path = "turn_usage.rs"]
 mod turn_usage;
 use turn_usage::turn_token_usage_after;

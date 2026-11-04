@@ -36,6 +36,7 @@ pub(in crate::server) struct SpawnedWorker<'a> {
     pub label: Option<&'a str>,
     pub agent_type: Option<&'a str>,
     pub spawn_mode: &'a str,
+    /// The coordinator's working directory, where the observer runs.
     pub working_dir: Option<&'a str>,
 }
 
@@ -93,6 +94,8 @@ pub(in crate::server) struct StatusTransition<'a> {
     pub status_changed: bool,
     pub duration_ms: u64,
     pub completion_report: Option<&'a str>,
+    /// The coordinator's working directory, where the observer runs.
+    pub coordinator_working_dir: Option<&'a str>,
 }
 
 /// Fire `swarm_member_end` when a registered worker leaves the running state
@@ -113,7 +116,7 @@ pub(in crate::server) fn member_status_changed(transition: &StatusTransition<'_>
         "SubagentStop",
         "swarm_member_end",
         &identity.coordinator_session_id,
-        None,
+        transition.coordinator_working_dir,
     );
     payload.insert("agent_id".into(), transition.session_id.into());
     if let Some(agent_type) = agent_type {
@@ -144,6 +147,9 @@ pub(in crate::server) fn member_status_changed(transition: &StatusTransition<'_>
     if let Some(label) = &identity.label {
         event = event.field("SWARM_LABEL", label.clone());
     }
+    if let Some(cwd) = transition.coordinator_working_dir {
+        event = event.cwd(cwd);
+    }
     hooks::dispatch_observer(event);
 }
 
@@ -159,25 +165,166 @@ mod tests {
         assert!(!is_end_status("running"));
     }
 
+    /// Run `f` with `event_env` pointing at a recording hook; returns what the
+    /// hook wrote (`pwd|stdin`), or an empty string if it never ran.
+    #[cfg(unix)]
+    fn record_hook(event_env: &str, f: impl FnOnce()) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let record = temp.path().join("record.txt");
+        let script = temp.path().join("hook.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nstdin=$(cat)\nprintf '%s|%s' \"$(pwd -P)\" \"$stdin\" > {}\n",
+                crate::terminal_launch::sh_escape(&record.to_string_lossy())
+            ),
+        )
+        .expect("write hook");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod hook");
+        let previous = std::env::var_os(event_env);
+        crate::env::set_var(event_env, script.to_string_lossy().to_string());
+        let event = event_env
+            .trim_start_matches("JCODE_HOOK_")
+            .to_ascii_lowercase();
+        wait_for_hook_config(&event, true);
+        f();
+        let mut recorded = String::new();
+        // Give a (wrongly) fired hook time to run before concluding silence.
+        for _ in 0..50 {
+            if let Ok(data) = std::fs::read_to_string(&record)
+                && !data.is_empty()
+            {
+                recorded = data;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match previous {
+            Some(value) => crate::env::set_var(event_env, value),
+            None => crate::env::remove_var(event_env),
+        }
+        wait_for_hook_config(&event, false);
+        recorded
+    }
+
+    /// The config cache re-checks the environment on a throttle, so wait until
+    /// it reflects the override before dispatching.
+    #[cfg(unix)]
+    fn wait_for_hook_config(event: &str, configured: bool) {
+        for _ in 0..200 {
+            if hooks::hook_configured(event) == configured {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
+    fn register_worker(session_id: &str) {
+        hooks::register_swarm_identity(
+            session_id,
+            SwarmIdentity {
+                swarm_id: "sw".into(),
+                coordinator_session_id: "coord".into(),
+                parent_session_id: "coord".into(),
+                label: Some("task".into()),
+                agent_type: None,
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    fn transition<'a>(
+        session_id: &'a str,
+        old_status: &'a str,
+        new_status: &'a str,
+        status_changed: bool,
+        coordinator_working_dir: Option<&'a str>,
+    ) -> StatusTransition<'a> {
+        StatusTransition {
+            session_id,
+            old_status,
+            new_status,
+            status_changed,
+            duration_ms: 1,
+            completion_report: None,
+            coordinator_working_dir,
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn unregistered_workers_and_noop_updates_do_not_fire() {
-        // No hook is configured in the test process, so this only checks that
-        // the guard conditions return without panicking.
-        member_status_changed(&StatusTransition {
-            session_id: "swarm-hooks-unregistered",
-            old_status: "running",
-            new_status: "ready",
-            status_changed: true,
-            duration_ms: 1,
-            completion_report: None,
+    fn end_event_fires_for_valid_transition_in_coordinator_dir() {
+        let coord_dir = tempfile::TempDir::new().expect("coordinator dir");
+        let expected = std::fs::canonicalize(coord_dir.path()).expect("canonical");
+        register_worker("swarm-hooks-end-valid");
+        let dir = coord_dir.path().to_string_lossy().into_owned();
+        let recorded = record_hook("JCODE_HOOK_SWARM_MEMBER_END", || {
+            member_status_changed(&transition(
+                "swarm-hooks-end-valid",
+                "running",
+                "ready",
+                true,
+                Some(&dir),
+            ));
         });
-        member_status_changed(&StatusTransition {
-            session_id: "swarm-hooks-unregistered",
-            old_status: "ready",
-            new_status: "ready",
-            status_changed: false,
-            duration_ms: 1,
-            completion_report: None,
+        hooks::forget_swarm_identity("swarm-hooks-end-valid");
+        assert!(
+            recorded.starts_with(&format!("{}|", expected.display())),
+            "{recorded}"
+        );
+        assert!(recorded.contains("\"cwd\":"), "{recorded}");
+        assert!(recorded.contains("\"session_id\":\"coord\""), "{recorded}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn end_event_suppressed_for_unregistered_noop_and_non_end_updates() {
+        register_worker("swarm-hooks-end-guards");
+        let cases = [
+            // Unregistered worker.
+            ("swarm-hooks-unregistered", "running", "ready", true),
+            // Status did not change.
+            ("swarm-hooks-end-guards", "running", "ready", false),
+            // Not leaving the running state.
+            ("swarm-hooks-end-guards", "ready", "completed", true),
+            // Not entering an end state.
+            ("swarm-hooks-end-guards", "running", "streaming", true),
+        ];
+        for (session, old, new, changed) in cases {
+            let recorded = record_hook("JCODE_HOOK_SWARM_MEMBER_END", || {
+                member_status_changed(&transition(session, old, new, changed, None));
+            });
+            assert_eq!(recorded, "", "{session} {old}->{new} changed={changed}");
+        }
+        hooks::forget_swarm_identity("swarm-hooks-end-guards");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_event_runs_in_given_working_dir() {
+        let coord_dir = tempfile::TempDir::new().expect("coordinator dir");
+        let expected = std::fs::canonicalize(coord_dir.path()).expect("canonical");
+        let dir = coord_dir.path().to_string_lossy().into_owned();
+        let recorded = record_hook("JCODE_HOOK_SWARM_MEMBER_START", || {
+            worker_spawned(&SpawnedWorker {
+                session_id: "swarm-hooks-start",
+                swarm_id: "sw",
+                coordinator_session_id: "coord",
+                label: Some("task"),
+                agent_type: None,
+                spawn_mode: "inline",
+                working_dir: Some(&dir),
+            });
         });
+        hooks::forget_swarm_identity("swarm-hooks-start");
+        assert!(
+            recorded.starts_with(&format!("{}|", expected.display())),
+            "{recorded}"
+        );
+        assert!(recorded.contains("\"spawn_mode\":\"inline\""), "{recorded}");
     }
 }

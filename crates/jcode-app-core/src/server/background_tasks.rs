@@ -367,6 +367,7 @@ pub(super) async fn dispatch_swarm_worker_report(
         &event.session_id,
         &event.notification,
         Some("A worker has reported back. Integrate its result and check the remaining todo plan. Reassign available workers to actionable work, or explicitly stop them if no work remains. Do not end coordination with an unfinished actionable plan just because this worker finished its chunk. Respect user cancellation and genuine external blockers.".to_string()),
+        crate::hooks::PromptOrigin::SwarmMessage,
         sessions,
         swarm,
     ).await {
