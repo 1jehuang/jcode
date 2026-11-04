@@ -1197,6 +1197,21 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
 include!("detailed_catalog.rs");
 
 #[test]
+fn test_deferred_skill_arguments_do_not_override_later_selection() {
+    let mut app = create_test_app();
+    app.pending_skill_arguments_after_model_switch = Some("42".to_string());
+    app.pending_skill_arguments = Some(String::new());
+    crate::tui::app::remote::restore_deferred_skill_arguments(&mut app);
+    assert_eq!(app.pending_skill_arguments.as_deref(), Some(""));
+    assert!(app.pending_skill_arguments_after_model_switch.is_none());
+
+    app.pending_skill_arguments = None;
+    app.pending_skill_arguments_after_model_switch = Some("42".to_string());
+    crate::tui::app::remote::restore_deferred_skill_arguments(&mut app);
+    assert_eq!(app.pending_skill_arguments.as_deref(), Some("42"));
+}
+
+#[test]
 fn test_replacement_prompt_does_not_inherit_deferred_skill_arguments() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
