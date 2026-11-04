@@ -658,7 +658,9 @@ impl SessionPicker {
 
         title_parts.push(Span::styled(" ", Style::default()));
 
-        let mut help = if self.search_active && self.loading_message.is_some() {
+        let mut help = if let Some(notice) = self.copy_notice {
+            format!(" {notice} ")
+        } else if self.search_active && self.loading_message.is_some() {
             " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
         } else if self.loading_message.is_some() {
             " / search · s/S filter · Esc cancel ".to_string()
@@ -669,10 +671,10 @@ impl SessionPicker {
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " y copy ID · Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " y copy ID · Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };

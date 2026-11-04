@@ -292,6 +292,8 @@ pub struct SessionPicker {
     search_query: String,
     /// Whether we're in search input mode
     search_active: bool,
+    /// Feedback from the most recent clipboard action, cleared on the next key.
+    copy_notice: Option<&'static str>,
     /// Hidden test session count (debug + canary)
     hidden_test_count: usize,
     /// Which pane has keyboard focus
@@ -390,6 +392,7 @@ impl SessionPicker {
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
+            copy_notice: None,
             hidden_test_count,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
@@ -448,6 +451,7 @@ impl SessionPicker {
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
+            copy_notice: None,
             hidden_test_count: 0,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
@@ -538,6 +542,7 @@ impl SessionPicker {
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
+            copy_notice: None,
             hidden_test_count,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
@@ -865,6 +870,21 @@ impl SessionPicker {
                 .copied()
                 .and_then(|session_ref| self.session_by_ref(session_ref))
         })
+    }
+
+    /// Copy the highlighted session's resume identifier and report clipboard errors.
+    fn copy_selected_session_with(&mut self, copy: impl FnOnce(&str) -> bool) {
+        let Some(session) = self.selected_session() else {
+            self.copy_notice = Some("No session selected");
+            return;
+        };
+        let is_path = matches!(session.resume_target, ResumeTarget::PiSession { .. });
+        let copied = copy(session.resume_target.stable_id());
+        self.copy_notice = Some(match (copied, is_path) {
+            (true, true) => "Session path copied",
+            (true, false) => "Session ID copied",
+            (false, _) => "Could not copy to clipboard",
+        });
     }
 
     pub fn session_for_target(&self, target: &ResumeTarget) -> Option<&SessionInfo> {
@@ -1352,6 +1372,7 @@ impl SessionPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<OverlayAction> {
+        self.copy_notice = None;
         if let Some(action) = self.handle_claude_takeover_confirmation_key(code, modifiers) {
             return Ok(action);
         }
@@ -1404,6 +1425,9 @@ impl SessionPicker {
                 return Ok(OverlayAction::Close);
             }
             KeyCode::Char('q') => return Ok(OverlayAction::Close),
+            KeyCode::Char('y') if modifiers.is_empty() => {
+                self.copy_selected_session_with(super::app::helpers::copy_to_clipboard);
+            }
             KeyCode::Char(' ') => {
                 self.toggle_selected_session();
             }
