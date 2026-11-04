@@ -195,7 +195,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     if command == CloudCommand::Where && app.pending_cloud_handoff.is_some() {
         let pending = app.pending_cloud_handoff.as_ref().unwrap();
         app.push_display_message(DisplayMessage::system(format!(
-            "Pending handoff: {} (session {}). Waiting for an idle turn boundary. Use /cloud cancel to cancel.",
+            "Pending handoff: {} (session {}). Starts as soon as the host is ready. Use /cloud cancel to cancel.",
             pending.trimmed, pending.session_id
         )));
         return true;
@@ -222,7 +222,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         ) {
             "Cloud repository replacement queued for the next idle turn boundary. This session stays here. Use /cloud cancel to cancel."
         } else {
-            "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel."
+            "Cloud handoff queued. The current turn continues while the host gets ready, then the transfer starts right away. Use /cloud cancel to cancel."
         };
         app.push_display_message(DisplayMessage::system(message));
         // A queued-command dispatcher may still be restoring the composer draft.
@@ -570,6 +570,54 @@ impl App {
         self.pending_cloud_handoff.take()
     }
 
+    /// A move waits for the host to be prepared while the turn keeps running.
+    /// Once the host is ready, stop the turn so the transfer starts right away.
+    /// The moved session gets a continue message, so the agent resumes the
+    /// interrupted task on the cloud host. Interrupts at most once per request.
+    fn interrupt_turn_for_ready_handoff(&mut self) {
+        let Some(pending) = self.pending_cloud_handoff.as_ref() else {
+            return;
+        };
+        // Only cloud moves get a continue message on arrival. `/local` keeps
+        // waiting for the turn so an interrupted task is not silently dropped.
+        let ready = matches!(
+            pending.command,
+            CloudCommand::Move { .. } | CloudCommand::MoveSelected { .. }
+        ) && pending.prepared;
+        if !ready
+            || !self.is_processing
+            || self.cloud_job.is_some()
+            || self.cloud_interrupt_sent_for == Some(pending.request_id)
+        {
+            return;
+        }
+        self.cloud_interrupt_sent_for = Some(pending.request_id);
+        self.cancel_requested = true;
+        self.cloud_remote_interrupt_pending = true;
+        self.interleave_message = None;
+        self.interleave_images.clear();
+        self.pending_soft_interrupts.clear();
+        self.pending_soft_interrupt_requests.clear();
+        self.set_status_notice("Interrupting turn to start cloud transfer...");
+    }
+
+    #[cfg(test)]
+    pub(super) fn poll_cloud_job_interrupt_only_for_test(&mut self) {
+        self.interrupt_turn_for_ready_handoff();
+    }
+
+    /// Remote mode: the running turn lives in the daemon, so the interrupt
+    /// must be sent over the socket. Returns true once per interrupt.
+    pub(super) fn take_cloud_remote_interrupt(&mut self) -> bool {
+        let take = std::mem::take(&mut self.cloud_remote_interrupt_pending);
+        if take {
+            // The daemon owns the turn here, so the local flag must not linger
+            // and cancel a later turn.
+            self.cancel_requested = false;
+        }
+        take
+    }
+
     fn cloud_handoff_can_dispatch(&self) -> bool {
         !self.is_processing
             && self.hidden_queued_system_messages.is_empty()
@@ -602,6 +650,7 @@ impl App {
             self.pending_queued_dispatch = true;
             return true;
         }
+        self.interrupt_turn_for_ready_handoff();
         let had_pending = self.pending_cloud_handoff.is_some();
         if let Some(pending) = self.take_ready_cloud_handoff() {
             return start_cloud_command(
@@ -907,7 +956,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             let mut steps = job.steps.clone();
             push_cloud_step(
                 &mut steps,
-                "cloud host ready, transfer starts at the next idle turn".to_string(),
+                "cloud host ready, starting transfer".to_string(),
             );
             app.replace_display_message_content(
                 job.progress_message,
