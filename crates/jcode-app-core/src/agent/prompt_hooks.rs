@@ -27,7 +27,7 @@ impl Agent {
     /// Deliver notices on the CLI output path (stderr keeps `--json` stdout clean).
     pub(in crate::agent) fn print_hook_notices(notices: &[String]) {
         for notice in notices {
-            eprintln!("[hook] {notice}");
+            std::eprintln!("[hook] {notice}");
         }
     }
 
@@ -81,7 +81,7 @@ impl Agent {
                 Err(crate::hooks::PromptBlocked(reason).into())
             }
             Some(PromptSubmitOutcome::Allow { context, notices }) => {
-                for notice in notices {
+                for notice in &notices {
                     crate::logging::info(&format!("user_prompt_submit notice: {notice}"));
                 }
                 decision.context = context;
