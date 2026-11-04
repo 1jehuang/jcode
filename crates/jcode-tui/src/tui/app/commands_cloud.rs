@@ -382,6 +382,7 @@ fn start_cloud_command(
     let carried = carried.filter(|(index, _)| *index < app.display_messages.len());
     let (progress_message, steps) = match carried {
         Some((index, steps)) => {
+            let index = app.move_display_message_to_end(index);
             app.replace_display_message_content(index, render_cloud_steps(&steps, 0, None));
             (index, steps)
         }
@@ -635,8 +636,20 @@ impl App {
         let finished = done
             .as_ref()
             .map(|result| result.as_ref().is_ok_and(|output| output.status.success()));
-        let index = job.progress_message;
         let content = render_cloud_steps(&job.steps, frame, finished);
+        if redraw || done.is_some() {
+            // Keep the live checklist next to the composer instead of leaving
+            // it stranded above output that arrived while the turn continued.
+            let old_index = job.progress_message;
+            let index = self.move_display_message_to_end(old_index);
+            if let Some(job) = self.cloud_job.as_mut() {
+                job.progress_message = index;
+            }
+        }
+        let Some(job) = self.cloud_job.as_ref() else {
+            return redraw;
+        };
+        let index = job.progress_message;
         if redraw || done.is_some() {
             self.replace_display_message_content(index, content);
         }

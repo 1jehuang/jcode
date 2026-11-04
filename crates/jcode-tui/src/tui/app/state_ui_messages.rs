@@ -529,6 +529,20 @@ impl App {
         true
     }
 
+    /// Move a live status message (such as a progress checklist) to the end of
+    /// the transcript so it stays next to the composer while later output
+    /// arrives. Returns the message's new index.
+    pub(super) fn move_display_message_to_end(&mut self, idx: usize) -> usize {
+        let last = self.display_messages.len().saturating_sub(1);
+        if idx >= last {
+            return idx;
+        }
+        let message = self.display_messages.remove(idx);
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+        last
+    }
+
     pub(super) fn remove_display_message(&mut self, idx: usize) -> Option<DisplayMessage> {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);
