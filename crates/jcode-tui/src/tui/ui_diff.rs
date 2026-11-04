@@ -225,10 +225,11 @@ fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine>
     let mut lines = Vec::new();
 
     for change in diff.iter_all_changes() {
-        let content = change.value().trim();
-        if content.is_empty() {
-            continue;
-        }
+        let value = change.value();
+        let content = value
+            .strip_suffix("\r\n")
+            .or_else(|| value.strip_suffix('\n'))
+            .unwrap_or(value);
 
         match change.tag() {
             ChangeTag::Delete => {
@@ -332,24 +333,25 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
         return None;
     }
 
-    if let Some(pos) = trimmed.find("- ") {
-        let (prefix, content) = trimmed.split_at(pos + 2);
-        if !prefix.is_empty() && prefix[..pos].chars().all(|c| c.is_ascii_digit()) {
+    // Numbered summaries have one format space after the sign. Raw unified
+    // diff lines have only a sign, so every following space belongs to source.
+    // Strip presentation padding only before a numbered prefix, never content.
+    let numbered = raw_line.trim_start();
+    let digits = numbered.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        let rest = &numbered[digits..];
+        let kind = if rest.starts_with("- ") {
+            Some(DiffLineKind::Del)
+        } else if rest.starts_with("+ ") {
+            Some(DiffLineKind::Add)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
             return Some(ParsedDiffLine {
-                kind: DiffLineKind::Del,
-                prefix: prefix.to_string(),
-                content: trim_diff_content(content),
-                file_path: None,
-            });
-        }
-    }
-    if let Some(pos) = trimmed.find("+ ") {
-        let (prefix, content) = trimmed.split_at(pos + 2);
-        if !prefix.is_empty() && prefix[..pos].chars().all(|c| c.is_ascii_digit()) {
-            return Some(ParsedDiffLine {
-                kind: DiffLineKind::Add,
-                prefix: prefix.to_string(),
-                content: trim_diff_content(content),
+                kind,
+                prefix: numbered[..digits + 2].to_string(),
+                content: numbered[digits + 2..].to_string(),
                 file_path: None,
             });
         }
@@ -359,7 +361,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Add,
             prefix: "+".to_string(),
-            content: trim_diff_content(rest),
+            content: rest.to_string(),
             file_path: None,
         });
     }
@@ -367,16 +369,12 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Del,
             prefix: "-".to_string(),
-            content: trim_diff_content(rest),
+            content: rest.to_string(),
             file_path: None,
         });
     }
 
     None
-}
-
-fn trim_diff_content(content: &str) -> String {
-    content.trim_start_matches([' ', '\t']).to_string()
 }
 
 pub(super) fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'static> {
@@ -409,6 +407,67 @@ mod tests {
     };
     use crate::message::ToolCall;
     use serde_json::json;
+
+    #[test]
+    fn numbered_diff_consumes_only_the_format_separator() {
+        for (raw, prefix, expected) in [
+            ("42+     nested();  ", "42+ ", "    nested();  "),
+            ("  7- \t\told();\t", "7- ", "\t\told();\t"),
+            ("1+ ", "1+ ", ""),
+            ("2-    ", "2- ", "   "),
+            ("3+ \t", "3+ ", "\t"),
+        ] {
+            let line = super::parse_diff_line(raw).unwrap();
+            assert_eq!(line.prefix, prefix, "{raw:?}");
+            assert_eq!(line.content, expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn raw_diff_preserves_every_character_after_the_sign() {
+        for (raw, expected) in [
+            ("+    nested();  ", "    nested();  "),
+            ("-\t\told();\t", "\t\told();\t"),
+            ("+ 42+ source", " 42+ source"),
+            ("-1- source", "1- source"),
+            ("+", ""),
+            ("-", ""),
+            ("+   ", "   "),
+            ("-\t", "\t"),
+        ] {
+            let line = super::parse_diff_line(raw).unwrap();
+            assert_eq!(line.content, expected, "{raw:?}");
+            assert_eq!(line.prefix, &raw[..1]);
+            assert_eq!(
+                line.kind,
+                if raw.starts_with('+') {
+                    DiffLineKind::Add
+                } else {
+                    DiffLineKind::Del
+                }
+            );
+        }
+        assert!(super::parse_diff_line("  +context").is_none());
+        assert!(super::parse_diff_line("42+missing separator").is_none());
+    }
+
+    #[test]
+    fn generated_diff_retains_indentation_trailing_space_and_blank_lines() {
+        let lines =
+            generate_diff_lines_from_strings("", "    nested();  \r\n\t\tchild();\n\n \t\nlast  ");
+        let contents: Vec<_> = lines.iter().map(|line| line.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            ["    nested();  ", "\t\tchild();", "", " \t", "last  "]
+        );
+        assert_eq!(lines[2].prefix, "3+ ");
+        assert_eq!(lines[4].prefix, "5+ ");
+        let removed = generate_diff_lines_from_strings("\n\t\n", "");
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed[0].kind, DiffLineKind::Del);
+        assert_eq!(removed[0].content, "");
+        assert_eq!(removed[1].content, "\t");
+    }
 
     #[test]
     fn apply_patch_counts_ignore_context_lines_with_plus_or_minus_prefixes() {

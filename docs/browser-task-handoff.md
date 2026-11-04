@@ -5,6 +5,17 @@ Jcode owns the task state and execution loop. Jev selects the next action from t
 current trusted action catalog using the typed Decisions API. It does not generate
 JavaScript or run a separate chat-completion agent.
 
+For a new task tab, use `browser(action="handoff", url="https://example.com",
+new_tab=true, goal="...")`. Jcode creates the tab and binds the handoff to the
+returned tab ID before observing the page. Any old tab/frame target is replaced.
+Creation failures stop the task rather than falling back to an unrelated tab.
+With a URL and no tab ID, handoff also creates a fresh tab unless `new_tab=false`.
+To work in an existing signed-in tab, pass its explicit `tab_id` instead.
+
+Direct `open` defaults to a new tab when `tab_id` is omitted. Pass `tab_id` or
+`new_tab=false` to navigate an existing tab. Follow-up calls should use the
+returned tab ID, not the ID of the previously active tab.
+
 Each cycle sends:
 
 - The original goal and optional caller-supplied `context` (background and completion criteria).
@@ -50,7 +61,7 @@ orchestration.
 Run the browser regression suite through `selfdev test`:
 
 ```sh
-cargo test -p jcode-app-core --lib browser
+justrust test -p jcode-app-core --lib browser
 ```
 
 For live acceptance, check browser readiness, create a dedicated disposable

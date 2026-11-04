@@ -76,13 +76,8 @@ const DEFAULT_MODEL: &str = "anthropic/claude-opus-5.5";
 
 /// Which model should replace the placeholder default, if any. Pure so it can
 /// be tested without a network catalog.
-fn select_promoted_default(current: &str, catalog: &[&str]) -> Option<String> {
-    if current != DEFAULT_MODEL {
-        return None;
-    }
-    jcode_base::auth::lifecycle::preferred_model_for_provider("openrouter", catalog)
-        .filter(|best| best != DEFAULT_MODEL)
-}
+mod default_selection;
+use default_selection::select_promoted_default;
 
 /// Soft refresh TTL for the model catalog.
 ///
@@ -881,7 +876,9 @@ impl OpenRouterProvider {
                 "xhigh" => "high",
                 other => other,
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -892,7 +889,9 @@ impl OpenRouterProvider {
             } else {
                 effort
             };
-            if effort == "none" {
+            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
+            // Preserve omission for built-in and heuristic provider contracts.
+            if effort == "none" && self.reasoning_effort_support != Some(true) {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -953,6 +952,7 @@ impl OpenRouterProvider {
     fn model_is_openai_reasoning_family(model: &str) -> bool {
         let model = model.trim().to_ascii_lowercase();
         model.starts_with("gpt-5")
+            || model == "gpt-6.1-sol"
             || model.contains("codex")
             || model.starts_with("o1")
             || model.starts_with("o3")
@@ -1765,9 +1765,9 @@ impl OpenRouterProvider {
                 })
             }),
             supports_provider_features: false,
-            // The proxy's `/models` shape is not a documented catalog; keep the
-            // curated list so `/model` works offline and before first request.
-            supports_model_catalog: false,
+            // The official CLI discovers releases through GET /v1/models.
+            // Static models remain only an offline/pre-discovery fallback.
+            supports_model_catalog: true,
             profile_id: Some("grok-build".to_string()),
             builtin_azure: false,
             reasoning_effort_support: Some(false),
@@ -2616,6 +2616,10 @@ impl OpenRouterProvider {
 
     /// Force refresh the models cache from API
     pub async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
+        if !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
@@ -2882,50 +2886,5 @@ mod profile_catalog_backoff_tests;
 mod muse_native_tests;
 
 #[cfg(test)]
-mod placeholder_default_tests {
-    use super::*;
-
-    #[test]
-    fn placeholder_default_is_current_flagship() {
-        assert_eq!(DEFAULT_MODEL, "anthropic/claude-opus-5.5");
-    }
-
-    #[test]
-    fn placeholder_default_promotes_to_newest_flagship() {
-        let catalog = [
-            "anthropic/claude-sonnet-4",
-            "anthropic/claude-haiku-4.5",
-            "anthropic/claude-opus-4.6",
-            "anthropic/claude-opus-5.5",
-            "anthropic/claude-opus-5.6",
-            "openai/gpt-5.5",
-            "deepseek/deepseek-v4-pro",
-        ];
-        assert_eq!(
-            select_promoted_default(DEFAULT_MODEL, &catalog).as_deref(),
-            Some("anthropic/claude-opus-5.6")
-        );
-    }
-
-    #[test]
-    fn placeholder_default_never_overrides_a_chosen_model() {
-        let catalog = ["anthropic/claude-sonnet-4", "anthropic/claude-opus-5.5"];
-        assert_eq!(
-            select_promoted_default("deepseek/deepseek-v4-pro", &catalog),
-            None
-        );
-    }
-
-    #[test]
-    fn placeholder_default_stays_when_catalog_has_nothing_better() {
-        assert_eq!(
-            select_promoted_default(DEFAULT_MODEL, &["deepseek/deepseek-v4-pro"]),
-            None
-        );
-        assert_eq!(select_promoted_default(DEFAULT_MODEL, &[]), None);
-        assert_eq!(
-            select_promoted_default(DEFAULT_MODEL, &[DEFAULT_MODEL]),
-            None
-        );
-    }
-}
+#[path = "placeholder_default_tests.rs"]
+mod placeholder_default_tests;

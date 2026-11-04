@@ -1,4 +1,4 @@
-use super::{StdinInputRequest, Tool, ToolContext, ToolOutput};
+use super::{BACKGROUND_WAIT_GUIDANCE, StdinInputRequest, Tool, ToolContext, ToolOutput};
 use crate::background::TaskResult;
 use crate::bus::{
     BackgroundTaskProgress, BackgroundTaskProgressKind, BackgroundTaskProgressSource,
@@ -32,8 +32,8 @@ const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const STDIN_RESPONSE_TIMEOUT_MS: u64 = 1500;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
-const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
-const BASH_TOOL_DESCRIPTION: &str = "Run a bash command. For repository searches, prefer agentgrep or rg over grep -r. rg skips hidden and ignored files by default, not all untracked files. Use --hidden --no-ignore when those files must be searched.";
+const BASH_TOOL_DESCRIPTION: &str =
+    "Run bash. Prefer agentgrep/rg. Include hidden/ignored with --hidden --no-ignore.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
@@ -689,6 +689,20 @@ fn configure_background_command_stdio(command: &mut TokioCommand) {
         .stderr(Stdio::piped());
 }
 
+/// Keep cloud environment values out of tool arguments and transcript output.
+/// Read on each spawn so a just-completed opaque transfer is available to the
+/// next command without changing the long-lived daemon's global environment.
+fn cloud_command_environment(
+    working_dir: Option<&Path>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let root = match working_dir {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    crate::cloud_environment::load_environment(&root)
+        .map_err(|_| anyhow::anyhow!("could not load saved cloud environment"))
+}
+
 #[cfg(unix)]
 fn build_detached_shell_wrapper(command: &str) -> StdCommand {
     let mut cmd = StdCommand::new("bash");
@@ -721,89 +735,8 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
 }
 
 #[cfg(test)]
-mod utf8_truncation_tests {
-    #[cfg(any(windows, unix))]
-    use super::build_shell_command;
-    use super::format_command_output;
-
-    #[test]
-    fn format_command_output_truncates_on_utf8_boundary() {
-        let input = format!("{}é", "a".repeat(29_999));
-        let output = format_command_output(input, None);
-        assert!(output.ends_with("\n... (output truncated)"));
-        assert!(output.starts_with(&"a".repeat(29_999)));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn build_shell_command_uses_cmd_and_executes_command() {
-        let output = build_shell_command("echo hello-from-cmd")
-            .output()
-            .await
-            .expect("run cmd command");
-        assert!(output.status.success(), "cmd command should succeed");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.to_ascii_lowercase().contains("hello-from-cmd"),
-            "unexpected stdout: {}",
-            stdout
-        );
-
-        let probe_path = std::env::temp_dir().join(format!(
-            "jcode-cmd-quoting-probe-{}.cmd",
-            std::process::id()
-        ));
-        std::fs::write(
-            &probe_path,
-            concat!(
-                "@echo off\r\n",
-                "if \"%~1\"==\"text with spaces\" if \"%~2\"==\"\" (\r\n",
-                "  echo quoted-argument-ok\r\n",
-                "  exit /b 0\r\n",
-                ")\r\n",
-                "echo first=[%~1] second=[%~2]\r\n",
-                "exit /b 1\r\n",
-            ),
-        )
-        .expect("write cmd quoting probe");
-
-        let quoted_command = format!("call \"{}\" \"text with spaces\"", probe_path.display());
-        let quoted_output = build_shell_command(&quoted_command)
-            .output()
-            .await
-            .expect("run cmd quoting probe");
-        let _ = std::fs::remove_file(&probe_path);
-        let quoted_stdout = String::from_utf8_lossy(&quoted_output.stdout);
-        let quoted_stderr = String::from_utf8_lossy(&quoted_output.stderr);
-        assert!(
-            quoted_output.status.success(),
-            "quoted argument should remain one child-process argument; stdout={quoted_stdout:?} stderr={quoted_stderr:?}"
-        );
-        assert!(
-            quoted_stdout.contains("quoted-argument-ok"),
-            "unexpected quoted-command stdout: {quoted_stdout}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn build_shell_command_uses_disk_backed_scratch_directory() {
-        // Keep JCODE_HOME stable until the final directory assertion. Running
-        // synchronously avoids holding the environment MutexGuard across await.
-        let _env_lock = crate::storage::lock_test_env();
-        let expected = super::tool_scratch_dir().expect("jcode scratch directory");
-        let output = build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$JCODE_SCRATCH_DIR\"")
-            .as_std_mut()
-            .output()
-            .expect("run bash command");
-        assert!(output.status.success(), "bash command should succeed");
-        let stdout = String::from_utf8(output.stdout).expect("utf-8 scratch paths");
-        let paths = stdout.lines().collect::<Vec<_>>();
-        let expected = expected.to_string_lossy().into_owned();
-        assert_eq!(paths, vec![expected.as_str(), expected.as_str()]);
-        assert!(std::path::Path::new(&expected).is_dir());
-    }
-}
+#[path = "bash_utf8_truncation_tests.rs"]
+mod utf8_truncation_tests;
 
 pub struct BashTool;
 
@@ -961,37 +894,8 @@ fn file_edit_hint(command: &str) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod file_edit_hint_tests {
-    use super::file_edit_hint;
-
-    #[test]
-    fn flags_in_place_edits() {
-        for command in [
-            "sed -i 's/a/b/' src/main.rs",
-            "cd x && sed -Ei 's/a/b/g' f.rs",
-            "sed --in-place=.bak 's/a/b/' f",
-            "perl -pi -e 's/a/b/' f.rs",
-            "python3 - <<'EOF'\ns=open(p).read()\ns=s.replace('a','b')\nopen(p,'w').write(s)\nEOF",
-            "python3 -c \"import pathlib;p=pathlib.Path('f');p.write_text(p.read_text().replace('a','b'))\"",
-        ] {
-            assert!(file_edit_hint(command).is_some(), "{command}");
-        }
-    }
-
-    #[test]
-    fn ignores_read_only_commands() {
-        for command in [
-            "sed -n '1,20p' f.rs",
-            "sed 's/a/b/' f.rs",
-            "grep -i foo f.rs",
-            "cargo test -p jcode-app-core",
-            "python3 -c \"print('a'.replace('a','b'))\"",
-            "git diff --ignore-space-change",
-        ] {
-            assert!(file_edit_hint(command).is_none(), "{command}");
-        }
-    }
-}
+#[path = "bash_file_edit_hint_tests.rs"]
+mod file_edit_hint_tests;
 
 impl BashTool {
     async fn execute_foreground(
@@ -1012,6 +916,8 @@ impl BashTool {
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
         let mut command = build_shell_command(&params.command);
+        command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
+        command.envs(crate::session_env::session_env(&ctx.session_id));
         command
             .env("JCODE_SESSION_ID", &ctx.session_id)
             .kill_on_drop(true)
@@ -1193,17 +1099,14 @@ impl BashTool {
                      Name: {}\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
+                     {BACKGROUND_WAIT_GUIDANCE}\n\n\
                      The command is still running; do not rerun it unless you intentionally want a second copy.\n\
-                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion or the next progress checkpoint.\n\
-                     Use `bg` with action=\"output\" and task_id=\"{}\" to inspect output.\n\
                      If you expected it to finish quickly and it did not, the `timeout` parameter is in MILLISECONDS; pass a larger value or omit it.",
                     timeout_ms as f64 / 1000.0,
                     info.task_id,
                     display_name,
                     info.output_file.display(),
                     info.status_file.display(),
-                    info.task_id,
-                    info.task_id,
                 );
 
                 Ok(ToolOutput::new(output)
@@ -1245,6 +1148,8 @@ impl BashTool {
         let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
+        cmd.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
+        cmd.envs(crate::session_env::session_env(&ctx.session_id));
         cmd.env("JCODE_SESSION_ID", &ctx.session_id);
         let stdout = OpenOptions::new()
             .create(true)
@@ -1304,17 +1209,14 @@ impl BashTool {
                      Foreground time used: {:.1}s\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
-                     The command is still running; do not rerun it unless you intentionally want a second copy.\n\
-                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion or the next progress checkpoint.\n\
-                     Use `bg` with action=\"output\" and task_id=\"{}\" to inspect output.",
+                     {BACKGROUND_WAIT_GUIDANCE}\n\n\
+                     The command is still running; do not rerun it unless you intentionally want a second copy.",
                     timeout_ms as f64 / 1000.0,
                     info.task_id,
                     display_name,
                     elapsed.as_secs_f64(),
                     info.output_file.display(),
                     info.status_file.display(),
-                    info.task_id,
-                    info.task_id,
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1354,11 +1256,10 @@ impl BashTool {
                     .await;
                 spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
                 let output = format!(
-                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\nUse `bg` with action=\"wait\" and task_id=\"{}\" after reload to wait for completion or the next progress checkpoint.",
+                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{BACKGROUND_WAIT_GUIDANCE}",
                     info.task_id,
                     info.output_file.display(),
                     info.status_file.display(),
-                    info.task_id,
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1387,7 +1288,11 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
+        let cloud_environment = cloud_command_environment(working_dir.as_deref())?;
         let session_id_env = ctx.session_id.clone();
+        // Capture before handing work to the manager. Its closure can start
+        // after a caller has already replaced or cleared these overrides.
+        let session_environment = crate::session_env::session_env(&ctx.session_id);
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1401,7 +1306,11 @@ impl BashTool {
                 notify,
                 wake,
 				move |output_path| async move {
+                    #[cfg(all(test, not(windows)))]
+                    tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
+					cmd.envs(cloud_environment);
+					cmd.envs(session_environment);
 					cmd.env("JCODE_SESSION_ID", &session_id_env);
 					#[cfg(unix)]
 					unsafe {
@@ -1532,7 +1441,7 @@ impl BashTool {
         } else if notify {
             "You will be notified when the task completes."
         } else {
-            "Notifications disabled. Use `bg` tool to check status."
+            "Notifications disabled."
         };
 
         let stall_msg = match params.stall_wake_seconds {
@@ -1552,25 +1461,19 @@ impl BashTool {
         };
 
         let output = format!(
-            "Command started in background.\n\n\
+            "Command started in background as requested.\n\n\
              Task ID: {}\n\
              Name: {}\n\
              Output file: {}\n\
              Status file: {}\n\n\
-             {}\n\
-             {}To wait for completion/checkpoints: use the `bg` tool with action=\"wait\" and task_id=\"{}\"\n\
-             To check progress immediately: use the `bg` tool with action=\"status\" and task_id=\"{}\"\n\
-             To see output: use the `read` tool on the output file, or `bg` with action=\"output\"\n\n\
-             {}",
+             {}\n{}\n\
+             {BACKGROUND_WAIT_GUIDANCE}",
             info.task_id,
             display_name,
             info.output_file.display(),
             info.status_file.display(),
             notify_msg,
             stall_msg,
-            info.task_id,
-            info.task_id,
-            BACKGROUND_PROGRESS_GUIDANCE,
         );
 
         Ok(ToolOutput::new(output)

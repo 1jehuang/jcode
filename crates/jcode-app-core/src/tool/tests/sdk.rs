@@ -86,8 +86,10 @@ async fn sdk_selection_replacement_validation_and_isolation() {
     assert!(sdk::configure(session, "owner", bad, tx.clone()).is_err());
     assert_eq!(sdk::config(session).unwrap().custom.len(), 2);
     sdk::configure(session, "owner", SessionToolConfig::default(), tx).unwrap();
-    assert!(sdk::config(session).unwrap().enabled.is_none());
-    assert!(sdk::config(session).unwrap().custom.is_empty());
+    assert!(
+        sdk::config(session).is_none(),
+        "default config removes the runtime overlay and restores built-in selection"
+    );
 }
 
 #[tokio::test]
@@ -226,7 +228,10 @@ async fn sdk_disabled_batch_subcalls_and_cancel_cleanup() {
         sdk::configure(
             session,
             "batch-owner",
-            SessionToolConfig::default(),
+            SessionToolConfig {
+                enabled: Some(vec![]),
+                ..Default::default()
+            },
             tx.clone()
         )
         .is_err()

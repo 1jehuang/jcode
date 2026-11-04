@@ -165,6 +165,32 @@ exit 0
 - **Anything else fails open** with a logged warning: other exit codes,
   timeout (`pre_tool_timeout_ms`, default 5s), missing binary, spawn errors.
 
+### JSON output (Codex/Claude compatible)
+
+On exit 0 a gate may print one JSON object on stdout. Non-JSON stdout is
+ignored, so plain exit-code scripts keep working. Recognized fields:
+
+```json
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "rm -rf is not allowed",
+    "updatedInput": { "command": "ls" },
+    "additionalContext": "note shown to the model"
+  },
+  "systemMessage": "also shown to the model"
+}
+```
+
+- `permissionDecision: "deny"` (or legacy top-level `"decision": "block"`
+  with `reason`) blocks the call with that reason.
+- `permissionDecision: "ask"` also blocks, with a "requires user approval"
+  reason. jcode has no interactive approval prompt for hooks yet.
+- `updatedInput` (an object) replaces the tool input. With several gates,
+  later gates receive the rewritten input. A block discards rewrites.
+- `additionalContext` and `systemMessage` are appended to the tool result
+  (or block error) under a `[pre_tool context]` marker.
+
 Fail-open is deliberate: a broken policy script should degrade to "no policy"
 rather than brick every session. If you need fail-closed semantics, make the
 hook itself robust (it is your trust boundary, not jcode).

@@ -9,6 +9,53 @@ pub(crate) struct IdleCacheRelease {
     pub tool_index_entries: usize,
 }
 
+impl Agent {
+    /// Caller must hold the idle Agent reservation. Never checkpoint here:
+    /// save_prepared can succeed without writing under a migration lease.
+    /// Keeping the source history means waking is simply lazy cache rebuilding,
+    /// with no disk dependency, lifecycle hooks or environment resnapshotting.
+    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
+        if crate::turn_cancel_registry::has_active_turn(self.session_id())
+            || self.session.migration_lease_block().is_some()
+            || !self.pending_alerts.is_empty()
+        {
+            return None;
+        }
+        let queue = self.soft_interrupt_queue.try_lock().ok()?;
+        if !queue.is_empty() {
+            return None;
+        }
+        let compaction = self.registry.compaction();
+        let manager = compaction.try_read().ok()?;
+        if manager.is_compacting() {
+            return None;
+        }
+        // A backgrounded tool can outlive the Agent lock. Do not disturb even
+        // derived state until every tool belonging to this history has settled.
+        if self.session.messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::ToolUse { id, .. } => crate::tool::inflight::is_tool_in_flight(id),
+                _ => false,
+            })
+        }) {
+            return None;
+        }
+
+        let released = IdleCacheRelease {
+            provider_cache_bytes: self
+                .session
+                .memory_profile_snapshot()
+                .provider_cache_json_bytes,
+            tool_index_entries: self.tool_call_ids.len() + self.tool_result_ids.len(),
+        };
+        self.session.release_provider_messages_cache();
+        self.tool_call_ids = HashSet::new();
+        self.tool_result_ids = HashSet::new();
+        self.tool_output_scan_index = 0;
+        Some(released)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,52 +377,5 @@ mod tests {
                 .provider_cache_message_count,
             0
         );
-    }
-}
-
-impl Agent {
-    /// Caller must hold the idle Agent reservation. Never checkpoint here:
-    /// save_prepared can succeed without writing under a migration lease.
-    /// Keeping the source history means waking is simply lazy cache rebuilding,
-    /// with no disk dependency, lifecycle hooks or environment resnapshotting.
-    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
-        if crate::turn_cancel_registry::has_active_turn(self.session_id())
-            || self.session.migration_lease_block().is_some()
-            || !self.pending_alerts.is_empty()
-        {
-            return None;
-        }
-        let queue = self.soft_interrupt_queue.try_lock().ok()?;
-        if !queue.is_empty() {
-            return None;
-        }
-        let compaction = self.registry.compaction();
-        let manager = compaction.try_read().ok()?;
-        if manager.is_compacting() {
-            return None;
-        }
-        // A backgrounded tool can outlive the Agent lock. Do not disturb even
-        // derived state until every tool belonging to this history has settled.
-        if self.session.messages.iter().any(|message| {
-            message.content.iter().any(|block| match block {
-                ContentBlock::ToolUse { id, .. } => crate::tool::inflight::is_tool_in_flight(id),
-                _ => false,
-            })
-        }) {
-            return None;
-        }
-
-        let released = IdleCacheRelease {
-            provider_cache_bytes: self
-                .session
-                .memory_profile_snapshot()
-                .provider_cache_json_bytes,
-            tool_index_entries: self.tool_call_ids.len() + self.tool_result_ids.len(),
-        };
-        self.session.release_provider_messages_cache();
-        self.tool_call_ids = HashSet::new();
-        self.tool_result_ids = HashSet::new();
-        self.tool_output_scan_index = 0;
-        Some(released)
     }
 }

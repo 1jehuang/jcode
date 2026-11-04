@@ -377,12 +377,12 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
     assert!(ensure_model_allowed_for_subscription("sonnet 5.5").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-6.1-sol").is_ok());
     assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
     for model in [
         "claude-opus-4-8",
         "opus 4.8",
         "claude-opus-5",
-        "claude-sonnet-4-6",
-        "sonnet 4.6",
         "claude-fable-5",
         "gpt-5.4",
         "gpt-5.5",
@@ -879,5 +879,30 @@ fn test_anthropic_pro_no_catalog_and_explicit_long_context_keep_legacy_gates() {
             (false, "requires extra usage".into())
         };
         assert_eq!(anthropic_oauth_route_availability(model), expected);
+    });
+}
+#[test]
+fn test_jcode_provider_model_switch_does_not_require_openrouter_key() {
+    with_clean_provider_test_env(|| {
+        crate::env::set_var("JCODE_API_KEY", "jcode-test-subscription-key");
+        crate::env::remove_var("OPENROUTER_API_KEY");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let provider = crate::provider::jcode::JcodeProvider::new();
+            for model in ["claude-haiku-5-5", "gpt-6.1-sol", "claude-opus-5-5"] {
+                provider.set_model(model).expect("managed model switch");
+                assert_eq!(provider.model(), model);
+                assert_eq!(
+                    std::env::var("JCODE_OPENROUTER_TRANSPORT_STATE").as_deref(),
+                    Ok("jcode-subscription")
+                );
+                assert_eq!(
+                    std::env::var("JCODE_OPENROUTER_API_KEY_NAME").as_deref(),
+                    Ok("JCODE_API_KEY")
+                );
+            }
+            assert!(std::env::var_os("OPENROUTER_API_KEY").is_none());
+        });
+        crate::env::remove_var("JCODE_API_KEY");
     });
 }

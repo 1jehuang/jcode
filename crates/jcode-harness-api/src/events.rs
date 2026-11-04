@@ -164,6 +164,16 @@ pub enum ApiEvent {
         cache_read_input: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
+        /// Authoritative effective context budget, when supplied by the daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_budget: Option<usize>,
+    },
+
+    /// A session context override changed, including its resolved budget.
+    ContextCapChanged {
+        session_id: String,
+        max_context_tokens: Option<usize>,
+        effective_budget: usize,
     },
 
     /// The provider request that just completed missed the KV (prompt) cache:

@@ -366,6 +366,9 @@ async fn await_swarm_progress(
         tokio::time::interval_at(tokio::time::Instant::now() + refresh_period, refresh_period);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Detached plan drivers must not label the foreground agent as waiting.
+    let _wait_guard = (!reporter.is_background())
+        .then(|| crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members"));
     let response = loop {
         tokio::select! {
             result = &mut await_members => break result,
@@ -1420,6 +1423,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         // `agents.swarm_effort` (default "low").
         effort: None,
         label: None,
+        lane_id: None,
     };
 
     match send_request(spawn_request).await {
@@ -1616,14 +1620,14 @@ fn format_swarm_model_list(
             out.push_str(&format!("Configured agents.swarm_model default: {pin}\n"));
         }
         _ => out.push_str(
-            "No agents.swarm_model default configured (workers inherit the coordinator's model unless model is passed).\n",
+            "No agents.swarm_model default configured (workers inherit the coordinator's model).\n",
         ),
     }
     if model_routes.is_empty() {
-        out.push_str("\nNo model routes reported. Omit model to use the configured default, or pass inherit to use the coordinator.");
+        out.push_str("\nNo model routes reported. Omit model to use the configured default.");
         return out;
     }
-    out.push_str("\nAvailable model routes (pass model with a bare model or route-pinned value to override the configured default):\n");
+    out.push_str("\nModel routes (informational only, overrides require agents.swarm_model_selection and an exact agents.swarm_model_allowlist entry):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1661,21 +1665,19 @@ impl CommunicateTool {
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
         const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
+            "Coordinate agents: spawn todo-lane workers, message them, and manage plans.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
-            format!(
-                "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
-            )
+            format!("{BASE_DESCRIPTION}\n\nSwarm prompt:\n{swarm_prompt}")
         };
         Self { description }
     }
 }
 
 /// Swarm actions advertised to models. Real usage is dominated by messaging,
-/// reports, listing and spawning; the plan/task-graph actions (propose_plan,
+/// listing and spawning; the plan/task-graph actions (propose_plan,
 /// assign_task, assign_next, fill_slots, run_plan, resync_plan, ...) are
 /// subsumed by `launch` and lane-owning `spawn`. Unlisted actions still
 /// execute for old transcripts and scripts, they are just not offered.
@@ -1683,7 +1685,6 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "launch",
     "spawn",
     "message",
-    "report",
     "status",
     "plan_status",
     "list",
@@ -1771,8 +1772,7 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Per-worker model override for spawn and assignment-created workers.
-    /// Takes precedence over agents.swarm_model; see list_models for routes.
+    /// Optional model override, authorized by the user's opt-in and exact allowlist.
     #[serde(default)]
     model: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
@@ -1837,6 +1837,9 @@ fn canonical_swarm_action(action: &str) -> &str {
     }
 }
 
+#[path = "swarm_model_schema.rs"]
+mod swarm_model_schema;
+use swarm_model_schema::apply_swarm_model_policy;
 #[async_trait]
 impl Tool for CommunicateTool {
     fn name(&self) -> &str {
@@ -1855,84 +1858,66 @@ impl Tool for CommunicateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ADVERTISED_SWARM_ACTIONS,
-                    "description": "Action. launch runs your todo list (one agent per lane). spawn starts one worker on a lane; spawn requires label and should include prompt. message sends to one agent (to_session) or a channel; only the coordinator may omit both to message everyone. list_models shows available models/routes."
+                    "enum": ADVERTISED_SWARM_ACTIONS
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message body. Goes to to_session, or to channel; with neither, everyone (coordinator only). For report, the body."
+                    "description": "Routes to to_session, then channel, else broadcasts (coordinator only)."
                 },
                 "tldr": {
                     "type": "string",
-                    "description": "Optional one-line summary (under ~120 chars); recommended for bodies over 240 chars, else auto-derived."
-                },
-                "status": {
-                    "type": "string",
-                    "description": "For report: usually ready, blocked, failed, or completed. Defaults to ready."
-                },
-                "validation": {
-                    "type": "string",
-                    "description": "For action=report: tests or validation performed."
-                },
-                "follow_up": {
-                    "type": "string",
-                    "description": "For action=report: blockers or follow-up work."
+                    "description": "Summary under ~120 chars; auto-derived if omitted."
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Session ID or unique friendly name of one agent. Alias of target_session."
+                    "description": "Agent ID/unique name; alias of target_session."
                 },
                 "to_swarm": {
                     "type": "string",
-                    "description": "Cross-swarm DM: swarm label or id (see list_swarms). With to_session, that agent; else its coordinator."
+                    "description": "Swarm ID/label; targets to_session or its coordinator."
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Channel name for channel actions. Discouraged: prefer DMs."
+                    "description": "Prefer DMs."
                 },
                 "target_session": {
                     "type": "string",
-                    "description": "Session ID or unique friendly name for management actions. Alias of to_session."
+                    "description": "Alias of to_session."
                 },
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn: the worker's lane name (e.g. 'auth refactor'). Each spawned worker owns that lane in your todo list (created from the prompt if missing); its todo list is the lane and syncs only it."
+                    "description": "Required for spawn: todo lane (source of truth)."
                 },
                 "phase": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "For spawn: which phase the worker's lane belongs to. Defaults to the active phase."
+                    "description": "Spawn lane phase; defaults to active phase."
                 },
                 "working_dir": {
-                    "type": "string",
-                    "description": "Optional working directory for spawn."
+                    "type": "string"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Initial task/instructions for spawn. Spawning without it creates an idle agent."
+                    "description": "Extra spawn context, not lane tasks."
                 },
                 "initial_message": {
                     "type": "string",
-                    "description": "Alias of prompt for spawn; wins when both are set."
+                    "description": "Overrides prompt for spawn."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional max items for summary-style reads."
+                    "description": "Max summary items."
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Optional plan task ID. When omitted the coordinator picks or resumes the relevant task."
+                    "description": "Plan task; auto-selected if omitted."
                 },
                 "spawn_mode": {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Omit to use the user's configured mode. Set only when the user asks for one."
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Model for new workers, e.g. 'openai-api:gpt-5.6-luna'. 'inherit' uses yours. See list_models."
                 },
                 "session_ids": {
                     "type": "array",
@@ -1941,47 +1926,46 @@ impl Tool for CommunicateTool {
                 "mode": {
                     "type": "string",
                     "enum": ["all", "any"],
-                    "description": "await_members: all or any."
+                    "description": "await_members."
                 },
                 "target_status": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional completion statuses for await_members. Defaults to ready/completed/stopped/failed."
+                    "description": "await_members; defaults to ready/completed/stopped/failed."
                 },
                 "timeout_minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional timeout for await_members."
+                    "description": "await_members; returned ID can be used in todo.waiting_on."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "For launch/run_plan: detach as a background task (default true); false blocks until the plan resolves."
+                    "description": "launch: default true; false waits for completion."
                 },
                 "notify": {
                     "type": "boolean",
-                    "description": "For await_members/run_plan: show a notification when resolved. Defaults to true."
+                    "description": "await_members: default true."
                 },
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max live workers for launch."
+                    "description": "Max live launch workers."
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "For stop/cleanup: allow stopping non-owned/user-created swarm sessions. Defaults to false."
+                    "description": "stop: allow stopping non-owned/user-created sessions; default false."
                 },
                 "retain_agents": {
                     "type": "boolean",
-                    "description": "For launch/run_plan: keep spawned workers after the plan finishes. Defaults to false."
+                    "description": "launch: keep workers after completion; default false."
                 },
                 "wake": {
                     "type": "boolean",
-                    "description": "Wake this agent when a message or awaited background task resolves (default true)."
+                    "description": "Wake on message/await completion; default true."
                 },
                 "delivery": {
                     "type": "string",
-                    "enum": ["notify", "interrupt", "wake"],
-                    "description": "Optional delivery mode for dm/channel messaging."
+                    "enum": ["notify", "interrupt", "wake"]
                 },
             }
         });
@@ -2021,11 +2005,16 @@ impl Tool for CommunicateTool {
             }
         ]);
 
+        apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
+        crate::config::config()
+            .agents
+            .validate_swarm_model_request(params.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
         // different actions required different field names (e.g. `dm` wanted `to_session`
@@ -2481,7 +2470,7 @@ impl Tool for CommunicateTool {
                 // phase), created from the prompt when it does not exist. The
                 // worker's own todo list is that lane and syncs only it.
                 let prompt = params.spawn_initial_message();
-                let lane_id = {
+                let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
                     let title = prompt
                         .as_deref()
@@ -2505,7 +2494,9 @@ impl Tool for CommunicateTool {
                     if updated != todos {
                         crate::todo::save_todos(&ctx.session_id, &updated)?;
                     }
-                    lane_id
+                    let seeded_count =
+                        crate::todo::stages::lane_todos_for_worker(&updated, &lane_id).len();
+                    (lane_id, seeded_count)
                 };
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
@@ -2519,23 +2510,18 @@ impl Tool for CommunicateTool {
                     // `agents.swarm_effort` (default "low").
                     effort: None,
                     label: Some(label),
+                    lane_id: Some(lane_id.clone()),
                 };
 
                 match send_request(request).await {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        crate::server::swarm_todo_link::link_assignment(
-                            &ctx.session_id,
-                            &lane_id,
-                            "",
-                            &new_session_id,
-                        );
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {new_session_id}"
+                            "Spawned new agent: {new_session_id}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically."
                         ))
                         .with_metadata(
-                            serde_json::json!({"session_id": new_session_id, "lane": lane_id}),
+                            serde_json::json!({"session_id": new_session_id, "lane": lane_id, "seeded_todo_count": seeded_count, "lane_synced": true}),
                         ))
                     }
                     Ok(response) => {
@@ -2653,6 +2639,8 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            // Compatibility for old transcripts and scripts only. Worker output is
+            // collected automatically, so this action is not advertised to models.
             "report" => {
                 let message = params
                     .message
@@ -3126,8 +3114,10 @@ impl Tool for CommunicateTool {
                                 "\n\n(You can keep working; this wait runs in the background.)"
                             };
                             return Ok(ToolOutput::new(format!(
-                                "{}{}",
-                                summary, compatibility_note
+                                "{}{}\n\n{}",
+                                summary,
+                                compatibility_note,
+                                super::BACKGROUND_WAIT_GUIDANCE
                             )));
                         }
                         let reports = fetch_awaited_member_reports(&ctx, &members).await;
@@ -3145,7 +3135,7 @@ impl Tool for CommunicateTool {
 
             _ => Err(anyhow::anyhow!(
                 "Unknown action '{}'. Valid actions: share, share_append, read, message, broadcast, dm, channel, list, list_channels, channel_members, \
-                 propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, report, plan_status, summary, read_context, \
+                 propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, plan_status, summary, read_context, \
                  resync_plan, assign_task, assign_next, fill_slots, run_plan, cleanup, start, start_task, wake, resume, retry, reassign, replace, salvage, subscribe_channel, unsubscribe_channel, await_members. \
                  To read messages addressed to you, use action='read'.",
                 params.action

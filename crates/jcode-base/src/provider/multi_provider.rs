@@ -230,6 +230,7 @@ impl MultiProvider {
         if let Some(position) = order.iter().position(|key| *key == source_key) {
             order.rotate_left(position + 1);
         }
+        order.sort_by_cached_key(|key| pool.priority(key));
         let configured_model = crate::config::Config::load().provider.default_model;
         let target = order
             .into_iter()

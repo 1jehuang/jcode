@@ -681,6 +681,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             let sleep = tokio::time::sleep(backoff);
             tokio::pin!(sleep);
             let mut redraw = disconnected_redraw_interval(false, state);
+            let queued_before_wait = app.queued_messages.len();
             loop {
                 tokio::select! {
                     _ = &mut sleep => break,
@@ -695,6 +696,11 @@ pub(in crate::tui::app) async fn connect_with_retry(
                         )? {
                             return Ok(ConnectOutcome::Quit);
                         }
+                        // Enter must wake the retry timer, while ordinary editing,
+                        // empty submissions and local commands leave it alone.
+                        if submitted_during_backoff(queued_before_wait, app.queued_messages.len()) {
+                            break;
+                        }
                     }
                 }
             }
@@ -702,6 +708,10 @@ pub(in crate::tui::app) async fn connect_with_retry(
             Ok(ConnectOutcome::Retry)
         }
     }
+}
+
+pub(super) fn submitted_during_backoff(before: usize, after: usize) -> bool {
+    after > before
 }
 
 pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backend>(
@@ -941,6 +951,47 @@ pub(super) fn load_reload_reconnect_hints(
     }
 }
 
+/// Reconnect can dispatch before its bootstrap History arrives. Remember a
+/// recovery after it leaves the queue, including while its turn is running or
+/// finished, instead of treating an empty queue as permission to send it again.
+pub(in crate::tui::app) fn queue_reload_continuation_once(
+    app: &mut App,
+    session_id: &str,
+    directive: crate::tool::selfdev::ReloadRecoveryDirective,
+    notice: &str,
+) -> bool {
+    // Initiator notices identify the build even if background-task notes were
+    // regenerated between the local context and the server snapshot. Legacy
+    // interrupted-peer recovery has no notice and uses its stable prompt.
+    let identity = directive
+        .reconnect_notice
+        .as_ref()
+        .unwrap_or(&directive.continuation_message)
+        .clone();
+    if !app
+        .scheduled_reload_recoveries
+        .insert((session_id.to_string(), identity))
+    {
+        return false;
+    }
+    let continuation = directive.continuation_message;
+    let already_queued = app
+        .hidden_queued_system_messages
+        .iter()
+        .any(|queued| queued == &continuation)
+        || app
+            .rate_limit_pending_message
+            .as_ref()
+            .and_then(|pending| pending.system_reminder.as_ref())
+            .is_some_and(|queued| queued == &continuation);
+    if already_queued {
+        return false;
+    }
+    app.push_display_message(DisplayMessage::system(notice));
+    app.hidden_queued_system_messages.push(continuation);
+    true
+}
+
 pub(in crate::tui::app) fn finalize_reload_reconnect(
     app: &mut App,
     session_to_resume: Option<&str>,
@@ -979,7 +1030,14 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
 
         if let Some(directive) = directive {
             let session_id = session_to_resume.unwrap_or("unknown");
-            if app.current_message_id.is_none()
+            let queued = queue_reload_continuation_once(
+                app,
+                session_id,
+                directive,
+                "Reload complete - continuing because reload recovery was pending.",
+            );
+            if queued
+                && app.current_message_id.is_none()
                 && (app.remote_resume_activity.is_some() || app.is_processing)
             {
                 crate::logging::info(
@@ -988,28 +1046,25 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 app.remote_resume_activity = None;
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                // Reload recovery continues the same visible turn. Only the
+                // request-level processing state is stale, not its elapsed time.
+                app.visible_turn_started = app.visible_turn_started.or(app.processing_started);
                 app.processing_started = None;
-                app.clear_visible_turn_started();
                 app.last_stream_activity = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
             }
 
-            crate::logging::info(&format!(
-                "Queuing reload continuation message ({} chars)",
-                directive.continuation_message.len()
-            ));
             ReloadContext::log_recovery_outcome(
                 "tui_reconnect",
                 session_id,
-                "resumed",
-                "queued initiator continuation after reconnect",
+                if queued { "resumed" } else { "skipped" },
+                if queued {
+                    "queued initiator continuation after reconnect"
+                } else {
+                    "initiator continuation already scheduled"
+                },
             );
-            app.push_display_message(DisplayMessage::system(
-                "Reload complete - continuing because reload recovery was pending.",
-            ));
-            app.hidden_queued_system_messages
-                .push(directive.continuation_message);
         } else {
             ReloadContext::log_recovery_outcome(
                 "tui_reconnect",

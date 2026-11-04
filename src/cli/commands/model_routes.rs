@@ -1,6 +1,6 @@
 //! Model route filtering and CLI display names.
 
-use super::*;
+use std::collections::BTreeSet;
 
 pub(super) fn cli_api_method_display(raw: &str) -> String {
     crate::provider::ModelRouteApiMethod::parse(raw).display_label()

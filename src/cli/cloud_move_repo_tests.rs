@@ -1,6 +1,6 @@
 use super::*;
 
-fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
+pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
     let root = tempfile::tempdir().unwrap();
     let stage = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "--quiet"]).unwrap();

@@ -175,10 +175,7 @@ fn tmux_has_native_sixel() -> bool {
     }
     let output = String::from_utf8_lossy(&output.stdout);
     let mut lines = output.lines();
-    tmux_reports_native_sixel(
-        lines.next().unwrap_or_default(),
-        lines.next().unwrap_or_default(),
-    )
+    tmux_reports_native_sixel(lines.next().unwrap_or(""), lines.next().unwrap_or(""))
 }
 
 /// Construct image state while allowing a sixel-capable tmux to retain images
@@ -215,18 +212,21 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 /// * `probe_override` is the parsed value of `JCODE_MERMAID_PICKER_PROBE`
 ///   (`Some(true)`/`Some(false)` when set explicitly, `None` otherwise) and
 ///   always wins so users can force either behavior.
-/// * When the override is absent, startup stays on the environment-based fast
-///   path. The upstream stdio probe can block for two seconds when a terminal
-///   does not answer, which made an optional image capability dominate the TUI
-///   critical path. Users behind multiplexers that hide the outer terminal can
-///   still opt into the authoritative probe with
-///   `JCODE_MERMAID_PICKER_PROBE=1`.
+/// * Without an override, Orca is probed automatically outside multiplexers:
+///   it answers capability queries, including when inline images are disabled,
+///   so the probe respects that setting. Other terminals keep the fast path because
+///   the upstream stdio probe can block for two seconds if they do not answer.
+///   Multiplexer users can opt into the probe with `JCODE_MERMAID_PICKER_PROBE=1`.
 pub(super) fn decide_picker_init_mode(
     probe_override: Option<bool>,
     _env_protocol: Option<ProtocolType>,
-    _multiplexer: Multiplexer,
+    multiplexer: Multiplexer,
+    term_program: Option<&str>,
 ) -> PickerInitMode {
-    if probe_override == Some(true) {
+    if probe_override.unwrap_or(
+        multiplexer == Multiplexer::None
+            && term_program.is_some_and(|program| program.eq_ignore_ascii_case("Orca")),
+    ) {
         PickerInitMode::Probe
     } else {
         PickerInitMode::Fast
@@ -436,10 +436,10 @@ pub(crate) fn prewarm_svg_font_db_async() {
 }
 
 /// Initialize the global picker.
-/// By default jcode uses environment-based detection and never blocks startup
-/// on terminal capability responses. Set JCODE_MERMAID_PICKER_PROBE=1 to run an
-/// authoritative stdio probe when a multiplexer masks the outer terminal, or
-/// =0 to explicitly retain the fast path. Cache eviction runs once before image
+/// By default jcode probes Orca automatically outside multiplexers and uses
+/// environment-based detection elsewhere to avoid waiting on capability responses.
+/// Set JCODE_MERMAID_PICKER_PROBE=1 to force the authoritative stdio probe, or
+/// =0 to retain the fast path even in Orca. Cache eviction runs once before image
 /// rendering can begin so it cannot delete a file between materialization and
 /// in-memory cache registration.
 pub fn init_picker() {
@@ -455,7 +455,12 @@ pub fn init_picker() {
             .ok()
             .as_deref()
             .and_then(parse_env_bool);
-        let mode = decide_picker_init_mode(probe_override, env_protocol, multiplexer);
+        let mode = decide_picker_init_mode(
+            probe_override,
+            env_protocol,
+            multiplexer,
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+        );
         crate::log_info(&format!(
             "Mermaid picker init: mode={:?} multiplexer={} env_protocol={:?} probe_override={:?}",
             mode,
@@ -589,6 +594,87 @@ pub fn is_video_export_mode() -> bool {
 pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
     let diagram = get_cached_diagram(hash, None)?;
     Some((diagram.path, diagram.width, diagram.height))
+}
+
+/// Register a local markdown image, rasterizing SVGs for terminal protocols.
+/// SVG cache keys include the source bytes so edited graphs never reuse old pixels.
+pub fn register_markdown_image(path: &Path) -> Option<u64> {
+    if !path.extension()?.eq_ignore_ascii_case("svg") {
+        let (width, height) = image::image_dimensions(path).map_or_else(
+            |error| {
+                crate::log_info(&format!("Markdown image dimensions unavailable: {error}"));
+                None
+            },
+            Some,
+        )?;
+        return Some(register_external_image(path, width, height));
+    }
+
+    let bytes = fs::read(path).map_or_else(
+        |error| {
+            crate::log_info(&format!("Markdown image read failed: {error}"));
+            None
+        },
+        Some,
+    )?;
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let content_hash = hasher.finish();
+    let output = RENDER_CACHE
+        .lock()
+        .map_or_else(
+            |error| {
+                crate::log_info(&format!("Markdown image cache lock failed: {error}"));
+                None
+            },
+            Some,
+        )?
+        .cache_dir
+        .join(format!("{content_hash:016x}_external_svg.png"));
+    if !output.exists() {
+        // Do not resolve external resources in document-supplied SVGs.
+        let options = usvg::Options {
+            fontdb: SVG_FONT_DB.clone(),
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_data(&bytes, &options).map_or_else(
+            |error| {
+                crate::log_info(&format!("Markdown SVG parse failed: {error}"));
+                None
+            },
+            Some,
+        )?;
+        let size = tree.size().to_int_size();
+        // Bound allocations for malformed or unexpectedly large documents.
+        if u64::from(size.width()) * u64::from(size.height()) > 32_000_000 {
+            return None;
+        }
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.save_png(&output).map_or_else(
+            |error| {
+                crate::log_info(&format!("Markdown SVG cache write failed: {error}"));
+                None
+            },
+            Some,
+        )?;
+    }
+    let (width, height) = image::image_dimensions(&output).map_or_else(
+        |error| {
+            crate::log_info(&format!("Markdown SVG dimensions unavailable: {error}"));
+            None
+        },
+        Some,
+    )?;
+    Some(register_external_image(&output, width, height))
 }
 
 /// Register an external image file (e.g. from file_read) in the render cache
@@ -751,343 +837,5 @@ pub fn get_font_size() -> Option<(u16, u16)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// An external image (LaTeX formula PNG, `read` of an image file) must be
-    /// recoverable after the bounded render cache evicts it. Before this, the
-    /// hash -> path mapping lived only in that LRU, so a math-heavy transcript
-    /// silently lost its rendered formulas: the placeholder rows stayed
-    /// reserved and nothing could ever repaint them.
-    #[test]
-    fn evicted_external_image_is_rediscovered_from_its_remembered_path() {
-        use image::{ImageBuffer, Rgba};
-
-        let dir = std::env::temp_dir().join(format!(
-            "jcode-external-image-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create fixture dir");
-        let path = dir.join("formula.png");
-        ImageBuffer::from_pixel(9, 4, Rgba([120u8, 160, 255, 255]))
-            .save(&path)
-            .expect("write fixture png");
-
-        let hash = register_external_image(&path, 9, 4);
-        assert!(
-            get_cached_png(hash).is_some(),
-            "registration should populate the render cache"
-        );
-
-        // Simulate LRU eviction of the render-cache entry.
-        {
-            let mut cache = RENDER_CACHE
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache
-                .entries
-                .retain(|(entry_hash, _), _| *entry_hash != hash);
-            cache.order.retain(|(entry_hash, _)| *entry_hash != hash);
-        }
-        assert!(
-            !inline_image_is_materialized(hash),
-            "eviction should leave the image unmaterialized"
-        );
-
-        assert_eq!(rediscover_external_image(hash), Some((hash, 9, 4)));
-        assert!(
-            inline_image_is_materialized(hash),
-            "rediscovery must restore the render-cache entry"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A deleted cache file must fail cleanly instead of resurrecting a
-    /// dangling entry that would draw nothing.
-    #[test]
-    fn rediscovery_fails_when_the_external_image_file_is_gone() {
-        let path = std::env::temp_dir().join(format!(
-            "jcode-missing-external-image-{}-{:?}.png",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_file(&path);
-        let hash = register_external_image(&path, 5, 5);
-        assert_eq!(rediscover_external_image(hash), None);
-    }
-
-    #[test]
-    fn infer_protocol_detects_kitty_family() {
-        assert_eq!(
-            infer_protocol_from_env(Some("xterm-kitty"), None, None, None),
-            Some(ProtocolType::Kitty)
-        );
-        assert_eq!(
-            infer_protocol_from_env(None, Some("ghostty"), None, None),
-            Some(ProtocolType::Kitty)
-        );
-        assert_eq!(
-            infer_protocol_from_env(None, Some("HandTerm"), None, None),
-            Some(ProtocolType::Kitty)
-        );
-        // KITTY_WINDOW_ID present is sufficient.
-        assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3")),
-            Some(ProtocolType::Kitty)
-        );
-    }
-
-    #[test]
-    fn infer_protocol_detects_iterm_and_sixel() {
-        // Real iTerm2 breaks on inline images, so it reports no protocol.
-        assert_eq!(
-            infer_protocol_from_env(None, Some("iTerm.app"), None, None),
-            None
-        );
-        assert_eq!(
-            infer_protocol_from_env(None, Some("WezTerm"), None, None),
-            Some(ProtocolType::Iterm2)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
-            Some(ProtocolType::Sixel)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
-            Some(ProtocolType::Sixel)
-        );
-        // foot sets TERM=foot but no TERM_PROGRAM.
-        assert_eq!(
-            infer_protocol_from_env(Some("foot"), None, None, None),
-            Some(ProtocolType::Sixel)
-        );
-    }
-
-    #[test]
-    fn explicit_wezterm_identity_avoids_incomplete_kitty_placeholders() {
-        assert_eq!(
-            infer_protocol_from_env(
-                Some("xterm-kitty"),
-                Some("WezTerm"),
-                None,
-                Some("stale-kitty-window")
-            ),
-            Some(ProtocolType::Iterm2)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
-            None
-        );
-    }
-
-    #[test]
-    fn infer_protocol_misses_inside_masking_multiplexer() {
-        // Herdr/tmux advertise a bland TERM with no graphics hints.
-        assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), None, None, None),
-            None
-        );
-    }
-
-    #[test]
-    fn detect_multiplexer_identifies_each() {
-        assert_eq!(
-            detect_multiplexer(Some("xterm-256color"), None, None, None, Some("1")),
-            Multiplexer::Herdr
-        );
-        assert_eq!(
-            detect_multiplexer(Some("xterm-256color"), None, None, Some("0.40.1"), None),
-            Multiplexer::Zellij
-        );
-        assert_eq!(
-            detect_multiplexer(
-                Some("tmux-256color"),
-                Some("/tmp/tmux-1000/default,1,0"),
-                None,
-                None,
-                None
-            ),
-            Multiplexer::Tmux
-        );
-        assert_eq!(
-            detect_multiplexer(
-                Some("screen.xterm-256color"),
-                None,
-                Some("1234.pts-0.host"),
-                None,
-                None
-            ),
-            Multiplexer::Screen
-        );
-        // TERM prefix alone is enough for screen/tmux even without TMUX/STY.
-        assert_eq!(
-            detect_multiplexer(Some("screen-256color"), None, None, None, None),
-            Multiplexer::Screen
-        );
-        assert_eq!(
-            detect_multiplexer(Some("tmux-256color"), None, None, None, None),
-            Multiplexer::Tmux
-        );
-        assert_eq!(
-            detect_multiplexer(Some("xterm-kitty"), None, None, None, None),
-            Multiplexer::None
-        );
-    }
-
-    #[test]
-    fn detect_multiplexer_herdr_wins_over_others() {
-        // Herdr is the most specific signal even if a stale TMUX leaks through.
-        assert_eq!(
-            detect_multiplexer(
-                Some("xterm-256color"),
-                Some("/tmp/tmux"),
-                None,
-                None,
-                Some("1")
-            ),
-            Multiplexer::Herdr
-        );
-    }
-
-    #[test]
-    fn native_tmux_sixel_requires_server_and_client_support() {
-        assert!(tmux_reports_native_sixel(
-            "1\n",
-            "256,clipboard,mouse,sixel,title"
-        ));
-        assert!(tmux_reports_native_sixel("1", "RGB sixel hyperlinks"));
-        assert!(!tmux_reports_native_sixel("0", "sixel"));
-        assert!(!tmux_reports_native_sixel("1", "256,clipboard,mouse"));
-        assert!(!tmux_reports_native_sixel("1", "sixel-overwrite"));
-    }
-
-    #[test]
-    fn zellij_preserves_classic_kitty_unless_explicitly_disabled() {
-        assert_eq!(
-            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, false),
-            ProtocolType::Halfblocks
-        );
-        assert_eq!(
-            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, true),
-            ProtocolType::Kitty
-        );
-        // Zellij's Sixel passthrough and other multiplexers are untouched.
-        assert_eq!(
-            adjust_protocol_for_multiplexer(ProtocolType::Sixel, Multiplexer::Zellij, false),
-            ProtocolType::Sixel
-        );
-        for mux in [Multiplexer::None, Multiplexer::Tmux, Multiplexer::Herdr] {
-            assert_eq!(
-                adjust_protocol_for_multiplexer(ProtocolType::Kitty, mux, false),
-                ProtocolType::Kitty
-            );
-        }
-    }
-
-    #[test]
-    fn decide_mode_respects_explicit_override() {
-        // Force-on always probes, even when env already detected a protocol.
-        assert_eq!(
-            decide_picker_init_mode(Some(true), Some(ProtocolType::Kitty), Multiplexer::None),
-            PickerInitMode::Probe
-        );
-        // Force-off never probes, even on an env miss inside a multiplexer.
-        assert_eq!(
-            decide_picker_init_mode(Some(false), None, Multiplexer::Herdr),
-            PickerInitMode::Fast
-        );
-    }
-
-    #[test]
-    fn decide_mode_defaults_to_fast_path() {
-        // Env already identified a graphics terminal: stay fast.
-        assert_eq!(
-            decide_picker_init_mode(None, Some(ProtocolType::Kitty), Multiplexer::None),
-            PickerInitMode::Fast
-        );
-        // An env miss must not turn an optional capability query into a
-        // two-second startup stall. Multiplexer users can opt in explicitly.
-        assert_eq!(
-            decide_picker_init_mode(None, None, Multiplexer::Herdr),
-            PickerInitMode::Fast
-        );
-        assert_eq!(
-            decide_picker_init_mode(None, None, Multiplexer::None),
-            PickerInitMode::Fast
-        );
-    }
-
-    #[test]
-    fn probe_env_helper_back_compat() {
-        // Unset / disabled keeps the historical fast default.
-        assert_eq!(picker_init_mode_from_probe_env(None), PickerInitMode::Fast);
-        assert_eq!(
-            picker_init_mode_from_probe_env(Some("0")),
-            PickerInitMode::Fast
-        );
-        // Explicit enable still probes.
-        assert_eq!(
-            picker_init_mode_from_probe_env(Some("1")),
-            PickerInitMode::Probe
-        );
-    }
-
-    #[test]
-    fn only_halfblocks_uses_the_user_facing_text_image_fallback() {
-        assert!(protocol_uses_text_image_fallback(
-            Some(ProtocolType::Halfblocks),
-            false
-        ));
-        assert!(!protocol_uses_text_image_fallback(
-            Some(ProtocolType::Kitty),
-            false
-        ));
-        assert!(!protocol_uses_text_image_fallback(
-            Some(ProtocolType::Iterm2),
-            false
-        ));
-        assert!(!protocol_uses_text_image_fallback(
-            Some(ProtocolType::Sixel),
-            false
-        ));
-        assert!(!protocol_uses_text_image_fallback(None, false));
-        assert!(!protocol_uses_text_image_fallback(
-            Some(ProtocolType::Halfblocks),
-            true
-        ));
-    }
-
-    #[test]
-    fn native_image_capability_excludes_halfblocks_but_allows_video_export() {
-        assert!(protocol_supports_native_images(
-            Some(ProtocolType::Kitty),
-            false
-        ));
-        assert!(protocol_supports_native_images(
-            Some(ProtocolType::Iterm2),
-            false
-        ));
-        assert!(protocol_supports_native_images(
-            Some(ProtocolType::Sixel),
-            false
-        ));
-        assert!(!protocol_supports_native_images(
-            Some(ProtocolType::Halfblocks),
-            false
-        ));
-        assert!(!protocol_supports_native_images(None, false));
-        assert!(protocol_supports_native_images(None, true));
-    }
-
-    #[test]
-    fn native_image_capability_respects_scoped_test_override() {
-        with_image_protocol_override(Some(false), || {
-            assert!(!native_image_protocol_available());
-        });
-        with_image_protocol_override(Some(true), || {
-            assert!(native_image_protocol_available());
-        });
-    }
-}
+#[path = "mermaid_runtime/protocol_tests.rs"]
+mod protocol_tests;

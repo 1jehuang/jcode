@@ -302,7 +302,7 @@ fn isolated_latency_child() {
         result.unwrap();
     }
     let probes = std::fs::read_to_string(root.join("probes")).unwrap();
-    let expected = if mode.ends_with("failure") { 2 } else { 4 };
+    let expected = if mode.ends_with("failure") { 2 } else { 6 };
     assert_eq!(probes.lines().count(), expected, "{probes}");
     assert!(
         probes
@@ -318,7 +318,7 @@ fn isolated_latency_child() {
             .unwrap()
             .ends_with("cloud credentials --help")
     );
-    if expected == 4 {
+    if expected == 6 {
         assert!(
             probes
                 .lines()
@@ -332,6 +332,20 @@ fn isolated_latency_child() {
                 .nth(3)
                 .unwrap()
                 .ends_with("cloud cancel-return --help")
+        );
+        assert!(
+            probes
+                .lines()
+                .nth(4)
+                .unwrap()
+                .ends_with("cloud replace-receive --help")
+        );
+        assert!(
+            probes
+                .lines()
+                .nth(5)
+                .unwrap()
+                .ends_with("cloud group-protocol --help")
         );
     }
     let calls = std::fs::read_to_string(root.join("calls")).unwrap();

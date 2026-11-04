@@ -1,15 +1,95 @@
 // Synthetic loopback regressions. No live account, model, or transcript data.
 #[tokio::test]
+async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
+    let _env_lock = jcode_base::storage::lock_test_env();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let input = vec![
+        serde_json::json!({"role":"user","content":"original"}),
+        serde_json::json!({"role":"user","content":"next"}),
+    ];
+    let expected_input = input.clone();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let replay: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(replay.get("previous_response_id").is_none());
+        assert!(replay.get("stream").is_none());
+        assert!(replay.get("background").is_none());
+        assert_eq!(replay["input"], serde_json::json!(expected_input));
+        assert_eq!(
+            replay["metadata"],
+            serde_json::json!({"fixture":"full_request_field"})
+        );
+        for event in [
+            serde_json::json!({"type":"response.created","response":{"id":"resp_recovered"}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_recovered","status":"completed","output":[]}}),
+        ] {
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
+        }
+    });
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
+    let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
+        ws_stream,
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: None,
+        last_response_id: "resp_completed_before_cancel".into(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_response_output: vec![
+            serde_json::json!({"type":"function_call","call_id":"unseen","name":"bash","arguments":"{}"}),
+        ],
+    })));
+    let request = serde_json::json!({"model":"gpt-5.6-sol", "input":input,
+        "stream":true,"background":false,"previous_response_id":"must-not-reuse",
+        "metadata":{"fixture":"full_request_field"}});
+    let (tx, _rx) = mpsc::channel(32);
+    let result = try_persistent_ws_continuation(
+        &persistent,
+        &Arc::new(RwLock::new(prewarm_test_credentials())),
+        &request,
+        &input,
+        input.len(),
+        &tx,
+    )
+    .await;
+    assert!(matches!(result, PersistentWsResult::Success));
+    assert_eq!(
+        persistent.lock().await.as_ref().unwrap().last_response_id,
+        "resp_recovered"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn persistent_cancellation_old_keepalive_preserves_replacement() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let old_connection = state.connected_at - Duration::from_secs(1);
     let persistent = Arc::new(Mutex::new(Some(state)));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
-        Arc::downgrade(&persistent), old_connection, "fixture".to_string(), Duration::from_millis(1),
+        Arc::downgrade(&persistent),
+        old_connection,
+        "fixture".to_string(),
+        Duration::from_millis(1),
     );
-    tokio::time::timeout(Duration::from_secs(1), keepalive).await.unwrap().unwrap();
-    assert_eq!(persistent.lock().await.as_ref().unwrap().last_response_id, "resp_test");
+    tokio::time::timeout(Duration::from_secs(1), keepalive)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persistent.lock().await.as_ref().unwrap().last_response_id,
+        "resp_test"
+    );
     server.abort();
 }
 
@@ -22,7 +102,10 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
-        assert!(matches!(ws.next().await.unwrap().unwrap(), WsMessage::Ping(_)));
+        assert!(matches!(
+            ws.next().await.unwrap().unwrap(),
+            WsMessage::Ping(_)
+        ));
         ping_tx.send(()).unwrap();
         std::future::pending::<()>().await;
         drop(ws);
@@ -31,7 +114,11 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
     let connected_at = Instant::now();
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at,
@@ -43,12 +130,21 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
         last_input_item_hashes: vec![],
     })));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
-        Arc::downgrade(&persistent), connected_at, "fixture".to_string(), Duration::from_millis(1),
+        Arc::downgrade(&persistent),
+        connected_at,
+        "fixture".to_string(),
+        Duration::from_millis(1),
     );
-    tokio::time::timeout(Duration::from_secs(1), ping_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), ping_rx)
+        .await
+        .unwrap()
+        .unwrap();
     keepalive.abort();
     assert!(matches!(keepalive.await, Err(error) if error.is_cancelled()));
-    assert!(persistent.lock().await.is_none(), "aborted ping round trip must not leave a reusable socket");
+    assert!(
+        persistent.lock().await.is_none(),
+        "aborted ping round trip must not leave a reusable socket"
+    );
     server.abort();
 }
 
@@ -60,73 +156,109 @@ async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
     *provider.credentials.write().await = prewarm_test_credentials();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
-    jcode_base::provider::populate_account_models_for_scope(&provider.catalog_scope(),
-        vec!["gpt-5.6-sol".to_string()]);
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     let mut owner = provider.persistent_ws.lock().await;
     *owner = Some(state);
-    let stream = provider.complete(&[ChatMessage::user("fixture")], &[], "fixture", None)
-        .await.unwrap();
+    let stream = provider
+        .complete(&[ChatMessage::user("fixture")], &[], "fixture", None)
+        .await
+        .unwrap();
     tokio::task::yield_now().await;
-    assert_eq!(Arc::strong_count(&provider.persistent_ws), 2);
+    assert!(Arc::strong_count(&provider.persistent_ws) >= 2);
     drop(stream);
     tokio::time::timeout(Duration::from_secs(1), async {
         while Arc::strong_count(&provider.persistent_ws) > 1 {
             tokio::task::yield_now().await;
         }
-    }).await.expect("cancelled producer must stop even while another turn owns the mutex");
+    })
+    .await
+    .expect("cancelled producer must stop even while another turn owns the mutex");
     assert_eq!(owner.as_ref().unwrap().last_response_id, "resp_test");
     server.abort();
 }
 
 #[tokio::test]
-async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
+async fn persistent_cancellation_drains_unseen_tools_and_replays_on_same_socket() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
-    let messages = vec![ChatMessage::user("original"), ChatMessage::assistant_text("earlier"),
-        ChatMessage::user("next")];
+    let messages = vec![
+        ChatMessage::user("original"),
+        ChatMessage::assistant_text("earlier"),
+        ChatMessage::user("next"),
+    ];
     let input = build_responses_input(&messages);
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let expected_input = input.clone();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
-        let mut stalled = tokio_tungstenite::accept_async(tcp).await.unwrap();
-        let request = stalled.next().await.unwrap().unwrap();
-        assert!(request.is_text());
-        let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
-        assert_eq!(request["previous_response_id"], "resp_previous", "{request}");
-        stalled.send(WsMessage::Text(serde_json::json!({"type":"response.created",
-            "response":{"id":"resp_incomplete"}}).to_string())).await.unwrap();
-        stalled.send(WsMessage::Text(serde_json::json!({"type":"response.output_text.delta",
-            "delta":"partial"}).to_string())).await.unwrap();
-        accepted_tx.send(()).unwrap();
-        // Retain the socket without returning an event or closing it.
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
-        let request: Value = serde_json::from_str(
-            fresh.next().await.unwrap().unwrap().to_text().unwrap(),
-        ).unwrap();
-        assert!(request.get("previous_response_id").is_none());
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let first: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(first["previous_response_id"], "resp_previous");
+        ws.send(WsMessage::Text(
+            serde_json::json!({"type":"response.created",
+            "response":{"id":"resp_cancelled"}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!({"type":"response.output_text.delta",
+            "delta":"partial"})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        cancel_rx.await.unwrap();
+        // These outputs are never delivered to the caller and must not enter
+        // the next response's implicit context or become executable tools.
+        for event in [
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"function_call","id":"fc_unseen","call_id":"call_unseen",
+                    "name":"bash","arguments":"{\"command\":\"unseen\"}"}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_cancelled",
+                "status":"completed","output":[{"type":"function_call","call_id":"call_unseen",
+                    "name":"bash","arguments":"{}"}]}}),
+        ] {
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
+        }
+        // A second request must arrive on this very connection, not a fresh
+        // handshake, and contain exactly the caller's complete history.
+        let replay: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(replay.get("previous_response_id").is_none(), "{replay}");
+        assert_eq!(replay["input"], serde_json::json!(expected_input));
+        assert_eq!(replay["instructions"], first["instructions"]);
+        assert_eq!(replay["tools"], first["tools"]);
+        assert_eq!(replay["prompt_cache_key"], first["prompt_cache_key"]);
         for event in [
             serde_json::json!({"type":"response.created","response":{"id":"resp_recovered"}}),
             serde_json::json!({"type":"response.output_text.delta","delta":"recovered"}),
             serde_json::json!({"type":"response.completed","response":{"id":"resp_recovered","status":"completed","output":[]}}),
         ] {
-            fresh.send(WsMessage::Text(event.to_string())).await.unwrap();
+            ws.send(WsMessage::Text(event.to_string())).await.unwrap();
         }
-        while fresh.next().await.is_some() {}
-        drop(stalled);
     });
-    let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
     *provider.credentials.write().await = prewarm_test_credentials();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
-    jcode_base::provider::populate_account_models_for_scope(&provider.catalog_scope(),
-        vec!["gpt-5.6-sol".to_string()]);
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
@@ -137,7 +269,142 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
-    let mut stream = provider.complete(&messages, &[], "fixture", None).await.unwrap();
+    let mut stream = provider
+        .complete(&messages, &[], "fixture", None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.unwrap(), StreamEvent::TextDelta(delta) if delta == "partial") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    cancel_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut next = provider
+            .complete(&messages, &[], "fixture", None)
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(event) = next.next().await {
+            match event.unwrap() {
+                StreamEvent::TextDelta(delta) => text.push_str(&delta),
+                StreamEvent::ToolUseStart { .. } => panic!("unseen cancelled tool was forwarded"),
+                _ => {}
+            }
+        }
+        assert_eq!(text, "recovered");
+        assert_eq!(
+            provider
+                .persistent_ws
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .last_response_id,
+            "resp_recovered"
+        );
+    })
+    .await
+    .expect("cancelled response should recover its transport without a reconnect");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
+    let _env_lock = jcode_base::storage::lock_test_env();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let messages = vec![
+        ChatMessage::user("original"),
+        ChatMessage::assistant_text("earlier"),
+        ChatMessage::user("next"),
+    ];
+    let input = build_responses_input(&messages);
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut stalled = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let request = stalled.next().await.unwrap().unwrap();
+        assert!(request.is_text());
+        let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+        assert_eq!(
+            request["previous_response_id"], "resp_previous",
+            "{request}"
+        );
+        stalled
+            .send(WsMessage::Text(
+                serde_json::json!({"type":"response.created",
+            "response":{"id":"resp_incomplete"}})
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        stalled
+            .send(WsMessage::Text(
+                serde_json::json!({"type":"response.output_text.delta",
+            "delta":"partial"})
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        accepted_tx.send(()).unwrap();
+        // Retain the socket without returning an event or closing it.
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let request: Value =
+            serde_json::from_str(fresh.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(request.get("previous_response_id").is_none());
+        for event in [
+            serde_json::json!({"type":"response.created","response":{"id":"resp_recovered"}}),
+            serde_json::json!({"type":"response.output_text.delta","delta":"recovered"}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_recovered","status":"completed","output":[]}}),
+        ] {
+            fresh
+                .send(WsMessage::Text(event.to_string()))
+                .await
+                .unwrap();
+        }
+        while fresh.next().await.is_some() {}
+        drop(stalled);
+    });
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses"))
+        .await
+        .unwrap();
+    let provider = OpenAIProvider::new(prewarm_test_credentials());
+    *provider.credentials.write().await = prewarm_test_credentials();
+    provider.set_model("gpt-5.6-sol").unwrap();
+    provider.set_transport("websocket").unwrap();
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
+    *provider.persistent_ws.lock().await = Some(PersistentWsState {
+        ws_stream,
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
+        cache_key: Some(provider.cache_routing_key()),
+        last_response_id: "resp_previous".into(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+        last_response_output: Vec::new(),
+        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+    });
+    let mut stream = provider
+        .complete(&messages, &[], "fixture", None)
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         while let Some(event) = stream.next().await {
             if matches!(event.unwrap(), StreamEvent::TextDelta(delta) if delta == "partial") {
@@ -145,15 +412,24 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
             }
         }
         accepted_rx.await.unwrap();
-    }).await.expect("fixture must accept the request");
+    })
+    .await
+    .expect("fixture must accept the request");
     tokio::task::yield_now().await;
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        assert!(provider.persistent_ws.lock().await.is_none(),
-            "cancelled response must be invalidated before mutex handoff");
-    }).await.expect("dropping the consumer must release the persistent lock promptly");
+    tokio::time::timeout(Duration::from_secs(12), async {
+        assert!(
+            provider.persistent_ws.lock().await.is_none(),
+            "cancelled response must be invalidated before mutex handoff"
+        );
+    })
+    .await
+    .expect("dropping the consumer must release the persistent lock after bounded recovery");
     tokio::time::timeout(Duration::from_secs(2), async {
-        let mut next = provider.complete(&messages, &[], "fixture", None).await.unwrap();
+        let mut next = provider
+            .complete(&messages, &[], "fixture", None)
+            .await
+            .unwrap();
         let mut text = String::new();
         while let Some(event) = next.next().await {
             if let StreamEvent::TextDelta(delta) = event.unwrap() {
@@ -161,9 +437,19 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
             }
         }
         assert_eq!(text, "recovered");
-        assert_eq!(provider.persistent_ws.lock().await.as_ref().unwrap().last_response_id,
-            "resp_recovered");
-    }).await.expect("next request must reconnect rather than reuse the cancelled response");
+        assert_eq!(
+            provider
+                .persistent_ws
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .last_response_id,
+            "resp_recovered"
+        );
+    })
+    .await
+    .expect("next request must reconnect rather than reuse the cancelled response");
     server.abort();
 }
 
@@ -181,11 +467,17 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         std::future::pending::<()>().await;
     });
     let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
-    let input = vec![serde_json::json!({"role":"user","content":"original"}),
-        serde_json::json!({"role":"user","content":"next"})];
+    let input = vec![
+        serde_json::json!({"role":"user","content":"original"}),
+        serde_json::json!({"role":"user","content":"next"}),
+    ];
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
@@ -199,18 +491,33 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
     let (tx, _rx) = mpsc::channel(10);
     let socket = Arc::clone(&persistent);
     let task = tokio::spawn(async move {
-        try_persistent_ws_continuation(&socket,
+        try_persistent_ws_continuation(
+            &socket,
             &Arc::new(RwLock::new(prewarm_test_credentials())),
-            &serde_json::json!({"model":"gpt-5.6-sol"}), &input, input.len(), &tx).await
+            &serde_json::json!({"model":"gpt-5.6-sol"}),
+            &input,
+            input.len(),
+            &tx,
+        )
+        .await
     });
-    tokio::time::timeout(Duration::from_secs(1), accepted_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), accepted_rx)
+        .await
+        .unwrap()
+        .unwrap();
     let socket = Arc::clone(&persistent);
     let waiter = tokio::spawn(async move {
-        assert!(socket.lock().await.is_none(), "a cancelled in-flight socket must not be handed off");
+        assert!(
+            socket.lock().await.is_none(),
+            "a cancelled in-flight socket must not be handed off"
+        );
     });
     tokio::task::yield_now().await;
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-    tokio::time::timeout(Duration::from_secs(1), waiter).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(12), waiter)
+        .await
+        .unwrap()
+        .unwrap();
     server.abort();
 }

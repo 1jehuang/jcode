@@ -32,6 +32,7 @@ struct JemallocProfilingMibs {
 pub struct ProcessMemorySnapshot {
     pub rss_bytes: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
+    /// Total virtual address space size, when available. Not private commit.
     pub virtual_bytes: Option<u64>,
     /// Number of OS threads (`Threads:` in `/proc/self/status`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +48,10 @@ pub struct ProcessMemorySnapshot {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct OsProcessMemoryInfo {
+    /// Windows private committed memory (`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`).
+    /// Includes nonresident memory and is not virtual address space size or RSS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_commit_bytes: Option<u64>,
     pub pss_bytes: Option<u64>,
     /// Proportional set size of anonymous mappings (`Pss_Anon:` in
     /// smaps_rollup): heap + thread stacks + other private anon memory.
@@ -135,12 +140,6 @@ fn memory_history() -> &'static Mutex<VecDeque<ProcessMemoryHistoryEntry>> {
     MEMORY_HISTORY.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_HISTORY_SAMPLES)))
 }
 
-#[cfg(target_os = "linux")]
-pub fn snapshot() -> ProcessMemorySnapshot {
-    snapshot_with_source("snapshot")
-}
-
-#[cfg(not(target_os = "linux"))]
 pub fn snapshot() -> ProcessMemorySnapshot {
     snapshot_with_source("snapshot")
 }
@@ -177,7 +176,59 @@ pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot 
     snapshot
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let source = source.into();
+    // SAFETY: This C structure contains only integer fields, so zero is valid.
+    let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    // SAFETY: GetCurrentProcess returns a borrowed pseudo-handle (do not close it).
+    // The API accepts an EX structure through the base pointer, with its full size.
+    let success = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    let snapshot = if success != 0 {
+        windows_memory_snapshot(
+            counters.WorkingSetSize as u64,
+            counters.PeakWorkingSetSize as u64,
+            counters.PrivateUsage as u64,
+        )
+    } else {
+        let error = std::io::Error::last_os_error();
+        logging::warn(&format!(
+            "process memory snapshot source={source} GetProcessMemoryInfo failed: {error}"
+        ));
+        ProcessMemorySnapshot::default()
+    };
+    record_snapshot(source, snapshot.clone());
+    snapshot
+}
+
+#[cfg(any(windows, test))]
+fn windows_memory_snapshot(rss: u64, peak_rss: u64, private_commit: u64) -> ProcessMemorySnapshot {
+    ProcessMemorySnapshot {
+        rss_bytes: Some(rss),
+        peak_rss_bytes: Some(peak_rss),
+        // GetProcessMemoryInfo reports private commit, not total virtual space.
+        virtual_bytes: None,
+        os: Some(OsProcessMemoryInfo {
+            private_commit_bytes: Some(private_commit),
+            ..OsProcessMemoryInfo::default()
+        }),
+        ..ProcessMemorySnapshot::default()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
     let source = source.into();
     logging::debug(&format!(
@@ -693,6 +744,7 @@ fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
 fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
     let smaps = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
     let info = OsProcessMemoryInfo {
+        private_commit_bytes: None,
         pss_bytes: smaps
             .as_deref()
             .and_then(|text| parse_proc_value_bytes(text, "Pss:")),
@@ -926,259 +978,4 @@ fn parse_proc_value_bytes(status: &str, key: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn estimate_json_bytes_matches_serialized_length_without_buffering_output() {
-        let value = serde_json::json!({
-            "escaped": "line one\nline two\t\"quoted\"",
-            "unicode": "RAM profile 🦊",
-            "nested": [null, true, -42, {"payload": "x".repeat(64 * 1024)}],
-        });
-
-        assert_eq!(
-            estimate_json_bytes(&value),
-            serde_json::to_vec(&value)
-                .expect("serialize reference value")
-                .len()
-        );
-    }
-
-    #[test]
-    fn estimate_json_bytes_returns_zero_when_serialization_fails() {
-        struct FailingSerialize;
-
-        impl serde::Serialize for FailingSerialize {
-            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                Err(serde::ser::Error::custom("intentional failure"))
-            }
-        }
-
-        assert_eq!(estimate_json_bytes(&FailingSerialize), 0);
-    }
-
-    #[test]
-    fn release_retained_heap_is_safe_to_call() {
-        // Allocate and drop a large transient buffer, then release. This must
-        // not crash on any allocator configuration.
-        let buffer = vec![0u8; 8 * 1024 * 1024];
-        drop(buffer);
-        release_retained_heap("unit_test");
-    }
-
-    #[test]
-    fn release_retained_heap_debounced_skips_within_interval() {
-        // First call resets the shared debounce clock; the immediate second
-        // call within a long interval must be skipped.
-        release_retained_heap_debounced("unit_test_first", std::time::Duration::ZERO);
-        let ran = release_retained_heap_debounced(
-            "unit_test_second",
-            std::time::Duration::from_secs(3600),
-        );
-        assert!(
-            !ran,
-            "second call within debounce interval should be skipped"
-        );
-    }
-
-    #[test]
-    fn parse_retention_trim_threshold_handles_default_disable_and_values() {
-        assert_eq!(
-            parse_retention_trim_threshold(None),
-            DEFAULT_RETENTION_TRIM_THRESHOLD_BYTES
-        );
-        assert_eq!(
-            parse_retention_trim_threshold(Some("garbage")),
-            DEFAULT_RETENTION_TRIM_THRESHOLD_BYTES
-        );
-        // 0 disables retention trimming entirely.
-        assert_eq!(parse_retention_trim_threshold(Some("0")), u64::MAX);
-        assert_eq!(
-            parse_retention_trim_threshold(Some(" 128 ")),
-            128 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn release_retained_heap_if_excessive_skips_below_threshold() {
-        // u64::MAX growth threshold can never be exceeded, so no release
-        // should run regardless of current allocator state.
-        let ran = release_retained_heap_if_excessive(
-            "unit_test_below_threshold",
-            u64::MAX,
-            std::time::Duration::ZERO,
-        );
-        assert!(!ran, "release should not run below threshold");
-    }
-
-    #[test]
-    fn retention_growth_trigger_measures_growth_above_baseline() {
-        let mb = 1024 * 1024;
-        // At or below baseline: no growth.
-        assert!(!retention_growth_exceeds(100 * mb, 100 * mb, 64 * mb));
-        assert!(!retention_growth_exceeds(50 * mb, 100 * mb, 64 * mb));
-        // Growth below threshold stays quiet (the post-trim residual case).
-        assert!(!retention_growth_exceeds(163 * mb, 100 * mb, 64 * mb));
-        // Growth at/above threshold fires.
-        assert!(retention_growth_exceeds(164 * mb, 100 * mb, 64 * mb));
-        assert!(retention_growth_exceeds(300 * mb, 100 * mb, 64 * mb));
-        // Threshold 0 always fires.
-        assert!(retention_growth_exceeds(0, 0, 0));
-    }
-
-    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
-    #[test]
-    fn release_retained_heap_if_excessive_runs_above_threshold_then_requires_regrowth() {
-        // Threshold 0 means any growth (>= 0) triggers; with a zero debounce
-        // the release must run and reset the baseline to the current level.
-        let ran = release_retained_heap_if_excessive(
-            "unit_test_above_threshold",
-            0,
-            std::time::Duration::ZERO,
-        );
-        assert!(ran, "release should run when growth exceeds threshold");
-
-        // Immediately after the trim the baseline equals current apparent
-        // retention, so a huge growth threshold cannot be met: steady state
-        // must not re-trigger.
-        let ran_again = release_retained_heap_if_excessive(
-            "unit_test_steady_state",
-            u64::MAX,
-            std::time::Duration::ZERO,
-        );
-        assert!(
-            !ran_again,
-            "steady-state retention must not re-trigger the watchdog"
-        );
-    }
-
-    /// Guards the musl build (issue #645). `mallopt`/`malloc_trim` are glibc
-    /// extensions, so every allocator path that calls them must be gated on
-    /// `target_env = "gnu"`, not on `target_os = "linux"` alone, and the
-    /// corresponding fallback must widen to match.
-    ///
-    /// This asserts the *shape* of the gating rather than any runtime value:
-    /// exactly one of the glibc arm and the no-op arm may be active for a given
-    /// target. If someone re-widens the glibc gate to bare `target_os`, musl
-    /// selects both arms here and this fails; if a fallback is narrowed by
-    /// mistake, musl selects neither and this also fails.
-    #[test]
-    fn glibc_only_allocator_paths_are_gated_on_gnu_not_just_linux() {
-        let glibc_arm_active = cfg!(all(
-            target_os = "linux",
-            target_env = "gnu",
-            not(feature = "jemalloc")
-        ));
-        let fallback_arm_active = cfg!(all(
-            not(all(target_os = "linux", target_env = "gnu")),
-            not(feature = "jemalloc")
-        ));
-
-        if cfg!(feature = "jemalloc") {
-            // jemalloc supersedes both system-allocator arms.
-            assert!(!glibc_arm_active);
-            assert!(!fallback_arm_active);
-        } else {
-            assert_ne!(
-                glibc_arm_active, fallback_arm_active,
-                "exactly one system-allocator arm must be active: \
-                 glibc={glibc_arm_active} fallback={fallback_arm_active}"
-            );
-        }
-
-        // On a musl target the glibc-only arm must never be the active one,
-        // since the symbols it references do not exist there.
-        if cfg!(all(target_os = "linux", target_env = "musl")) {
-            assert!(
-                !glibc_arm_active,
-                "musl must not select the glibc allocator arm: it references \
-                 mallopt/malloc_trim, which musl does not provide (issue #645)"
-            );
-        }
-    }
-
-    #[test]
-    fn allocator_info_matches_enabled_allocator_features() {
-        let info = allocator_info();
-        if cfg!(feature = "jemalloc") {
-            assert_eq!(info.name, "jemalloc");
-            assert_eq!(info.stats_available, info.stats.is_some());
-            assert!(info.profiling.is_some());
-        } else {
-            assert_eq!(info.name, "system");
-            assert_eq!(info.stats_available, info.stats.is_some());
-            assert!(info.profiling.is_none());
-        }
-    }
-
-    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
-    #[test]
-    fn glibc_malloc_stats_report_live_and_retained_bytes() {
-        // Hold a live allocation so uordblks cannot be zero, then check the
-        // mallinfo2-backed stats are populated and internally consistent.
-        let held = vec![0u8; 1024 * 1024];
-        let stats = glibc_malloc_stats().expect("mallinfo2 stats on glibc");
-        assert!(
-            stats.allocated_bytes.unwrap() > 0,
-            "live bytes should be nonzero"
-        );
-        assert!(stats.retained_bytes.is_some());
-        assert!(
-            stats.mapped_bytes.unwrap() >= stats.active_bytes.unwrap(),
-            "arena total should cover in-use arena bytes"
-        );
-        drop(held);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parse_proc_value_bytes_handles_kib_and_mib_units() {
-        let text = "Pss:               123 kB\nMapped:            2 MB\nRetained:          1 GB\n";
-        assert_eq!(parse_proc_value_bytes(text, "Pss:"), Some(123 * 1024));
-        assert_eq!(
-            parse_proc_value_bytes(text, "Mapped:"),
-            Some(2 * 1024 * 1024)
-        );
-        assert_eq!(
-            parse_proc_value_bytes(text, "Retained:"),
-            Some(1024 * 1024 * 1024)
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parse_proc_status_count_reads_unitless_counters() {
-        let text = "Name:\tjcode\nThreads:\t10\nVmStk:\t     132 kB\n";
-        assert_eq!(parse_proc_status_count(text, "Threads:"), Some(10));
-        assert_eq!(parse_proc_status_count(text, "Missing:"), None);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn snapshot_populates_thread_and_stack_and_pss_split_fields() {
-        let snapshot = snapshot_with_source("unit_test_coverage_fields");
-        assert!(
-            snapshot.thread_count.unwrap_or(0) >= 1,
-            "a live process has at least one thread"
-        );
-        assert!(
-            snapshot.main_stack_bytes.unwrap_or(0) > 0,
-            "main stack should be nonzero"
-        );
-        let os = snapshot.os.expect("linux os info");
-        // smaps_rollup reports Pss_Anon/Pss_File on kernels >= 4.14; both
-        // should be present and their sum should not exceed total PSS by more
-        // than rounding.
-        let pss = os.pss_bytes.expect("pss");
-        let anon = os.pss_anon_bytes.expect("pss_anon");
-        let file = os.pss_file_bytes.expect("pss_file");
-        assert!(
-            anon + file <= pss + 2 * 1024 * 1024,
-            "pss split should be consistent"
-        );
-    }
-}
+mod tests;

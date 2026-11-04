@@ -1,0 +1,54 @@
+name: Signing helper validation (native macOS)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == '1jehuang/jcode' && github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    environment: native-handoff-signing
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 1jehuang/justrust
+          ref: 17c344f2e83f836598b82715950497c0879aa713
+          path: signing-helper-source
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/sign-release.py
+            tests/sign_release_test.py
+          sparse-checkout-cone-mode: false
+      - name: Validate pinned tests and build fixed native fixture before credentials
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C signing-helper-source rev-parse HEAD)" = 17c344f2e83f836598b82715950497c0879aa713
+          test "$(uname -m)" = arm64
+          python3 signing-helper-source/tests/sign_release_test.py
+          python3 -m unittest discover -s scripts -p test_signing_helper_validation.py
+          bash scripts/check_signing_helper_macos.sh prepare
+      - name: Execute real pinned helper with protected identity
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TRUSTED_SHA256: ${{ steps.fixture.outputs.sha256 }}
+        run: bash scripts/check_signing_helper_macos.sh sign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-helper-receipt-${{ github.run_attempt }}
+          path: signing-helper-validation/receipt.json
+          if-no-files-found: error
+          retention-days: 7

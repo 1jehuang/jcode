@@ -278,6 +278,20 @@ mod tests {
         assert!(Role::from_key("not-a-role").is_none());
     }
 
+    /// The config template must list the full built-in palette, so editing
+    /// the generated config is how users see and change the defaults.
+    #[test]
+    fn config_template_lists_the_full_default_palette() {
+        let template = crate::config::Config::default_config_file_contents();
+        for role in ALL_ROLES.iter().copied() {
+            let line = format!("# {} = \"{}\"", role.key(), to_hex(role.default_rgb()));
+            assert!(
+                template.lines().any(|l| l == line),
+                "config template should contain `{line}`"
+            );
+        }
+    }
+
     #[test]
     fn usage_text_documents_every_subcommand() {
         for subcommand in ["reset", "harmony", "export"] {

@@ -203,13 +203,13 @@ async fn live_browser_handoff_completes_search_and_nested_navigation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture with visible password/verification controls"]
+#[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture with a visible CAPTCHA"]
 async fn live_browser_handoff_sensitive_fixture_hands_back_without_actions() {
     let ctx = fixture_context();
     let tab_id = local_fixture_tab("JCODE_BROWSER_HANDOFF_TEST_BLOCKED_TAB_ID", &ctx).await;
     let result = handoff(
         tab_id,
-        "Continue to the Browser controls documentation. Hand back if blocked by sensitive authentication or verification. Never reset a password.",
+        "Continue to the Browser controls documentation. Hand back if blocked by a CAPTCHA.",
         ctx,
     )
     .await;

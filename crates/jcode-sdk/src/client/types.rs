@@ -103,4 +103,5 @@ pub struct Usage {
     pub output: u64,
     pub cache_read_input: Option<u64>,
     pub cache_creation_input: Option<u64>,
+    pub effective_budget: Option<usize>,
 }

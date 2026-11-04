@@ -319,21 +319,20 @@ fn high_usage_stays_visible_when_overview_cannot_fit() {
     );
 }
 
-/// (c) The swarm dock widget is gated on managed members: a session that
-/// manages agents (spawn subtree) gets the dock in layout, while plain swarm
-/// presence data (session counts/names) must never place it. The inline strip
-/// stands down while the dock is visible so agents never render twice.
+/// Managed agents stay in the progress view, never in a redundant margin dock.
 #[test]
-fn swarm_status_dock_requires_managed_members() {
-    // With managed members (contended_data has them) the dock is eligible and
-    // can be placed. The inline strip avoids double-rendering by standing
-    // down while the dock is visible (see ui.rs swarm_strip_lines gating).
+fn swarm_status_widget_is_never_available() {
     let data = contended_data();
+    assert!(!data.has_data_for(WidgetKind::SwarmStatus));
+    assert!(!data.available_widgets().contains(&WidgetKind::SwarmStatus));
+    let area = Rect::new(0, 0, 100, 40);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 40, true), &data, true, &[]);
     assert!(
-        data.has_data_for(WidgetKind::SwarmStatus),
-        "SwarmStatus dock must be eligible while this session manages agents"
+        outcome
+            .visible
+            .iter()
+            .all(|p| p.kind != WidgetKind::SwarmStatus)
     );
-    assert!(data.available_widgets().contains(&WidgetKind::SwarmStatus));
 
     // Without managed members the widget stays out of layout entirely, no
     // matter how rich the rest of swarm_info is (legacy session-list data).

@@ -153,6 +153,7 @@ pub(super) fn apply_failover_target(
 
 /// Run a message turn, and when enabled, transparently fail over to the next
 /// pool-approved account and retry the same turn on a usage/rate-limit error.
+#[cfg(test)]
 pub(super) async fn process_message_with_server_failover(
     agent: Arc<Mutex<Agent>>,
     content: &str,
@@ -161,25 +162,51 @@ pub(super) async fn process_message_with_server_failover(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
 ) -> anyhow::Result<()> {
+    let lease = agent.lock().await.claim_server_turn()?;
+    process_reserved_message_with_server_failover(
+        agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_reserved_message_with_server_failover(
+    agent: Arc<Mutex<Agent>>,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    enabled: bool,
+) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
-    let result = super::client_lifecycle::process_message_streaming_mpsc(
-        Arc::clone(&agent),
+    let mut guard = agent.lock().await;
+    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+        &mut guard,
+        lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
     )
     .await;
-    if !enabled || result.is_ok() {
+    if !enabled && result.is_err() {
         return result;
     }
-    let mut guard = agent.lock().await;
-    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx).await
+    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
 /// on an already locked agent. No client runs a countdown for these turns, so
 /// the server always applies the account router itself.
+#[cfg(test)]
 pub(super) async fn process_locked_message_with_server_failover(
     agent: &mut Agent,
     content: &str,
@@ -187,20 +214,44 @@ pub(super) async fn process_locked_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
-    let reminder = system_reminder.clone();
-    let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
+    let lease = agent.claim_server_turn()?;
+    process_reserved_locked_message_with_server_failover(
         agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+    )
+    .await
+}
+
+pub(super) async fn process_reserved_locked_message_with_server_failover(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    agent.validate_server_turn(lease)?;
+    let reminder = system_reminder.clone();
+    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+        agent,
+        lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, result, reminder, event_tx).await
+    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
 /// `Arc<Mutex<Agent>>`.
+#[cfg(test)]
 pub(super) async fn process_server_initiated_message(
     agent: Arc<Mutex<Agent>>,
     content: &str,
@@ -224,10 +275,12 @@ pub(super) async fn process_server_initiated_message(
 /// usage/rate-limit error.
 pub(super) async fn retry_turn_with_server_failover(
     agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
     mut result: anyhow::Result<()>,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
+    agent.validate_server_turn(lease)?;
     let mut attempts = 0;
     while let Err(error) = &result {
         if attempts >= MAX_SERVER_FAILOVERS {
@@ -252,7 +305,7 @@ pub(super) async fn retry_turn_with_server_failover(
         }
         attempts += 1;
         result = agent
-            .continue_turn_after_failover(reminder.clone(), event_tx.clone())
+            .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;
     }
     result
@@ -351,151 +404,189 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn usage_limit_switches_pool_account_and_retries_same_turn() {
+    #[test]
+    fn usage_limit_switches_pool_account_and_retries_same_turn() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-        crate::config::Config::invalidate_cache();
-        let mut pool = crate::auth::account_pool::AccountPool::default();
-        pool.members = vec!["anthropic-api".into(), "openai-api".into()];
-        pool.save().unwrap();
+        // Serialize process-wide environment outside the asynchronous runtime.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev_home = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                crate::config::Config::invalidate_cache();
+                let pool = crate::auth::account_pool::AccountPool {
+                    members: vec!["anthropic-api".into(), "openai-api".into()],
+                    ..Default::default()
+                };
+                pool.save().unwrap();
 
-        let provider = TwoAccountProvider {
-            on_openai: Arc::new(StdMutex::new(false)),
-            calls: Arc::new(StdMutex::new(Vec::new())),
-        };
-        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
-        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
-        let session =
-            crate::session::Session::create_with_id("session_server_failover".into(), None, None);
-        let agent = Arc::new(Mutex::new(Agent::new_with_session(
-            provider_dyn,
-            registry,
-            session,
-            None,
-        )));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+                let provider = TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(false)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_server_failover".into(),
+                    None,
+                    None,
+                );
+                let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                    provider_dyn,
+                    registry,
+                    session,
+                    None,
+                )));
+                let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let result = process_message_with_server_failover(
-            Arc::clone(&agent),
-            "hello",
-            Vec::new(),
-            None,
-            tx,
-            true,
-        )
-        .await;
+                let result = process_message_with_server_failover(
+                    Arc::clone(&agent),
+                    "hello",
+                    Vec::new(),
+                    None,
+                    tx,
+                    true,
+                )
+                .await;
 
-        let mut events = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            events.push(event);
-        }
-        let calls = provider.calls.lock().unwrap().clone();
-        let user_messages = agent
-            .lock()
-            .await
-            .messages()
-            .iter()
-            .filter(|message| {
-                message.role == crate::message::Role::User
-                    && message.content.iter().any(|block| {
-                        matches!(block, crate::message::ContentBlock::Text { text, .. }
-                            if text.contains("hello"))
+                let mut events = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    events.push(event);
+                }
+                let calls = provider.calls.lock().unwrap().clone();
+                let user_messages = agent
+                    .lock()
+                    .await
+                    .messages()
+                    .iter()
+                    .filter(|message| {
+                        message.role == crate::message::Role::User
+                            && message.content.iter().any(|block| {
+                                matches!(block, crate::message::ContentBlock::Text { text, .. }
+                                if text.contains("hello"))
+                            })
                     })
-            })
-            .count();
-        match prev_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-        crate::config::Config::invalidate_cache();
+                    .count();
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
 
-        assert!(
-            result.is_ok(),
-            "turn should succeed after failover: {result:?}"
-        );
-        assert_eq!(
-            calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
-            vec![false, true],
-            "one failed request on the source, one retry on the target"
-        );
-        assert_eq!(calls[0].1, calls[1].1, "retry must resend the same history");
-        assert_eq!(user_messages, 1, "the user message must not be duplicated");
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
-        )));
+                assert!(
+                    result.is_ok(),
+                    "turn should succeed after failover: {result:?}"
+                );
+                assert_eq!(
+                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    vec![false, true],
+                    "one failed request on the source, one retry on the target"
+                );
+                assert_eq!(calls[0].1, calls[1].1, "retry must resend the same history");
+                assert_eq!(user_messages, 1, "the user message must not be duplicated");
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
+                )));
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
+                )));
+            });
     }
 
-    #[tokio::test]
-    async fn server_initiated_turns_always_use_account_router() {
+    #[test]
+    fn server_initiated_turns_always_use_account_router() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-        crate::config::Config::invalidate_cache();
-        let mut pool = crate::auth::account_pool::AccountPool::default();
-        pool.members = vec!["anthropic-api".into(), "openai-api".into()];
-        pool.save().unwrap();
+        // Serialize process-wide environment outside the asynchronous runtime.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev_home = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                crate::config::Config::invalidate_cache();
+                let pool = crate::auth::account_pool::AccountPool {
+                    members: vec!["anthropic-api".into(), "openai-api".into()],
+                    ..Default::default()
+                };
+                pool.save().unwrap();
 
-        let provider = TwoAccountProvider {
-            on_openai: Arc::new(StdMutex::new(false)),
-            calls: Arc::new(StdMutex::new(Vec::new())),
-        };
-        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
-        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
-        let session =
-            crate::session::Session::create_with_id("session_swarm_failover".into(), None, None);
-        let agent = Arc::new(Mutex::new(Agent::new_with_session(
-            provider_dyn,
-            registry,
-            session,
-            None,
-        )));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let result = process_server_initiated_message(
-            Arc::clone(&agent),
-            "swarm task",
-            Vec::new(),
-            None,
-            tx,
-        )
-        .await;
-        let calls = provider.calls.lock().unwrap().clone();
-        match prev_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-        crate::config::Config::invalidate_cache();
+                let provider = TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(false)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_failover".into(),
+                    None,
+                    None,
+                );
+                let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                    provider_dyn,
+                    registry,
+                    session,
+                    None,
+                )));
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_server_initiated_message(
+                    Arc::clone(&agent),
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                )
+                .await;
+                let calls = provider.calls.lock().unwrap().clone();
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
 
-        assert!(result.is_ok(), "worker turn should fail over: {result:?}");
-        assert_eq!(
-            calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
-            vec![false, true]
-        );
+                assert!(result.is_ok(), "worker turn should fail over: {result:?}");
+                assert_eq!(
+                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    vec![false, true]
+                );
+            });
     }
 
-    #[tokio::test]
-    async fn disabled_clients_keep_the_original_error() {
+    #[test]
+    fn disabled_clients_keep_the_original_error() {
         let _guard = crate::storage::lock_test_env();
-        let provider = TwoAccountProvider {
-            on_openai: Arc::new(StdMutex::new(false)),
-            calls: Arc::new(StdMutex::new(Vec::new())),
-        };
-        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
-        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
-        let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let result =
-            process_message_with_server_failover(agent, "hello", Vec::new(), None, tx, false).await;
-        assert!(result.is_err());
-        assert_eq!(provider.calls.lock().unwrap().len(), 1);
+        // Serialize process-wide environment outside the asynchronous runtime.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(false)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_message_with_server_failover(
+                    agent,
+                    "hello",
+                    Vec::new(),
+                    None,
+                    tx,
+                    false,
+                )
+                .await;
+                assert!(result.is_err());
+                assert_eq!(provider.calls.lock().unwrap().len(), 1);
+            });
     }
 
     #[test]

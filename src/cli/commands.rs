@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
@@ -1444,7 +1443,7 @@ pub async fn run_transcript_command(
     let request_id = client.send_transcript(&text, mode, session).await?;
 
     loop {
-        match client.read_event().await? {
+        match unwrap_turn_event(client.read_event().await?) {
             crate::protocol::ServerEvent::Ack { id } if id == request_id => {}
             crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
             crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
@@ -2379,7 +2378,7 @@ async fn run_server_reload_command_to(
     // exec's a new process, which drops this connection after it sends Done;
     // we treat a disconnect after observing Reloading as the expected handoff.
     loop {
-        match client.read_event().await {
+        match client.read_event().await.map(unwrap_turn_event) {
             Ok(ServerEvent::Ack { id }) if id == request_id => {}
             Ok(ServerEvent::Reloading { .. }) => {
                 reloading = true;
@@ -2682,7 +2681,12 @@ async fn run_single_message_with_agent(
     emit_json: bool,
     emit_ndjson: bool,
 ) -> Result<()> {
+    // A detached dependency can outlive a model turn without holding an
+    // in-process activity guard. Keep this CLI continuation alive across the
+    // wait too, rather than letting an idle-only runtime replacement lose it.
+    // run_once's nested read reservations are deliberately safe.
     let result: Result<()> = async {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         if emit_json {
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
             let report = RunCommandReport {
@@ -2829,149 +2833,14 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
         .unwrap_or(false)
 }
 
-#[derive(Debug)]
-enum RunAutoPokeFollowUp {
-    Incomplete {
-        count: usize,
-        message: String,
-    },
-    ConfidenceSummary {
-        total_todos: usize,
-        message: String,
-        confidence_spike_challenge: bool,
-    },
-    /// Deferred quality-check reminder for the points this turn flagged and
-    /// never resolved. Delivered once, ahead of the confidence summary.
-    GateDigest {
-        message: String,
-    },
-}
-
-fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
-    crate::todo::load_todos(session_id).unwrap_or_default()
-}
-
-/// Build the deferred quality-check reminder for a headless run, consuming the
-/// turn's observation log.
-///
-/// The log is cleared whether or not a reminder results, so one turn's points
-/// cannot be raised again against the next turn's work. Returns `None` only when
-/// the turn recorded nothing.
-fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<String> {
-    if already_delivered {
-        return None;
-    }
-    let observations = crate::todo::load_gate_observations(session_id).unwrap_or_default();
-    if observations.is_empty() {
-        return None;
-    }
-    let plan = crate::todo::load_plan(session_id).unwrap_or_default();
-    let goals = crate::todo::load_goals(session_id).unwrap_or_default();
-    let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
-    let _ = crate::todo::clear_gate_observations(session_id);
-    digest
-}
-
-/// Consume the observation log only once the turn has actually ended.
-///
-/// `take_run_gate_digest` clears the log, so calling it while todos are still
-/// open would destroy the reminder: auto-poke iterates many times with open work
-/// on a long run, and the incomplete-todo follow-up takes precedence, so the
-/// digest string would be dropped on the floor with the log already emptied.
-fn take_run_gate_digest_if_turn_ended(
-    session_id: &str,
-    already_delivered: bool,
-    todos: &[crate::todo::TodoItem],
-) -> Option<String> {
-    let work_remains = todos.iter().any(|todo| {
-        !crate::todo::todo_status_is_completed(&todo.status)
-            && !crate::todo::todo_status_is_cancelled(&todo.status)
-    });
-    if work_remains {
-        return None;
-    }
-    take_run_gate_digest(session_id, already_delivered)
-}
-
-fn build_run_auto_poke_follow_up_from_todos(
-    todos: &[crate::todo::TodoItem],
-    confidence_spike_challenged: bool,
-    gate_digest: Option<String>,
-) -> Option<RunAutoPokeFollowUp> {
-    let incomplete: Vec<_> = todos
-        .iter()
-        .filter(|todo| {
-            !crate::todo::todo_status_is_completed(&todo.status)
-                && !crate::todo::todo_status_is_cancelled(&todo.status)
-        })
-        .cloned()
-        .collect();
-    if !incomplete.is_empty() {
-        return Some(RunAutoPokeFollowUp::Incomplete {
-            count: incomplete.len(),
-            message: build_run_poke_message(&incomplete),
-        });
-    }
-    // Verify the weak points before judging completion confidence: the digest
-    // may prompt work that changes those very assessments.
-    if let Some(message) = gate_digest {
-        return Some(RunAutoPokeFollowUp::GateDigest { message });
-    }
-    if !todos.is_empty()
-        && let Some((message, confidence_spike_challenge)) =
-            build_run_todo_validation_message(todos, !confidence_spike_challenged)
-    {
-        return Some(RunAutoPokeFollowUp::ConfidenceSummary {
-            total_todos: todos.len(),
-            message,
-            confidence_spike_challenge,
-        });
-    }
-    None
-}
-
-fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
-}
-
-fn build_run_todo_validation_message(
-    todos: &[crate::todo::TodoItem],
-    allow_confidence_spike_challenge: bool,
-) -> Option<(String, bool)> {
-    let completed: Vec<&crate::todo::TodoItem> = todos
-        .iter()
-        .filter(|todo| crate::todo::todo_status_is_completed(&todo.status))
-        .collect();
-    if completed.is_empty() {
-        return None;
-    }
-
-    let completion_confidence_needs_validation = completed
-        .iter()
-        .any(|todo| !crate::todo::completion_confidence_passes(todo.completion_confidence));
-    let confidence_spike_detected =
-        allow_confidence_spike_challenge && !crate::todo::spike_completed_todos(todos).is_empty();
-
-    if !completion_confidence_needs_validation && !confidence_spike_detected {
-        // Nothing actionable: completing the loop with a generic summary just
-        // spends tokens on "all good" theater, so send nothing and end the run.
-        return None;
-    }
-
-    if completion_confidence_needs_validation {
-        crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-        Some((
-            crate::todo::build_todo_completion_continuation_message(todos),
-            false,
-        ))
-    } else {
-        crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
-        Some((
-            crate::todo::build_todo_confidence_spike_continuation_message(todos),
-            true,
-        ))
-    }
-}
+mod todo_followup;
+use todo_followup::{
+    RunAutoPokeFollowUp, build_run_auto_poke_follow_up_from_todos, prepare_run_todo_follow_up,
+    run_actionable_poke_message, run_blocked_notice, run_completely_blocked_notice,
+    run_external_blocker_notice, run_todos, take_run_gate_digest_if_turn_ended,
+};
+#[cfg(test)]
+use todo_followup::{run_actionable_todos, take_run_gate_digest};
 
 async fn run_single_message_command_plain_with_auto_poke(
     agent: &mut crate::agent::Agent,
@@ -2982,6 +2851,7 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         agent.run_once(&next_message).await?;
         turns_completed += 1;
@@ -2989,10 +2859,42 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            agent.session_id(),
             &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
+            ));
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
+            eprintln!(
+                "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
+                crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
+            );
+            break;
+        }
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
+        match build_run_auto_poke_follow_up_from_todos(
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3033,6 +2935,8 @@ async fn run_single_message_command_plain_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
@@ -3064,6 +2968,7 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         outputs.push(agent.run_once_capture(&next_message).await?);
         turns_completed += 1;
@@ -3071,10 +2976,42 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            agent.session_id(),
             &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+                "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
+            ));
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
+            eprintln!(
+                "We stopped poking after {} attempts without todo progress; unfinished todos remain.",
+                crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
+            );
+            break;
+        }
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
+        match build_run_auto_poke_follow_up_from_todos(
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3112,6 +3049,8 @@ async fn run_single_message_command_capture_with_auto_poke(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
@@ -3169,6 +3108,7 @@ async fn run_single_message_command_ndjson(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
@@ -3209,10 +3149,66 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
-        let gate_digest =
-            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        let (actionable_todos, dependency_resume) = prepare_run_todo_follow_up(
+            crate::background::global(),
+            &session_id,
             &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await;
+        if let Some(message) = dependency_resume {
+            incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+            gate_digest_delivered = false;
+            next_message = message;
+            write_json_line(
+                &mut stdout,
+                &serde_json::json!({
+                    "type": "auto_poke_dependency_resolved",
+                    "session_id": session_id,
+                    "message": next_message,
+                }),
+            )?;
+            continue;
+        }
+        if todos.iter().any(crate::todo::is_incomplete_todo)
+            && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
+        {
+            write_json_line(
+                &mut stdout,
+                &serde_json::json!({
+                    "type": "auto_poke_stopped",
+                    "session_id": session_id,
+                    "reason": if run_completely_blocked_notice(&todos).is_some() { "completely_blocked" } else if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
+                    "message": run_blocked_notice(&todos),
+                    "completely_blocked": todos.iter().any(crate::todo::todo_completely_blocked),
+                    "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
+                    "waiting_on_external": todos.iter().any(crate::todo::todo_has_external_blocker),
+                    "max_turns": max_turns,
+                }),
+            )?;
+            break;
+        }
+        if !incomplete_budget.allow_follow_up(&actionable_todos) {
+            writeln!(
+                stdout,
+                "{}",
+                serde_json::json!({
+                    "type": "auto_poke_stopped",
+                    "reason": "unchanged_todos",
+                    "max_attempts": crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS,
+                    "incomplete_todos": todos.iter().filter(|todo| crate::todo::is_incomplete_todo(todo)).count(),
+                })
+            )?;
+            break;
+        }
+        let gate_digest = take_run_gate_digest_if_turn_ended(
+            agent.session_id(),
+            gate_digest_delivered,
+            &todos,
+            crate::config::config().features.todo_gate_digest,
+        );
+        match build_run_auto_poke_follow_up_from_todos(
+            &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3266,6 +3262,8 @@ async fn run_single_message_command_ndjson(
                 continue;
             }
             Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                let message = run_actionable_poke_message(message, &todos, &actionable_todos);
+                gate_digest_delivered = false;
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         write_json_line(
@@ -3336,6 +3334,17 @@ async fn run_single_message_command_ndjson(
     }
 }
 
+/// Legacy CLI adapters consume the payload even when an identity-aware peer
+/// sends an explicit envelope. Unwrap iteratively to tolerate nested envelopes.
+pub(super) fn unwrap_turn_event(
+    mut event: crate::protocol::ServerEvent,
+) -> crate::protocol::ServerEvent {
+    while let crate::protocol::ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = *inner;
+    }
+    event
+}
+
 fn emit_ndjson_event(
     stdout: &mut impl Write,
     state: &mut NdjsonRunState,
@@ -3343,7 +3352,7 @@ fn emit_ndjson_event(
 ) -> Result<()> {
     use crate::protocol::ServerEvent;
 
-    match event {
+    match unwrap_turn_event(event) {
         ServerEvent::TextDelta { text } => {
             state.text.push_str(&text);
             write_json_line(
@@ -3399,6 +3408,7 @@ fn emit_ndjson_event(
             output,
             cache_read_input,
             cache_creation_input,
+            ..
         } => {
             state.usage = crate::agent::TokenUsage {
                 input_tokens: input,
@@ -3556,73 +3566,12 @@ fn write_json_line(stdout: &mut impl Write, value: &impl Serialize) -> Result<()
     Ok(())
 }
 
-pub async fn run_model_command(
-    choice: &super::provider_init::ProviderChoice,
-    model: Option<&str>,
-    emit_json: bool,
-    verbose: bool,
-) -> Result<()> {
-    let provider = super::provider_init::init_provider_quiet(choice, model).await?;
+#[path = "commands/model_listing.rs"]
+mod model_listing;
 
-    if let Err(err) = provider.prefetch_models().await
-        && !super::output::quiet_enabled()
-    {
-        eprintln!("Warning: failed to refresh dynamic model list: {}", err);
-    }
-
-    let routes = provider.model_routes();
-    let filtered_routes = filter_cli_model_routes_for_choice(choice, &routes);
-    let models = if filtered_routes.len() == routes.len() {
-        collect_cli_model_names(&routes, provider.available_models_display())
-    } else {
-        collect_cli_model_names(&filtered_routes, Vec::new())
-    };
-
-    if models.is_empty() {
-        anyhow::bail!(
-            "No models found for provider '{}'. Check credentials or try a different --provider.",
-            provider.name()
-        );
-    }
-
-    if emit_json {
-        let provider_label = super::provider_init::login_provider_for_choice(choice)
-            .map(|provider| provider.display_name.to_string())
-            .unwrap_or_else(|| {
-                crate::provider_catalog::runtime_provider_display_name(provider.name())
-            });
-        let report = ModelListReport {
-            provider: provider_label,
-            selected_model: provider.model(),
-            models,
-            routes: filtered_routes
-                .iter()
-                .map(|route| ModelListRouteReport {
-                    provider: cli_route_provider_display(&route.provider, &route.api_method),
-                    model: route.model.clone(),
-                    method: cli_api_method_display(&route.api_method),
-                    available: route.available,
-                })
-                .collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        if verbose {
-            println!(
-                "Provider: {}",
-                crate::provider_catalog::runtime_provider_display_name(provider.name())
-            );
-            println!("Selected model: {}", provider.model());
-            println!("Available models: {}", models.len());
-            println!();
-        }
-        for model in models {
-            println!("{}", model);
-        }
-    }
-
-    Ok(())
-}
+#[cfg(test)]
+mod turn_envelope_tests;
+pub use model_listing::run_model_command;
 
 mod model_routes;
 use model_routes::*;

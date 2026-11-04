@@ -1,10 +1,98 @@
 use super::*;
 
+#[cfg(feature = "aws-sdk")]
+#[test]
+fn inference_profile_discovery_reads_all_sdk_pages() {
+    use std::io::{BufRead, Write};
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().to_str().unwrap());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for index in 0..6 {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "SDK catalog request timed out"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("accept: {err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            if index == 5 {
+                let body = r#"{"message":"access denied"}"#;
+                write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                continue;
+            }
+            let page = index % 3;
+            let body = if page == 0 {
+                assert!(request.contains("/foundation-models"));
+                json!({"modelSummaries": []})
+            } else {
+                assert!(request.contains("/inference-profiles"));
+                if page == 2 { assert!(request.contains("nextToken=second-page")); }
+                let mut body = json!({"inferenceProfileSummaries": [{
+                    "inferenceProfileName": format!("profile-{index}"),
+                    "inferenceProfileId": format!("profile-{index}"),
+                    "inferenceProfileArn": format!("arn:aws:bedrock:us-east-1:123456789012:inference-profile/profile-{index}"),
+                    "type": "SYSTEM_DEFINED", "status": "ACTIVE", "models": []
+                }]});
+                if page == 1 { body["nextToken"] = json!("second-page"); }
+                body
+            }.to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let config = aws_sdk_bedrock::config::Builder::new()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_types::region::Region::new("us-east-1"))
+            .credentials_provider(aws_credential_types::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .build();
+        let client = BedrockControlClient::from_conf(config);
+        let provider = BedrockProvider::new();
+        let (_, profiles) = provider.refresh_catalog_with_client(&client).await.unwrap();
+        assert!(profiles.contains(&"profile-1".into()));
+        assert!(profiles.contains(&"profile-2".into()));
+        assert!(provider.refresh_catalog_with_client(&client).await.is_err());
+        assert_eq!(
+            *provider.fetched_inference_profiles.read().unwrap(),
+            profiles
+        );
+    });
+    server.join().unwrap();
+}
+
 #[test]
 fn opus_low_effort_default_and_explicit_overrides() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _model = EnvVarGuard::remove("JCODE_BEDROCK_MODEL");
     let _effort = EnvVarGuard::remove("JCODE_BEDROCK_EFFORT");
     let p = BedrockProvider::new();
@@ -121,8 +209,6 @@ fn opus_explicit_routes_and_metadata() {
 #[test]
 fn opus_default_ignores_cached_global_routes_and_preserves_explicit_choice() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _model = EnvVarGuard::remove("JCODE_BEDROCK_MODEL");
     let p = BedrockProvider::new();
     assert_eq!(p.model(), DEFAULT_MODEL);
@@ -232,12 +318,26 @@ fn bedrock_tool_schema_removes_top_level_combinators() {
     assert_eq!(normalized["required"], json!(["category"]));
 }
 
-fn lock_test_env() -> MutexGuard<'static, ()> {
+// Drop the environment override before the temporary directory, and unlock last.
+struct TestEnvGuard {
+    _home: EnvVarGuard,
+    root: tempfile::TempDir,
+    _lock: MutexGuard<'static, ()>,
+}
+
+fn lock_test_env() -> TestEnvGuard {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK
+    let lock = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let home = EnvVarGuard::set("JCODE_HOME", root.path().as_os_str());
+    TestEnvGuard {
+        _home: home,
+        root,
+        _lock: lock,
+    }
 }
 
 struct EnvVarGuard {
@@ -270,10 +370,38 @@ impl Drop for EnvVarGuard {
 }
 
 #[test]
+fn bedrock_env_file_is_isolated_under_jcode_home() {
+    let guard = lock_test_env();
+    let xdg = tempfile::tempdir().unwrap();
+    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", xdg.path().as_os_str());
+    let _token = EnvVarGuard::remove(API_KEY_ENV);
+    let config = guard.root.path().join("config/jcode");
+    assert_eq!(jcode_storage::app_config_dir().unwrap(), config);
+    assert_eq!(BedrockProvider::configured_bearer_token(), None);
+
+    jcode_provider_env::save_env_value_to_env_file(API_KEY_ENV, ENV_FILE, Some("isolated-token"))
+        .unwrap();
+    jcode_core::env::remove_var(API_KEY_ENV);
+    assert!(
+        std::fs::read_to_string(config.join(ENV_FILE))
+            .unwrap()
+            .contains("isolated-token")
+    );
+    assert_eq!(
+        BedrockProvider::configured_bearer_token().as_deref(),
+        Some("isolated-token")
+    );
+    assert!(std::fs::read_dir(xdg.path()).unwrap().next().is_none());
+
+    // Switching to another sandbox must not read the previous test's fixture.
+    let next = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", next.path().as_os_str());
+    assert_eq!(BedrockProvider::configured_bearer_token(), None);
+}
+
+#[test]
 fn detects_env_credentials_requires_region_and_credential_hint() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
@@ -297,17 +425,14 @@ fn detects_env_credentials_requires_region_and_credential_hint() {
 #[test]
 fn explicit_enable_marks_configured_for_instance_metadata_credentials() {
     let _guard = lock_test_env();
-    jcode_core::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+    let _enabled = EnvVarGuard::set("JCODE_BEDROCK_ENABLE", "1");
     assert!(BedrockProvider::has_credentials());
-    jcode_core::env::remove_var("JCODE_BEDROCK_ENABLE");
 }
 
 #[test]
 fn detects_bedrock_login_env_file_credentials() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
-    for key in [
+    let _removed = [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
         REGION_ENV,
@@ -316,9 +441,8 @@ fn detects_bedrock_login_env_file_credentials() {
         "AWS_PROFILE",
         "JCODE_BEDROCK_PROFILE",
         "AWS_ACCESS_KEY_ID",
-    ] {
-        jcode_core::env::remove_var(key);
-    }
+    ]
+    .map(EnvVarGuard::remove);
 
     assert!(!BedrockProvider::has_credentials());
     jcode_provider_env::save_env_value_to_env_file(API_KEY_ENV, ENV_FILE, Some("test-key"))
@@ -344,8 +468,6 @@ fn detects_bedrock_login_env_file_credentials() {
 #[test]
 fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
@@ -390,6 +512,7 @@ fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
 
 #[test]
 fn switches_arbitrary_model_ids() {
+    let _guard = lock_test_env();
     let p = BedrockProvider::new();
     p.set_model("us.anthropic.claude-3-5-sonnet-20241022-v2:0")
         .unwrap();
@@ -399,8 +522,6 @@ fn switches_arbitrary_model_ids() {
 #[test]
 fn maps_profile_required_foundation_model_to_inference_profile() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     p.profile_required_models
         .write()
@@ -419,8 +540,6 @@ fn maps_profile_required_foundation_model_to_inference_profile() {
 #[test]
 fn maps_foundation_model_from_stale_cached_profile_list() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_inference_profiles.write().unwrap() = vec![
         "global.amazon.nova-2-lite-v1:0".to_string(),
@@ -435,8 +554,6 @@ fn maps_foundation_model_from_stale_cached_profile_list() {
 #[test]
 fn hides_profile_required_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     *p.fetched_inference_profiles.write().unwrap() = vec!["us.amazon.nova-2-lite-v1:0".to_string()];
@@ -466,8 +583,6 @@ fn hides_profile_required_foundation_model_when_profile_route_exists() {
 #[test]
 fn hides_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     *p.fetched_inference_profiles.write().unwrap() = vec!["us.amazon.nova-2-lite-v1:0".to_string()];
@@ -493,8 +608,6 @@ fn hides_foundation_model_when_profile_route_exists() {
 #[test]
 fn profile_required_foundation_model_without_profile_route_is_disabled() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     p.profile_required_models
@@ -514,6 +627,7 @@ fn profile_required_foundation_model_without_profile_route_is_disabled() {
 
 #[test]
 fn global_inference_profiles_use_foundation_capabilities_and_detail() {
+    let _guard = lock_test_env();
     let p = BedrockProvider::new();
     *p.fetched_inference_profiles.write().unwrap() =
         vec!["global.amazon.nova-2-lite-v1:0".to_string()];
@@ -537,8 +651,6 @@ fn global_inference_profiles_use_foundation_capabilities_and_detail() {
 #[test]
 fn ignores_persisted_bedrock_catalog_from_different_region() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     {
         let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
         BedrockProvider::persist_catalog(
@@ -581,6 +693,7 @@ fn prefers_region_inference_profile_over_global_profile() {
 
 #[test]
 fn known_context_and_vision_capabilities() {
+    let _guard = lock_test_env();
     let p = BedrockProvider::new();
     p.set_model("anthropic.claude-3-5-sonnet-20241022-v2:0")
         .unwrap();
@@ -652,8 +765,6 @@ fn missing_credentials_error_omits_sdk_blob() {
 #[test]
 fn legacy_model_route_is_unavailable_with_reason() {
     let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];
     p.legacy_models

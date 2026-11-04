@@ -164,6 +164,19 @@ fn update_stalls_notifies_once_and_rearms_after_recovery() {
     assert!(update_stalls(&members, &coordinators, WINDOW, silent, tool).is_empty());
     assert!(stalled_for_secs(owned).is_none());
 
+    // Explicit waits suppress false stalls even without a running tool entry.
+    // Keep this in the same registry scenario so parallel tests cannot clear
+    // each other's process-global stall state.
+    let worker_wait = crate::wait_registry::register(worker, "Waiting for build");
+    let owned_wait = crate::wait_registry::register(owned, "Waiting for tests");
+    assert!(update_stalls(&members, &coordinators, WINDOW, silent, no_tool).is_empty());
+    assert!(stalled_for_secs(worker).is_none());
+    drop(worker_wait);
+    let resumed = update_stalls(&members, &coordinators, WINDOW, silent, no_tool);
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].session_id, worker);
+    drop(owned_wait);
+
     clear_for_tests(&[worker, owned, coord]);
 }
 

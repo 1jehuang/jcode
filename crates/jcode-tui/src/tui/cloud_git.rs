@@ -61,8 +61,32 @@ pub(crate) fn script_command(
     dir: &str,
     script: &str,
 ) -> tokio::process::Command {
+    script_command_inner(host, config, dir, script, false)
+}
+
+/// Large JSON transcripts benefit from SSH's negotiated stream compression.
+/// Small workspace probes keep their existing uncompressed transport.
+pub(crate) fn compressed_script_command(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+    script: &str,
+) -> tokio::process::Command {
+    script_command_inner(host, config, dir, script, true)
+}
+
+fn script_command_inner(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+    script: &str,
+    compressed: bool,
+) -> tokio::process::Command {
     let mut cmd = if let Some(host) = host {
         let mut cmd = tokio::process::Command::new("ssh");
+        if compressed {
+            cmd.arg("-C");
+        }
         if let Some(config) = config {
             cmd.arg("-F").arg(config);
         }
@@ -119,6 +143,19 @@ pub(crate) fn script_command(
 
 async fn probe(command: tokio::process::Command) -> RepoState {
     probe_with_timeout(command, Duration::from_secs(12)).await
+}
+
+/// Read a specific workspace without consulting the active TUI attachment.
+/// Used by selected-session previews on their background loader thread.
+pub(crate) async fn probe_workspace(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+) -> RepoState {
+    if dir.is_empty() || host.is_some_and(|host| host.is_empty() || host.starts_with('-')) {
+        return RepoState::Unavailable;
+    }
+    probe(command(host, config, dir)).await
 }
 
 async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration) -> RepoState {
@@ -332,7 +369,7 @@ mod tests {
     use super::*;
     #[test]
     fn snapshot_handles_rename_newline_and_independent_counts() {
-        let info = parse(b"jcode-git-v1\0/repo\0main\02 3\0R  new name\0old name\0?? a\nb\0 M tracked\0\01\t2\ttracked\n").unwrap();
+        let info = parse(b"jcode-git-v1\0/repo\0main\x002 3\0R  new name\0old name\0?? a\nb\0 M tracked\0\x001\t2\ttracked\n").unwrap();
         assert_eq!(
             (info.staged, info.modified, info.untracked, info.dirty_total),
             (1, 1, 1, 3)
@@ -348,7 +385,7 @@ mod tests {
             (2, 3, 1, 2)
         );
         assert!(parse(b"bad response").is_none());
-        assert!(parse(b"jcode-git-v1\0/repo\0main\00 0\0 M truncated").is_none());
+        assert!(parse(b"jcode-git-v1\0/repo\0main\x000 0\0 M truncated").is_none());
     }
     #[tokio::test]
     async fn live_independent_repositories_and_missing_path() {
@@ -420,6 +457,36 @@ mod tests {
             RepoState::Unavailable
         );
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn transcript_compression_does_not_change_workspace_probe_transport() {
+        let config = std::path::Path::new("/private/config");
+        let args = |cmd: tokio::process::Command| {
+            cmd.as_std()
+                .get_args()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        };
+        let compressed = args(compressed_script_command(
+            Some("cloud-host"),
+            Some(config),
+            "session",
+            "printf test",
+        ));
+        let ordinary = args(script_command(
+            Some("cloud-host"),
+            Some(config),
+            "session",
+            "printf test",
+        ));
+        assert_eq!(compressed[0], "-C");
+        assert_eq!(&compressed[1..], ordinary.as_slice());
+        assert!(
+            compressed
+                .iter()
+                .any(|arg| arg == "StrictHostKeyChecking=yes")
+        );
     }
 
     #[test]

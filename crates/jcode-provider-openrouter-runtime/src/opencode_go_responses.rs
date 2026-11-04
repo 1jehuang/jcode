@@ -182,7 +182,9 @@ struct ToolState {
 
 pub(crate) struct ResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+    // Retain raw bytes until a complete SSE frame arrives: transport chunks
+    // can split a UTF-8 character at any byte.
+    buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
@@ -195,7 +197,7 @@ impl ResponsesStream {
     ) -> Self {
         Self {
             inner: Box::pin(stream),
-            buffer: String::new(),
+            buffer: Vec::new(),
             pending: Vec::new(),
             tools: HashMap::new(),
             thinking: false,
@@ -382,15 +384,21 @@ impl ResponsesStream {
             return Some(event);
         }
         while let Some((pos, separator_len)) = [
-            self.buffer.find("\n\n").map(|pos| (pos, 2)),
-            self.buffer.find("\r\n\r\n").map(|pos| (pos, 4)),
+            self.buffer
+                .windows(2)
+                .position(|bytes| bytes == b"\n\n")
+                .map(|pos| (pos, 2)),
+            self.buffer
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .map(|pos| (pos, 4)),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|(pos, _)| *pos)
         {
-            let raw = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + separator_len..].to_string();
+            let raw = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
+            self.buffer.drain(..pos + separator_len);
             let data = raw
                 .lines()
                 .filter_map(|line| line.strip_prefix("data:"))
@@ -463,15 +471,15 @@ impl Stream for ResponsesStream {
             }
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(error))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {error}"))));
                 }
                 Poll::Ready(None) => {
-                    if !self.buffer.trim().is_empty() {
+                    if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
-                        self.parse_event(tail.trim());
+                        self.parse_event(String::from_utf8_lossy(&tail).trim());
                         if let Some(event) = self.pending.first().cloned() {
                             self.pending.remove(0);
                             return Poll::Ready(Some(Ok(event)));
@@ -636,6 +644,68 @@ mod tests {
             "Use only Jcode-approved tools in /work/project"
         );
         assert_eq!(request["model"], "muse-wonder-1.0");
+    }
+
+    #[test]
+    fn responses_stream_preserves_unicode_at_every_byte_split() {
+        let text = "café 中文 🦀 e\u{301}";
+        let arguments = serde_json::json!({"query": text}).to_string();
+        let events = [
+            serde_json::json!({"type": "response.output_text.delta", "delta": text}),
+            serde_json::json!({"type": "response.output_item.added", "item": {
+                "type": "function_call", "id": "item_1", "call_id": "call_1", "name": "search"
+            }}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "item_id": "item_1", "delta": arguments}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "item_id": "item_1"}),
+            serde_json::json!({"type": "response.completed", "response": {}}),
+        ];
+        for newline in ["\n", "\r\n"] {
+            let payload = events
+                .iter()
+                .map(|event| format!("data: {event}{newline}{newline}"))
+                .collect::<String>()
+                .into_bytes();
+            // Include empty chunks at either end, every two-chunk split, and
+            // one-byte chunks that split all multibyte characters repeatedly.
+            let chunkings = (0..=payload.len())
+                .map(|split| {
+                    vec![
+                        Bytes::copy_from_slice(&payload[..split]),
+                        Bytes::copy_from_slice(&payload[split..]),
+                    ]
+                })
+                .chain(std::iter::once(
+                    payload
+                        .iter()
+                        .map(|byte| Bytes::copy_from_slice(&[*byte]))
+                        .collect(),
+                ));
+            for (split, chunks) in chunkings.enumerate() {
+                let actual = futures::executor::block_on(
+                    ResponsesStream::new(futures::stream::iter(chunks.into_iter().map(Ok)))
+                        .collect::<Vec<_>>(),
+                )
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()
+                .expect("response events");
+                assert_eq!(actual.len(), 5, "newline {newline:?}, split {split}");
+                assert!(
+                    matches!(&actual[0], StreamEvent::TextDelta(value) if value == text),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[0]
+                );
+                assert!(
+                    matches!(&actual[1], StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "search")
+                );
+                assert!(
+                    matches!(&actual[2], StreamEvent::ToolInputDelta(value) if value == &arguments),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[2]
+                );
+                assert!(matches!(actual[3], StreamEvent::ToolUseEnd));
+                assert!(matches!(actual[4], StreamEvent::MessageEnd { .. }));
+            }
+        }
     }
 
     #[test]

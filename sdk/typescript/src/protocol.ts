@@ -90,6 +90,8 @@ export interface TodoSnapshot {
   goals: Array<Record<string, unknown>>;
   gate_observations: Array<Record<string, unknown>>;
   long_session_review_due: boolean;
+  /** Session-scoped background task IDs still running. Absent on older servers. */
+  running_background_tasks?: string[];
 }
 
 /** Persistent effects of a follow-up decision. */
@@ -209,9 +211,11 @@ export type ApiRequest =
   | { req: "get_todo_state"; session_id: string }
   | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
+  | { req: "set_context_cap"; session_id: string; max_context_tokens: number | null }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
+  | { req: "set_session_env"; session_id: string; env: Record<string, string> }
   | { req: "set_session_saved"; session_id: string; saved: boolean; label?: string }
   | {
       req: "applet_action";
@@ -316,7 +320,9 @@ export type ApiEvent =
       output: number;
       cache_read_input?: number;
       cache_creation_input?: number;
+      effective_budget?: number;
     }
+  | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
   | {
       ev: "kv_cache_miss";
       session_id: string;
@@ -479,6 +485,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_exec",
   "tool_done",
   "token_usage",
+  "context_cap_changed",
   "kv_cache_miss",
   "turn_done",
   "soft_interrupt_injected",
@@ -542,9 +549,11 @@ export const KNOWN_REQUEST_KINDS = [
   "get_todo_state",
   "ack_todo_follow_up",
   "set_model",
+  "set_context_cap",
   "set_reasoning_effort",
   "compact",
   "rename_session",
+  "set_session_env",
   "set_session_saved",
   "applet_action",
   "close_applet",

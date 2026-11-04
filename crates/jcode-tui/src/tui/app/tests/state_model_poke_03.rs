@@ -12,6 +12,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -24,6 +25,9 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -49,6 +53,59 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
 }
 
 include!("model_picker_startup_tests.rs");
+
+#[test]
+fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
+    with_temp_jcode_home(|| {
+        for command in ["/cloud", "/local"] {
+            let mut app = create_test_app();
+            crate::todo::save_todos(
+                &app.session.id,
+                &[crate::todo::TodoItem {
+                    lane_after: None,
+                    stage: None,
+                    details: None,
+                    group: None,
+                    id: "open".into(),
+                    content: "Continue on the destination".into(),
+                    status: "in_progress".into(),
+                    priority: "high".into(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                    confidence: None,
+                    completion_confidence: None,
+                    confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
+                }],
+            )
+            .unwrap();
+            app.auto_poke_default_on = true;
+            app.auto_poke_incomplete_todos = true;
+            app.is_processing = true;
+            let session = app.session.id.clone();
+            assert!(super::commands_cloud::handle_cloud_command(
+                &mut app, command, &session
+            ));
+
+            // The local completion path used to enqueue a poke here, which
+            // immediately made the pending transfer fail its safety check.
+            // Remote Done uses the same turn-end scheduling entry point.
+            super::local::finish_turn(&mut app);
+            assert!(app.pending_cloud_handoff.is_some());
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.pending_queued_dispatch);
+            assert!(app.auto_poke_incomplete_todos);
+            assert!(app.last_auto_poke_fingerprint.is_none());
+
+            // Cancellation restores normal scheduling, not a disabled poke.
+            super::commands_cloud::handle_cloud_command(&mut app, "/cloud cancel", &session);
+            assert!(app.schedule_turn_end_followups());
+            assert!(!app.queued_messages.is_empty());
+        }
+    });
+}
 
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
@@ -2283,6 +2340,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2295,6 +2353,9 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2318,6 +2379,7 @@ fn test_poke_status_reports_current_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2330,6 +2392,9 @@ fn test_poke_status_reports_current_state() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2374,6 +2439,7 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2386,6 +2452,9 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2425,6 +2494,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2437,6 +2507,9 @@ fn test_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2463,6 +2536,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2475,8 +2549,12 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2489,6 +2567,9 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
                 },
             ],
         )
@@ -2499,7 +2580,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
-        assert!(!app.queued_messages()[0].contains("Pick up the newly discovered task"));
+        assert!(app.queued_messages()[0].contains("Pick up the newly discovered task"));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
@@ -2532,6 +2613,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2544,6 +2626,9 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2566,6 +2651,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2580,8 +2666,12 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         80,
                     )),
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2596,6 +2686,9 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         95,
                     )),
                     confidence_history: Vec::new(),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
                 },
             ],
         )
@@ -2686,7 +2779,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
         );
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
+        assert!(!app.display_messages().iter().any(|msg| {
             msg.content
                 .contains("All todos done. Completion confidence: verified.")
         }));
@@ -2709,6 +2802,9 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        external_blocker: None,
+        completely_blocked: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(0),
             crate::todo::ConfidenceState::from_legacy_score(100),
@@ -2729,6 +2825,9 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        external_blocker: None,
+        completely_blocked: None,
+        waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::Speculative,
             crate::todo::ConfidenceState::Plausible,
@@ -2757,6 +2856,9 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
@@ -2827,7 +2929,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 .iter()
                 .filter(|message| message.content.contains("All todos done"))
                 .count(),
-            1
+            0
         );
     });
 }
@@ -2853,6 +2955,7 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2865,6 +2968,9 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2890,6 +2996,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2902,6 +3009,9 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -2918,113 +3028,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
     });
 }
 
-#[test]
-fn test_help_topic_shows_overnight_command_details() {
-    let mut app = create_test_app();
-    app.input = "/help overnight".to_string();
-    app.submit_input();
-
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing help response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("/overnight <hours>[h|m] [mission]"));
-    assert!(msg.content.contains("review HTML page"));
-    assert!(msg.content.contains("/overnight status"));
-}
-
-#[test]
-fn test_overnight_status_without_runs_is_handled() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        assert!(super::commands::handle_session_command(
-            &mut app,
-            "/overnight status"
-        ));
-
-        let msg = app
-            .display_messages()
-            .last()
-            .expect("missing overnight status response");
-        assert_eq!(msg.role, "system");
-        assert!(msg.content.contains("No overnight runs found"));
-    });
-}
-
-#[test]
-fn test_overnight_help_command_is_handled() {
-    let mut app = create_test_app();
-    assert!(super::commands::handle_session_command(
-        &mut app,
-        "/overnight help"
-    ));
-
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing overnight help response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("/overnight <hours>[h|m] [mission]"));
-    assert!(msg.content.contains("/overnight review"));
-}
-
-#[test]
-fn test_overnight_start_runs_as_visible_local_turn() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        assert!(super::commands::handle_session_command(
-            &mut app,
-            "/overnight 1m hi"
-        ));
-
-        assert!(
-            app.pending_turn,
-            "local overnight should start a visible turn"
-        );
-        assert!(
-            app.is_processing,
-            "local overnight should enter processing state"
-        );
-        assert!(
-            app.queued_messages.is_empty(),
-            "local overnight should not use remote queue"
-        );
-        let last_message = app
-            .session
-            .messages
-            .last()
-            .expect("overnight prompt message");
-        assert!(last_message.content.iter().any(|block| matches!(
-            block,
-            crate::message::ContentBlock::Text { text, .. }
-                if text.contains("visible Overnight Coordinator")
-        )));
-    });
-}
-
-#[test]
-fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.is_remote = true;
-        assert!(super::commands::handle_session_command(
-            &mut app,
-            "/overnight 1m hi"
-        ));
-
-        assert!(
-            !app.pending_turn,
-            "remote overnight should not set local pending_turn"
-        );
-        assert!(
-            !app.is_processing,
-            "remote overnight should not get stuck in local Sending"
-        );
-        assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
-    });
-}
+include!("overnight_commands.rs");
 
 #[test]
 fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps() {
@@ -3071,6 +3075,9 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     status: "completed".into(),
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
+                    external_blocker: None,
+                    completely_blocked: None,
+                    waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()
                 }],
@@ -3106,16 +3113,5 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
     });
 }
 
-#[test]
-fn test_remote_alt_e_toggles_prompt_history_without_typing() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    let before = crate::tui::ui::viewport::prompt_history_expanded();
-    rt.block_on(app.handle_remote_key(KeyCode::Char('e'), KeyModifiers::ALT, &mut remote))
-        .unwrap();
-    assert!(app.input.is_empty(), "Alt+E must not type: {:?}", app.input);
-    assert_ne!(crate::tui::ui::viewport::prompt_history_expanded(), before);
-    crate::tui::ui::viewport::toggle_prompt_history_expanded();
-}
+#[path = "state_model_poke_03/prompt_history_keys.rs"]
+mod prompt_history_keys;
