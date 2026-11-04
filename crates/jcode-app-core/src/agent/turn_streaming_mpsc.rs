@@ -1,7 +1,7 @@
 use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
-use super::streaming::StreamUsageRecorder;
+use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 #[path = "tool_handoff.rs"]
 mod tool_handoff;
 pub(super) use tool_handoff::execute_with_background;
@@ -355,6 +355,7 @@ impl Agent {
             );
 
             let mut text_content = String::new();
+            let mut text_wrapped_detected = false;
             // Inline swarm worker output tap: publish a throttled tail of the
             // in-progress assistant text to the bus so a coordinator can render
             // a live inline gallery viewport.
@@ -672,7 +673,20 @@ impl Agent {
                                 self.publish_inline_tail();
                             }
                         }
-                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                        if !text_wrapped_detected {
+                            if let Some(marker_idx) =
+                                find_wrap_marker_incremental(&text_content, text.len())
+                            {
+                                text_wrapped_detected = true;
+                                let clean_prefix =
+                                    text_content[..marker_idx].trim_end().to_string();
+                                let _ =
+                                    event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
+                            } else {
+                                let _ =
+                                    event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                            }
+                        }
                         if self.is_graceful_shutdown() {
                             logging::info(
                                 "Graceful shutdown during streaming - checkpointing partial response",
@@ -925,6 +939,7 @@ impl Agent {
                             ],
                         );
                         text_content.clear();
+                        text_wrapped_detected = false;
                         if inline_output_tap {
                             // The provider replays from the top; drop the
                             // discarded partial from the live tail too.

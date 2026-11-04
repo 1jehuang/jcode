@@ -505,6 +505,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(obj) = input.as_object_mut() else {
         return Ok(());
     };
+    // Optional tool arguments may be serialized explicitly as null. Treat
+    // `phases: null` as omitted so incremental edits can coexist with the
+    // schema's nullable hierarchy field.
     let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };

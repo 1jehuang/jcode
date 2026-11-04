@@ -38,9 +38,9 @@ fn active_client_connections(
     let (disconnect_tx, _) = mpsc::unbounded_channel();
     let now = Instant::now();
     Arc::new(RwLock::new(HashMap::from([(
-        "client-1".to_string(),
+        "test-connection".to_string(),
         ClientConnectionInfo {
-            client_id: "client-1".to_string(),
+            client_id: "test-connection".to_string(),
             session_id: session_id.to_string(),
             client_instance_id: None,
             debug_client_id: None,
