@@ -1211,6 +1211,10 @@ pub struct App {
     // Running `/cloud` or `/local` job (wakes the machine, moves the session).
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
+    // Request id of a ready handoff that already interrupted the running turn.
+    cloud_interrupt_sent_for: Option<u64>,
+    // Remote mode: the daemon turn must be cancelled for a ready handoff.
+    cloud_remote_interrupt_pending: bool,
     cloud_recovery_context: Option<(String, String)>,
     cloud_recovery_auto_pending: bool,
     // One autonomous diagnosis per command/session per client lifetime. A

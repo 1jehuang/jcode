@@ -139,6 +139,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
     needs_redraw |= app.poll_cloud_job();
+    if app.take_cloud_remote_interrupt() {
+        if let Err(error) = remote.cancel_with_reason("cloud_handoff_ready").await {
+            crate::logging::warn(&format!(
+                "Failed to interrupt turn for cloud handoff: {error}"
+            ));
+        }
+        needs_redraw = true;
+    }
     if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
         let sent = match provider {
             super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
