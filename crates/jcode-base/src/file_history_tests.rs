@@ -247,27 +247,53 @@ fn macos_edit_and_rewind_preserve_xattrs_and_detect_external_conflicts() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn new_file_group_uses_effective_group_unless_parent_is_setgid() {
+fn checkpointed_new_files_match_ordinary_creation_mode_group_and_default_acl() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let _env = crate::storage::lock_test_env();
     let (_home, work) = fixture();
-    let regular_dir = work.path().join("regular");
-    let setgid_dir = work.path().join("setgid");
-    fs::create_dir(&regular_dir).unwrap();
-    fs::create_dir(&setgid_dir).unwrap();
-    fs::set_permissions(&setgid_dir, fs::Permissions::from_mode(0o2770)).unwrap();
-    let regular_metadata = fs::metadata(&regular_dir).unwrap();
-    let setgid_metadata = fs::metadata(&setgid_dir).unwrap();
-    let effective_gid = unsafe { libc::getegid() };
+    let dir = fs::canonicalize(work.path()).unwrap().join("inherit");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o2770)).unwrap();
+    // Default ACL: owner rw, another user r, everyone else nothing.
+    let mut acl = 2u32.to_le_bytes().to_vec();
+    for (tag, permissions, id) in [
+        (1u16, 6u16, u32::MAX),
+        (2, 4, unsafe { libc::geteuid() }.wrapping_add(1)),
+        (4, 0, u32::MAX),
+        (16, 4, u32::MAX),
+        (32, 0, u32::MAX),
+    ] {
+        acl.extend(tag.to_le_bytes());
+        acl.extend(permissions.to_le_bytes());
+        acl.extend(id.to_le_bytes());
+    }
+    write_xattrs(
+        &dir,
+        &BTreeMap::from([("system.posix_acl_default".into(), acl)]),
+    )
+    .unwrap();
+    let ordinary = dir.join("ordinary");
+    fs::write(&ordinary, b"created").unwrap();
+    let tracked = dir.join("tracked");
+    let cp = checkpoint("new-file-inherit", 0, "create").unwrap();
+    mutate("new-file-inherit", &tracked, Some(b"created")).unwrap();
 
-    assert_eq!(new_file_gid(Some(&regular_metadata)), effective_gid);
-    assert_eq!(new_file_gid(Some(&setgid_metadata)), setgid_metadata.gid());
-    assert_eq!(new_file_gid(None), effective_gid);
-
-    let path = regular_dir.join("new-file");
-    checkpoint("new-file-group", 0, "create").unwrap();
-    mutate("new-file-group", &path, Some(b"created")).unwrap();
-    assert_eq!(fs::metadata(path).unwrap().gid(), effective_gid);
+    let (expected, actual) = (
+        fs::metadata(&ordinary).unwrap(),
+        fs::metadata(&tracked).unwrap(),
+    );
+    assert_eq!(actual.mode(), expected.mode());
+    assert_eq!(actual.mode() & 0o007, 0);
+    assert_eq!(
+        (actual.uid(), actual.gid()),
+        (expected.uid(), expected.gid())
+    );
+    let inherited = read_xattrs(&ordinary).unwrap();
+    assert!(inherited.contains_key("system.posix_acl_access"));
+    assert_eq!(read_xattrs(&tracked).unwrap(), inherited);
+    assert!(checkpoints("new-file-inherit").unwrap()[0].can_restore_files);
+    assert_eq!(restore("new-file-inherit", &cp.id).unwrap(), 1);
+    assert!(!tracked.exists());
 }
 
 #[cfg(target_os = "linux")]
