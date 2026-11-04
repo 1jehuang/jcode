@@ -1266,6 +1266,7 @@ fn version_command_plain_output_includes_core_fields() {
         build_time: "2026-03-18 18:00:00 +0000".to_string(),
         git_date: "2026-03-18 17:59:00 +0000".to_string(),
         release_build: false,
+        hook_capabilities: Vec::new(),
     };
     let text = format!(
         "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\n",
@@ -1345,6 +1346,18 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                 _ => run_single_message_command_ndjson(&mut agent, provider, "go")
                     .await
                     .unwrap(),
+            }
+            if mode != "ndjson" {
+                // Only the person's first message is `user`; generated pokes are not.
+                assert_eq!(
+                    crate::hooks::current_prompt_origin(agent.session_id()),
+                    Some(if enabled {
+                        crate::hooks::PromptOrigin::Auto
+                    } else {
+                        crate::hooks::PromptOrigin::User
+                    }),
+                    "{mode}, enabled={enabled}"
+                );
             }
             let session = crate::session::Session::load(agent.session_id()).unwrap();
             let followups = session

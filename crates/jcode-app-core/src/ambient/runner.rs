@@ -985,7 +985,9 @@ impl AmbientRunnerHandle {
 
         self.set_running_detail("running agent").await;
 
-        let run_result = agent.run_once_capture(&initial_message).await;
+        let run_result = agent
+            .run_once_capture_as(crate::hooks::PromptOrigin::System, &initial_message)
+            .await;
 
         // Check if end_ambient_cycle was called
         if let Some(result) = ambient_tools::take_cycle_result() {
@@ -1012,7 +1014,9 @@ impl AmbientRunnerHandle {
             what you accomplished and schedule your next wake. \
             If you are not done, continue what you were doing.";
 
-        let _ = agent.run_once_capture(continuation).await;
+        let _ = agent
+            .run_once_capture_as(crate::hooks::PromptOrigin::System, continuation)
+            .await;
 
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {

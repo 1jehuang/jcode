@@ -1150,6 +1150,7 @@ pub(super) async fn handle_resume_all_sessions(
             String::new(),
             Some(reminder),
             None,
+            crate::hooks::PromptOrigin::Reminder,
             Some("resuming interrupted session".to_string()),
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,

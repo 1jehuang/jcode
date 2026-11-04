@@ -1327,3 +1327,45 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
 include!("remote_tests/swarm_delivery.rs");
 
 include!("remote_tests/recall_cancellation.rs");
+
+fn queued_message_origin(queued: &[&str]) -> Option<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.queued_messages = queued.iter().map(|m| m.to_string()).collect();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let peer = remote.take_dummy_peer().expect("dummy peer");
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.current_message_id.is_some(), "queued message was sent");
+    rt.block_on(async {
+        let (reader, _) = peer.into_split();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            BufReader::new(reader).read_line(&mut line),
+        )
+        .await
+        .expect("request written")
+        .expect("read request");
+        let value: serde_json::Value = serde_json::from_str(line.trim()).expect("json request");
+        value
+            .get("origin")
+            .and_then(|origin| origin.as_str())
+            .map(str::to_string)
+    })
+}
+
+#[test]
+fn queued_human_prompt_keeps_human_origin() {
+    assert_eq!(queued_message_origin(&["please also check the docs"]), None);
+}
+
+#[test]
+fn queued_poke_is_marked_auto() {
+    let poke = "You have 2 incomplete todos. Continue working, then update the todo tool.";
+    assert_eq!(queued_message_origin(&[poke]).as_deref(), Some("auto"));
+}

@@ -134,6 +134,7 @@ fn test_request_roundtrip() -> Result<()> {
         images: vec![],
         system_reminder: None,
         active_skill: Some("verification".to_string()),
+        origin: None,
         no_reply: false,
     };
     let json = serde_json::to_string(&req)?;

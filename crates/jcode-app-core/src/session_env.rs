@@ -65,8 +65,12 @@ pub fn inherit_session_env(parent: &str, child: &str) {
     crate::tool::session_http::prune(&entries);
 }
 
-/// Forget a destroyed session. Already-launched jobs retain their snapshots.
+/// Forget a destroyed session (including its swarm hook identity and prompt origin and stop-hook continuation count). Already-launched
+/// jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
+    crate::hooks::forget_swarm_identity(session_id);
+    crate::hooks::forget_prompt_origin(session_id);
+    crate::hooks::reset_stop_continuations(session_id);
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
     crate::tool::session_http::prune(&entries);
@@ -119,5 +123,22 @@ mod tests {
         assert!(!SESSION_ENV.read().unwrap().contains_key(child));
         assert_eq!(snapshot, vars("parent"));
         remove_session_env(other);
+    }
+
+    #[test]
+    fn cleanup_forgets_prompt_origins() {
+        let sid = "env-cleanup-hook-state";
+        crate::hooks::begin_turn_origin(sid, crate::hooks::PromptOrigin::User);
+        crate::hooks::set_pending_prompt_origin(sid, crate::hooks::PromptOrigin::Auto);
+        assert!(crate::hooks::current_prompt_origin(sid).is_some());
+        remove_session_env(sid);
+        assert!(crate::hooks::current_prompt_origin(sid).is_none());
+        assert_eq!(crate::hooks::stop_continuations(sid), 0);
+        // The pending origin was dropped too: a fresh turn falls back to its default.
+        assert_eq!(
+            crate::hooks::begin_turn_origin(sid, crate::hooks::PromptOrigin::User),
+            crate::hooks::PromptOrigin::User
+        );
+        remove_session_env(sid);
     }
 }

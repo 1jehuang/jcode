@@ -104,6 +104,7 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    origin: Option<String>,
     /// Retry on the next pool account after a usage limit (API clients).
     server_failover: bool,
 }
@@ -1084,6 +1085,7 @@ pub(super) async fn handle_client(
                 images,
                 system_reminder,
                 active_skill,
+                origin,
                 no_reply,
             } => {
                 if no_reply {
@@ -1091,7 +1093,7 @@ pub(super) async fn handle_client(
                         id,
                         &content,
                         images,
-                        &client_session_id,
+                        (&client_session_id, origin.as_deref()),
                         client_is_processing,
                         &agent,
                         &client_event_tx,
@@ -1120,6 +1122,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        origin,
                         server_failover: supports_server_failover,
                     },
                     &client_session_id,
@@ -1230,6 +1233,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            origin: None,
                             server_failover: supports_server_failover,
                         },
                         &client_session_id,
@@ -2404,17 +2408,9 @@ pub(super) async fn handle_client(
                                 }
                             }
                             start_processing_message(
-                                ProcessingMessage {
-                                    id, content, images: Vec::new(), system_reminder: None,
-                                    active_skill: None, server_failover: true,
-                                },
+                                ProcessingMessage { id, content, images: Vec::new(), system_reminder: None, active_skill: None, origin: None, server_failover: true },
                                 &client_session_id,
-                                &mut ProcessingState {
-                                    client_is_processing: &mut client_is_processing,
-                                    message_id: &mut processing_message_id,
-                                    session_id: &mut processing_session_id,
-                                    task: &mut processing_task,
-                                },
+                                &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
                                 &agent, &client_event_tx, &processing_done_tx,
                                 active_terminal_env.clone(),
                                 &SwarmStatusRefs {

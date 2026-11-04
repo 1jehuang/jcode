@@ -118,7 +118,7 @@ pub(super) async fn append_context_message(
     id: u64,
     content: &str,
     images: Vec<(String, String)>,
-    client_session_id: &str,
+    (client_session_id, origin): (&str, Option<&str>),
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -133,9 +133,16 @@ pub(super) async fn append_context_message(
         );
         return;
     };
-    let result = agent.append_user_context_message(content, images);
+    // Declared while holding the agent lock, only once accepted.
+    crate::hooks::set_pending_prompt_origin_named(client_session_id, origin);
+    let result = agent.append_user_context_message(content, images).await;
     let event = match result {
-        Ok(()) => ServerEvent::ContextMessageAdded { id },
+        Ok(notices) => {
+            for notice in notices {
+                let _ = client_event_tx.send(crate::agent::hook_notice_event(client_session_id, &notice));
+            }
+            ServerEvent::ContextMessageAdded { id }
+        }
         Err(error) => ServerEvent::Error {
             id,
             message: crate::util::format_error_chain(&error),
@@ -166,6 +173,7 @@ pub(super) async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        origin,
         server_failover,
     } = message;
     if server_reload_starting() {
@@ -297,7 +305,7 @@ pub(super) async fn start_processing_message(
                 images,
                 system_reminder,
                 event_tx,
-                server_failover,
+                (server_failover, origin),
             ),
         ))
         .catch_unwind()

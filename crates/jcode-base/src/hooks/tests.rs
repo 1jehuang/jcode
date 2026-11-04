@@ -126,6 +126,29 @@ async fn tool_transformers_compose_json_replacements() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn tool_transformer_keeps_output_larger_than_default_capture_limit() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // ~2 MiB of valid JSON, above the 1 MiB default stream capture.
+    let big = write_executable_script(
+        temp.path(),
+        "big.sh",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"command\":\"'\nhead -c 2097152 /dev/zero | tr '\\0' 'a'\nprintf '\"}'\n",
+    );
+    let _env = transform_test_config(&big.to_string_lossy(), 10_000);
+
+    let output = transform_tool_input(
+        "ses_transform",
+        None,
+        "bash",
+        serde_json::json!({"command": "original"}),
+    )
+    .await;
+    assert_eq!(output["command"].as_str().map(str::len), Some(2 * 1024 * 1024));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn tool_transformer_fails_open_for_invalid_output_and_timeout() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -300,6 +323,29 @@ async fn pre_tool_gate_fails_open_on_timeout_and_odd_exits() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pre_tool_gate_timeout_is_not_held_open_by_grandchild_stdout() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // The hook exits at once but leaves a grandchild holding stdout open.
+    let script = write_executable_script(
+        temp.path(),
+        "grandchild.sh",
+        "#!/bin/sh\nsleep 30 &\nsleep 30\n",
+    );
+    let _env = gate_test_config(&script.to_string_lossy(), 300);
+    let started = std::time::Instant::now();
+    let decision = run_pre_tool_gate("ses_g", None, "bash", "{}")
+        .await
+        .decision;
+    assert_eq!(decision, GateDecision::Allow);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "gate must fail open at its timeout, not wait for the grandchild"
+    );
+}
+
 #[test]
 fn gate_stdout_json_decisions_parse_codex_shapes() {
     assert_eq!(parse_gate_stdout(""), CommandVerdict::default());
@@ -452,6 +498,71 @@ fn observer_dispatch_runs_hook_with_event_env() {
     assert_eq!(recorded, "turn_end|ses_obs|ok|1");
 }
 
+#[cfg(unix)]
+#[test]
+fn observer_with_swarm_identity_gets_env_payload_and_stdin_json() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let record = temp.path().join("identity.txt");
+    let script = write_executable_script(
+        temp.path(),
+        "identity.sh",
+        &format!(
+            "#!/bin/sh\nstdin=$(cat)\nprintf '%s|%s|%s|%s|%s|%s' \"$JCODE_HOOK_SWARM_ID\" \"$JCODE_HOOK_COORDINATOR_SESSION_ID\" \"$JCODE_HOOK_AGENT_ID\" \"$JCODE_HOOK_AGENT_TYPE\" \"$stdin\" \"$JCODE_HOOK_PAYLOAD\" > {}\n",
+            crate::terminal_launch::sh_escape(&record.to_string_lossy())
+        ),
+    );
+    register_swarm_identity(
+        "ses_worker_id",
+        SwarmIdentity {
+            swarm_id: "sw1".into(),
+            coordinator_session_id: "coord1".into(),
+            parent_session_id: "coord1".into(),
+            label: Some("task".into()),
+            agent_type: Some("reviewer".into()),
+        },
+    );
+    let prev = std::env::var_os("JCODE_HOOK_TURN_END");
+    crate::env::set_var("JCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
+    dispatch_observer(
+        HookEvent::new("turn_end")
+            .session_id("ses_worker_id")
+            .stdin_json("{\"hello\":1}"),
+    );
+    let mut recorded = String::new();
+    for _ in 0..100 {
+        if let Ok(data) = std::fs::read_to_string(&record)
+            && !data.is_empty()
+        {
+            recorded = data;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_HOOK_TURN_END", value),
+        None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
+    }
+    forget_swarm_identity("ses_worker_id");
+    assert!(
+        recorded.starts_with("sw1|coord1|ses_worker_id|reviewer|{\"hello\":1}|"),
+        "{recorded}"
+    );
+    assert!(recorded.contains("\"swarm_id\":\"sw1\""), "{recorded}");
+    assert!(
+        recorded.contains("\"agent_type\":\"reviewer\""),
+        "{recorded}"
+    );
+}
+
+#[test]
+fn normal_sessions_get_no_swarm_fields() {
+    let event = HookEvent::new("turn_end").session_id("ses_plain_not_registered");
+    let payload: serde_json::Value = serde_json::from_str(&payload_json(&event)).unwrap();
+    assert!(payload.get("swarm_id").is_none());
+    assert!(payload.get("agent_id").is_none());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn observer_dispatch_reaps_completed_hook() {
@@ -532,7 +643,10 @@ fn observer_dispatch_runs_each_configured_command() {
 
     dispatch_observer(HookEvent::new("session_start").session_id("ses_multi"));
     for _ in 0..100 {
-        if first_record.exists() && second_record.exists() {
+        let written = |path: &std::path::Path| {
+            std::fs::read_to_string(path).is_ok_and(|text| !text.is_empty())
+        };
+        if written(&first_record) && written(&second_record) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
