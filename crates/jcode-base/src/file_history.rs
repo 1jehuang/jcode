@@ -34,10 +34,11 @@ struct FileState {
 impl FileState {
     /// Legacy snapshots constrain bytes and mode but know nothing about metadata.
     /// This is directional matching, not equality: a modern snapshot still
-    /// requires its recorded metadata to be present and unchanged.
+    /// requires its recorded metadata to be present and unchanged. A new file
+    /// leaves mode unset because the kernel derives it (umask, default ACL).
     fn matches(&self, actual: &Self) -> bool {
         self.blob == actual.blob
-            && self.mode == actual.mode
+            && self.mode.is_none_or(|mode| actual.mode == Some(mode))
             && self
                 .metadata
                 .as_ref()
@@ -341,21 +342,6 @@ fn xattrs_unsupported(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENOTSUP)
 }
 
-#[cfg(unix)]
-fn new_file_gid(parent: Option<&fs::Metadata>) -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    parent.map_or_else(
-        || unsafe { libc::getegid() },
-        |metadata| {
-            if metadata.mode() & u32::from(libc::S_ISGID) != 0 {
-                metadata.gid()
-            } else {
-                unsafe { libc::getegid() }
-            }
-        },
-    )
-}
-
 #[cfg(target_os = "macos")]
 fn read_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     use std::os::unix::ffi::OsStrExt;
@@ -561,7 +547,9 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            // Without a recorded mode this is a new file: create it like an
+            // ordinary write so umask, default ACLs and setgid apply natively.
+            options.mode(if desired.mode.is_some() { 0o600 } else { 0o666 });
         }
         let mut file = options.open(&temporary)?;
         file.write_all(&data)?;
@@ -1120,35 +1108,12 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
     if content.is_some() && before.blob.is_some() {
         OpenOptions::new().write(true).open(&path)?;
     }
+    // New files leave mode and metadata unset: the kernel assigns them on
+    // creation, and imposing ours would strip inherited default ACLs.
     let after = FileState {
         blob: content.map(|bytes| store_blob(&dir, bytes)).transpose()?,
-        mode: if content.is_some() {
-            Some(match before.mode {
-                Some(mode) => mode,
-                None => new_file_mode(&dir)?,
-            })
-        } else {
-            None
-        },
-        metadata: if content.is_some() {
-            #[cfg(unix)]
-            {
-                Some(before.metadata.clone().unwrap_or_else(|| {
-                    let parent = path.parent().and_then(|parent| fs::metadata(parent).ok());
-                    FileMetadata {
-                        uid: unsafe { libc::geteuid() },
-                        gid: new_file_gid(parent.as_ref()),
-                        xattrs: BTreeMap::new(),
-                    }
-                }))
-            }
-            #[cfg(not(unix))]
-            {
-                None
-            }
-        } else {
-            None
-        },
+        mode: content.and(before.mode),
+        metadata: content.and(before.metadata.clone()),
     };
     note_external(&mut history, &path, &before);
     for checkpoint in &mut history.checkpoints {
@@ -1207,28 +1172,6 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
 fn collect_blobs_best_effort(dir: &Path, history: &History) {
     if let Err(error) = collect_blobs(dir, history) {
         crate::logging::warn(&format!("Checkpoint blob cleanup failed: {error:#}"));
-    }
-}
-
-fn new_file_mode(dir: &Path) -> Result<u32> {
-    // Observe the process umask without changing its process-global value.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let probe = dir.join(format!(".mode-{}", uuid::Uuid::new_v4()));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o666)
-            .open(&probe)?;
-        let mode = file.metadata()?.permissions().mode();
-        fs::remove_file(probe)?;
-        Ok(mode)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(0)
     }
 }
 
