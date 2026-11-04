@@ -966,16 +966,19 @@ pub(super) async fn handle_comm_stop(
     // Removing the session forgets its hook identity, so fire
     // `swarm_member_end` first. Stopping publishes no status update of its own.
     let stopping_transition = {
-        let members = swarm_members.read().await;
-        members.get(&target_session).map(|member| {
-            (
-                member.status.clone(),
-                member.last_status_change.elapsed().as_millis() as u64,
-                members
-                    .get(&req_session_id)
-                    .and_then(|coordinator| coordinator.working_dir.as_ref())
-                    .map(|dir| dir.display().to_string()),
-            )
+        // Claim the transition under the write lock: once the status is
+        // `stopped`, a racing normal status update sees a non-running old
+        // status and cannot fire a second `swarm_member_end`.
+        let mut members = swarm_members.write().await;
+        let coordinator_working_dir = members
+            .get(&req_session_id)
+            .and_then(|coordinator| coordinator.working_dir.as_ref())
+            .map(|dir| dir.display().to_string());
+        members.get_mut(&target_session).map(|member| {
+            let old_status = std::mem::replace(&mut member.status, "stopped".to_string());
+            let running_ms = member.last_status_change.elapsed().as_millis() as u64;
+            member.last_status_change = std::time::Instant::now();
+            (old_status, running_ms, coordinator_working_dir)
         })
     };
     if let Some((old_status, running_ms, coordinator_working_dir)) = stopping_transition {
