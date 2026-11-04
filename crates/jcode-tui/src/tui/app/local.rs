@@ -1,7 +1,7 @@
 use super::{App, DisplayMessage, ProcessingStatus, is_context_limit_error};
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgressEvent, BusEvent, InputShellCompleted,
-    ManualToolCompleted, UiActivity, UiActivityKind,
+    ManualToolCompleted, McpToggleCompleted, UiActivity, UiActivityKind,
 };
 use crate::message::{
     ContentBlock, Message, Role, background_task_status_notice,
@@ -231,6 +231,10 @@ pub(super) fn handle_bus_event(
             super::commands::handle_git_status_completed(app, result);
             true
         }
+        Ok(BusEvent::McpToggleCompleted(toggle)) => {
+            handle_mcp_toggle_completed(app, toggle);
+            true
+        }
         Ok(BusEvent::ProductivityReportReady(event)) => {
             app.handle_productivity_report_ready(event);
             true
@@ -389,6 +393,20 @@ pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
         app.set_status_notice(status_notice);
     }
     true
+}
+
+/// A local `/mcp enable|disable` toggle's background connect/disconnect work
+/// finished. Refresh the cached MCP state (local equivalent of the remote
+/// path's `McpStatus` handling) and surface a connection failure if enabling
+/// did not connect.
+pub(super) fn handle_mcp_toggle_completed(app: &mut App, toggle: McpToggleCompleted) {
+    app.refresh_mcp_server_names_blocking();
+    if let Some(error) = toggle.connect_error {
+        app.push_display_message(DisplayMessage::error(format!(
+            "MCP server '{}' enabled but failed to connect: {}.\nUse '/mcp reload' or retry to try again.",
+            toggle.server, error
+        )));
+    }
 }
 
 fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
