@@ -1198,6 +1198,14 @@ pub trait TuiState {
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        None
+    }
+    fn explorer_countdown_active(&self) -> bool {
+        false
+    }
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
     /// Keep a reset offer visible briefly without rearming on usage refresh.

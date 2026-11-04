@@ -1,6 +1,100 @@
-use super::{JevProvider, LAYA_BASE_URL_ENV, LAYA_DEFAULT_BASE};
+use super::{
+    JevClient, JevProvider, JevPurpose, LAYA_BASE_URL_ENV, LAYA_DEFAULT_BASE, client_builder_for,
+    resolve_jev_model, resolve_providers, resolve_with,
+};
 use anyhow::{Result, anyhow, ensure};
 use reqwest::Url;
+use serde_json::Value;
+
+impl JevClient {
+    /// Suggestions routing prefers explicit OpenJev SystemOne (`OPENJEV_API_KEY`),
+    /// then Jcode / TypeSafe / OpenRouter / AIMLAPI when `auto` is selected.
+    /// Evaluation never changes accounts after an auth/billing failure.
+    pub fn for_suggestions() -> Result<Self> {
+        Self::for_purpose(JevPurpose::Suggestions)
+    }
+
+    pub fn for_suggestions_with_selector(config_selector: &str) -> Result<Self> {
+        let (provider, api_key, endpoint, me_endpoint) =
+            Self::resolve_with_suggestions_default(config_selector)?;
+        Self::build_suggestions_client(provider, api_key, endpoint, me_endpoint)
+    }
+
+    pub fn for_suggestions_fixed_selector(selector: &str) -> Result<Self> {
+        let (provider, api_key, endpoint, me_endpoint) =
+            Self::resolve_for_selector(JevPurpose::Suggestions, selector)?;
+        Self::build_suggestions_client(provider, api_key, endpoint, me_endpoint)
+    }
+
+    fn build_suggestions_client(
+        provider: JevProvider,
+        api_key: String,
+        endpoint: String,
+        me_endpoint: Option<String>,
+    ) -> Result<Self> {
+        let bypass_proxy = should_bypass_proxy(provider, &endpoint);
+        let client = client_builder_for(bypass_proxy)
+            .build()
+            .map_err(|_| anyhow!("Could not initialize the Jev decision client"))?;
+        Ok(Self {
+            client,
+            hedge_clients: Vec::new(),
+            purpose: JevPurpose::Suggestions,
+            provider,
+            model_id: resolve_jev_model(JevPurpose::Suggestions, provider),
+            api_key,
+            endpoint,
+            me_endpoint,
+        })
+    }
+
+    /// True when the active route supports direct SystemOne `choice` questions
+    /// (`OpenJev`, `TypeSafe`, `OpenRouter`, `Aimlapi`). `Jcode` subscription
+    /// decisions only accept `noul` outside of Browser mode.
+    pub fn supports_choice_questions(&self) -> bool {
+        self.provider != JevProvider::Jcode || self.purpose == JevPurpose::Browser
+    }
+
+    /// True when `JCODE_LAYA_BASE_URL`, `LAYA_BASE_URL`, or `LAYA_API_KEY` is configured in env or `laya.env`.
+    pub fn has_configured_laya_route() -> bool {
+        has_configured_laya(&mut |env, file| {
+            crate::provider_catalog::load_env_value_from_env_or_config(env, file)
+        })
+    }
+}
+
+pub(super) fn validate_choice_answer(question: &Value, answer: &Value) -> Result<()> {
+    let criteria = question["criteria"]
+        .as_object()
+        .ok_or_else(|| anyhow!("Jev choice question is missing criteria"))?;
+    let choice = answer["choice"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Jev choice answer omitted selected choice"))?;
+    ensure!(
+        criteria.contains_key(choice),
+        "Jev choice answer selected an unknown option"
+    );
+    if let Some(conf) = answer.get("confidence").and_then(Value::as_f64) {
+        ensure!(
+            conf.is_finite() && (0.0..=1.0).contains(&conf),
+            "Jev returned an invalid choice confidence"
+        );
+    }
+    if let Some(probs) = answer.get("probabilities").and_then(Value::as_object) {
+        for (opt, prob) in probs {
+            ensure!(
+                criteria.contains_key(opt),
+                "Jev returned probability for an unknown choice option"
+            );
+            ensure!(
+                prob.as_f64()
+                    .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
+                "Jev returned an invalid choice probability"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Local/private HTTP endpoints (loopback, LAN, Tailscale) must connect directly
 /// rather than routing plaintext request bodies and bearer tokens through an
@@ -12,6 +106,46 @@ pub(super) fn should_bypass_proxy(provider: JevProvider, endpoint: &str) -> bool
                 Ok(url) => url.host_str().is_none_or(is_trusted_local_or_private_host),
                 Err(_) => true,
             })
+}
+
+pub(super) fn resolve_suggestions_with(
+    selector: &str,
+    mut load: impl FnMut(&str, &str) -> Option<String>,
+) -> Result<(JevProvider, String)> {
+    let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
+        "auto" => &[
+            JevProvider::OpenJev,
+            JevProvider::Jcode,
+            JevProvider::TypeSafe,
+            JevProvider::OpenRouter,
+            JevProvider::Aimlapi,
+        ],
+        "openjev" => &[JevProvider::OpenJev],
+        "laya" => return resolve_laya_with(&mut load),
+        _ => return resolve_with(selector, load),
+    };
+    match resolve_providers(providers, &mut load) {
+        Ok(found) => Ok(found),
+        Err(err) if selector.trim().eq_ignore_ascii_case("auto") => {
+            if has_configured_laya(&mut load) {
+                resolve_laya_with(&mut load)
+            } else {
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub(super) fn has_configured_laya(load: &mut impl FnMut(&str, &str) -> Option<String>) -> bool {
+    for env_key in [LAYA_BASE_URL_ENV, "LAYA_BASE_URL", "LAYA_API_KEY"] {
+        if let Some(val) = load(env_key, "laya.env")
+            && !jcode_provider_env::sanitize_secret_value(&val).is_empty()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn resolve_laya_with(

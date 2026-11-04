@@ -582,6 +582,7 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
         return false;
     };
 
+    app.cancel_suggested_replies_interaction(false);
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
     app.input.replace_range(
@@ -781,6 +782,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Keeping this at the shared insertion boundary also covers paste and
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
+    app.cancel_suggested_replies_interaction(false);
     app.follow_chat_bottom_for_typing();
 
     let at_end = app.cursor_pos == app.input.len();
@@ -835,6 +837,9 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 }
 
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
+    if app.try_stage_suggested_reply_text(text) {
+        return true;
+    }
     if app.append_ssh_login_input(text) {
         return true;
     }
@@ -862,6 +867,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
                     app.remember_input_undo_state();
                     app.input = prompt.clone();
                     app.cursor_pos = app.input.len();
+                    app.cancel_suggested_replies_interaction(false);
                     app.follow_chat_bottom_for_typing();
                     app.submit_input();
                     return true;
@@ -1131,6 +1137,7 @@ fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
+    app.cancel_suggested_replies_on_escape();
     let had_input = !app.input.is_empty();
     if had_input {
         app.remember_input_undo_state();
@@ -1948,7 +1955,8 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
         return;
     }
 
-    if app.input.is_empty() {
+    if app.suggested_replies_input_is_empty_or_staged() {
+        app.try_submit_suggested_reply_on_empty_input(true);
         return;
     }
 
@@ -2817,6 +2825,9 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     if app.activate_picker_from_preview() {
         return true;
     }
+    if app.try_submit_suggested_reply_on_empty_input(false) {
+        return true;
+    }
     if !app.input.is_empty() {
         if route_prompt_to_new_session_local(app) {
             return true;
@@ -2834,6 +2845,9 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
+    if app.pre_handle_basic_key_for_suggested_replies(code) {
+        return true;
+    }
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
@@ -2964,6 +2978,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    app.clear_suggested_replies_for_new_turn();
     promote_dropped_images(app);
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
@@ -3261,6 +3276,10 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if self.handle_suggested_replies_arrow_key(code, modifiers) {
+            return Ok(());
         }
 
         if handle_multiline_input_navigation(self, code, modifiers)

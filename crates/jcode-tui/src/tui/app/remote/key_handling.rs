@@ -257,6 +257,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     if app.activate_picker_from_preview() {
         return Ok(());
     }
+    app.try_stage_suggested_reply_for_remote_enter(false);
     if !app.input.is_empty() {
         let command = input::expand_paste_placeholders(app, &app.input)
             .trim()

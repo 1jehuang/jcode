@@ -235,6 +235,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+    needs_redraw |= app.poll_and_queue_suggested_replies_tick();
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
@@ -1419,7 +1420,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     let _ = recover_stranded_soft_interrupts(app, remote).await;
 
-    if app.pending_queued_dispatch {
+    if app.pending_queued_dispatch && app.suggested_replies.pending_remote_submit.is_none() {
         note_startup_submit_deferred(app, "pending_queued_dispatch in progress");
         return;
     }
@@ -1520,6 +1521,16 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         app.clear_visible_turn_started();
         app.replay_processing_started_ms = None;
         app.replay_elapsed_override = None;
+    }
+
+    if app.take_pending_remote_suggested_reply().is_some() {
+        if let Err(error) = key_handling::submit_remote_enter_input(app, remote).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit suggested reply: {error}"
+            )));
+            app.set_status_notice("Suggested reply failed");
+        }
+        return;
     }
 
     if app.submit_input_on_startup && !app.is_processing {

@@ -20,6 +20,7 @@ fn max_len_only_for_loopback_laya_endpoints() {
             JevProvider::Laya,
             JevProvider::OpenRouter,
             JevProvider::TypeSafe,
+            JevProvider::OpenJev,
             JevProvider::Aimlapi,
             JevProvider::Jcode,
         ] {
@@ -39,6 +40,26 @@ fn max_len_only_for_loopback_laya_endpoints() {
                 "{provider:?} {endpoint}"
             );
         }
+    }
+}
+
+#[test]
+fn suggestions_laya_keeps_loopback_context_budget() {
+    for (endpoint, expected) in [
+        ("http://127.0.0.1:8000/v1/systemone", Some(4096)),
+        ("http://192.168.1.2/v1/systemone", None),
+    ] {
+        let body = request_body_with_model(
+            JevPurpose::Suggestions,
+            JevProvider::Laya,
+            JevProvider::Laya.model(),
+            endpoint,
+            json!("state"),
+            &questions(),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.get("max_len").and_then(Value::as_u64), expected);
     }
 }
 

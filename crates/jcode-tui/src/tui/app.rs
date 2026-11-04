@@ -123,6 +123,7 @@ mod state_ui_messages;
 mod state_ui_runtime;
 mod state_ui_storage;
 mod subscribe_nudge;
+pub mod suggested_replies;
 mod support;
 mod swarm_hint;
 mod terminal_liveness;
@@ -1853,6 +1854,7 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+    pub(crate) suggested_replies: suggested_replies::SuggestedRepliesRuntime,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

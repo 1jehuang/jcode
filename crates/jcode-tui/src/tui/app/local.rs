@@ -145,6 +145,11 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+    let (sr_redraw, sr_auto_prompt) = app.poll_suggested_replies_tick();
+    needs_redraw |= sr_redraw;
+    if let Some(prompt) = sr_auto_prompt {
+        app.submit_suggested_reply_prompt(prompt);
+    }
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.poll_compaction_completion();
@@ -670,6 +675,7 @@ pub(super) fn finish_turn(app: &mut App) {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {
             app.maybe_notify_turn_complete(turn_duration_secs);
+            app.maybe_trigger_suggested_replies_at_turn_end();
         }
     }
     let _ = super::commands::maybe_begin_pending_local_transfer(app);

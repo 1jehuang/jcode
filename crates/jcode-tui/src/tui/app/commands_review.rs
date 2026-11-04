@@ -5,7 +5,7 @@ use crate::message::{ContentBlock, Role, ToolCall};
 use crate::session::{Session, StoredMessage};
 use std::time::Instant;
 
-fn review_session_read_only_guardrails() -> &'static str {
+pub(super) fn review_session_read_only_guardrails() -> &'static str {
     "Important constraints for this session:\n\
 - This session is analysis-only. Do not do the work yourself.\n\
 - Do not modify files or repo state. Do not call `edit`, `write`, `multiedit`, `patch`, `apply_patch`, or destructive `bash`/`git` commands.\n\
@@ -796,7 +796,7 @@ pub(super) fn launch_forked_session_local(
     Ok(opened)
 }
 
-fn launch_review_window_local(
+pub(super) fn launch_review_window_local(
     app: &mut App,
     session_title: &str,
     label: &str,
