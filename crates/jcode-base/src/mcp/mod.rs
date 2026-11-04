@@ -14,6 +14,8 @@ mod protocol;
 mod remote;
 pub mod schema_cache;
 mod tool;
+#[cfg(windows)]
+mod windows_job;
 
 pub use client::{DEFAULT_MCP_REQUEST_TIMEOUT, McpClient, McpHandle, request_timeout_for};
 pub use manager::McpManager;
@@ -24,3 +26,16 @@ pub use tool::{
     McpTool, create_mcp_tools, create_mcp_tools_from_cached, create_mcp_tools_from_cached_many,
     dispatch_name, dispatch_names, take_accept_large_output,
 };
+
+#[cfg(windows)]
+mod windows_native_args;
+#[cfg(windows)]
+mod windows_native_command;
+#[cfg(windows)]
+mod windows_native_env;
+#[cfg(windows)]
+mod windows_native_launch;
+#[cfg(windows)]
+mod windows_native_process;
+#[cfg(windows)]
+mod windows_native_resolve;

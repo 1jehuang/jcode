@@ -437,3 +437,6 @@ async fn connected_server_refresh_skips_identical_catalog_but_applies_changes() 
         def.input_schema
     );
 }
+
+#[path = "mcp_reload.rs"]
+mod reload_lifecycle;

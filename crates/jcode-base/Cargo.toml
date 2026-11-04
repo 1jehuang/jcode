@@ -148,7 +148,7 @@ embeddings = ["dep:jcode-embedding"]
 bedrock = ["jcode-provider-bedrock/aws-sdk"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
@@ -162,4 +162,3 @@ jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
-
