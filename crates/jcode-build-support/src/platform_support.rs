@@ -130,7 +130,11 @@ fn sweep_stale_launcher_backups(dir: &Path, max_age: Duration) {
         if !backup_is_stale(file_name, now, max_age) {
             continue;
         }
-        let _ = std::fs::remove_file(entry.path());
+        // Best-effort removal: a backup still held open by a running process
+        // fails to delete on Windows, and that must not abort the sweep.
+        if std::fs::remove_file(entry.path()).is_err() {
+            continue;
+        }
     }
 }
 
@@ -155,7 +159,10 @@ fn backup_operation_time(file_name: &str) -> Option<SystemTime> {
     let rest = file_name.strip_prefix(LAUNCHER_BACKUP_PREFIX)?;
     let stem = rest.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(rest);
     let (_, nanos) = stem.rsplit_once('-')?;
-    let nanos: u64 = nanos.parse().ok()?;
+    let nanos: u64 = match nanos.parse() {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
     Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos))
 }
 
