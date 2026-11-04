@@ -112,6 +112,29 @@ pub fn anthropic_is_1m_model(model: &str) -> bool {
     model.ends_with("[1m]")
 }
 
+/// Beta header Anthropic requires for fast mode on research-preview models.
+pub const ANTHROPIC_FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+
+/// Whether Anthropic offers fast mode (`speed: "fast"`) for `model`.
+///
+/// Generally available on Opus 5.5. Opus 4.8 (research preview) is kept for
+/// existing users.
+/// Verified against platform.claude.com/docs/en/build-with-claude/fast-mode,
+/// 2026-10-29.
+pub fn anthropic_model_supports_fast_mode(model: &str) -> bool {
+    matches!(
+        normalized_claude_caps_key(model).as_str(),
+        "claude-opus-5-5" | "claude-opus-4-8"
+    )
+}
+
+/// Whether fast mode on `model` still needs [`ANTHROPIC_FAST_MODE_BETA`].
+/// Opus 5.5 fast mode left research preview and needs no beta header.
+pub fn anthropic_fast_mode_requires_beta(model: &str) -> bool {
+    anthropic_model_supports_fast_mode(model)
+        && normalized_claude_caps_key(model) != "claude-opus-5-5"
+}
+
 /// Whether `model` looks like a Claude id with a parseable family/version, i.e.
 /// one [`anthropic_context_mode`] can classify rather than guess about.
 pub fn claude_id_has_parseable_version(model: &str) -> bool {

@@ -20,6 +20,12 @@ pub(super) fn update_usage(state: &mut SseStreamState, usage: UsageInfo) {
         }
         state.service_tier = Some(tier);
     }
+    // Fast mode is reported as `usage.speed`; record it as the fast tier so
+    // usage and cost tracking bill fast-mode rates.
+    if usage.speed.as_deref() == Some("fast") {
+        jcode_base::logging::info("Anthropic granted speed=fast");
+        state.service_tier = Some("auto".to_string());
+    }
     if let Some(creation) = usage.cache_creation {
         state.cache_creation_5m = creation
             .ephemeral_5m_input_tokens
@@ -294,6 +300,21 @@ mod tests {
         assert_eq!(state.cache_creation_5m, Some(10));
         assert_eq!(state.cache_creation_1h, Some(20));
         assert_eq!(state.service_tier.as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn usage_speed_fast_records_fast_tier() {
+        let mut state = SseStreamState::default();
+        process_sse_event(
+            &SseEvent {
+                event_type: "message_delta".into(),
+                data: r#"{"delta":{},"usage":{"input_tokens":5,"output_tokens":2,"speed":"fast"}}"#
+                    .into(),
+            },
+            &mut state,
+            true,
+        );
+        assert_eq!(state.service_tier.as_deref(), Some("auto"));
     }
 
     #[test]

@@ -585,9 +585,26 @@ pub struct ApiRequest {
     pub output_config: Option<ApiOutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Internal fast-mode selection (`auto` = fast). Anthropic's Messages API
+    /// opts into fast mode with `speed: "fast"`, so serialize it that way.
+    #[serde(
+        rename = "speed",
+        skip_serializing_if = "not_fast_tier",
+        serialize_with = "serialize_fast_speed"
+    )]
     pub service_tier: Option<String>,
     pub stream: bool,
+}
+
+fn not_fast_tier(tier: &Option<String>) -> bool {
+    tier.as_deref() != Some("auto")
+}
+
+fn serialize_fast_speed<S: serde::Serializer>(
+    _tier: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str("fast")
 }
 
 #[derive(Serialize, Clone)]

@@ -22,9 +22,10 @@ pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
-    ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
-    anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
+    ANTHROPIC_FAST_MODE_BETA, ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M,
+    AnthropicContextMode, AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
+    anthropic_fast_mode_requires_beta, anthropic_is_1m_model, anthropic_map_tool_name_for_oauth,
+    anthropic_map_tool_name_from_oauth, anthropic_model_supports_fast_mode,
     anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
     anthropic_stainless_os, anthropic_strip_1m_suffix,
 };

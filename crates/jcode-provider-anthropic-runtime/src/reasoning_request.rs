@@ -171,7 +171,8 @@ mod tests {
                 assert_eq!(wire["output_config"]["effort"], "low");
                 assert_eq!(wire["max_tokens"], 128_000);
                 assert!(wire.get("temperature").is_none());
-                assert!(wire.get("service_tier").is_none());
+                // Opus 5.5 supports fast mode, so the retry keeps it.
+                assert_eq!(wire["speed"], "fast");
                 assert_eq!(with_binding_beta("", &request.thinking), BINDING_BETA);
             }
         }
@@ -189,7 +190,7 @@ mod tests {
         settings.reshape(&mut request, "claude-opus-4-8", true);
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(wire["output_config"]["effort"], "xhigh");
-        assert_eq!(wire["service_tier"], "auto");
+        assert_eq!(wire["speed"], "fast");
         assert!(wire["thinking"].get("block_binding").is_none());
         assert_eq!(with_binding_beta("existing", &request.thinking), "existing");
         settings.reshape(&mut request, "claude-haiku-4-5", true);

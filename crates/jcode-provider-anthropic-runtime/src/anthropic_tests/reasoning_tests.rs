@@ -409,11 +409,64 @@ fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
     let value = serde_json::to_value(&request).unwrap();
 
     assert_eq!(value["model"], "claude-opus-4-8");
-    assert_eq!(value["service_tier"], "auto");
+    assert_eq!(value["speed"], "fast");
+    assert!(value.get("service_tier").is_none());
 }
 
 #[test]
-fn test_anthropic_fast_mode_is_limited_to_opus_48() {
+fn test_anthropic_opus_55_fast_mode_sends_speed_fast_without_beta() {
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-opus-5-5").unwrap();
+    assert_eq!(provider.available_service_tiers(), vec!["off", "priority"]);
+    provider.set_service_tier("priority").unwrap();
+    assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+
+    let tier = provider.current_service_tier_for_model("claude-opus-5-5");
+    let request = ApiRequest {
+        model: "claude-opus-5-5".into(),
+        max_tokens: 1024,
+        system: None,
+        messages: vec![],
+        tools: None,
+        metadata: None,
+        thinking: None,
+        output_config: None,
+        temperature: None,
+        service_tier: tier.clone(),
+        stream: true,
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["speed"], "fast");
+    // GA on Opus 5.5: no beta header. Opus 4.8 research preview needs it.
+    assert_eq!(
+        super::with_fast_mode_beta("x", "claude-opus-5-5", &tier),
+        "x"
+    );
+    assert_eq!(
+        super::with_fast_mode_beta("x", "claude-opus-4-8", &tier),
+        "x,fast-mode-2026-02-01"
+    );
+    assert_eq!(
+        super::with_fast_mode_beta("x", "claude-opus-4-8", &None),
+        "x"
+    );
+
+    provider.set_service_tier("off").unwrap();
+    let off = provider.current_service_tier_for_model("claude-opus-5-5");
+    let request = ApiRequest {
+        service_tier: off,
+        ..request
+    };
+    assert!(
+        serde_json::to_value(&request)
+            .unwrap()
+            .get("speed")
+            .is_none()
+    );
+}
+
+#[test]
+fn test_anthropic_fast_mode_is_limited_to_supported_opus() {
     let provider = AnthropicProvider::new();
     provider.set_model("claude-opus-4-6").unwrap();
 
