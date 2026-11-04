@@ -944,6 +944,7 @@ impl RawClient {
             images: vec![],
             system_reminder: None,
             active_skill: None,
+            origin: None,
             no_reply: false,
         })
         .await

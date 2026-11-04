@@ -39,6 +39,7 @@ async fn last_user_text(effort: Option<&str>, message: &str) -> String {
     let mut agent = Agent::new(provider, registry);
     agent
         .append_user_context_message(message, Vec::new())
+        .await
         .expect("append user message");
     agent
         .messages()

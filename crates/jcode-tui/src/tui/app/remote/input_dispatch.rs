@@ -23,6 +23,9 @@ pub(in crate::tui::app) async fn begin_remote_send(
         (None, Some(recovery)) => Some(recovery.clone()),
         (reminder, None) => reminder,
     };
+    if is_system {
+        remote.mark_next_message_auto();
+    }
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),

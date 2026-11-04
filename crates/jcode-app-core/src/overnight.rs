@@ -398,7 +398,7 @@ async fn run_turn_monitored(
     );
     long_notice_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let run_future = agent.run_once_capture(prompt);
+    let run_future = agent.run_once_capture_as(crate::hooks::PromptOrigin::System, prompt);
     tokio::pin!(run_future);
 
     loop {
