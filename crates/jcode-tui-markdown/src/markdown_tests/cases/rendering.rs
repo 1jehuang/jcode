@@ -71,7 +71,10 @@ fn unicode_display_math_copy_target_yields_latex_source() {
     let lines = math_display_lines(r"\frac{\partial L}{\partial \theta_{17}}");
     let targets = crate::extract_copy_targets_from_rendered_lines(&lines);
     assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0].kind, crate::CopyTargetKind::Math { display: true });
+    assert_eq!(
+        targets[0].kind,
+        crate::CopyTargetKind::Math { display: true }
+    );
     assert_eq!(
         targets[0].content,
         "$$\n\\frac{\\partial L}{\\partial \\theta_{17}}\n$$"
@@ -103,13 +106,21 @@ fn missing_tex_toolchain_shows_install_hint_once_in_image_mode() {
         })
     };
     let missing = render(true);
-    assert_eq!(missing.matches(crate::LATEX_INSTALL_HINT_TEXT).count(), 1, "{missing}");
+    assert_eq!(
+        missing.matches(crate::LATEX_INSTALL_HINT_TEXT).count(),
+        1,
+        "{missing}"
+    );
     let lazy = crate::latex_image::with_toolchain_missing_override(true, || {
         mermaid::with_image_protocol_override(Some(true), || {
             lines_to_string(&render_markdown_lazy(md, Some(80), 0..100))
         })
     });
-    assert_eq!(lazy.matches(crate::LATEX_INSTALL_HINT_TEXT).count(), 1, "{lazy}");
+    assert_eq!(
+        lazy.matches(crate::LATEX_INSTALL_HINT_TEXT).count(),
+        1,
+        "{lazy}"
+    );
     // Without an image-capable terminal the hint would be misleading.
     let no_protocol = crate::latex_image::with_toolchain_missing_override(true, || {
         mermaid::with_image_protocol_override(Some(false), || {
@@ -192,7 +203,10 @@ fn test_blockquote_blank_lines_keep_continuous_gutters() {
             "> Outer\n>\n>> Inner one\n>>\n>> Inner two\n>\n> Outer again",
             "│ Outer\n│ \n│ │ Inner one\n│ │ \n│ │ Inner two\n│ \n│ Outer again",
         ),
-        ("> First quote\n\n> Separate quote", "│ First quote\n\n│ Separate quote"),
+        (
+            "> First quote\n\n> Separate quote",
+            "│ First quote\n\n│ Separate quote",
+        ),
         ("> Single paragraph\n>\n", "│ Single paragraph"),
     ];
     for mode in [MarkdownSpacingMode::Compact, MarkdownSpacingMode::Document] {
@@ -203,7 +217,10 @@ fn test_blockquote_blank_lines_keep_continuous_gutters() {
                 let lazy = render_markdown_lazy(markdown, None, 0..100);
                 assert_eq!(lazy, full);
                 assert_eq!(lines_to_string(&wrap_lines(full.clone(), 80)), expected);
-                for line in full.iter().filter(|line| line_to_string(line).trim() == "│") {
+                for line in full
+                    .iter()
+                    .filter(|line| line_to_string(line).trim() == "│")
+                {
                     assert_eq!(line.spans[0].style.fg, Some(md_dim_color()));
                     assert_eq!(line.alignment, Some(Alignment::Left));
                 }
@@ -222,7 +239,8 @@ fn test_blockquote_copy_preserves_paragraph_breaks() {
 
 #[test]
 fn test_blockquote_streaming_and_narrow_wrapping_keep_gutters() {
-    let markdown = "> A long opening paragraph with several words.\n>\n> A second paragraph.\n>\n> Thanks";
+    let markdown =
+        "> A long opening paragraph with several words.\n>\n> A second paragraph.\n>\n> Thanks";
     let mut incremental = IncrementalMarkdownRenderer::new(Some(16));
     for end in 1..=markdown.len() {
         let prefix = &markdown[..end];
@@ -390,8 +408,14 @@ fn test_math_in_table_stays_within_constrained_width() {
         .map(line_to_string)
         .collect();
 
-    assert!(rendered.iter().any(|line| line.contains("x+1")), "{rendered:?}");
-    assert!(rendered.iter().any(|line| line.contains("α₂")), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|line| line.contains("x+1")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains("α₂")),
+        "{rendered:?}"
+    );
     assert!(
         rendered.iter().map(|line| line.width()).max().unwrap_or(0) <= 24,
         "table math exceeded width: {rendered:?}"
@@ -407,8 +431,14 @@ fn test_math_in_list_and_blockquote_wraps_without_losing_gutter() {
         .filter(|line| !line.is_empty())
         .collect();
 
-    assert!(rendered.iter().any(|line| line.contains("x+1")), "{rendered:?}");
-    assert!(rendered.iter().any(|line| line.contains("α₂")), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|line| line.contains("x+1")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains("α₂")),
+        "{rendered:?}"
+    );
     assert!(
         rendered.iter().any(|line| line.starts_with("│ ")),
         "blockquote gutter was not preserved: {rendered:?}"
@@ -475,7 +505,9 @@ fn test_mermaid_block_detection() {
     // source code instead of becoming a half-block image or a text stub.
     let md = "```mermaid\nflowchart LR\n    A --> B\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+        })
     });
     let text: String = lines
         .iter()
@@ -504,8 +536,10 @@ fn test_mermaid_block_detection() {
 fn lazy_mermaid_without_native_protocol_also_renders_source() {
     let md = "```mermaid\nflowchart TD\n    Start --> Finish\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            render_markdown_lazy(md, Some(80), 0..usize::MAX)
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                render_markdown_lazy(md, Some(80), 0..usize::MAX)
+            })
         })
     });
     let text = lines_to_string(&lines);
@@ -522,8 +556,10 @@ fn lazy_mermaid_without_native_protocol_also_renders_source() {
 fn streaming_mermaid_without_native_protocol_keeps_source_visible() {
     let md = "```mermaid\nflowchart TD\n    Stream --> Source\n```";
     let lines = with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            with_streaming_render_context(|| render_markdown_with_width(md, Some(80)))
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                with_streaming_render_context(|| render_markdown_with_width(md, Some(80)))
+            })
         })
     });
     let text = lines_to_string(&lines);
@@ -541,11 +577,22 @@ fn streaming_mermaid_without_native_protocol_keeps_source_visible() {
 #[test]
 fn mermaid_gate_accepts_native_protocol_and_rejects_halfblock_fallback() {
     with_mermaid_rendering_override(Some(true), || {
-        mermaid::with_image_protocol_override(Some(false), || {
-            assert!(!should_render_mermaid_block(Some("mermaid")));
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                assert!(!should_render_mermaid_block(Some("mermaid")));
+            });
         });
-        mermaid::with_image_protocol_override(Some(true), || {
-            assert!(should_render_mermaid_block(Some("mermaid")));
+        mermaid::with_herdr_webui_override(Some(false), || {
+            mermaid::with_image_protocol_override(Some(true), || {
+                assert!(should_render_mermaid_block(Some("mermaid")));
+            });
+        });
+        // The webui pane is the exception: Halfblocks text art there is
+        // exactly what the browser terminal can draw.
+        mermaid::with_herdr_webui_override(Some(true), || {
+            mermaid::with_image_protocol_override(Some(false), || {
+                assert!(should_render_mermaid_block(Some("mermaid")));
+            });
         });
     });
 }
@@ -646,7 +693,8 @@ fn test_link_strike_and_image_render() {
 
 #[test]
 fn native_search_source_links_render_in_full_and_lazy_paths() {
-    let markdown = "许可 🦀. [macOS license](<https://www.apple.com/legal/sla/docs/macOSTahoe.pdf>)";
+    let markdown =
+        "许可 🦀. [macOS license](<https://www.apple.com/legal/sla/docs/macOSTahoe.pdf>)";
     let expected = "许可 🦀. macOS license";
     for lines in [
         render_markdown_with_width(markdown, Some(120)),
