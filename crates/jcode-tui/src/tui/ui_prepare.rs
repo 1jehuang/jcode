@@ -1026,6 +1026,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
 
     drop(cache);
 
+    if let Some((base, _, _)) = incremental_base.as_ref() {
+        super::release_frame_refs_to_body(base);
+    }
+
     let build_start = Instant::now();
     let (prepared, build_path) = match incremental_base {
         Some((prev, prev_count, prev_prompt_offset)) => {
@@ -2734,21 +2738,24 @@ fn wrap_lines_with_map(
 mod tests;
 
 #[cfg(test)]
-static ENABLE_PREP_CACHE_IN_TESTS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    // Thread-local so a probe that opts into the caches does not make tests
+    // running in parallel share (and clobber) its cache entries and metrics.
+    static ENABLE_PREP_CACHE_IN_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Tests bypass the prep caches by default for determinism. Perf probes opt in
 /// so they measure the production cached path.
 #[cfg(test)]
 pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
-    ENABLE_PREP_CACHE_IN_TESTS.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.set(enabled));
 }
 
 #[inline]
 fn prep_cache_bypassed() -> bool {
     #[cfg(test)]
     {
-        !ENABLE_PREP_CACHE_IN_TESTS.load(std::sync::atomic::Ordering::SeqCst)
+        !ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.get())
     }
     #[cfg(not(test))]
     {
