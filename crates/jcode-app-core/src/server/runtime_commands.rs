@@ -78,6 +78,7 @@ pub(super) async fn execute(
                         tool_call_id: crate::id::new_id("call"),
                         working_dir: agent.working_dir().map(std::path::PathBuf::from),
                         stdin_request_tx: None,
+                        decision_request_tx: None,
                         graceful_shutdown_signal: None,
                         execution_mode: crate::tool::ToolExecutionMode::Direct,
                     },

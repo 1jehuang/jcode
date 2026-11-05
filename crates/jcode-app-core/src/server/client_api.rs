@@ -86,6 +86,9 @@ impl Client {
             supports_user_response: false,
             supports_server_failover: false,
             supports_turn_identity: false,
+            // This programmatic client has no interactive chooser: never
+            // opt in, so ask_user degrades to plain-text asking.
+            supports_decisions: false,
             id,
             working_dir: Some(working_dir),
             selfdev,
