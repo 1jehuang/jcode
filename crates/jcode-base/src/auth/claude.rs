@@ -530,7 +530,7 @@ mod replacement;
 pub use replacement::replace_account_if_unchanged;
 #[cfg(test)]
 use replacement::replace_saved_login;
-pub(in crate::auth) use replacement::{capture_refresh_account, commit_refresh_account};
+pub(in crate::auth) use replacement::{capture_refresh_account, commit_captured_refresh};
 
 #[cfg(test)]
 #[path = "claude_replacement_tests.rs"]

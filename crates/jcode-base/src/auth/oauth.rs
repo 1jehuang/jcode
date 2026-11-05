@@ -1002,7 +1002,7 @@ async fn refresh_claude_tokens_inner(refresh_token: &str, label: &str) -> Result
         scopes,
     };
 
-    claude_auth::commit_refresh_account(&expected, &oauth_tokens)?;
+    claude_auth::commit_captured_refresh(label, expected.as_ref(), &oauth_tokens)?;
 
     Ok(oauth_tokens)
 }
