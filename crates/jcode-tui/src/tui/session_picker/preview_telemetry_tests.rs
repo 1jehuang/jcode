@@ -27,6 +27,9 @@ fn fixture() -> (Session, SessionTelemetry) {
             seven_day_ratio: Some(0.5),
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         }),
         ..Default::default()
     };

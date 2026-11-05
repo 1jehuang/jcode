@@ -75,6 +75,9 @@ pub fn save_context(
                         seven_day_ratio: usage.seven_day_ratio,
                         resets_at: usage.resets_at,
                         error: usage.error,
+                        banked_resets: None,
+                        banked_expires_at: None,
+                        banked_next_at: None,
                     })
             })
     } else {

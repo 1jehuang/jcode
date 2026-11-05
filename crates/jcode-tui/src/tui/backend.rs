@@ -504,6 +504,7 @@ impl RemoteConnection {
             // `session_account_changed`.
             account_pins,
             supports_session_accounts,
+            client_name: None,
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
@@ -887,6 +888,7 @@ impl RemoteConnection {
             client_instance_id: self.client_instance_id.clone(),
             client_has_local_history: false,
             allow_session_takeover: false,
+            client_name: None,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;

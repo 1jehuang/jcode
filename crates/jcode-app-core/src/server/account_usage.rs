@@ -99,13 +99,35 @@ async fn fetch() -> Snapshot {
     Snapshot {
         anthropic: anthropic
             .into_iter()
-            .map(|value| wire_snapshot(value, true))
+            .map(|value| {
+                with_banked(
+                    wire_snapshot(value, true),
+                    MultiAccountProviderKind::Anthropic,
+                )
+            })
             .collect(),
         openai: openai
             .into_iter()
-            .map(|value| wire_snapshot(value, false))
+            .map(|value| {
+                with_banked(
+                    wire_snapshot(value, false),
+                    MultiAccountProviderKind::OpenAI,
+                )
+            })
             .collect(),
     }
+}
+
+fn with_banked(
+    mut snapshot: AccountUsageSnapshot,
+    provider: crate::usage::MultiAccountProviderKind,
+) -> AccountUsageSnapshot {
+    if let Some(banked) = crate::usage::cached_account_banked_resets(provider, &snapshot.label) {
+        snapshot.banked_resets = Some(banked.available);
+        snapshot.banked_expires_at = banked.expires_at;
+        snapshot.banked_next_at = banked.next_available_at;
+    }
+    snapshot
 }
 
 fn wire_snapshot(
@@ -143,6 +165,9 @@ fn wire_snapshot(
         resets_at: value.resets_at,
         // Raw endpoint failures can contain request diagnostics. Only send a safe status.
         error,
+        banked_resets: None,
+        banked_expires_at: None,
+        banked_next_at: None,
     }
 }
 

@@ -116,6 +116,28 @@ impl RemoteAccounts {
     }
 }
 
+/// Daemon-reported banked resets for one account, when the daemon knows them.
+pub fn remote_account_banked_resets(
+    provider: MultiAccountProviderKind,
+    label: &str,
+) -> Option<super::AccountBankedResets> {
+    let state = REMOTE.get()?.try_lock().ok()?;
+    state.received?;
+    let accounts = match provider {
+        MultiAccountProviderKind::Anthropic => &state.anthropic,
+        MultiAccountProviderKind::OpenAI => &state.openai,
+    };
+    let data = accounts.iter().find(|data| data.label == label.trim())?;
+    if data.banked_resets.is_none() && data.banked_next_at.is_none() {
+        return None;
+    }
+    Some(super::AccountBankedResets {
+        available: data.banked_resets.unwrap_or(0),
+        next_available_at: data.banked_next_at.clone(),
+        expires_at: data.banked_expires_at.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +178,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         });
         assert_eq!(
             state

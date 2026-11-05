@@ -633,6 +633,25 @@ fn attach_session_unknown_target_error_is_correlated_and_clears_pending_attach()
 }
 
 #[test]
+fn subscribe_forwards_hello_client_name() {
+    let mut state = BridgeState::default();
+    state.client_name = Some("jcode-ios/0.3.0".into());
+    let out =
+        state.api_request_to_legacy(&json!({"req": "attach_session", "id": 1, "session_id": "s1"}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["client_name"], "jcode-ios/0.3.0");
+
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(value.get("client_name").is_none());
+}
+
+#[test]
 fn desktop_owned_session_requests_crash_on_disconnect() {
     let mut state = BridgeState::with_crash_on_disconnect(true);
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
@@ -2371,6 +2390,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         reasoning_effort,
         auth_method,
         routes,
+        ..
     } = event
     else {
         panic!("expected runtime info, got {event:?}");
@@ -4020,4 +4040,34 @@ fn context_cap_requests_reply_broadcast_and_validate() {
             ..
         }
     ));
+}
+
+/// The account router's choice reaches remote clients so they can show which
+/// OAuth account a session bills against. A later event that omits the key
+/// keeps the known label, and an explicit null clears it.
+#[test]
+fn account_label_follows_the_daemons_routed_account() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "m",
+        "provider_oauth_account_label": "work",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+    assert!(
+        matches!(state.runtime_info(), ApiEvent::RuntimeInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "model_changed", "id": 99, "model": "m2"}));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    state.note_models(&json!({"provider_oauth_account_label": null}));
+    assert!(state.current_account.is_none());
 }

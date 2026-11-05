@@ -1078,6 +1078,7 @@ impl RawClient {
             terminal_env: Vec::new(),
             account_pins: Vec::new(),
             supports_session_accounts: false,
+            client_name: None,
         })
         .await?;
         self.read_until(

@@ -234,6 +234,9 @@ pub enum Request {
         /// Opt in to per-session account events (`session_account_changed`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_session_accounts: bool,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Declare that this client is intentionally detaching before its transport
@@ -295,6 +298,9 @@ pub enum Request {
         client_has_local_history: bool,
         #[serde(default)]
         allow_session_takeover: bool,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Resume/continue every live session that was interrupted and would
