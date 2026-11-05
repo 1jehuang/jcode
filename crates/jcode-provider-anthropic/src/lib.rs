@@ -1176,8 +1176,8 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        // Curated builtins are present under their OAuth names.
-        for builtin in ["Bash", "Read", "Agent", "Write", "Edit", "Glob", "Grep"] {
+        // Builtins are present under their own Jcode names (no Claude Code rename).
+        for builtin in ["bash", "read", "subagent", "write", "edit", "glob", "grep"] {
             assert!(
                 names.contains(&builtin),
                 "missing builtin {builtin} in {names:?}"
@@ -1190,10 +1190,13 @@ mod cache_prefix_invariant_tests {
                 "custom tool {custom} was dropped on OAuth; got {names:?}"
             );
         }
-        // No duplicate Agent/Bash/Read from the registry remap.
-        assert_eq!(names.iter().filter(|n| **n == "Agent").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Bash").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Read").count(), 1);
+        // No duplicates from the registry.
+        assert_eq!(names.iter().filter(|n| **n == "subagent").count(), 1);
+        assert_eq!(names.iter().filter(|n| **n == "bash").count(), 1);
+        assert_eq!(names.iter().filter(|n| **n == "read").count(), 1);
+        for legacy in ["Bash", "Read", "Agent"] {
+            assert!(!names.contains(&legacy), "legacy Claude Code name {legacy} sent");
+        }
     }
 
     #[test]
@@ -1210,13 +1213,13 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        for ghost in ["Agent", "Glob", "Grep", "Skill"] {
+        for ghost in ["Agent", "Glob", "Grep", "Skill", "subagent", "glob", "grep"] {
             assert!(
                 !names.contains(&ghost),
                 "advertised ghost builtin {ghost} without a backing registry tool: {names:?}"
             );
         }
-        for present in ["Bash", "Read", "Write", "Edit", "agentgrep"] {
+        for present in ["bash", "read", "write", "edit", "agentgrep"] {
             assert!(names.contains(&present), "missing {present} in {names:?}");
         }
     }
