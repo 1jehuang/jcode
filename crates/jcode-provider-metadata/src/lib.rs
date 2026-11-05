@@ -527,7 +527,8 @@ mod tests {
         assert_eq!(ACME_PROFILE.default_model, Some("gpt-6-astra"));
         const { assert!(ACME_PROFILE.requires_api_key) };
         assert!(openai_compatible_profiles().contains(&ACME_PROFILE));
-        for input in ["acme", "acme", "Acme", "acme", "astra-jb", " ACME "] {
+        assert_eq!(resolve_login_provider("astra-jb"), None);
+        for input in ["acme", "acme", "Acme", "acme", " ACME "] {
             assert_eq!(resolve_login_provider(input), Some(ACME_LOGIN_PROVIDER));
         }
     }
