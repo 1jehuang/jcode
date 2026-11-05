@@ -513,7 +513,8 @@ jobs:
             'test_menu_number_rejected_as_api_key',
             'test_command_palette_suppressed_while_api_key_prompt_pending',
             'test_ctrl_c_with_active_copy_selection_copies_instead_of_quitting',
-            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through'
+            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through',
+            'windows_edit_and_rewind_preserve_a_protected_file_dacl'
           )
 
           foreach ($testName in $tests) {

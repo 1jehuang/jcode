@@ -89,7 +89,8 @@ jobs:
             'busy_pipe_is_reported_as_a_live_socket_path',
             'stream_pair_round_trips_bytes',
             'split_stream_supports_concurrent_read_and_write',
-            'auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking'
+            'auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking',
+            'windows_edit_and_rewind_preserve_a_protected_file_dacl'
           )
 
           foreach ($testName in $tests) {
