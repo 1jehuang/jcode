@@ -23,6 +23,7 @@ const PROTOCOL: u32 = 1;
 const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CLOUD_WAKE_TIMEOUT: Duration = Duration::from_secs(150);
 const MAX_CONNECTIONS: usize = 32;
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
@@ -318,9 +319,24 @@ struct SshConnection {
 
 impl SshConnection {
     async fn connect(options: &SshOptions) -> Result<Self> {
-        Self::spawn(options.command(), STARTUP_TIMEOUT)
-            .await
-            .with_context(|| format!("connecting native Jcode on {}", options.host))
+        // Jcode Cloud hosts may be asleep: waking the VM and starting the
+        // remote daemon routinely exceeds the plain SSH startup deadline.
+        let cloud = super::cloud_managed::is_managed(&options.host)
+            || super::cloud_ephemeral::host_id(&options.host).is_some();
+        let (deadline, attempts) = if cloud {
+            (CLOUD_WAKE_TIMEOUT, 2)
+        } else {
+            (STARTUP_TIMEOUT, 1)
+        };
+        let mut last = None;
+        for _ in 0..attempts {
+            match Self::spawn(options.command(), deadline).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last = Some(error),
+            }
+        }
+        let error = last.context("native SSH connection attempts produced no result")?;
+        Err(error.context(format!("connecting native Jcode on {}", options.host)))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {

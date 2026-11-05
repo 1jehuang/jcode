@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
+#[path = "commands_cloud_tests/handoff_queue.rs"]
+mod handoff_queue;
 #[test]
 fn parses_explicit_group_selection_without_treating_flags_as_hosts() {
     assert_eq!(
@@ -1160,26 +1162,4 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Cancel)
     );
     assert_eq!(parse_cloud_command("/cloudy"), None);
-}
-
-#[test]
-fn queued_system_reminders_reach_agent_before_handoff() {
-    let mut app = crate::tui::app::tests::create_test_app();
-    let session = super::super::commands::active_session_id(&app);
-    app.hidden_queued_system_messages.push("bg task done".into());
-    handle_cloud_command(&mut app, "/local", &session);
-    assert!(app.pending_cloud_handoff.is_some());
-    // Reminders still dispatch while the handoff waits.
-    assert!(!app.cloud_handoff_blocks_work());
-    assert!(app.poll_cloud_job());
-    assert!(app.pending_queued_dispatch);
-    assert!(app.cloud_job.is_none());
-    assert_eq!(app.hidden_queued_system_messages, vec!["bg task done".to_string()]);
-    assert!(app.pending_cloud_handoff.is_some());
-
-    // Once delivered, the handoff proceeds and blocks new work again.
-    app.pending_queued_dispatch = false;
-    app.hidden_queued_system_messages.clear();
-    assert!(app.cloud_handoff_blocks_work());
-    assert!(app.take_ready_cloud_handoff().is_some());
 }
