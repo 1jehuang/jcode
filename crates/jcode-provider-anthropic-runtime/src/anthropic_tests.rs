@@ -1452,6 +1452,42 @@ async fn explicit_oauth_mode_does_not_silently_fall_back_to_api_key() {
     assert!(error.contains("expired"), "unexpected error: {error}");
 }
 
+#[tokio::test]
+async fn rejected_refresh_preserves_access_until_real_expiry() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    let refresh = "test-permanently-rejected-refresh";
+    jcode_base::auth::refresh_state::record_permanent_rejection("claude", refresh, "invalid_grant")
+        .unwrap();
+    for expired in [false, true] {
+        jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
+            label: "claude-otter".into(),
+            access: "test-live-access".into(),
+            refresh: refresh.into(),
+            expires: chrono::Utc::now().timestamp_millis()
+                + if expired { -60_000 } else { 120_000 },
+            email: None,
+            subscription_type: Some("max".into()),
+            scopes: vec!["user:inference".into()],
+        })
+        .unwrap();
+        let provider = AnthropicProvider::new();
+        let result = provider.get_oauth_access_token().await;
+        if expired {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("previously rejected")
+            );
+        } else {
+            assert_eq!(result.unwrap(), ("test-live-access".into(), true));
+        }
+    }
+}
+
 #[test]
 fn test_anthropic_fable_5_sends_reasoning_fields() {
     // `claude-fable-5` rejected reasoning fields during its preview, but the

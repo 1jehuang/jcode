@@ -57,6 +57,8 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[cfg(test)]
+pub(crate) use frame_metrics::body_last_path_for_tests;
 #[path = "ui_header.rs"]
 pub(crate) mod header;
 #[path = "ui_inline_image.rs"]
@@ -991,30 +993,42 @@ impl BodyCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &BodyCacheKey,
-    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &BodyCacheKey) -> Option<Arc<PreparedMessages>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
     #[cfg(test)]
@@ -1161,6 +1175,7 @@ impl BodyCacheState {
         Some((entry.prepared, msg_count, entry.prompt_offset))
     }
 
+    #[cfg(test)]
     fn insert(
         &mut self,
         key: BodyCacheKey,
@@ -1169,6 +1184,17 @@ impl BodyCacheState {
         prompt_offset: usize,
     ) {
         let prepared_bytes = estimate_prepared_messages_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes, msg_count, prompt_offset);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: BodyCacheKey,
+        prepared: Arc<PreparedMessages>,
+        prepared_bytes: usize,
+        msg_count: usize,
+        prompt_offset: usize,
+    ) {
         if prepared_bytes > BODY_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries
@@ -1287,34 +1313,56 @@ impl FullPrepCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &FullPrepCacheKey,
-    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &FullPrepCacheKey) -> Option<Arc<PreparedChatFrame>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
+    #[cfg(test)]
     fn insert(&mut self, key: FullPrepCacheKey, prepared: Arc<PreparedChatFrame>) {
         let prepared_bytes = estimate_prepared_chat_frame_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: FullPrepCacheKey,
+        prepared: Arc<PreparedChatFrame>,
+        prepared_bytes: usize,
+    ) {
         if prepared_bytes > FULL_PREP_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries

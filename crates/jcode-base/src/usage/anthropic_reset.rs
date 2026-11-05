@@ -408,6 +408,9 @@ async fn consume_with_client(
 /// reset. Only local state changes, so this is safe to repeat.
 pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
     super::cache::invalidate_anthropic_usage_after_reset(account_label);
+    if let Some(label) = account_label {
+        super::banked::record_anthropic_offer(label, None);
+    }
     crate::provider::clear_claude_provider_unavailability_for_account_label(account_label);
 }
 
