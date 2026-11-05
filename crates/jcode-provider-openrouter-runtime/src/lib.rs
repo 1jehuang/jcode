@@ -55,7 +55,6 @@ use tokio_stream::wrappers::ReceiverStream;
 mod catalog_fetch;
 use catalog_fetch::fetch_models_from_api;
 
-mod astra_jb;
 mod openai_compatible_runtime;
 
 mod request_headers;

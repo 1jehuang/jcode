@@ -527,7 +527,8 @@ mod tests {
         assert_eq!(A6API_PROFILE.default_model, Some("gpt-6-astra"));
         const { assert!(A6API_PROFILE.requires_api_key) };
         assert!(openai_compatible_profiles().contains(&A6API_PROFILE));
-        for input in ["a6api", "a6 api", "A6 API", "a6", "astra-jb", " A6API "] {
+        assert_eq!(resolve_login_provider("astra-jb"), None);
+        for input in ["a6api", "a6 api", "A6 API", "a6", " A6API "] {
             assert_eq!(resolve_login_provider(input), Some(A6API_LOGIN_PROVIDER));
         }
     }

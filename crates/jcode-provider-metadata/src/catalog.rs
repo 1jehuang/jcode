@@ -511,13 +511,7 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
-// A6 API (https://a6api.com) — OpenAI-compatible marketplace exchange serving
-// `gpt-6-astra` through merchant pools. This is the astra-jb profile: astra
-// models on this line run with the vision-OCR laundering chain applied by
-// default (see `jcode-provider-openrouter-runtime/src/astra_jb.rs`), so typed
-// prompts ride the vision path as scanned-page images instead of the filtered
-// text-input path. The normal OpenAI provider's `gpt-6-astra` catalog entry is
-// untouched; this profile exists in parallel.
+// A6 API (https://a6api.com) — OpenAI-compatible marketplace exchange.
 pub const A6API_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "a6api",
     display_name: "A6 API",
@@ -919,8 +913,8 @@ pub const A6API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescripto
     auth_kind: LoginProviderAuthKind::ApiKey,
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "API key",
-    aliases: &["a6", "a6 api", "astra-jb"],
-    menu_detail: "API key, astra models with astra-jb laundering on",
+    aliases: &["a6", "a6 api"],
+    menu_detail: "API key",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(A6API_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(41), Some(41), Some(41), Some(41), Some(41)),

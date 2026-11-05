@@ -26,7 +26,7 @@
     "crates/jcode-harness-api-server/src/translate_tests.rs": 4023,
     "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 3010,
     "crates/jcode-provider-copilot-runtime/src/copilot_tests.rs": 1300,
-    "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 3839,
+    "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 3745,
     "crates/jcode-sdk/tests/client_behavior.rs": 1239,
     "crates/jcode-telemetry-core/src/tests.rs": 1836,
     "crates/jcode-tui/src/tui/app/commands_cloud_tests.rs": 1210,
