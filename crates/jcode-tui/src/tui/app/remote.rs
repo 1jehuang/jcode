@@ -1368,6 +1368,16 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
     }
 }
 
+/// Restore skill arguments deferred with a queued prompt, but never over a
+/// later explicit skill selection (a bare `/skill` entered while the switch was
+/// in flight sets empty arguments that stale ones must not replace).
+pub(super) fn restore_deferred_skill_arguments(app: &mut App) {
+    let deferred = app.pending_skill_arguments_after_model_switch.take();
+    if app.pending_skill_arguments.is_none() {
+        app.pending_skill_arguments = deferred;
+    }
+}
+
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     if app
         .remote_queue_retry_not_before
@@ -1467,6 +1477,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         && !app.is_processing
         && let Some(prepared) = app.pending_prompt_after_model_switch.take()
     {
+        restore_deferred_skill_arguments(app);
         if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to submit prompt after model switch: {}",

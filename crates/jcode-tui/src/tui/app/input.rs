@@ -4008,7 +4008,15 @@ impl App {
                 if !self.is_remote {
                     self.append_turn_system_reminder(Some(format!(
                         "# Active Skill\n\n{}",
-                        skill.get_prompt().trim()
+                        skill
+                            .render_prompt(
+                                trailing_prompt.as_deref().unwrap_or_default(),
+                                self.session
+                                    .working_dir
+                                    .as_deref()
+                                    .map(std::path::Path::new),
+                            )
+                            .trim()
                     )));
                 }
                 self.push_display_message(DisplayMessage {
@@ -4022,6 +4030,11 @@ impl App {
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
                 } else {
+                    // A bare invocation sends explicitly empty arguments so
+                    // the previous invocation's values are not kept.
+                    if self.is_remote {
+                        self.pending_skill_arguments = Some(String::new());
+                    }
                     return;
                 }
             } else {

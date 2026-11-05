@@ -142,7 +142,7 @@ impl Agent {
         }
 
         // The active skill prompt is announced once in the transcript when the
-        // skill is activated (see `announce_active_skill`). Keeping it out of
+        // skill is activated (see `announce_active_skill_with`). Keeping it out of
         // the system prompt means switching skills never invalidates the cache.
         let skill_prompt: Option<String> = None;
 

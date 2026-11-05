@@ -965,6 +965,8 @@ pub struct App {
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,
     active_skill: Option<String>,
+    /// Words typed after `/skill`, delivered with the next remote message.
+    pending_skill_arguments: Option<String>,
     is_processing: bool,
     // Live streaming/turn progress (text, per-turn tokens, TPS tracking).
     streaming: StreamingProgress,
@@ -1608,6 +1610,9 @@ pub struct App {
     // the model switch and use stale provider/model state.
     remote_model_switch_in_flight: bool,
     pending_prompt_after_model_switch: Option<input::PreparedInput>,
+    // Skill arguments belonging to `pending_prompt_after_model_switch`; they
+    // are replaced together with the prompt so stale values never leak.
+    pending_skill_arguments_after_model_switch: Option<String>,
     // A manually submitted prompt that arrived before the remote session's
     // bootstrap History payload was applied. Submitting in that window is racy:
     // the locally-echoed user message is wiped by the `session_changed`
