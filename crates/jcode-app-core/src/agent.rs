@@ -24,7 +24,7 @@ mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
 pub(crate) use turn_ownership::{
-    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin, TurnReleaseSignal,
 };
 mod turn_streaming_mpsc;
 mod utils;
@@ -403,6 +403,13 @@ impl Agent {
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
         self.turn_ownership.claim()
+    }
+
+    /// A signal that resolves once the current server turn releases its lease.
+    /// Grab it under the agent lock, then await it without the lock held, so a
+    /// just-cancelled resume can drop its lease before a replacement claims.
+    pub(crate) fn turn_release_signal(&self) -> TurnReleaseSignal {
+        self.turn_ownership.release_signal()
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
