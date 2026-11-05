@@ -241,6 +241,45 @@ async fn model_catalog_is_scoped_to_instance_environment_even_with_the_same_home
         vec!["claude-future-work-2099"]
     );
     assert_eq!(fake.launches().len(), 2);
+
+    // Routes come from each instance's own catalog, not the active one's.
+    let routes_for = |method: &str| -> Vec<String> {
+        provider
+            .model_routes()
+            .into_iter()
+            .filter(|route| route.api_method == method)
+            .map(|route| route.model)
+            .collect()
+    };
+    assert_eq!(routes_for("claude-code"), vec!["claude-future-work-2099"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-future-personal-2099"]
+    );
+    let catalog = |id: &str, model: &str| {
+        let body = json!({"subtype": "success", "response": {
+            "models": [{"value": "next", "resolvedModel": model}]
+        }});
+        std::fs::write(fake.root.join(format!("{id}.json")), body.to_string()).unwrap();
+    };
+    // Forced refresh while pinned to `personal` still re-probes `work`.
+    catalog("work", "claude-next-work-2100");
+    catalog("personal", "claude-next-personal-2100");
+    provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(routes_for("claude-code"), vec!["claude-next-work-2100"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-next-personal-2100"]
+    );
+    // Another instance failing keeps its last good routes.
+    std::fs::write(fake.root.join("work.json"), "{").unwrap();
+    catalog("personal", "claude-last-personal-2101");
+    provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(routes_for("claude-code"), vec!["claude-next-work-2100"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-last-personal-2101"]
+    );
 }
 
 fn tools() -> Vec<ToolDefinition> {

@@ -34,7 +34,8 @@ use async_trait::async_trait;
 use jcode_message_types::{Message, ToolDefinition};
 use jcode_provider_core::{
     AccountPin, AccountPinSlot, AccountProviderKind, EventStream, ModelCatalogRefreshSummary,
-    NativeToolResult, NativeToolResultSender, Provider, summarize_model_catalog_refresh,
+    ModelRoute, NativeToolResult, NativeToolResultSender, Provider,
+    summarize_model_catalog_refresh,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -321,6 +322,54 @@ impl ClaudeCodeProvider {
         if changed {
             jcode_base::bus::Bus::global().publish_models_updated();
         }
+    }
+
+    /// This instance's discovered models, else the offline fallback list.
+    fn models_for(&self, instance: &ClaudeCodeInstance) -> Vec<String> {
+        self.model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(key, _, _)| key == instance)
+            .map(|(_, _, models)| models.clone())
+            .unwrap_or_else(|| FALLBACK_MODELS.iter().map(|m| m.to_string()).collect())
+    }
+
+    /// Probe every instance whose catalog is stale (all of them when `force`).
+    /// Only the active instance's failure is an error; another instance that
+    /// fails keeps its last good catalog, so its routes are not lost.
+    async fn discover_models(&self, force: bool) -> Result<()> {
+        let active = self.active_instance();
+        for instance in self.instances() {
+            let fresh = self
+                .model_catalogs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|(key, at, _)| key == &instance && at.elapsed() < PROBE_CACHE_TTL);
+            if fresh && !force {
+                continue;
+            }
+            let result = self
+                .probe_identity_inner(&instance, force)
+                .await
+                .and_then(|identity| {
+                    anyhow::ensure!(
+                        !identity.models.is_empty(),
+                        "Claude Code returned no discoverable models"
+                    );
+                    Ok(())
+                });
+            match result {
+                Err(error) if instance == active => return Err(error),
+                Err(error) => jcode_base::logging::warn(&format!(
+                    "Claude Code model discovery failed for instance '{}': {error:#}",
+                    instance.id
+                )),
+                Ok(()) => {}
+            }
+        }
+        Ok(())
     }
 
     fn login_hint(&self, instance: &ClaudeCodeInstance) -> String {
@@ -613,19 +662,17 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let instance = self.active_instance();
-        self.model_catalogs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .find(|(key, _, _)| key == &instance)
-            .map(|(_, _, models)| models.clone())
-            .unwrap_or_else(|| {
-                FALLBACK_MODELS
-                    .iter()
-                    .map(|model| model.to_string())
-                    .collect()
-            })
+        self.models_for(&self.active_instance())
+    }
+
+    fn model_routes(&self) -> Vec<ModelRoute> {
+        jcode_base::provider::claude_code_routes_for(&self.settings(), |instance| {
+            self.models_for(instance)
+                .into_iter()
+                .map(|model| settings::normalize_model_id(&model))
+                .filter(|model| !model.is_empty())
+                .collect()
+        })
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
@@ -633,32 +680,13 @@ impl Provider for ClaudeCodeProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let instance = self.active_instance();
-        if self
-            .model_catalogs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .any(|(key, at, _)| key == &instance && at.elapsed() < PROBE_CACHE_TTL)
-        {
-            return Ok(());
-        }
-        let identity = self.probe_identity(&instance).await?;
-        if identity.models.is_empty() {
-            bail!("Claude Code returned no discoverable models");
-        }
-        Ok(())
+        self.discover_models(false).await
     }
 
     async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
         let before_models = self.available_models_display();
         let before_routes = self.model_routes();
-        let identity = self
-            .probe_identity_inner(&self.active_instance(), true)
-            .await?;
-        if identity.models.is_empty() {
-            bail!("Claude Code returned no discoverable models");
-        }
+        self.discover_models(true).await?;
         Ok(summarize_model_catalog_refresh(
             before_models,
             self.available_models_display(),
