@@ -18,6 +18,13 @@ pub(crate) fn render_usage_message(
     let boxed = box_width >= 10;
     let content_width = if boxed { box_width - 4 } else { width };
     let raw_lines: Vec<_> = msg.content.lines().collect();
+    // Gauge rows share one label column per card so bars line up.
+    let gauge_label_width = raw_lines
+        .iter()
+        .filter_map(|raw| parse_gauge_row(raw))
+        .map(|(label, _, _)| label.width())
+        .max()
+        .unwrap_or(0);
     let mut content: Vec<_> = raw_lines
         .iter()
         .enumerate()
@@ -33,6 +40,8 @@ pub(crate) fn render_usage_message(
                     "  ──────",
                     Style::default().fg(dim_color()),
                 ))]
+            } else if let Some(lines) = usage_card_row(raw, content_width, gauge_label_width) {
+                lines
             } else {
                 usage_report_lines(raw, content_width)
             }
@@ -52,6 +61,65 @@ pub(crate) fn render_usage_message(
         content[0].spans.push(Span::raw(" ".repeat(padding)));
     }
     render_rounded_box(title, content, box_width, border_style)
+}
+
+fn parse_gauge_row(raw: &str) -> Option<(&str, f32, &str)> {
+    let mut parts = raw.strip_prefix("= ")?.splitn(3, '\t');
+    let label = parts.next()?;
+    let percent = parts.next()?.trim_end_matches('%').parse::<f32>().ok()?;
+    Some((label, percent, parts.next().unwrap_or("")))
+}
+
+/// Render the per-provider card rows: `*level\tstatus` and gauge rows.
+/// Returns None for other rows so they keep the shared report styling.
+fn usage_card_row(raw: &str, width: usize, label_width: usize) -> Option<Vec<Line<'static>>> {
+    use crate::tui::info_widget::{render_labeled_bar_with_label_width, usage_limit_color};
+    if let Some(rest) = raw.strip_prefix('*') {
+        let (level, status) = rest.split_once('\t')?;
+        let color = match level {
+            "ok" => usage_limit_color(100),
+            "warn" => usage_limit_color(50),
+            "crit" => usage_limit_color(0),
+            _ => dim_color(),
+        };
+        return Some(vec![Line::from(vec![
+            Span::styled("● ", Style::default().fg(color)),
+            Span::styled(status.to_owned(), Style::default().fg(color).bold()),
+        ])]);
+    }
+    let (label, percent, reset) = parse_gauge_row(raw)?;
+    let used = percent.round().clamp(0.0, 100.0) as u8;
+    let reset = (!reset.is_empty()).then_some(reset);
+    let display_used = crate::config::config().display.usage_display_used();
+    // Indent under the status dot, then a two-cell gap after the label.
+    let column = label_width + 2;
+    let gauge_width = width.saturating_sub(2);
+    // Keep at least a short bar. Narrow cards move the label above the bar.
+    let inline = column + 4 + " 100% used".len() <= gauge_width;
+    let mut lines = Vec::new();
+    let bar = |label: &str, column: usize| {
+        let mut line = render_labeled_bar_with_label_width(
+            label,
+            column,
+            used,
+            100 - used,
+            reset,
+            u16::try_from(gauge_width).unwrap_or(u16::MAX),
+            display_used,
+        );
+        line.spans.insert(0, Span::raw("  "));
+        line
+    };
+    if inline {
+        lines.push(bar(label, column));
+    } else {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(rgb(140, 140, 150))),
+        ]));
+        lines.push(bar("", 0));
+    }
+    Some(lines)
 }
 
 pub(crate) fn usage_report_lines(raw: &str, width: usize) -> Vec<Line<'static>> {

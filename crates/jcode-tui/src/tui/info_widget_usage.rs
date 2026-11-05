@@ -317,13 +317,40 @@ pub(crate) fn render_labeled_bar(
     width: u16,
     usage_display_used: bool,
 ) -> Line<'static> {
-    let color = if left_pct <= 20 {
+    render_labeled_bar_with_label_width(
+        label,
+        LABEL_WIDTH,
+        used_pct,
+        left_pct,
+        reset_time,
+        width,
+        usage_display_used,
+    )
+}
+
+/// Color for a limit with `left_pct` remaining, shared by every usage bar.
+pub(crate) fn limit_color(left_pct: u8) -> Color {
+    if left_pct <= 20 {
         rgb(255, 100, 100)
     } else if left_pct <= 50 {
         rgb(255, 200, 100)
     } else {
         rgb(100, 200, 100)
-    };
+    }
+}
+
+/// `render_labeled_bar` with a caller-chosen label column, so cards with
+/// longer window names ("5-hour window") can align without truncating.
+pub(crate) fn render_labeled_bar_with_label_width(
+    label: &str,
+    label_column: usize,
+    used_pct: u8,
+    left_pct: u8,
+    reset_time: Option<&str>,
+    width: u16,
+    usage_display_used: bool,
+) -> Line<'static> {
+    let color = limit_color(left_pct);
 
     const MIN_BAR_WIDTH: usize = 4;
 
@@ -342,7 +369,7 @@ pub(crate) fn render_labeled_bar(
     // reset countdown before sacrificing the bar. Exhausted wording is unchanged.
     let suffix = match reset_time {
         Some(_) if left_pct > 0 => {
-            let budget = usize::from(width).saturating_sub(LABEL_WIDTH + MIN_BAR_WIDTH);
+            let budget = usize::from(width).saturating_sub(label_column + MIN_BAR_WIDTH);
             if UnicodeWidthStr::width(full_suffix.as_str()) <= budget {
                 full_suffix
             } else {
@@ -352,7 +379,7 @@ pub(crate) fn render_labeled_bar(
         _ => full_suffix,
     };
     let suffix_width = UnicodeWidthStr::width(suffix.as_str());
-    let label_width = LABEL_WIDTH.min(usize::from(width).saturating_sub(suffix_width));
+    let label_width = label_column.min(usize::from(width).saturating_sub(suffix_width));
     let bar_width = usize::from(width)
         .saturating_sub(label_width + suffix_width)
         .min(12);
@@ -363,8 +390,20 @@ pub(crate) fn render_labeled_bar(
     let bar_filled = "▰".repeat(filled);
     let bar_empty = "▱".repeat(empty);
 
-    let visible_label: String = label.chars().take(label_width).collect();
-    let padded_label = format!("{visible_label:<label_width$}");
+    let mut visible_label = String::new();
+    let mut visible_cells = 0;
+    for ch in label.chars() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible_cells + cells > label_width {
+            break;
+        }
+        visible_label.push(ch);
+        visible_cells += cells;
+    }
+    let padded_label = format!(
+        "{visible_label}{}",
+        " ".repeat(label_width.saturating_sub(visible_cells))
+    );
 
     Line::from(vec![
         Span::styled(padded_label, Style::default().fg(rgb(140, 140, 150))),

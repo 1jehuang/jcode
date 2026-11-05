@@ -282,6 +282,44 @@ fn test_usage_report_shows_no_connected_providers_when_results_empty() {
 }
 
 #[test]
+fn test_usage_provider_command_shows_only_that_provider() {
+    let mut app = create_test_app();
+    assert!(super::commands::handle_usage_command(&mut app, "/usage claude"));
+    let report = |name: &str| crate::usage::ProviderUsage {
+        provider_name: name.to_string(),
+        ..Default::default()
+    };
+    app.handle_usage_report(vec![report("Anthropic (Claude)"), report("OpenAI (ChatGPT)")]);
+    let cards: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "usage")
+        .collect();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].title.as_deref(), Some("Anthropic (Claude)"));
+
+    assert!(super::commands::handle_usage_command(&mut app, "/usage nope"));
+    app.handle_usage_report(vec![report("Anthropic (Claude)")]);
+    let msg = app.display_messages().last().unwrap();
+    assert_eq!(msg.title.as_deref(), Some("Usage · nope"));
+    assert!(msg.content.contains("No connected provider matches \"nope\""));
+
+    // Plain /usage shows one card per provider, refreshed in place.
+    assert!(super::commands::handle_usage_command(&mut app, "/usage"));
+    for _ in 0..2 {
+        app.handle_usage_report(vec![report("Anthropic (Claude)"), report("OpenAI (ChatGPT)")]);
+    }
+    let titles: Vec<_> = app
+        .display_messages()
+        .iter()
+        .rev()
+        .take_while(|m| m.role == "usage")
+        .filter_map(|m| m.title.clone())
+        .collect();
+    assert_eq!(titles, ["OpenAI (ChatGPT)", "Anthropic (Claude)"]);
+}
+
+#[test]
 fn test_usage_command_requests_usage_report_with_inline_view() {
     let mut app = create_test_app();
 

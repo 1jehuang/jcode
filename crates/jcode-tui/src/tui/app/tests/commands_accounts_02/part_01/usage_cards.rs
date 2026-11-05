@@ -104,7 +104,7 @@ fn test_usage_card_responsive_terminal_layout() {
         assert!(text.contains("42%"), "{width} cols:\n{text}");
         let border = text
             .lines()
-            .find(|line| line.contains('╭') && line.contains("Usage"))
+            .find(|line| line.contains('╭') && line.contains("OpenAI (personal)"))
             .unwrap_or_else(|| panic!("missing usage border at {width}:\n{text}"));
         let start = border.find('╭').unwrap();
         let end = border.find('╮').unwrap();
@@ -187,7 +187,7 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(app.usage_overlay.is_none());
     let msg = app.display_messages().last().expect("missing usage card");
     assert_eq!(msg.role, "usage");
-    assert!(msg.content.contains("OpenAI (ChatGPT)"));
+    assert_eq!(msg.title.as_deref(), Some("OpenAI (ChatGPT)"));
     assert!(msg.content.contains("5h"));
     assert!(msg.content.contains("82%"));
     assert!(msg.content.contains("plan: pro"));
@@ -231,8 +231,10 @@ fn test_usage_progress_updates_card_incrementally() {
         app.display_messages()
             .iter()
             .filter(|message| message.role == "usage")
-            .count(),
-        1
+            .filter_map(|message| message.title.as_deref())
+            .collect::<Vec<_>>(),
+        ["Usage", "Anthropic (Claude)"],
+        "refresh status card followed by one card per provider"
     );
     let detail = &app
         .display_messages()
