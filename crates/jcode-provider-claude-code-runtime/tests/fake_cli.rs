@@ -280,6 +280,13 @@ async fn model_catalog_is_scoped_to_instance_environment_even_with_the_same_home
         routes_for("claude-code:personal"),
         vec!["claude-last-personal-2101"]
     );
+    // A signed-out active instance listed first still lets later ones refresh.
+    catalog("personal", "claude-after-failure-2102");
+    assert!(fork.refresh_model_catalog().await.is_err());
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-after-failure-2102"]
+    );
 }
 
 fn tools() -> Vec<ToolDefinition> {

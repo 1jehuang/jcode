@@ -336,10 +336,11 @@ impl ClaudeCodeProvider {
     }
 
     /// Probe every instance whose catalog is stale (all of them when `force`).
-    /// Only the active instance's failure is an error; another instance that
-    /// fails keeps its last good catalog, so its routes are not lost.
+    /// Only the active instance's failure is an error, returned after the
+    /// others are probed; another instance that fails keeps its last good one.
     async fn discover_models(&self, force: bool) -> Result<()> {
         let active = self.active_instance();
+        let mut active_error = None;
         for instance in self.instances() {
             let fresh = self
                 .model_catalogs
@@ -361,7 +362,7 @@ impl ClaudeCodeProvider {
                     Ok(())
                 });
             match result {
-                Err(error) if instance == active => return Err(error),
+                Err(error) if instance == active => active_error = Some(error),
                 Err(error) => jcode_base::logging::warn(&format!(
                     "Claude Code model discovery failed for instance '{}': {error:#}",
                     instance.id
@@ -369,7 +370,7 @@ impl ClaudeCodeProvider {
                 Ok(()) => {}
             }
         }
-        Ok(())
+        active_error.map_or(Ok(()), Err)
     }
 
     fn login_hint(&self, instance: &ClaudeCodeInstance) -> String {
