@@ -397,6 +397,7 @@ pub fn config() -> &'static Config {
     }
 
     let mut reload_reason = None;
+    let mut changed_default_route = None;
     let config = {
         let mut cache = CONFIG_CACHE
             .write()
@@ -417,7 +418,16 @@ pub fn config() -> &'static Config {
                 &cache.fingerprint,
                 &fingerprint,
             ));
-            cache.config = leak_config(Config::load());
+            let next = Config::load();
+            // Direct file edits bypass set_default_model's account-pool sync.
+            // Reconcile only a changed default in the same home, so unrelated
+            // reloads never undo a deliberate pool ordering change.
+            if cache.fingerprint.path == fingerprint.path
+                && cache.config.provider.default_provider != next.provider.default_provider
+            {
+                changed_default_route = next.provider.default_provider.clone();
+            }
+            cache.config = leak_config(next);
             // Loading applies env overrides that can themselves set env vars
             // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
@@ -427,6 +437,15 @@ pub fn config() -> &'static Config {
         }
         cache.config
     };
+
+    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
+    if let Some(route) = changed_default_route
+        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
+    {
+        crate::logging::error(&format!(
+            "Could not sync account order after config edit: {error}"
+        ));
+    }
 
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
@@ -749,6 +768,9 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+    /// Send mobile push notifications through the Jcode API when an account
+    /// key is available. `None` means enabled; set `false` to opt out.
+    pub mobile_push: Option<bool>,
 }
 
 /// Agent Client Protocol adapter configuration.
@@ -810,6 +832,8 @@ impl McpToolsMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolConfig {
+    /// Opt into Jev browser handoff. Direct browser actions remain available.
+    pub browser_handoff: bool,
     /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
     pub auto_background_timeout_ms: u64,
     /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
@@ -841,6 +865,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            browser_handoff: false,
             auto_background_timeout_ms: 3_000,
             profile: String::new(),
             enabled: Vec::new(),
@@ -1025,18 +1050,8 @@ mod color_tests;
 /// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.
 ///
-/// Discovery originally shipped opt-in with `enabled = false`, and because
-/// config saves serialize the whole struct, any save during that window froze
-/// the old default into the user's file and permanently disabled discovery even
-/// after the default flipped. Omitting default sections prevents a repeat.
+/// Explicit opt-ins must be serialized so unrelated preference saves cannot
+/// silently disable discovery on the next load.
 fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
-    sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
-}
-
-/// Endpoints used by shipped defaults. These may also be explicit user choices.
-fn is_default_discovery_endpoint(endpoint: &str) -> bool {
-    matches!(
-        endpoint.trim_end_matches('/'),
-        "https://api.jcode.sh/v1/discovery" | "https://api.solosystems.dev/v1/discovery"
-    )
+    !sponsors.enabled && sponsors.endpoint == SponsorsConfig::default().endpoint
 }

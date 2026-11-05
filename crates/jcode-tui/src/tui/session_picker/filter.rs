@@ -1,14 +1,71 @@
-use super::loading::session_matches_picker_query;
 use super::*;
+
+#[derive(Default)]
+pub(super) struct SearchSelection {
+    query: String,
+    follow_until: Option<std::time::Instant>,
+}
+
+impl SearchSelection {
+    fn update_query(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        if self.query != query {
+            self.follow_until = (!query.is_empty())
+                .then(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
+            self.query = query;
+        }
+    }
+
+    pub(super) fn following(&self) -> bool {
+        self.follow_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.follow_until = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire_for_test(&mut self) {
+        self.follow_until = Some(std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod search_selection_tests {
+    use super::*;
+
+    #[test]
+    fn follows_for_one_second_without_extending_on_rebuild() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(selection.following());
+        let deadline = selection.follow_until.unwrap();
+        selection.update_query("needle");
+        assert_eq!(selection.follow_until, Some(deadline));
+        selection.follow_until = Some(std::time::Instant::now());
+        assert!(!selection.following());
+        selection.update_query("needle");
+        assert!(
+            !selection.following(),
+            "same query must not restart an expired window"
+        );
+        selection.update_query("another query");
+        assert!(selection.following());
+        selection.stop();
+        selection.update_query("another query");
+        assert!(
+            !selection.following(),
+            "refresh must not undo a manual override"
+        );
+        selection.update_query("");
+        assert!(!selection.following());
+    }
+}
 
 impl SessionPicker {
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
-    }
-
-    /// Check if a session matches the current search query.
-    fn session_matches_search(session: &SessionInfo, query: &str) -> bool {
-        session_matches_picker_query(session, query)
     }
 
     fn all_session_refs(&self) -> Vec<SessionRef> {
@@ -50,17 +107,21 @@ impl SessionPicker {
             return self.all_session_refs();
         }
 
-        // Fuzzy matches are not monotonic: adding a character can increase the
-        // error budget or turn a short literal query into a typo-tolerant one.
-        // Reconsider every session rather than narrowing the previous results.
+        // Keep literal matches immediate. Expensive typo-tolerant matching is
+        // scheduled immediately on the worker alongside transcript search,
+        // never on the UI thread. Reconsider all sessions for new worker results.
         let candidates = self.all_session_refs();
-        let fuzzy = jcode_fuzzy::PreparedTokenQuery::new(&normalized);
+        let tokens = loading::search_query_tokens(&normalized);
 
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    fuzzy.matches_search_text(&session.search_index)
+                    identity_search::rank(session, &tokens).0
+                        || (!self.transcript_search.defers_metadata()
+                            && tokens
+                                .iter()
+                                .all(|token| session.search_index.contains(token)))
                         || self.transcript_search.contains(&session.id)
                 })
             })
@@ -116,14 +177,41 @@ impl SessionPicker {
                 .unwrap_or_default();
             b.cmp(&a)
         });
-        // Preserve recency within each tier, but literal matches should not
-        // be buried beneath newer sessions matching only through a typo.
+        // Cache once per candidate, never run matching from the comparator.
+        // Stable sorting keeps recency as the deterministic final tie-break.
         if !self.search_query.trim().is_empty() {
+            let normalized = Self::normalized_search_query(&self.search_query);
+            let tokens = loading::search_query_tokens(&normalized);
             filtered.sort_by_cached_key(|session_ref| {
-                !self.session_by_ref(*session_ref).is_some_and(|session| {
-                    Self::session_matches_search(session, &self.search_query)
-                        || self.transcript_search.contains(&session.id)
-                })
+                std::cmp::Reverse(self.session_by_ref(*session_ref).map(|session| {
+                    let rank = if self.transcript_search.contains(&session.id) {
+                        self.transcript_search.rank(&session.id)
+                    } else if self.transcript_search.defers_metadata() {
+                        transcript_search::SearchRank::default()
+                    } else {
+                        transcript_search::literal_metadata_rank(&session.search_index, &tokens)
+                            .with_exact_field(transcript_search::exact_metadata_field(
+                                session,
+                                &normalized,
+                            ))
+                    };
+                    // A renamed conversation's opening request is stronger
+                    // intent evidence than incidental matches in tool output.
+                    let fields = [
+                        session.title.as_str(),
+                        session.save_label.as_deref().unwrap_or(""),
+                        session.first_user_prompt.as_deref().unwrap_or(""),
+                    ];
+                    let fields = fields.map(transcript_search::lowercase_field);
+                    let intent_terms = tokens
+                        .iter()
+                        .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
+                        .count();
+                    (
+                        identity_search::rank(session, &tokens),
+                        rank.with_intent_terms(intent_terms),
+                    )
+                }))
             });
         }
         if filter_mode != SessionFilterMode::Active && self.search_query.trim().is_empty() {
@@ -135,7 +223,7 @@ impl SessionPicker {
                 }))
             });
         }
-        if filter_mode == SessionFilterMode::Active {
+        if filter_mode == SessionFilterMode::Active && self.search_query.trim().is_empty() {
             // Triage order for the active sessions manager: sessions that are
             // ready for input (done streaming) float above ones still working,
             // each group keeping the recency order from the sort above.
@@ -233,6 +321,9 @@ impl SessionPicker {
         let show_test = self.show_test_sessions;
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
+        self.search_selection.update_query(&search_query);
+        let current_selected_id =
+            current_selected_id.filter(|_| !self.search_selection.following());
         let search_matches = self.search_matched_session_refs(&search_query);
         let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 
@@ -240,7 +331,9 @@ impl SessionPicker {
         self.visible_sessions.clear();
         self.item_to_session.clear();
 
-        if filter_mode != SessionFilterMode::All {
+        // Search is one globally ranked list. Saved/server sections otherwise
+        // promote weak matches over better hits and defeat the relevance sort.
+        if filter_mode != SessionFilterMode::All || !search_query.trim().is_empty() {
             for session_ref in filtered_refs {
                 self.push_visible_session(session_ref);
             }

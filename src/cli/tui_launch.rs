@@ -48,20 +48,8 @@ pub async fn run_client() -> Result<()> {
             Ok(msg_id) => loop {
                 match client.read_event().await {
                     Ok(event) => {
-                        use crate::protocol::ServerEvent;
-                        match event {
-                            ServerEvent::TextDelta { text } => {
-                                print!("{}", crate::output_style::terminal_text(&text));
-                                std::io::stdout().flush()?;
-                            }
-                            ServerEvent::Done { id } if id == msg_id => {
-                                break;
-                            }
-                            ServerEvent::Error { message, .. } => {
-                                eprintln!("Error: {}", message);
-                                break;
-                            }
-                            _ => {}
+                        if emit_terminal_client_event(&mut io::stdout(), event, msg_id)? {
+                            break;
                         }
                     }
                     Err(e) => {
@@ -79,6 +67,71 @@ pub async fn run_client() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn emit_terminal_client_event(
+    output: &mut impl Write,
+    event: crate::protocol::ServerEvent,
+    message_id: u64,
+) -> Result<bool> {
+    use crate::protocol::ServerEvent;
+    match super::commands::unwrap_turn_event(event) {
+        ServerEvent::TextDelta { text } => {
+            write!(output, "{}", crate::output_style::terminal_text(&text))?;
+            output.flush()?;
+        }
+        ServerEvent::Done { id } if id == message_id => return Ok(true),
+        ServerEvent::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+            return Ok(true);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod turn_envelope_tests {
+    use super::*;
+    use crate::protocol::{ServerEvent, TurnIdentity};
+
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn terminal_client_prints_wrapped_text_and_honors_wrapped_done() {
+        let mut output = Vec::new();
+        assert!(
+            !emit_terminal_client_event(
+                &mut output,
+                envelope(ServerEvent::TextDelta {
+                    text: "hello".into()
+                }),
+                42
+            )
+            .unwrap()
+        );
+        assert_eq!(output, b"hello");
+        assert!(
+            !emit_terminal_client_event(&mut output, envelope(ServerEvent::Done { id: 41 }), 42)
+                .unwrap()
+        );
+        assert!(
+            emit_terminal_client_event(
+                &mut output,
+                envelope(envelope(ServerEvent::Done { id: 42 })),
+                42
+            )
+            .unwrap()
+        );
+    }
 }
 
 pub async fn run_tui_client(
@@ -180,6 +233,12 @@ pub async fn run_tui_client(
             // `/local` from a cloud attach: the SSH guard in `ssh.rs` must
             // close before we exec, so hand the target back to it.
             super::cloud_move::stash_handoff(handoff);
+            return Ok(());
+        }
+        if let Some(session_id) = run_result.reload_session.as_deref() {
+            // The owning SSH guard closes its transport before the re-exec.
+            // Never hand a remote ID to hot_reload, which resumes locally.
+            super::ssh::stash_client_reload(session_id.to_string());
             return Ok(());
         }
         if has_requested_action(&run_result) {

@@ -1,7 +1,7 @@
 //! Interactive session picker with preview
 //!
-//! Shows a list of sessions on the left, with a preview of the selected session's
-//! conversation on the right. Sessions are grouped by server for multi-server support.
+//! Shows the selected conversation as a full-screen canvas with a compact
+//! session/search panel reserved on the right.
 
 #[path = "session_picker_presence.rs"]
 mod presence;
@@ -12,7 +12,6 @@ use crate::tui::{DisplayMessage, markdown};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use jcode_session_types::SessionStatus;
-use jcode_tui_style::theme;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -34,12 +33,27 @@ pub use jcode_tui_session_picker::{
     SessionSource,
 };
 
+#[cfg(test)]
+mod benchmark_io;
+#[cfg(test)]
+mod benchmark_matrix;
+mod canvas;
 mod cloud_preview;
 mod filter;
+mod identity_search;
+mod latency;
 mod loading;
 mod memory;
 mod navigation;
+mod performance;
+#[cfg(test)]
+mod performance_tests;
 mod preview_chrome;
+mod preview_io;
+use preview_io::preview_result;
+mod preview_metadata;
+mod preview_refresh;
+mod progressive_preview;
 mod render;
 mod saved_placement;
 mod transcript_search;
@@ -57,7 +71,7 @@ pub use loading::{
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 500;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
@@ -149,7 +163,7 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// Format duration since a time in a human-readable way
 #[path = "session_picker/time_labels.rs"]
 mod time_labels;
-pub(super) use time_labels::{format_short_duration, format_time_ago};
+pub(crate) use time_labels::format_time_ago;
 
 /// Which pane has keyboard focus
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +209,8 @@ struct PreviewExtras {
     todos_payload: Option<String>,
     /// Durable selected-session widget facts, never the current App snapshot.
     info_data: Option<super::info_widget::InfoWidgetData>,
+    /// Freshness of the selected-session facts, not the transcript render cache.
+    loaded_at: Option<std::time::Instant>,
 }
 
 struct LoadedSessionPreview {
@@ -230,10 +246,8 @@ struct PreviewRenderCache {
     key: PreviewCacheKey,
     /// Wrapped lines at the final (post-scrollbar-decision) width.
     wrapped_lines: Vec<Line<'static>>,
-    /// For each pre-wrap source line, the index of its first wrapped line. Used
-    /// to locate user prompts for the sticky "previous prompt" header.
-    prewrap_to_wrapped: Vec<usize>,
-    /// (pre-wrap line index, display number, text) for every user prompt.
+    image_regions: Vec<jcode_tui_messages::ImageRegion>,
+    /// (wrapped line index, display number, text) for every user prompt.
     user_prompt_markers: Vec<(usize, usize, String)>,
     /// Whether the content overflows and a scrollbar column is reserved.
     show_scrollbar: bool,
@@ -268,6 +282,8 @@ pub struct SessionPicker {
     crashed_session_ids: HashSet<String>,
     last_list_area: Option<Rect>,
     last_preview_area: Option<Rect>,
+    /// Positive-space reservation for the compact session/search panel.
+    reserved_panel_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
     show_test_sessions: bool,
     /// Current list filter mode
@@ -289,9 +305,14 @@ pub struct SessionPicker {
     cached_search_refs: Vec<SessionRef>,
     /// Cancellable full-text scan, separate from the bounded display cache.
     transcript_search: transcript_search::TranscriptSearch,
+    /// Briefly follow new best matches, unless the user starts browsing.
+    search_selection: filter::SearchSelection,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
+    resume_latency: latency::Latency,
+    latency_transcript_rendered: bool,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
+    pending_workspace_load: Option<progressive_preview::PendingWorkspaceLoad>,
     preview_load_failures: HashSet<String>,
     /// Pinned todos + prompt offset per loaded preview, keyed by session id.
     preview_extras: HashMap<String, PreviewExtras>,
@@ -307,6 +328,8 @@ pub struct SessionPicker {
     /// re-wrap the whole preview every frame. Invalidated by content hash and
     /// pane geometry (see [`PreviewCacheKey`]).
     preview_cache: Option<PreviewRenderCache>,
+    preview_reuse: performance::PreviewReuse,
+    preview_fingerprints: RefCell<std::collections::VecDeque<(SessionRef, u64)>>,
     /// Working directory `/resume` was opened from. Sessions whose `working_dir`
     /// matches this are highlighted so the user can quickly spot sessions from
     /// the same project they are currently in.
@@ -362,6 +385,7 @@ impl SessionPicker {
             crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -373,13 +397,19 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: None,
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
+            preview_reuse: Default::default(),
+            preview_fingerprints: Default::default(),
             current_dir: None,
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
@@ -413,6 +443,7 @@ impl SessionPicker {
             crashed_session_ids: HashSet::new(),
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -424,13 +455,19 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: Some("Loading sessions…".to_string()),
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
+            preview_reuse: Default::default(),
+            preview_fingerprints: Default::default(),
             current_dir: None,
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
@@ -496,6 +533,7 @@ impl SessionPicker {
             crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
+            reserved_panel_area: None,
             show_test_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
@@ -507,13 +545,19 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
+            search_selection: Default::default(),
             loading_message: None,
+            resume_latency: Default::default(),
+            latency_transcript_rendered: false,
             pending_preview_load: None,
+            pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
+            preview_reuse: Default::default(),
+            preview_fingerprints: Default::default(),
             current_dir: None,
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
@@ -672,8 +716,8 @@ impl SessionPicker {
     /// async load completed a second or two after opening).
     pub fn reseed_grouped(
         &mut self,
-        server_groups: Vec<ServerGroup>,
-        orphan_sessions: Vec<SessionInfo>,
+        mut server_groups: Vec<ServerGroup>,
+        mut orphan_sessions: Vec<SessionInfo>,
     ) {
         // Remember what the user was looking at so we can restore it after the
         // data swap + item rebuild.
@@ -681,6 +725,8 @@ impl SessionPicker {
         let preview_scroll = self.scroll_offset;
         let auto_scroll_preview = self.auto_scroll_preview;
         let list_offset = self.list_state.offset();
+
+        self.reconcile_refreshed_previews(&mut server_groups, &mut orphan_sessions);
 
         let hidden_test_count: usize = server_groups
             .iter()
@@ -710,6 +756,7 @@ impl SessionPicker {
         self.all_sessions = all_sessions;
         self.all_server_groups = server_groups;
         self.all_orphan_sessions = all_orphan_sessions;
+        self.preview_fingerprints.get_mut().clear();
         self.hidden_test_count = hidden_test_count;
         self.loading_message = None;
         self.transcript_search = Default::default();
@@ -734,6 +781,7 @@ impl SessionPicker {
         // session across a reordered/extended refresh.
         let restored = selected_id
             .as_deref()
+            .filter(|_| !self.search_selection.following())
             .and_then(|id| self.find_item_index_for_session_id(id));
         if let Some(idx) = restored {
             self.list_state.select(Some(idx));
@@ -847,6 +895,7 @@ impl SessionPicker {
     }
 
     fn toggle_selected_session(&mut self) {
+        self.search_selection.stop();
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return;
         };
@@ -885,6 +934,9 @@ impl SessionPicker {
     }
 
     fn session_by_ref_mut(&mut self, session_ref: SessionRef) -> Option<&mut SessionInfo> {
+        self.preview_fingerprints
+            .get_mut()
+            .retain(|(key, _)| *key != session_ref);
         match session_ref {
             SessionRef::Flat(idx) => self.all_sessions.get_mut(idx),
             SessionRef::Group {
@@ -952,10 +1004,15 @@ impl SessionPicker {
             let cloud_host = crate::storage::read_session_lease(session_id)
                 .and_then(|lease| lease.away_host)
                 .filter(|host| !host.trim().is_empty());
-            let session = if let Some(host) = cloud_host {
-                cloud_preview::load(session_id, &host)?
+            let (session, remote_snapshot) = if let Some(host) = cloud_host.as_deref() {
+                cloud_preview::load(session_id, host)?
             } else {
-                Session::load(session_id).ok()?
+                (Session::load(session_id).ok()?, None)
+            };
+            let info_data = if cloud_host.is_some() {
+                preview_chrome::persisted_info_from_snapshot(&session, remote_snapshot)
+            } else {
+                preview_chrome::persisted_info(&session)
             };
             let (messages, hidden_prompts) = build_messages_preview_with_offset(&session);
             return Some(LoadedSessionPreview {
@@ -963,7 +1020,8 @@ impl SessionPicker {
                 extras: PreviewExtras {
                     hidden_prompts,
                     todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
-                    info_data: Some(preview_chrome::persisted_info(&session)),
+                    info_data: Some(info_data),
+                    loaded_at: None,
                 },
             });
         }
@@ -1049,6 +1107,7 @@ impl SessionPicker {
             }
             Ok(None) => {
                 if let Some(pending) = self.pending_preview_load.take() {
+                    self.resume_latency.fail(&pending.session_id);
                     self.preview_load_failures.insert(pending.session_id);
                 }
                 true
@@ -1056,6 +1115,7 @@ impl SessionPicker {
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 if let Some(pending) = self.pending_preview_load.take() {
+                    self.resume_latency.fail(&pending.session_id);
                     self.preview_load_failures.insert(pending.session_id);
                 }
                 true
@@ -1067,27 +1127,28 @@ impl SessionPicker {
         let Some(session_ref) = self.selected_session_ref() else {
             return;
         };
-        let needs_preview = self
-            .session_by_ref(session_ref)
-            .map(|s| s.messages_preview.is_empty())
-            .unwrap_or(false);
-        if !needs_preview {
-            return;
-        }
-
-        let Some((cache_session_id, resume_target, external_path)) =
+        let Some((cache_session_id, resume_target, external_path, working_dir, is_cloud)) =
             self.session_by_ref(session_ref).map(|s| {
                 (
                     s.id.clone(),
                     s.resume_target.clone(),
                     s.external_path.clone(),
+                    s.working_dir.clone(),
+                    s.server_icon.as_deref() == Some("☁"),
                 )
             })
         else {
             return;
         };
 
-        if self.preview_extras.contains_key(&cache_session_id)
+        if self
+            .preview_extras
+            .get(&cache_session_id)
+            .is_some_and(|extras| {
+                extras
+                    .loaded_at
+                    .is_none_or(|at| at.elapsed() < Duration::from_secs(15))
+            })
             || self.preview_load_failures.contains(&cache_session_id)
             || self
                 .pending_preview_load
@@ -1098,13 +1159,33 @@ impl SessionPicker {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
+        let (workspace_tx, workspace_rx) = std::sync::mpsc::channel();
         let thread_session_id = cache_session_id.clone();
-        let _ = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("jcode-session-preview-loader".to_string())
             .spawn(move || {
+                let session_id = match &resume_target {
+                    ResumeTarget::JcodeSession { session_id } => Some(session_id.clone()),
+                    _ => None,
+                };
                 let preview = Self::load_preview_for_target(resume_target, external_path);
-                let _ = tx.send(preview);
+                progressive_preview::publish_then_hydrate(preview, tx, workspace_tx, |data| {
+                    let target = preview_metadata::WorkspaceTarget::for_identity(
+                        session_id.as_deref(),
+                        working_dir,
+                        is_cloud,
+                    );
+                    preview_metadata::hydrate_workspace(data, &target);
+                });
             });
+        if preview_result(worker, "loader worker startup").is_none() {
+            self.preview_load_failures.insert(cache_session_id);
+            return;
+        }
+        self.pending_workspace_load = Some(progressive_preview::PendingWorkspaceLoad {
+            session_id: cache_session_id,
+            receiver: workspace_rx,
+        });
         self.pending_preview_load = Some(PendingSessionPreviewLoad {
             session_id: thread_session_id,
             receiver: rx,
@@ -1255,6 +1336,18 @@ impl SessionPicker {
     /// - `None` if the overlay should close (Esc/q/Ctrl+C)
     /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
     pub fn handle_overlay_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<OverlayAction> {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
+        let result = self.handle_overlay_key_inner(code, modifiers);
+        self.latency_input_complete(before, at);
+        result
+    }
+
+    fn handle_overlay_key_inner(
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
@@ -1424,9 +1517,14 @@ impl SessionPicker {
         }
 
         let _ = self.poll_preview_load();
+        let _ = self.poll_workspace_load();
         self.ensure_selected_preview_loading();
 
-        let Some(session) = self.selected_session().cloned() else {
+        let selected = self.selected_session_ref().and_then(|session_ref| {
+            self.session_by_ref(session_ref)
+                .map(|session| (session_ref, session))
+        });
+        let Some((session_ref, session)) = selected else {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1456,46 +1554,64 @@ impl SessionPicker {
             .border_type(BorderType::Rounded)
             .title(" Preview ")
             .border_style(Style::default().fg(preview_border_color));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = if self.reserved_panel_area.is_some() {
+            // The conversation is the canvas, not a boxed second pane.
+            area
+        } else {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            inner
+        };
         if inner.width == 0 || inner.height == 0 {
             return;
         }
 
         let inner =
-            preview_chrome::draw(frame, inner, &session, self.preview_extras.get(&session.id));
+            preview_chrome::draw(frame, inner, session, self.preview_extras.get(&session.id));
+        let todos_payload = self
+            .preview_extras
+            .get(&session.id)
+            .and_then(|extras| extras.todos_payload.clone());
+        let preview_still_loading = session.messages_preview.is_empty()
+            && self
+                .pending_preview_load
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session.id);
+        let Some(content_hash) = self.selected_preview_content_hash(session_ref, diff_mode) else {
+            return;
+        };
 
         // Build (or reuse) the fully-wrapped preview content. The expensive
         // markdown render + wrap only runs on a cache miss; scrolling, focus
         // changes, and idle redraws reuse the cached wrapped lines. This mirrors
         // the main chat viewport, whose prepared frame is cached the same way.
         let key = PreviewCacheKey {
-            content_hash: self.preview_content_hash(&session, diff_mode),
+            content_hash,
             inner_width: inner.width,
             inner_height: inner.height,
             diff_mode,
             search_query: self.search_query.trim().to_lowercase(),
         };
-        let cache_valid = self
-            .preview_cache
-            .as_ref()
-            .is_some_and(|cache| cache.key == key);
-        if !cache_valid {
+        let cache_hit = self.reuse_preview(&key);
+        self.resume_latency.cache_lookup(cache_hit);
+        if !cache_hit {
+            let Some(session) = self.session_by_ref(session_ref) else {
+                return;
+            };
             // Shared markdown renderers also center structured blocks via a
             // thread-local setting. Scope it so lists/code/tools stay flush
             // left here without changing the chat rendered behind the picker.
             let rebuilt = markdown::with_center_code_blocks(false, || {
-                self.build_preview_cache(&session, area, inner, key, align, diff_mode)
+                self.build_preview_cache(session, area, inner, key, align, diff_mode)
             });
-            self.preview_cache = Some(rebuilt);
+            self.install_preview(rebuilt);
         }
         // Read cache geometry through a short-lived borrow so the scroll-offset
         // clamp below can take `&mut self` without conflict.
         let (show_scrollbar, total_lines, first_match_line) = {
-            let cache = self
-                .preview_cache
-                .as_ref()
-                .expect("preview cache populated above");
+            let Some(cache) = self.preview_cache.as_ref() else {
+                return;
+            };
             (
                 cache.show_scrollbar,
                 cache.wrapped_lines.len(),
@@ -1505,18 +1621,23 @@ impl SessionPicker {
 
         let (text_area, scrollbar_area) =
             super::ui::split_native_scrollbar_area(inner, show_scrollbar);
+        let inset = super::ui::left_aligned_content_inset(text_area.width, false);
+        let text_area = Rect {
+            x: text_area.x + inset,
+            width: text_area.width.saturating_sub(inset),
+            ..text_area
+        };
+        // The picker is an overlay, not a narrower conversation viewport.
+        // Keep prompt and todo wrapping identical to the opened session.
+        let band_width = text_area.width;
 
         // Pinned todo band, rendered beneath the sticky previous-prompt header
         // exactly like the live chat viewport (`display.pin_todos`).
-        let todos_payload = self
-            .preview_extras
-            .get(&session.id)
-            .and_then(|extras| extras.todos_payload.clone());
         let (todo_band, _) = super::ui::viewport::pinned_todo_band_lines_for_payload(
             todos_payload.as_deref(),
             false,
             diff_mode,
-            text_area.width,
+            band_width,
             text_area.height,
         );
         let todo_lines = todo_band.len() as u16;
@@ -1527,10 +1648,15 @@ impl SessionPicker {
             total_lines.saturating_sub(text_area.height.saturating_sub(todo_lines) as usize);
         for _ in 0..4 {
             let header = self
-                .preview_prompt_header_lines(max_scroll, text_area.width, align)
+                .preview_prompt_header_lines(max_scroll, band_width, align)
                 .len() as u16;
-            let adjusted = total_lines
-                .saturating_sub(text_area.height.saturating_sub(header + todo_lines) as usize);
+            let top_band = (header + todo_lines).min(text_area.height);
+            let body = Rect {
+                y: text_area.y + top_band,
+                height: text_area.height - top_band,
+                ..text_area
+            };
+            let adjusted = total_lines.saturating_sub(body.height as usize);
             if adjusted == max_scroll {
                 break;
             }
@@ -1545,11 +1671,6 @@ impl SessionPicker {
         // frame and the populated transcript stays pinned at the top, hiding the
         // sticky "previous prompt" header that should appear once we snap to the
         // bottom.
-        let preview_still_loading = session.messages_preview.is_empty()
-            && self
-                .pending_preview_load
-                .as_ref()
-                .is_some_and(|pending| pending.session_id == session.id);
         if self.auto_scroll_preview {
             // When a search is active and the selected session has a match in the
             // preview body, scroll the first hit into view (a few lines of lead-in
@@ -1568,7 +1689,7 @@ impl SessionPicker {
         }
         let scroll = self.scroll_offset as usize;
 
-        let header_lines = self.preview_prompt_header_lines(scroll, text_area.width, align);
+        let header_lines = self.preview_prompt_header_lines(scroll, band_width, align);
         let header_height = (header_lines.len() as u16).min(text_area.height);
         let top_band = (header_height + todo_lines).min(text_area.height);
         let content_area = Rect {
@@ -1584,31 +1705,49 @@ impl SessionPicker {
         // viewport uses the same visible-slice strategy). This makes a scroll
         // tick O(viewport height) rather than O(total wrapped lines).
         let visible_end = (scroll + visible_height).min(total_lines);
-        let visible_lines: Vec<Line<'static>> = {
-            let cache = self
-                .preview_cache
-                .as_ref()
-                .expect("preview cache populated above");
+        let (visible_lines, source_rows): (Vec<Line<'static>>, Vec<usize>) = {
+            let Some(cache) = self.preview_cache.as_ref() else {
+                return;
+            };
             if scroll < visible_end {
-                cache.wrapped_lines[scroll..visible_end].to_vec()
+                (
+                    cache.wrapped_lines[scroll..visible_end].to_vec(),
+                    (scroll..visible_end).collect(),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         };
         frame.render_widget(Paragraph::new(visible_lines.clone()), content_area);
-        preview_chrome::draw_widgets(
-            frame,
-            content_area,
-            &visible_lines,
-            &session,
-            self.preview_extras.get(&session.id),
-        );
+        if let Some(cache) = self.preview_cache.as_ref() {
+            preview_chrome::draw_images(
+                frame,
+                content_area,
+                &cache.image_regions,
+                &source_rows,
+                None,
+            );
+        }
+        if let (Some(session), Some(cache)) = (
+            self.session_by_ref(session_ref),
+            self.preview_cache.as_ref(),
+        ) {
+            preview_chrome::draw_widgets(
+                frame,
+                content_area,
+                &visible_lines,
+                session,
+                self.preview_extras.get(&session.id),
+                &cache.image_regions,
+                scroll,
+            );
+        }
 
         if todo_lines > 0 && header_height < text_area.height {
             let band_area = Rect {
                 x: text_area.x,
                 y: text_area.y + header_height,
-                width: text_area.width,
+                width: band_width,
                 height: todo_lines.min(text_area.height - header_height),
             };
             frame.render_widget(Clear, band_area);
@@ -1618,7 +1757,7 @@ impl SessionPicker {
             let header_area = Rect {
                 x: text_area.x,
                 y: text_area.y,
-                width: text_area.width.saturating_sub(1),
+                width: band_width.saturating_sub(1),
                 height: header_height,
             };
             frame.render_widget(Clear, header_area);
@@ -1635,45 +1774,67 @@ impl SessionPicker {
                 self.focus == PaneFocus::Preview,
             );
         }
+        self.latency_transcript_rendered = !preview_still_loading
+            && !self.pending_preview_load.as_ref().is_some_and(|pending| {
+                Some(&pending.session_id) == self.selected_session().map(|s| &s.id)
+            })
+            && !self
+                .preview_load_failures
+                .contains(&self.latency_selection_id().unwrap_or_default());
     }
 
     /// Fingerprint everything that affects the *content* of the preview pane so
     /// the wrapped-line cache can be reused across frames (notably while
     /// scrolling). Mirrors the main chat viewport's prepared-frame cache key.
+    #[cfg(test)]
     fn preview_content_hash(
         &self,
         session: &SessionInfo,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> u64 {
+        self.preview_content_hash_with_transcript(
+            session,
+            diff_mode,
+            performance::transcript_hash(session),
+        )
+    }
+
+    fn preview_content_hash_with_transcript(
+        &self,
+        session: &SessionInfo,
+        diff_mode: crate::config::DiffDisplayMode,
+        transcript_hash: u64,
+    ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         session.id.hash(&mut h);
-        // Only transcript inputs invalidate this expensive markdown cache.
+        session.short_name.hash(&mut h);
+        session.model.hash(&mut h);
+        session.provider_key.hash(&mut h);
+        session.server_name.hash(&mut h);
+        session.server_icon.hash(&mut h);
+        session.is_canary.hash(&mut h);
+        // Transcript and selected-session header inputs invalidate this cache.
         let is_loading = session.messages_preview.is_empty()
             && self
                 .pending_preview_load
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
-        self.preview_load_failures
-            .contains(&session.id)
+        (session.messages_preview.is_empty() && self.preview_load_failures.contains(&session.id))
             .hash(&mut h);
         is_loading.hash(&mut h);
         diff_mode.hash(&mut h);
         crate::config::config().display.pin_todos.hash(&mut h);
+        crate::config::config()
+            .display
+            .compact_thinking
+            .hash(&mut h);
+        super::mermaid::deferred_render_epoch().hash(&mut h);
         if let Some(extras) = self.preview_extras.get(&session.id) {
             extras.hidden_prompts.hash(&mut h);
             extras.todos_payload.hash(&mut h);
         }
-        for msg in &session.messages_preview {
-            msg.role.hash(&mut h);
-            msg.content.hash(&mut h);
-            msg.tool_calls.hash(&mut h);
-            if let Some(tool) = &msg.tool_data {
-                tool.id.hash(&mut h);
-                tool.name.hash(&mut h);
-                tool.input.to_string().hash(&mut h);
-            }
-        }
+        transcript_hash.hash(&mut h);
         h.finish()
     }
 
@@ -1687,308 +1848,110 @@ impl SessionPicker {
         area: Rect,
         inner: Rect,
         key: PreviewCacheKey,
-        align: Alignment,
+        _align: Alignment,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> PreviewRenderCache {
-        let user_color: Color = theme::user_color();
-        let user_text: Color = theme::user_text();
-        let dim_color: Color = rgb(80, 80, 80);
-
-        let preview_inner_width = area.width.saturating_sub(2);
-        let assistant_width = preview_inner_width.saturating_sub(2);
-
-        // Build preview content
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        // Picker metadata belongs in the session list, not the transcript.
-        // Messages preview - styled like the actual TUI
-        let extras = self.preview_extras.get(&session.id);
-        let hidden_prompts = extras.map_or(0, |extras| extras.hidden_prompts);
-        // The pinned todo band is the canonical todo presentation while
-        // enabled, so omit duplicate todo tool cards exactly like the live chat.
-        let hide_todo_tools = crate::config::config().display.pin_todos;
-        let is_hidden_todo_tool = |msg: &PreviewMessage| {
-            hide_todo_tools
-                && msg.role == "tool"
-                && msg.tool_data.as_ref().is_some_and(|tool| {
-                    super::ui::tools_ui::canonical_tool_name(&tool.name) == "todo"
-                })
-        };
-        let total_prompts = session
+        let hidden_prompts = self
+            .preview_extras
+            .get(&session.id)
+            .map_or(0, |extras| extras.hidden_prompts);
+        let messages: Vec<DisplayMessage> = session
             .messages_preview
             .iter()
-            .filter(|msg| msg.role == "user" && !msg.content.trim().is_empty())
-            .count();
-        let mut local_prompt_num = 0usize;
-        let mut prompt_num = hidden_prompts;
-        let mut rendered_messages = 0usize;
-        // Track the pre-wrap line index + display number + text of every user
-        // prompt so we can render a sticky "previous prompt" header (matching the
-        // main TUI's `prompt_preview`) once it scrolls out of view.
-        let mut user_prompt_markers: Vec<(usize, usize, String)> = Vec::new();
-        for msg in &session.messages_preview {
-            if msg.content.trim().is_empty() || is_hidden_todo_tool(msg) {
-                continue;
-            }
-
-            if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" && msg.role != "swarm"
-            {
-                lines.push(Line::from("").alignment(align));
-            }
-
-            let display_msg = DisplayMessage {
+            .map(|msg| DisplayMessage {
                 role: msg.role.clone(),
                 content: msg.content.clone(),
                 tool_calls: msg.tool_calls.clone(),
-                duration_secs: None,
-                title: None,
+                duration_secs: msg.duration_secs,
+                title: msg.title.clone(),
                 tool_data: msg.tool_data.clone(),
-            };
-
-            match msg.role.as_str() {
-                "user" => {
-                    prompt_num += 1;
-                    local_prompt_num += 1;
-                    user_prompt_markers.push((
-                        lines.len(),
-                        prompt_num,
-                        display_msg.content.clone(),
-                    ));
-                    // Same prompt rendering as the live chat: rainbow number by
-                    // recency, accent chevron, prompt background, one row per
-                    // source line with a hanging indent.
-                    let distance = total_prompts + 1 - local_prompt_num.min(total_prompts);
-                    let num_color = theme::rainbow_prompt_color(distance);
-                    let bg = theme::user_bg();
-                    let num_str = prompt_num.to_string();
-                    let prefix_width = unicode_width::UnicodeWidthStr::width(num_str.as_str())
-                        + unicode_width::UnicodeWidthStr::width("› ");
-                    let (visible, transcribed) =
-                        jcode_session_types::strip_transcription(&display_msg.content);
-                    let content = if transcribed {
-                        format!("🎙 {visible}")
-                    } else {
-                        display_msg.content.clone()
-                    };
-                    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-                    for (line_idx, content_line) in normalized.split('\n').enumerate() {
-                        let mut spans = if line_idx == 0 {
-                            vec![
-                                Span::styled(
-                                    num_str.clone(),
-                                    Style::default().fg(num_color).bg(bg),
-                                ),
-                                Span::styled("› ", Style::default().fg(user_color).bg(bg)),
-                            ]
-                        } else {
-                            vec![Span::styled(
-                                " ".repeat(prefix_width),
-                                Style::default().fg(user_color).bg(bg),
-                            )]
-                        };
-                        spans.push(Span::styled(
-                            content_line.to_string(),
-                            Style::default().fg(user_text).bg(bg),
-                        ));
-                        lines.push(Line::from(spans).alignment(align));
-                    }
-                    rendered_messages += 1;
-                }
-                "assistant" => {
-                    let md_lines = super::ui::render_assistant_message(
-                        &display_msg,
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    let mut skip_mermaid_blank = false;
-
-                    for line in md_lines {
-                        if super::mermaid::parse_image_placeholder(&line).is_some()
-                            || super::mermaid::parse_inline_image_placeholder(&line).is_some()
-                        {
-                            lines.push(
-                                Line::from(vec![Span::styled(
-                                    "[mermaid diagram]",
-                                    Style::default().fg(dim_color),
-                                )])
-                                .alignment(align),
-                            );
-                            skip_mermaid_blank = true;
-                            rendered_messages += 1;
-                            continue;
-                        }
-
-                        if skip_mermaid_blank
-                            && line.spans.len() == 1
-                            && line.spans[0].content.trim().is_empty()
-                        {
-                            continue;
-                        }
-
-                        skip_mermaid_blank = false;
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "tool" => {
-                    let tool_lines = super::ui::render_tool_message(
-                        &display_msg,
-                        preview_inner_width,
-                        diff_mode,
-                    );
-                    for line in tool_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "meta" => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(dim_color),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "system" => {
-                    let md_lines = super::ui::render_system_message(
-                        &DisplayMessage {
-                            role: msg.role.clone(),
-                            content: msg.content.clone(),
-                            tool_calls: msg.tool_calls.clone(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: msg.tool_data.clone(),
-                        },
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    for line in md_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "background_task" => {
-                    let md_lines = super::ui::render_background_task_message(
-                        &DisplayMessage {
-                            role: msg.role.clone(),
-                            content: msg.content.clone(),
-                            tool_calls: msg.tool_calls.clone(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: msg.tool_data.clone(),
-                        },
-                        assistant_width,
-                        crate::config::DiffDisplayMode::Off,
-                    );
-                    for line in md_lines {
-                        lines.push(super::ui::align_if_unset(line, align));
-                        rendered_messages += 1;
-                    }
-                }
-                "memory" => {
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled("🧠 ", Style::default()),
-                            Span::styled(
-                                msg.content.clone(),
-                                Style::default().fg(rgb(140, 210, 255)),
-                            ),
-                        ])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "usage" => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(dim_color),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                "error" => {
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled("✗ ", Style::default().fg(Color::Red)),
-                            Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                        ])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
-                _ => {
-                    lines.push(
-                        Line::from(vec![Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(Color::White),
-                        )])
-                        .alignment(align),
-                    );
-                    rendered_messages += 1;
-                }
+            })
+            .collect();
+        let wide_width = inner
+            .width
+            .saturating_sub(super::ui::left_aligned_content_inset(inner.width, false));
+        let mut header = super::ui::header::build_preview_header(session, wide_width);
+        let mut padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
+        let render_width = inner.width.saturating_sub(1);
+        let narrow_width =
+            render_width.saturating_sub(super::ui::left_aligned_content_inset(render_width, false));
+        let header_height = padding + header.len();
+        let (prepared, show_scrollbar) = if inner.width <= 1 || inner.height == 0 {
+            (
+                super::ui::prepare::prepare_history_preview(
+                    &messages,
+                    hidden_prompts,
+                    wide_width,
+                    diff_mode,
+                ),
+                false,
+            )
+        } else if header_height > inner.height as usize {
+            (
+                super::ui::prepare::prepare_history_preview(
+                    &messages,
+                    hidden_prompts,
+                    narrow_width,
+                    diff_mode,
+                ),
+                true,
+            )
+        } else {
+            super::ui::prepare::prepare_history_preview_for_viewport(
+                &messages,
+                hidden_prompts,
+                wide_width,
+                narrow_width,
+                diff_mode,
+                inner.height as usize - header_height,
+            )
+        };
+        if show_scrollbar {
+            header = super::ui::header::build_preview_header(session, narrow_width);
+            padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
+        }
+        // The real startup header is a scrolling transcript section. Never
+        // pin a synthetic jcode/client/model banner above a long conversation.
+        let header_height = padding + header.len();
+        let mut wrapped_lines = vec![Line::default(); padding];
+        wrapped_lines.extend(header);
+        let body_empty = prepared.wrapped_lines.is_empty();
+        wrapped_lines.extend(prepared.wrapped_lines);
+        let mut image_regions = prepared.image_regions;
+        for region in &mut image_regions {
+            region.abs_line_idx += header_height;
+            region.end_line += header_height;
+        }
+        // The live viewport consumes these marker rows as image metadata, never
+        // printable text. Preserve their reserved rows and draw the images below.
+        for region in &image_regions {
+            if let Some(line) = wrapped_lines.get_mut(region.abs_line_idx) {
+                *line = Line::default();
             }
         }
-
-        if rendered_messages == 0 {
-            let preview_loading = session.messages_preview.is_empty()
-                && self
-                    .pending_preview_load
-                    .as_ref()
-                    .is_some_and(|pending| pending.session_id == session.id);
-            let text = if preview_loading {
+        let user_prompt_markers = prepared
+            .wrapped_user_prompt_starts
+            .iter()
+            .zip(prepared.user_prompt_texts.iter())
+            .enumerate()
+            .map(|(idx, (&line, text))| {
+                (line + header_height, hidden_prompts + idx + 1, text.clone())
+            })
+            .collect();
+        if body_empty {
+            let loading = self
+                .pending_preview_load
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session.id);
+            let text = if loading {
                 "Loading preview…"
             } else if self.preview_load_failures.contains(&session.id) {
                 "Preview unavailable (session could not be read)"
             } else {
                 "(empty session)"
             };
-            lines.push(
-                Line::from(vec![Span::styled(text, Style::default().fg(dim_color))])
-                    .alignment(align),
-            );
+            wrapped_lines.push(Line::styled(text, Style::default().fg(rgb(80, 80, 80))));
         }
-
-        // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
-        // Two-pass so the content reserves the scrollbar column before wrapping
-        // (matching the main chat viewport): wrap at the full inner width, and if
-        // that overflows the viewport we re-wrap one column narrower to leave room
-        // for the scrollbar. Narrowing only ever adds lines, so the decision is
-        // stable. We also record, for each pre-wrap line, its first wrapped-line
-        // index so we can locate user prompts for the sticky header.
-        let visible_height = inner.height as usize;
-        let source_lines = lines;
-        let wrap_lines_tracked = |width: usize| -> (Vec<Line<'static>>, Vec<usize>) {
-            let mut mapped = Vec::with_capacity(source_lines.len() + 1);
-            let mut wrapped: Vec<Line> = Vec::new();
-            for line in source_lines.iter().cloned() {
-                mapped.push(wrapped.len());
-                if width > 0 {
-                    wrapped.extend(markdown::wrap_lines(vec![line], width));
-                } else {
-                    wrapped.push(line);
-                }
-            }
-            mapped.push(wrapped.len());
-            (wrapped, mapped)
-        };
-
-        let full_width = inner.width as usize;
-        let (full_lines, full_map) = wrap_lines_tracked(full_width);
-        let show_scrollbar =
-            super::ui::native_scrollbar_visible(true, full_lines.len(), visible_height);
-
-        let (mut wrapped_lines, prewrap_to_wrapped) = if show_scrollbar {
-            let content_width = inner.width.saturating_sub(1) as usize;
-            wrap_lines_tracked(content_width)
-        } else {
-            // Reuse the full-width wrap; the map already matches.
-            (full_lines, full_map)
-        };
-
         // Highlight active search matches in the wrapped preview body and record
         // the first wrapped line that contains a hit, so the caller can scroll it
         // into view. Highlighting after wrapping keeps wrapped-line indices exact.
@@ -1999,7 +1962,7 @@ impl SessionPicker {
         PreviewRenderCache {
             key,
             wrapped_lines,
-            prewrap_to_wrapped,
+            image_regions,
             user_prompt_markers,
             show_scrollbar,
             first_match_line,
@@ -2050,74 +2013,21 @@ impl SessionPicker {
         if scroll == 0 || !crate::config::config().display.prompt_preview {
             return Vec::new();
         }
-        // Read the prompt markers + wrap map from the cached preview content so
+        // Read the wrapped prompt markers from the cached preview content so
         // the header costs nothing extra during a scroll burst.
         let Some(cache) = self.preview_cache.as_ref() else {
             return Vec::new();
         };
-        let prewrap_to_wrapped = &cache.prewrap_to_wrapped;
-        let Some((_, prompt_num, text)) =
-            cache
-                .user_prompt_markers
-                .iter()
-                .rev()
-                .find(|(prewrap_idx, _, _)| {
-                    prewrap_to_wrapped
-                        .get(*prewrap_idx)
-                        .is_some_and(|wrapped_start| *wrapped_start < scroll)
-                })
+        let Some((_, prompt_num, text)) = cache
+            .user_prompt_markers
+            .iter()
+            .rev()
+            .find(|(wrapped_start, _, _)| *wrapped_start < scroll)
         else {
             return Vec::new();
         };
 
-        let text_flat = text.trim().replace('\n', " ");
-        if text_flat.is_empty() {
-            return Vec::new();
-        }
-
-        let num_str = format!("{}", prompt_num);
-        let prefix_len = num_str.len() + 2;
-        let content_width = (width as usize).saturating_sub(prefix_len + 2);
-        let dim_style = Style::default().dim();
-        let dim_num = theme::dim_color();
-        let user_bg = theme::user_bg();
-        let user_color = theme::user_color();
-        let user_text = theme::user_text();
-
-        let text_chars: Vec<char> = text_flat.chars().collect();
-        let is_long = unicode_width::UnicodeWidthStr::width(text_flat.as_str()) > content_width;
-        if !is_long {
-            return vec![
-                Line::from(vec![
-                    Span::styled(num_str, dim_style.fg(dim_num).bg(user_bg)),
-                    Span::styled("› ", dim_style.fg(user_color).bg(user_bg)),
-                    Span::styled(text_flat, dim_style.fg(user_text).bg(user_bg)),
-                ])
-                .alignment(align),
-            ];
-        }
-        let half = content_width.max(4);
-        let head: String = text_chars[..half.min(text_chars.len())].iter().collect();
-        let tail_start = text_chars.len().saturating_sub(half);
-        let tail: String = text_chars[tail_start..].iter().collect();
-        let first = Line::from(vec![
-            Span::styled(num_str, dim_style.fg(dim_num).bg(user_bg)),
-            Span::styled("› ", dim_style.fg(user_color).bg(user_bg)),
-            Span::styled(
-                format!("{} ...", head.trim_end()),
-                dim_style.fg(user_text).bg(user_bg),
-            ),
-        ])
-        .alignment(align);
-        let second = Line::from(vec![
-            Span::styled(" ".repeat(prefix_len), dim_style.bg(user_bg)),
-            Span::styled(
-                format!("... {}", tail.trim_start()),
-                dim_style.fg(user_text).bg(user_bg),
-            ),
-        ])
-        .alignment(align);
-        vec![first, second]
+        super::ui::viewport::prompt_preview_lines(*prompt_num, text, width, align)
     }
 
     /// Label for the blank-session onboarding action, naming the directory
@@ -2257,6 +2167,26 @@ impl SessionPicker {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        let at = std::time::Instant::now();
+        let initial_id = self.latency_selection_id();
+        self.resume_latency.initial_selection(initial_id);
+        self.latency_transcript_rendered = false;
+        self.render_inner(frame);
+        let id = if frame.area().width > 0 && frame.area().height > 0 {
+            self.latency_selection_id()
+        } else {
+            None
+        };
+        if let Some(id) = id.as_ref()
+            && self.preview_load_failures.contains(id)
+        {
+            self.resume_latency.fail(id);
+        }
+        self.resume_latency
+            .frame(id, self.latency_transcript_rendered, at.elapsed());
+    }
+
+    fn render_inner(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
         let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
@@ -2265,9 +2195,16 @@ impl SessionPicker {
         if has_onboarding && self.visible_sessions.is_empty() {
             self.last_list_area = None;
             self.last_preview_area = None;
+            self.reserved_panel_area = None;
             self.render_onboarding_band(frame, frame.area());
             return;
         }
+
+        if !has_onboarding {
+            self.render_resume_canvas(frame);
+            return;
+        }
+        self.reserved_panel_area = None;
 
         // Build vertical constraints
         let mut v_constraints = Vec::new();
@@ -2333,17 +2270,17 @@ impl SessionPicker {
 
         let main_area = v_chunks[chunk_idx];
 
-        // Split main area horizontally for list and preview
+        // Keep the transcript on the left and the session sidebar on the right.
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(main_area);
 
-        self.last_list_area = Some(chunks[0]);
-        self.last_preview_area = Some(chunks[1]);
+        self.last_list_area = Some(chunks[1]);
+        self.last_preview_area = Some(chunks[0]);
 
-        self.render_session_list(frame, chunks[0]);
-        self.render_preview(frame, chunks[1]);
+        self.render_session_list(frame, chunks[1]);
+        self.render_preview(frame, chunks[0]);
         self.render_claude_takeover_confirmation(frame);
     }
 
@@ -2466,7 +2403,7 @@ impl SessionPicker {
             // Always paint before polling, including on a cold cache. Neither
             // disk-cache parsing nor the full transcript scan may hold up the
             // first frame or prevent Escape from cancelling the picker.
-            let mut input_poll_timeout = Duration::from_millis(100);
+            let mut input_poll_timeout = self.preview_poll_interval();
             if let Some(receiver) = updates.as_ref() {
                 match receiver.try_recv() {
                     Ok(update) => match self.apply_session_list_update(update) {
@@ -2504,7 +2441,7 @@ impl SessionPicker {
                     },
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
+                            self.handle_overlay_mouse(mouse);
                         }
                         _ => {}
                     },

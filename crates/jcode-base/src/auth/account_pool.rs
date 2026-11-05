@@ -71,7 +71,7 @@ fn subscription_priority(key: &str, plan: Option<&str>) -> u32 {
     {
         return 2;
     }
-    let plan = plan.unwrap_or_default().trim().to_ascii_lowercase();
+    let plan = plan.unwrap_or("").trim().to_ascii_lowercase();
     match (key.split(':').next().unwrap_or(key), plan.as_str()) {
         ("claude", "max" | "max_5x" | "max_20x")
         | ("openai", "pro" | "promax" | "enterprise" | "edu") => 0,
@@ -103,7 +103,10 @@ pub struct OAuthLogin {
 pub fn oauth_logins() -> Vec<OAuthLogin> {
     let mut logins = Vec::new();
     let openai_active = crate::auth::codex::active_account_label();
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+    for account in crate::auth::codex::list_accounts().unwrap_or_else(|_| {
+        crate::logging::debug("Could not list OpenAI accounts for account pool");
+        Vec::new()
+    }) {
         logins.push(OAuthLogin {
             provider: "openai",
             active: openai_active.as_deref() == Some(account.label.as_str()),
@@ -112,7 +115,10 @@ pub fn oauth_logins() -> Vec<OAuthLogin> {
         });
     }
     let claude_active = crate::auth::claude::active_account_label();
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+    for account in crate::auth::claude::list_accounts().unwrap_or_else(|_| {
+        crate::logging::debug("Could not list Claude accounts for account pool");
+        Vec::new()
+    }) {
         logins.push(OAuthLogin {
             provider: "claude",
             active: claude_active.as_deref() == Some(account.label.as_str()),

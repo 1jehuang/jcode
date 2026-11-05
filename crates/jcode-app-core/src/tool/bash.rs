@@ -946,6 +946,8 @@ impl BashTool {
             .unwrap_or_else(|| params.command.clone());
         let stdin_tx = ctx.stdin_request_tx.clone();
         let tool_call_id = ctx.tool_call_id.clone();
+        let push_session_id = ctx.session_id.clone();
+        let push_command = params.command.clone();
         let title_for_work = title.clone();
         // Track progress parsed from output so a timeout promotion starts the
         // background task at the real percentage instead of 0%.
@@ -997,6 +999,13 @@ impl BashTool {
                                     if stdin_tx.send(request).is_err() {
                                         break;
                                     }
+                                    crate::mobile_push::notify(
+                                        crate::mobile_push::PushKind::NeedsInput,
+                                        &push_session_id,
+                                        None,
+                                        &format!("Command is waiting for input: {push_command}"),
+                                        None,
+                                    );
 
                                     // Most clients cannot answer stdin prompts. Without a
                                     // prompt reply, close stdin so commands that read it
@@ -1306,7 +1315,7 @@ impl BashTool {
                 notify,
                 wake,
 				move |output_path| async move {
-                    #[cfg(test)]
+                    #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
 					cmd.envs(cloud_environment);

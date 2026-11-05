@@ -13,6 +13,23 @@ unavailable accounts are skipped while a ready account exists.
 
 ## Automatic defaults
 
+### Manual account hot-swapping
+
+In chat, press `Ctrl+Alt+J` for the next saved OAuth account or `Ctrl+Alt+K`
+for the previous one. Cycling wraps at either end, traverses Claude accounts
+then OpenAI accounts, and preserves your input draft. These shortcuts switch
+immediately using the normal account-switch path. They skip API keys and
+management actions such as add, replace, and remove. Remote sessions use only
+the daemon-reported account inventory, never local credentials.
+
+The header's active-account marker follows the daemon's confirmed session
+credential, not the global preferred login or an unacknowledged request. A
+same-provider account switch preserves the selected model. If a response is
+still running, the switch waits until the session is idle. Repeated presses
+continue from the latest requested account while that switch is pending.
+
+### Plan-based priorities
+
 The plan label is read from locally stored account metadata, without a network
 request in the rendering or routing path:
 

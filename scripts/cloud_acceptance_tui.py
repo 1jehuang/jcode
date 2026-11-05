@@ -272,6 +272,21 @@ LogLevel VERBOSE
         wait_for(lambda: (not (state := self.state())["processing"]
                           and state["queued_messages"] == 0), "idle client")
 
+    def wait_attachment(self, *, cloud):
+        # Ownership and provider continuation precede exec-based reattachment.
+        # The outgoing client can still answer `state` as idle in that window,
+        # and terminal input sent to it is lost when it exits. Observe the new
+        # client, not transcript text that is also visible on the old client.
+        def attached():
+            frame = self.frame()
+            header = next((line.strip() for line in frame.splitlines()
+                           if line.strip().startswith("server:")), "")
+            if not header or header.startswith("server: SSH ") != cloud:
+                return False
+            state = self.state()
+            return state.get("remote_session_id") == self.sid
+        wait_for(attached, "cloud TUI reattachment" if cloud else "local TUI reattachment")
+
     def release(self, token):
         (self.control / (token + ".release")).touch()
 
@@ -299,6 +314,7 @@ LogLevel VERBOSE
                     return record
         wait_for(cloud_continuation, "new cloud continuation request")
         self.wait_text("saw_cloud_notice=True")
+        self.wait_attachment(cloud=True)
         self.wait_idle()
         assert "Pending cloud handoff canceled" not in self.frame()
         assert "local uncommitted edit" in (self.cloud_repo / "file.txt").read_text()
@@ -314,10 +330,7 @@ LogLevel VERBOSE
         start = len(self.records())
         self.send("/local")
         wait_for(lambda: self.lease() and not self.lease().get("away_host"), "local ownership")
-        def local_ready():
-            frame = self.frame()
-            return "server:" in frame and "server: SSH" not in frame and "OpenAI-compatible Fake Model" in frame
-        wait_for(local_ready, "local TUI reattachment")
+        self.wait_attachment(cloud=False)
         self.wait_idle()
         # A new prompt proves the reattached local runtime actually runs, not
         # just that a success message was printed or the lease was changed.

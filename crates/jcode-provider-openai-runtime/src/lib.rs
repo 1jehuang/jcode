@@ -50,7 +50,16 @@ mod openai_stream_diagnostics;
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_OPENAI_MODEL;
-const ORIGINATOR: &str = "codex_cli_rs";
+/// `originator` header for ChatGPT-login (Codex backend) requests.
+///
+/// This used to be `codex_cli_rs` to look like the official Codex CLI. Live
+/// probes on 2026-11-05 against chatgpt.com/backend-api/codex (HTTPS and
+/// websocket, two ChatGPT accounts, gpt-5.6-sol and gpt-6-astra) showed
+/// `codex_cli_rs`, `jcode` and no originator at all are all accepted and get
+/// identical `x-codex-plan-type` / `x-codex-active-limit` / usage headers, so
+/// Jcode now identifies itself. See
+/// docs/ANTHROPIC_OAUTH_IDENTITY_PROBE_2026_11_05.md.
+const ORIGINATOR: &str = "jcode";
 
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
@@ -1550,9 +1559,9 @@ mod stream;
 use self::openai_stream_runtime::try_persistent_ws_continuation;
 use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai_access_token};
 
-use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
-use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
+use self::stream::handle_openai_output_item;
+use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 
 mod chatgpt_web;
 mod native_web_search;

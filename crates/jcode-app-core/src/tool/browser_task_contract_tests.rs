@@ -22,6 +22,8 @@ fn handoff_context_is_optional_and_deserializes() {
 #[test]
 fn handoff_schema_exposes_task_context_and_extended_budget() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _enabled = browser_tests::HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF", "1");
+    let _disabled = browser_tests::HandoffEnvGuard::set("JCODE_BROWSER_HANDOFF_DISABLED", "0");
     let schema = BrowserTool::new().parameters_schema();
     let properties = &schema["properties"];
     assert_eq!(properties["context"]["type"], "string");

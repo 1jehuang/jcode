@@ -3,12 +3,14 @@ import SwiftUI
 @main
 struct JCodeMobileApp: App {
     @State private var model = AppModel()
+    @State private var cloud = CloudModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
+                .environment(cloud)
                 .preferredColorScheme(.dark)
         }
         .onChange(of: scenePhase) { _, phase in

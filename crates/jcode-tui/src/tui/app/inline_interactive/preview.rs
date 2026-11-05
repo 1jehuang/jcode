@@ -132,6 +132,7 @@ impl App {
     }
 
     pub(crate) fn sync_model_picker_preview_from_input(&mut self) {
+        self.sync_input_image_attachments();
         let Some(request) = self.inline_picker_preview_request(&self.input) else {
             if self
                 .inline_interactive_state

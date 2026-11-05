@@ -402,6 +402,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels: true,
         supports_user_response: true,
         supports_server_failover: false,
+        supports_turn_identity: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -413,6 +414,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect: true,
         continue_on_disconnect: true,
         terminal_env: vec![("ZELLIJ_SESSION_NAME".to_string(), "sessionB".to_string())],
+        client_name: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"subscribe\""));
@@ -422,6 +424,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_turn_identity: _,
         id,
         working_dir,
         selfdev,
@@ -433,6 +436,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));
@@ -464,6 +468,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         supports_pdf_panels,
         supports_user_response,
         supports_server_failover: _,
+        supports_turn_identity: _,
         id,
         working_dir,
         selfdev,
@@ -475,6 +480,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));
@@ -504,6 +510,7 @@ fn test_resume_session_defaults_sync_flags() -> Result<()> {
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected ResumeSession"));
@@ -682,9 +689,11 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
             ..
         }
     ));
-    assert!(serde_json::to_value(&legacy)?
-        .get("native_ssh_protocol")
-        .is_none());
+    assert!(
+        serde_json::to_value(&legacy)?
+            .get("native_ssh_protocol")
+            .is_none()
+    );
     Ok(())
 }
 
@@ -747,4 +756,23 @@ fn context_cap_wire_roundtrip() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[test]
+fn subscribe_and_resume_client_name_is_optional_and_compatible() {
+    let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
+    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    let new: Request =
+        serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
+            .unwrap();
+    assert!(
+        matches!(new, Request::Subscribe { client_name: Some(ref n), .. } if n == "jcode-ios/1.0")
+    );
+    let resume: Request = serde_json::from_str(
+        r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
+    )
+    .unwrap();
+    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    let json = serde_json::to_string(&old).unwrap();
+    assert!(!json.contains("client_name"));
 }

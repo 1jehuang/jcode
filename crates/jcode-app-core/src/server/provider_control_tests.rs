@@ -10,60 +10,6 @@ use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
-#[tokio::test]
-async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_cooldown() {
-    let _guard = crate::storage::lock_test_env();
-    let target = "daemon-reset-target";
-    let other = "daemon-reset-other";
-    crate::auth::codex::set_active_account_override(Some(target.to_string()));
-    crate::provider::record_provider_unavailable_for_account("openai", "target quota exhausted");
-    crate::auth::codex::set_active_account_override(Some(other.to_string()));
-    crate::provider::record_provider_unavailable_for_account("openai", "other quota exhausted");
-
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    for id in [51, 52] {
-        handle_invalidate_openai_usage(id, Some(target.to_string()), &tx).await;
-        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: ack }) if ack == id));
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            crate::auth::codex::active_account_label().as_deref(),
-            Some(other)
-        );
-        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_some());
-        crate::auth::codex::set_active_account_override(Some(target.to_string()));
-        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_none());
-        crate::auth::codex::set_active_account_override(Some(other.to_string()));
-    }
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some(other));
-    crate::auth::codex::set_active_account_override(None);
-}
-
-#[tokio::test]
-async fn invalidate_anthropic_usage_acknowledges_after_clearing_only_pinned_claude_cooldown() {
-    let _guard = crate::storage::lock_test_env();
-    let target = "daemon-claude-reset-target";
-    let other = "daemon-claude-reset-other";
-    crate::auth::claude::set_active_account_override(Some(target.to_string()));
-    crate::provider::record_provider_unavailable_for_account("claude", "target session limit");
-    crate::auth::claude::set_active_account_override(Some(other.to_string()));
-    crate::provider::record_provider_unavailable_for_account("claude", "other session limit");
-
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    // Repeating the request is harmless: it only touches local state.
-    for id in [61, 62] {
-        handle_invalidate_anthropic_usage(id, Some(target.to_string()), &tx).await;
-        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: ack }) if ack == id));
-        assert!(rx.try_recv().is_err());
-        // The other login keeps its cooldown and stays the active account.
-        assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_some());
-        crate::auth::claude::set_active_account_override(Some(target.to_string()));
-        assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_none());
-        crate::auth::claude::set_active_account_override(Some(other.to_string()));
-    }
-    crate::provider::clear_claude_provider_unavailability_for_account_label(Some(other));
-    crate::auth::claude::set_active_account_override(None);
-}
-
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -90,98 +36,8 @@ async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<Server
     .expect("expected final auth catalog notification")
 }
 
-#[tokio::test]
-async fn account_switch_clears_only_selected_login_failure_even_when_agent_is_busy() {
-    let _guard = EnvGuard::save(&[]);
-    let previous_claude = crate::auth::claude::get_active_account_override();
-    let previous_openai = crate::auth::codex::get_active_account_override();
-    let target = "switch-failure-target";
-    let other = "switch-failure-other";
-    for (kind, provider_id) in [("anthropic", "claude"), ("openai", "openai")] {
-        crate::auth::claude::set_active_account_override(Some(target.to_string()));
-        crate::auth::codex::set_active_account_override(Some(target.to_string()));
-        for id in ["claude", "openai"] {
-            crate::provider::record_provider_unavailable_for_account(id, "old credential rejected");
-        }
-        crate::auth::claude::set_active_account_override(Some(other.to_string()));
-        crate::auth::codex::set_active_account_override(Some(other.to_string()));
-        crate::provider::record_provider_unavailable_for_account(
-            provider_id,
-            "other login rejected",
-        );
-
-        let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
-        let agent = Arc::new(Mutex::new(Agent::new(provider, Registry::empty())));
-        let busy = agent.lock().await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_account_switch_refresh(71, kind, target.to_string(), Arc::clone(&agent), tx);
-        assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_some());
-        crate::auth::claude::set_active_account_override(Some(target.to_string()));
-        crate::auth::codex::set_active_account_override(Some(target.to_string()));
-        assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_none());
-        let unrelated = if provider_id == "claude" {
-            "openai"
-        } else {
-            "claude"
-        };
-        assert!(crate::provider::provider_unavailability_detail_for_account(unrelated).is_some());
-        drop(busy);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while let Some(event) = rx.recv().await {
-                if matches!(event, ServerEvent::Done { id: 71 }) {
-                    return;
-                }
-            }
-            panic!("account switch must acknowledge completion");
-        })
-        .await
-        .expect("account switch must finish after the agent becomes idle");
-        for id in ["claude", "openai"] {
-            crate::provider::clear_provider_unavailable_for_account(id);
-        }
-        crate::auth::claude::set_active_account_override(Some(other.to_string()));
-        crate::auth::codex::set_active_account_override(Some(other.to_string()));
-        crate::provider::clear_provider_unavailable_for_account(provider_id);
-    }
-    crate::auth::claude::set_active_account_override(previous_claude);
-    crate::auth::codex::set_active_account_override(previous_openai);
-}
-
-#[tokio::test]
-async fn notify_auth_changed_clears_renewed_claude_login_failure() {
-    let _guard = EnvGuard::save(&[
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ]);
-    let previous = crate::auth::claude::get_active_account_override();
-    crate::auth::claude::set_active_account_override(Some("renewed-login".to_string()));
-    crate::provider::record_provider_unavailable_for_account(
-        "claude",
-        "old refresh token rejected",
-    );
-    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
-    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
-    let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    handle_notify_auth_changed(
-        72,
-        Some("claude".to_string()),
-        None,
-        false,
-        &provider,
-        &provider,
-        &sessions,
-        &session_id,
-        &agent,
-        &tx,
-    )
-    .await;
-    recv_final_catalog_notification(&mut rx).await;
-    assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_none());
-    crate::auth::claude::set_active_account_override(previous);
-}
+#[path = "provider_control_tests/account_invalidation.rs"]
+mod account_invalidation;
 
 #[test]
 fn compact_auth_catalog_activity_reports_changed_and_unchanged_in_two_lines() {
@@ -237,6 +93,155 @@ struct AuthChangeMockState {
 
 struct AuthChangeMockProvider {
     state: Arc<AuthChangeMockState>,
+}
+
+struct PinnedAccountSwitchProvider {
+    route: StdRwLock<crate::provider::RouteSelection>,
+}
+
+#[async_trait]
+impl Provider for PinnedAccountSwitchProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("account switch must not send a model request")
+    }
+
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    fn model(&self) -> String {
+        self.route.read().unwrap().model.clone()
+    }
+    fn set_route_selection(
+        &self,
+        selection: &crate::provider::RouteSelection,
+    ) -> anyhow::Result<()> {
+        if selection.account_label() == Some("missing") {
+            anyhow::bail!("No saved account named missing");
+        }
+        *self.route.write().unwrap() = selection.clone();
+        Ok(())
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        self.route
+            .read()
+            .unwrap()
+            .account_label()
+            .map(str::to_owned)
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            route: StdRwLock::new(self.route.read().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_identity() {
+    let _guard = EnvGuard::save(&[]);
+    let provider: Arc<dyn Provider> = Arc::new(PinnedAccountSwitchProvider {
+        route: StdRwLock::new(crate::provider::RouteSelection {
+            model: "arbitrary-future-model".into(),
+            runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+            api_method: "openai-oauth@first".into(),
+            provider_label: "OpenAI".into(),
+            detail: String::new(),
+        }),
+    });
+    let mut session_agent = Agent::new(provider, Registry::empty());
+    session_agent.persist_session_now().unwrap();
+    let agent = Arc::new(Mutex::new(session_agent));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for label in ["second", "third", "first"] {
+        spawn_account_switch_refresh(81, "openai", label.into(), Arc::clone(&agent), tx.clone());
+        let mut acknowledged = false;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ServerEvent::ModelChanged {
+                        id: 81,
+                        model,
+                        provider_oauth_account_label,
+                        error,
+                        ..
+                    } => {
+                        assert_eq!(model, "arbitrary-future-model");
+                        assert_eq!(provider_oauth_account_label.as_deref(), Some(label));
+                        assert!(error.is_none());
+                        acknowledged = true;
+                    }
+                    ServerEvent::Done { id: 81 } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            acknowledged,
+            "a same-model account switch needs an identity acknowledgement"
+        );
+        let agent = agent.lock().await;
+        assert_eq!(
+            agent.provider_handle().oauth_account_label().as_deref(),
+            Some(label)
+        );
+        assert_eq!(
+            agent.session_route_api_method().as_deref(),
+            Some(format!("openai-oauth@{label}").as_str())
+        );
+        let saved = crate::session::Session::load(agent.session_id()).unwrap();
+        assert_eq!(saved.route_api_method, agent.session_route_api_method());
+    }
+    let mut agent = agent.lock().await;
+    apply_account_switch(82, "openai", "missing", &mut agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChanged {
+            id: 82,
+            error: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        agent.provider_handle().oauth_account_label().as_deref(),
+        Some("first")
+    );
+    assert_eq!(
+        agent.session_route_api_method().as_deref(),
+        Some("openai-oauth@first")
+    );
+}
+
+#[tokio::test]
+async fn account_switch_cross_provider_uses_target_oauth_catalog() {
+    let _guard = EnvGuard::save(&[]);
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    *provider.state.routes_override.write().unwrap() = Some(vec![ModelRoute {
+        model: "future-target-model".into(),
+        provider: "Claude".into(),
+        api_method: "claude-oauth@work".into(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    }]);
+    let agent = Agent::new(provider, Registry::empty());
+    let selection = account_switch_selection(&agent, "anthropic", "personal").unwrap();
+    assert_eq!(selection.model, "future-target-model");
+    assert_eq!(selection.api_method, "claude-oauth@personal");
+    assert_eq!(
+        selection.runtime_key,
+        jcode_provider_core::RuntimeKey::ClaudeOAuth
+    );
 }
 
 impl AuthChangeMockProvider {
@@ -444,10 +449,10 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed(
@@ -532,10 +537,10 @@ async fn notify_auth_changed_finishes_when_provider_work_finishes_without_deboun
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "timed-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("timed-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let started = std::time::Instant::now();
@@ -580,10 +585,10 @@ async fn newer_auth_refresh_supersedes_older_final_completion_for_the_same_sessi
     let provider: Arc<dyn Provider> = Arc::new(provider_impl);
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "overlap-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("overlap-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (first_tx, mut first_rx) = mpsc::unbounded_channel();
     let (second_tx, mut second_rx) = mpsc::unbounded_channel();
 
@@ -647,10 +652,10 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
     let current_session_id = { current_agent.lock().await.session_id().to_string() };
     let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, registry)));
     let busy_guard = busy_agent.lock().await;
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "busy-session".to_string(),
-        Arc::clone(&busy_agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("busy-session".to_string(), Arc::clone(&busy_agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed(
@@ -725,10 +730,10 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed(
@@ -872,10 +877,10 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let mut auth = crate::protocol::AuthChanged::new("cerebras");
@@ -956,10 +961,10 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let mut auth = crate::protocol::AuthChanged::new("cerebras");
@@ -1050,7 +1055,9 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     let provider: Arc<dyn Provider> = provider;
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(
+        crate::server::session_manager::SessionManager::from_agents(HashMap::new()),
+    );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     handle_notify_auth_changed(
@@ -1108,10 +1115,10 @@ async fn notify_auth_changed_does_not_override_manual_model_selected_during_refr
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
-        "test-session".to_string(),
-        Arc::clone(&agent),
-    )])));
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let mut auth = crate::protocol::AuthChanged::new("cerebras");
@@ -1217,10 +1224,12 @@ async fn notify_auth_changed_switches_only_current_session_model() {
     )));
     let current_session_id = { current_agent.lock().await.session_id().to_string() };
     let peer_agent = Arc::new(Mutex::new(Agent::new(peer_provider, registry)));
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([
-        ("current-session".to_string(), Arc::clone(&current_agent)),
-        ("peer-session".to_string(), Arc::clone(&peer_agent)),
-    ])));
+    let sessions: SessionAgents = Arc::new(
+        crate::server::session_manager::SessionManager::from_agents(HashMap::from([
+            ("current-session".to_string(), Arc::clone(&current_agent)),
+            ("peer-session".to_string(), Arc::clone(&peer_agent)),
+        ])),
+    );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let mut auth = crate::protocol::AuthChanged::new("groq");

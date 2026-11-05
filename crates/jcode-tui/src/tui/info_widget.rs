@@ -6,7 +6,10 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
-pub use super::cloud_status::{CloudMachineStats, CloudProbeState, CloudStatusInfo};
+pub use super::cloud_status::{
+    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState,
+    CloudStatusInfo,
+};
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
@@ -69,6 +72,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
+pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
@@ -116,6 +120,8 @@ pub enum WidgetKind {
     GitStatus,
     /// Native SSH cloud machine and workspace details.
     CloudVm,
+    /// Directories known to the attached cloud VM.
+    CloudDirectories,
     /// Commits: recent history on the current branch
     Commits,
 }
@@ -135,6 +141,7 @@ impl WidgetKind {
             WidgetKind::BackgroundTasks => 10,
             WidgetKind::GitStatus => 11,
             WidgetKind::CloudVm => 12,
+            WidgetKind::CloudDirectories => 12,
             WidgetKind::Commits => 12,
             WidgetKind::SwarmStatus => 12, // Session list - lower priority
             WidgetKind::AmbientMode => 13, // Scheduled agent - lower priority
@@ -159,6 +166,7 @@ impl WidgetKind {
             WidgetKind::Tips => Side::Left,
             WidgetKind::GitStatus => Side::Left,
             WidgetKind::CloudVm => Side::Left,
+            WidgetKind::CloudDirectories => Side::Left,
             WidgetKind::Commits => Side::Left,
         }
     }
@@ -180,6 +188,7 @@ impl WidgetKind {
             WidgetKind::Tips => 3,
             WidgetKind::GitStatus => 1,
             WidgetKind::CloudVm => 16,
+            WidgetKind::CloudDirectories => 3,
             WidgetKind::Commits => 1,
         }
     }
@@ -197,6 +206,7 @@ impl WidgetKind {
             WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
             WidgetKind::CloudVm,
+            WidgetKind::CloudDirectories,
             WidgetKind::Commits,
             WidgetKind::SwarmStatus,
             WidgetKind::AmbientMode,
@@ -220,6 +230,7 @@ impl WidgetKind {
             WidgetKind::Tips => "tips",
             WidgetKind::GitStatus => "git",
             WidgetKind::CloudVm => "cloud",
+            WidgetKind::CloudDirectories => "cloud-directories",
             WidgetKind::Commits => "commits",
         }
     }
@@ -669,6 +680,8 @@ pub struct InfoWidgetData {
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
+    /// Resume previews show a measured past request, not the active prompt.
+    pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
     pub model: Option<String>,
@@ -686,6 +699,8 @@ pub struct InfoWidgetData {
     pub session_name: Option<String>,
     /// Current working directory for this session.
     pub working_dir: Option<String>,
+    /// Session origin, if its working directory has changed.
+    pub original_working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
@@ -856,6 +871,7 @@ impl InfoWidgetData {
                         .unwrap_or(false)
             }
             WidgetKind::CloudVm => self.cloud_info.is_some(),
+            WidgetKind::CloudDirectories => self.cloud_info.is_some(),
             WidgetKind::Commits => self
                 .git_info
                 .as_ref()
@@ -1116,7 +1132,8 @@ pub fn calculate_placements(
 
 /// Repack cloud details only when asynchronously loaded Overview rows cannot
 /// grow inside their original anchor. Keep the resident layout unless a fresh
-/// priority pass fits the full Overview without losing any visible widget.
+/// priority pass fits the full Overview without losing primary visible widgets.
+/// The supplemental directory inventory may yield when the viewport is short.
 pub(super) fn calculate_placements_with_cloud_reflow(
     area: Rect,
     margins: &Margins,
@@ -1147,10 +1164,10 @@ pub(super) fn calculate_placements_with_cloud_reflow(
             && p.rect.height
                 >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
     });
-    let preserves = resident
-        .visible
-        .iter()
-        .all(|old| fresh.visible.iter().any(|new| new.kind == old.kind));
+    let preserves = resident.visible.iter().all(|old| {
+        old.kind == WidgetKind::CloudDirectories
+            || fresh.visible.iter().any(|new| new.kind == old.kind)
+    });
     if fits && preserves { fresh } else { resident }
 }
 
@@ -1468,7 +1485,12 @@ fn overview_footer(data: &InfoWidgetData) -> String {
                 ""
             };
             format!(
-                "{estimate}{} ctx left",
+                "{}{estimate}{} ctx left",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
                 crate::kv_cache_monitor::format_token_count(left)
             )
         }
@@ -1769,6 +1791,9 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_changes_framed(data, inner),
         WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
+        WidgetKind::CloudDirectories => {
+            super::info_widget_cloud_directories::render_cloud_directories(data, inner)
+        }
         WidgetKind::Commits => render_commits_widget(data, inner),
     };
     framed.settle()

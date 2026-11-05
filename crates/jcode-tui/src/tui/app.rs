@@ -573,47 +573,8 @@ pub struct CopyBadgeFeedback {
     pub expires_at: Instant,
 }
 
-impl CopyBadgeUiState {
-    fn pulse_active(expires_at: Option<Instant>, now: Instant) -> bool {
-        expires_at.is_some_and(|expires_at| expires_at > now)
-    }
-
-    pub(crate) fn alt_is_active(&self, now: Instant) -> bool {
-        self.alt_active || Self::pulse_active(self.alt_pulse_until, now)
-    }
-
-    pub(crate) fn shift_is_active(&self, now: Instant) -> bool {
-        self.alt_is_active(now)
-            && (self.shift_active || Self::pulse_active(self.shift_pulse_until, now))
-    }
-
-    pub(crate) fn key_is_active(&self, key: char, now: Instant) -> bool {
-        self.shift_is_active(now)
-            && self
-                .key_active
-                .as_ref()
-                .map(|(active_key, expires_at)| {
-                    active_key.eq_ignore_ascii_case(&key) && *expires_at > now
-                })
-                .unwrap_or(false)
-    }
-
-    pub(crate) fn feedback_for_key(&self, key: char, now: Instant) -> Option<bool> {
-        self.copied_feedback.as_ref().and_then(|feedback| {
-            if feedback.key.eq_ignore_ascii_case(&key) && feedback.expires_at > now {
-                Some(feedback.success)
-            } else {
-                None
-            }
-        })
-    }
-
-    pub(crate) fn expand_feedback_is_active(&self, now: Instant) -> bool {
-        self.expand_feedback_until
-            .is_some_and(|expires_at| expires_at > now)
-    }
-}
-
+#[path = "app/copy_badge_state.rs"]
+mod copy_badge_state;
 /// Result from running the TUI
 #[derive(Debug, Default)]
 pub struct RunResult {
@@ -1052,6 +1013,9 @@ pub struct App {
     // tick replays it after the backlog drains and one final live frame renders,
     // preventing Done from force-flushing a whole provider burst at once.
     deferred_stream_done_id: Option<u64>,
+    deferred_stream_done_identity: Option<crate::protocol::TurnIdentity>,
+    remote_turn_fence: remote::turn_identity::TurnFence,
+    remote_queue_retry_not_before: Option<Instant>,
     // Server-reported processing snapshot captured from resume/history before live events arrive.
     remote_resume_activity: Option<RemoteResumeActivity>,
     // First tick at which a queued follow-up was observed sitting undispatched
@@ -1224,6 +1188,10 @@ pub struct App {
     // Running `/cloud` or `/local` job (wakes the machine, moves the session).
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
+    // Request id of a ready handoff that already interrupted the running turn.
+    cloud_interrupt_sent_for: Option<u64>,
+    // Remote mode: the daemon turn must be cancelled for a ready handoff.
+    cloud_remote_interrupt_pending: bool,
     cloud_recovery_context: Option<(String, String)>,
     cloud_recovery_auto_pending: bool,
     // One autonomous diagnosis per command/session per client lifetime. A
@@ -1313,6 +1281,8 @@ pub struct App {
     /// keep auto-scrolling on every tick (browser-style) until the drag leaves the
     /// edge or ends. Stores the pane and whether to scroll upward.
     copy_selection_edge_autoscroll: Option<(crate::tui::CopySelectionPane, bool)>,
+    /// Temporary composer viewport while dragging, independent of the caret.
+    input_selection_scroll: Option<usize>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
@@ -1410,6 +1380,8 @@ pub struct App {
     runtime_mode: AppRuntimeMode,
     // Remote rewind/undo request waiting for the server's replacement History payload.
     pending_remote_rewind_notice: Option<PendingRemoteRewindNotice>,
+    // Opaque server-owned SSH session navigation and child-creation state.
+    ssh_sessions: remote::ssh_sessions::State,
     // History-recovery watchdog for the "stuck on loading session…" bug. When a
     // remote (re)connect never receives the bootstrap `History` event, every
     // prompt path is gated behind `has_loaded_history()` and the session is
@@ -1649,6 +1621,8 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Last sent account switch, used only as the cycle cursor until acknowledged.
+    pending_account_switch_target: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
@@ -1866,6 +1840,8 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    /// Provider query from `/usage <provider>`; None shows every provider.
+    usage_provider_filter: Option<String>,
     usage_reset: usage_reset::ResetState,
     /// Whether a `/productivity` report generation is currently in flight.
     productivity_refreshing: bool,

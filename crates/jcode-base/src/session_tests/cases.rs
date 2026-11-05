@@ -717,6 +717,71 @@ fn test_save_persists_compaction_state() -> Result<()> {
     Ok(())
 }
 
+/// A metadata-only stub (no transcript, no compaction loaded) that is saved
+/// through the journal must not erase the owner's compaction summary. Doing so
+/// made the next resume/split see the whole transcript and emergency-compact it.
+#[test]
+fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-stub-compaction-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_stub_compaction_test";
+    let mut owner = Session::create_with_id(id.to_string(), None, Some("owner".to_string()));
+    for i in 0..4 {
+        owner.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("message {i}"),
+                cache_control: None,
+            }],
+        );
+    }
+    owner.save()?;
+    // Compaction lands in the journal, as it does for a live large session.
+    owner.compaction = Some(StoredCompactionState {
+        summary_text: "owner summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 3,
+        original_turn_count: 3,
+        compacted_count: 3,
+    });
+    owner.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "after compaction".into(),
+            cache_control: None,
+        }],
+    );
+    owner.save()?;
+    // A later append marks compaction unchanged, so the stub, which reads only
+    // the latest journal metadata, never sees the summary.
+    owner.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "reply".into(),
+            cache_control: None,
+        }],
+    );
+    owner.save()?;
+
+    let mut stub = Session::load_startup_stub(id)?;
+    stub.compaction = None;
+    stub.last_pid = Some(1);
+    stub.save()?;
+    let mut stub = Session::load_startup_stub(id)?;
+    assert!(stub.messages.is_empty());
+    stub.save()?;
+
+    let loaded = Session::load(id)?;
+    assert_eq!(loaded.compaction, owner.compaction);
+    assert_eq!(loaded.messages.len(), 6);
+    Ok(())
+}
+
 #[test]
 fn test_save_persists_provider_key() -> Result<()> {
     let _env_lock = lock_env();
@@ -802,6 +867,40 @@ fn context_cap_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
     session.replace_messages(session.messages.clone());
     session.save()?;
     assert_loaders(None)?;
+    Ok(())
+}
+
+#[test]
+fn original_working_dir_survives_snapshot_journal_and_startup_loaders() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let id = "session_original_working_dir_test";
+    let mut session = Session::create_with_id(id.into(), None, None);
+    session.working_dir = Some("/projects/start".into());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2 * 1024 * 1024),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    session.original_working_dir = session.working_dir.clone();
+    session.working_dir = Some("/projects/current".into());
+    session.save()?;
+    assert!(session_journal_path(id)?.exists());
+    for loaded in [
+        Session::load(id)?,
+        Session::load_startup_stub(id)?,
+        Session::load_for_remote_startup(id)?,
+    ] {
+        assert_eq!(
+            loaded.original_working_dir.as_deref(),
+            Some("/projects/start")
+        );
+        assert_eq!(loaded.working_dir.as_deref(), Some("/projects/current"));
+    }
     Ok(())
 }
 
@@ -1655,217 +1754,8 @@ fn test_render_messages_shows_auto_poke_continuations_as_system_not_user() {
     );
 }
 
-#[test]
-fn test_render_messages_renders_reasoning_before_answer_in_stored_order() {
-    // Regression: providers persist the assistant turn as `[Text, ReasoningTrace,
-    // ToolUse]` (see agent/turn_loops.rs push order). On resume/re-render the
-    // reasoning must still appear *before* the answer text to match the live
-    // streaming order, even though the Text block is stored first.
-    use jcode_render_core::REASONING_SENTINEL;
-
-    let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
-    crate::config::invalidate_config_cache();
-
-    let mut session = Session::create_with_id(
-        "session_render_reasoning_order_test".to_string(),
-        None,
-        Some("render reasoning order test".to_string()),
-    );
-
-    session.add_message(
-        Role::Assistant,
-        vec![
-            ContentBlock::Text {
-                text: "Here is the answer.".to_string(),
-                cache_control: None,
-            },
-            ContentBlock::ReasoningTrace {
-                text: "step one\nstep two".to_string(),
-            },
-        ],
-    );
-
-    let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    let content = &rendered[0].content;
-    assert!(
-        content.contains(&format!("*{0}step one{0}*", REASONING_SENTINEL)),
-        "expected reasoning markup, got: {content:?}"
-    );
-    assert!(content.contains("Here is the answer."));
-    let reasoning_pos = content.find("step two").unwrap();
-    let answer_pos = content.find("Here is the answer.").unwrap();
-    assert!(
-        reasoning_pos < answer_pos,
-        "reasoning should precede the answer text even when stored after it: {content:?}"
-    );
-}
-
-#[test]
-fn test_render_messages_renders_persisted_reasoning() {
-    use jcode_render_core::REASONING_SENTINEL;
-
-    let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
-    crate::config::invalidate_config_cache();
-
-    let mut session = Session::create_with_id(
-        "session_render_reasoning_test".to_string(),
-        None,
-        Some("render reasoning test".to_string()),
-    );
-
-    session.add_message(
-        Role::Assistant,
-        vec![
-            ContentBlock::ReasoningTrace {
-                text: "step one\nstep two".to_string(),
-            },
-            ContentBlock::Text {
-                text: "Here is the answer.".to_string(),
-                cache_control: None,
-            },
-        ],
-    );
-
-    let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    let content = &rendered[0].content;
-    // Reasoning lines are rendered as dim/italic markup with the sentinel.
-    assert!(
-        content.contains(&format!("*{0}step one{0}*", REASONING_SENTINEL)),
-        "expected reasoning markup, got: {content:?}"
-    );
-    assert!(
-        content.contains(&format!("*{0}step two{0}*", REASONING_SENTINEL)),
-        "expected reasoning markup, got: {content:?}"
-    );
-    // Answer text follows the reasoning block.
-    assert!(content.contains("Here is the answer."));
-    let reasoning_end = content.find("step two").unwrap();
-    let answer_start = content.find("Here is the answer.").unwrap();
-    assert!(
-        reasoning_end < answer_start,
-        "reasoning should precede the answer text: {content:?}"
-    );
-}
-
-#[test]
-fn test_render_messages_renders_legacy_reasoning_variant() {
-    use jcode_render_core::REASONING_SENTINEL;
-
-    let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
-    crate::config::invalidate_config_cache();
-
-    let mut session = Session::create_with_id(
-        "session_render_legacy_reasoning_test".to_string(),
-        None,
-        Some("render legacy reasoning test".to_string()),
-    );
-
-    session.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Reasoning {
-            text: "legacy thought".to_string(),
-        }],
-    );
-
-    let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    assert!(
-        rendered[0]
-            .content
-            .contains(&format!("*{0}legacy thought{0}*", REASONING_SENTINEL)),
-        "expected legacy reasoning markup, got: {:?}",
-        rendered[0].content
-    );
-}
-
-#[test]
-fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
-    use jcode_render_core::REASONING_SENTINEL;
-
-    let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "current");
-    crate::config::invalidate_config_cache();
-
-    let mut session = Session::create_with_id(
-        "session_render_reasoning_current_test".to_string(),
-        None,
-        Some("render reasoning current test".to_string()),
-    );
-
-    session.add_message(
-        Role::Assistant,
-        vec![
-            ContentBlock::ReasoningTrace {
-                text: "step one\nstep two\nstep three".to_string(),
-            },
-            ContentBlock::Text {
-                text: "Here is the answer.".to_string(),
-                cache_control: None,
-            },
-        ],
-    );
-
-    let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    let content = &rendered[0].content;
-    // In `current` mode only the *live* reasoning block is ever shown; it streams
-    // then is discarded once the model answers. Re-rendered history therefore
-    // shows no past reasoning at all (no trace line, no lines, no sentinel).
-    assert!(
-        !content.contains(REASONING_SENTINEL),
-        "no reasoning markup expected in current mode on reload: {content:?}"
-    );
-    assert!(
-        !content.contains("step one")
-            && !content.contains("step two")
-            && !content.contains("thought"),
-        "individual reasoning lines/trace must not be replayed in current mode: {content:?}"
-    );
-    // The answer text is preserved.
-    assert!(content.contains("Here is the answer."));
-}
-
-#[test]
-fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
-    use jcode_render_core::REASONING_SENTINEL;
-
-    let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "off");
-    crate::config::invalidate_config_cache();
-
-    let mut session = Session::create_with_id(
-        "session_render_reasoning_off_test".to_string(),
-        None,
-        Some("render reasoning off test".to_string()),
-    );
-
-    session.add_message(
-        Role::Assistant,
-        vec![
-            ContentBlock::ReasoningTrace {
-                text: "secret thought".to_string(),
-            },
-            ContentBlock::Text {
-                text: "Here is the answer.".to_string(),
-                cache_control: None,
-            },
-        ],
-    );
-
-    let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    let content = &rendered[0].content;
-    assert!(
-        !content.contains(REASONING_SENTINEL) && !content.contains("secret thought"),
-        "reasoning must be hidden entirely in off mode: {content:?}"
-    );
-    assert!(content.contains("Here is the answer."));
-}
+#[path = "reasoning_render_tests.rs"]
+mod reasoning_render;
 
 #[test]
 fn test_render_messages_honors_background_task_display_role_override() {
@@ -3106,6 +2996,115 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     let stub = Session::load_startup_stub(session_id)?;
     assert_eq!(stub.custom_title.as_deref(), Some("renamed"));
     assert!(matches!(stub.status, SessionStatus::Closed));
+    Ok(())
+}
+
+fn assert_persisted_route(session_id: &str, expected: Option<&str>) -> Result<()> {
+    assert_eq!(
+        Session::load(session_id)?.route_api_method.as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_startup_stub(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    assert_eq!(
+        Session::load_for_remote_startup(session_id)?
+            .route_api_method
+            .as_deref(),
+        expected
+    );
+    Ok(())
+}
+
+fn route_journal_roundtrip(large: bool) -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.provider_key = Some("openai".into());
+    session.model = Some("same-model".into());
+    session.route_api_method = Some("account:first".into());
+    session.append_stored_message(StoredMessage {
+        id: "message".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+    let path = storage_paths::session_path(session_id)?;
+    let before = std::fs::read(&path)?;
+    for route in [Some("account:second"), Some("account:third"), None] {
+        session.route_api_method = route.map(str::to_string);
+        session.save()?;
+        assert_persisted_route(session_id, route)?;
+        if large {
+            assert_eq!(std::fs::read(&path)?, before);
+            assert!(session_journal_path(session_id)?.exists());
+        } else {
+            // Small metadata updates keep the snapshot self-contained.
+            let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            assert_eq!(snapshot["route_api_method"].as_str(), route);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn route_journal_small_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(false)
+}
+
+#[test]
+fn route_journal_large_session_roundtrip() -> Result<()> {
+    route_journal_roundtrip(true)
+}
+
+#[test]
+fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_route_legacy_journal";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.route_api_method = Some("account:snapshot".into());
+    session.title = Some("legacy route test".into());
+    session.save()?;
+    // Metadata-only entries at or before the checkpoint timestamp are stale.
+    session.updated_at += chrono::Duration::seconds(1);
+    let mut legacy = serde_json::to_value(session.journal_meta())?;
+    legacy.as_object_mut().unwrap().remove("route_api_method");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("route_api_method_present");
+    let legacy_line = serde_json::json!({"meta": legacy}).to_string();
+    let path = session_journal_path(session_id)?;
+    std::fs::write(&path, format!("{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:snapshot"))?;
+
+    session.route_api_method = Some("account:journal".into());
+    let current_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    // A downgraded writer can append legacy metadata after new metadata.
+    std::fs::write(&path, format!("{current_line}\n{legacy_line}\n"))?;
+    assert_persisted_route(session_id, Some("account:journal"))?;
+
+    session.route_api_method = None;
+    let cleared_line = serde_json::json!({"meta": session.journal_meta()}).to_string();
+    std::fs::write(
+        &path,
+        format!("{current_line}\n{cleared_line}\n{legacy_line}\n"),
+    )?;
+    assert_persisted_route(session_id, None)?;
     Ok(())
 }
 

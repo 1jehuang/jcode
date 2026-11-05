@@ -849,6 +849,13 @@ impl crate::tui::TuiState for App {
         &self.input
     }
 
+    fn input_image_attached(&self, number: usize) -> bool {
+        number
+            .checked_sub(1)
+            .and_then(|index| self.pending_images.get(index))
+            .is_some_and(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
+    }
+
     fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }
@@ -1841,6 +1848,7 @@ impl crate::tui::TuiState for App {
             ),
             context_info,
             context_info_stale: !context_snapshot.fresh,
+            historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
             model,
@@ -1884,6 +1892,7 @@ impl crate::tui::TuiState for App {
             session_count,
             session_name,
             working_dir: self.session.working_dir.clone(),
+            original_working_dir: self.session.original_working_dir.clone(),
             client_count,
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
@@ -1920,7 +1929,7 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
-            cloud_info: crate::tui::cloud_status::gather(),
+            cloud_info: crate::tui::cloud_status::gather(self.current_session_id()),
             cloud_connection: self.remote_startup_phase.as_ref().map(|phase| match phase {
                 super::RemoteStartupPhase::Reconnecting { .. } => "Reconnecting".to_string(),
                 _ => "Connecting".to_string(),
@@ -1982,12 +1991,13 @@ impl crate::tui::TuiState for App {
     }
 
     fn startup_oauth_account_label(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return None;
-        }
         if !self.is_remote {
+            if crate::tui::is_ssh_remote() {
+                return None;
+            }
             return self.provider.oauth_account_label();
         }
+        // SSH must avoid host-local credentials, not daemon-reported identity.
         remote_oauth_account_label(
             self.remote_provider_oauth_account_label.as_deref(),
             self.session.route_api_method.as_deref(),
@@ -2245,6 +2255,12 @@ impl crate::tui::TuiState for App {
 
     fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
         self.normalized_copy_selection()
+    }
+
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        self.copy_selection_dragging
+            .then_some(self.input_selection_scroll)
+            .flatten()
     }
 
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {

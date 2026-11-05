@@ -352,7 +352,7 @@ pub(super) fn wrapped_input_line_count(
 
     let num_str = next_prompt.to_string();
     let (prompt_char, caret_color) = input_prompt(app);
-    let (lines, _, _) = wrap_input_text(
+    let (lines, _, _) = wrap_input_text_with_images(
         app.input(),
         app.cursor_pos(),
         line_width,
@@ -360,6 +360,7 @@ pub(super) fn wrapped_input_line_count(
         prompt_char,
         caret_color,
         prompt_len,
+        &|number| app.input_image_attached(number),
     );
     lines.len().max(1)
 }
@@ -1108,6 +1109,13 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     };
 
+    let line = status_with_background_tasks(
+        line,
+        app.background_task_rows(),
+        area.width as usize,
+        app.is_processing(),
+    );
+
     crate::memory::check_staleness();
 
     if app.centered_mode() {
@@ -1115,6 +1123,46 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         return;
     }
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Background launches finish their tool call immediately, but the work and
+/// its intent must remain visible while the agent moves on to another tool.
+fn status_with_background_tasks(
+    foreground: Line<'static>,
+    tasks: &[crate::tui::BackgroundTaskRow],
+    width: usize,
+    processing: bool,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus;
+    use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
+
+    let running: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
+        .collect();
+    if running.is_empty() {
+        return fit(&foreground, width);
+    }
+    let labels = running
+        .iter()
+        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let background = Line::from(Span::styled(
+        format!("bg {}: {}", running.len(), labels),
+        Style::default().fg(ai_color()),
+    ));
+    // Idle tips must not displace actual work. While processing, reserve space
+    // for both activities rather than letting a long foreground intent hide bg.
+    if !processing || foreground.width() == 0 || width < 24 {
+        return fit(&background, width);
+    }
+    let background_width = background.width().min(width / 2);
+    let mut line = fit(&foreground, width.saturating_sub(background_width + 3));
+    line.spans
+        .push(Span::styled(" · ", Style::default().fg(dim_color())));
+    line.spans.extend(fit(&background, background_width).spans);
+    line
 }
 
 fn running_tool_header_spans(
@@ -1477,7 +1525,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
         machine: crate::tui::ssh_remote_host(),
-        dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            app.working_dir().as_deref(),
+        ),
         branch: overscroll_git_branch(&data),
         git: data.git_info.clone(),
         context: overscroll_context_usage(&data),
@@ -1509,13 +1560,28 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
 
 /// Render only the supplied session facts. Unlike the live adapter this never
 /// falls back to the current App, process directory, SSH host or credentials.
+#[cfg(test)]
 pub(crate) fn preview_overscroll_line(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
 ) -> Line<'static> {
+    preview_overscroll_line_for_host(data, width, None)
+}
+
+/// The host belongs to the selected preview, never the attached live session.
+pub(crate) fn preview_overscroll_line_for_host(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+    host: Option<&str>,
+) -> Line<'static> {
     let facts = OverscrollFacts {
-        machine: None,
-        dir: data.working_dir.as_deref().and_then(overscroll_dir_label),
+        machine: host
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_owned),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            data.working_dir.as_deref(),
+        ),
         branch: overscroll_git_branch(data),
         git: data.git_info.clone(),
         context: overscroll_context_usage(data),
@@ -1537,7 +1603,17 @@ pub(crate) fn preview_overscroll_line(
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
     };
-    Line::from(overscroll_fit_facts(&facts, width as usize).0).alignment(Alignment::Right)
+    let label = if data.historical_context {
+        "saved · "
+    } else {
+        ""
+    };
+    let label_width = unicode_width::UnicodeWidthStr::width(label);
+    let mut spans = overscroll_fit_facts(&facts, (width as usize).saturating_sub(label_width)).0;
+    if !label.is_empty() && width as usize > label_width {
+        spans.insert(0, Span::styled(label, Style::default().fg(dim_color())));
+    }
+    Line::from(spans).alignment(Alignment::Right)
 }
 
 /// Model name color on the overscroll status line.
@@ -1625,10 +1701,10 @@ fn overscroll_fact_spans(
         let label = if levels.dir == 0 {
             dir.clone()
         } else {
-            dir.rsplit('/')
-                .find(|seg| !seg.is_empty())
-                .unwrap_or(dir)
-                .to_string()
+            dir.split(" → ")
+                .map(|path| path.rsplit('/').find(|seg| !seg.is_empty()).unwrap_or(path))
+                .collect::<Vec<_>>()
+                .join(" → ")
         };
         let mut group = machine_spans(levels);
         if group.is_empty() {
@@ -1873,6 +1949,27 @@ fn overscroll_dir_label(path: &str) -> Option<String> {
     session_facts::dir_label_short(path)
 }
 
+fn overscroll_directory_transition(
+    original: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let current = current.filter(|path| !path.trim().is_empty())?;
+    let label = overscroll_dir_label(current).unwrap_or_else(|| current.to_string());
+    let Some(original) = original.filter(|path| !path.trim().is_empty()) else {
+        return Some(label);
+    };
+    if std::path::Path::new(original) == std::path::Path::new(current) {
+        return Some(label);
+    }
+    let origin_label = overscroll_dir_label(original).unwrap_or_else(|| original.to_string());
+    // Elision can hide the differing ancestor. Keep both paths distinguishable.
+    if origin_label == label {
+        Some(format!("{original} → {current}"))
+    } else {
+        Some(format!("{origin_label} → {label}"))
+    }
+}
+
 /// Placeholder header strings used during remote startup; not real model names.
 fn overscroll_is_placeholder(model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
@@ -2022,6 +2119,30 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     };
     Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
+
+/// The idle resume composer uses the live input wrapper, but never reads the
+/// currently open session's draft, queue, selection, or cursor state.
+pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
+    let number = next_prompt.to_string();
+    let prompt = "> ";
+    let prompt_len = number.len() + prompt.len();
+    let line_width = (area.width as usize).saturating_sub(prompt_len);
+    if area.height == 0 || line_width == 0 {
+        return;
+    }
+    let (lines, _, _) = wrap_input_text_with_images(
+        "",
+        0,
+        line_width,
+        &number,
+        prompt,
+        user_color(),
+        prompt_len,
+        &|_| false,
+    );
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -2048,7 +2169,7 @@ pub(super) fn draw_input(
         return None;
     }
 
-    let (all_lines, cursor_line, cursor_col) = wrap_input_text(
+    let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_images(
         input_text,
         cursor_pos,
         line_width,
@@ -2056,6 +2177,7 @@ pub(super) fn draw_input(
         prompt_char,
         caret_color,
         prompt_len,
+        &|number| app.input_image_attached(number),
     );
 
     let mut lines: Vec<Line> = Vec::new();
@@ -2117,7 +2239,11 @@ pub(super) fn draw_input(
     let total_input_lines = all_lines.len();
     let visible_height = area.height as usize;
 
-    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
+    let scroll_offset = if let Some(scroll) = app.input_drag_scroll_offset() {
+        // Selection scrolling is independent of the editing caret.
+        let available = visible_height.saturating_sub(suggestions_offset).max(1);
+        scroll.min(total_input_lines.saturating_sub(available))
+    } else if total_input_lines + suggestions_offset <= visible_height {
         0
     } else {
         let available_for_input = visible_height.saturating_sub(suggestions_offset);
@@ -2240,8 +2366,11 @@ pub(super) fn draw_input(
     };
 
     let cursor = Position::new(cursor_x, cursor_y);
-    frame.set_cursor_position(cursor);
     draw_send_mode_indicator(frame, app, area);
+    if app.input_drag_scroll_offset().is_some() {
+        return None;
+    }
+    frame.set_cursor_position(cursor);
     Some(cursor)
 }
 
@@ -2481,6 +2610,7 @@ pub(crate) fn input_cursor_pos_from_screen(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn wrap_input_text<'a>(
     input: &str,
     cursor_pos: usize,
@@ -2490,7 +2620,30 @@ pub(crate) fn wrap_input_text<'a>(
     caret_color: Color,
     prompt_len: usize,
 ) -> (Vec<Line<'a>>, usize, usize) {
-    let image_ranges: Vec<std::ops::Range<usize>> = input
+    wrap_input_text_with_images(
+        input,
+        cursor_pos,
+        line_width,
+        num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+        &|_| false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrap_input_text_with_images<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+    attached: &dyn Fn(usize) -> bool,
+) -> (Vec<Line<'a>>, usize, usize) {
+    let image_ranges: Vec<(std::ops::Range<usize>, bool)> = input
         .match_indices("[image ")
         .filter_map(|(start, _)| {
             let suffix = &input[start + 7..];
@@ -2499,7 +2652,8 @@ pub(crate) fn wrap_input_text<'a>(
                 return None;
             }
             let char_start = input[..start].chars().count();
-            Some(char_start..char_start + 8 + digits)
+            let present = suffix[..digits].parse::<usize>().is_ok_and(attached);
+            Some((char_start..char_start + 8 + digits, present))
         })
         .collect();
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
@@ -2534,8 +2688,16 @@ pub(crate) fn wrap_input_text<'a>(
         let mut previous_style = Style::default();
         for (offset, ch) in segment.text.chars().enumerate() {
             let position = segment.start_char + offset;
-            let style = if image_ranges.iter().any(|range| range.contains(&position)) {
-                Style::default().fg(rgb(102, 204, 221)).bold()
+            let style = if let Some((_, present)) = image_ranges
+                .iter()
+                .find(|(range, _)| range.contains(&position))
+            {
+                let color = if *present {
+                    rgb(102, 204, 221)
+                } else {
+                    rgb(255, 193, 7)
+                };
+                Style::default().fg(color).bold()
             } else {
                 Style::default()
             };

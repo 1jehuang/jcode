@@ -1371,7 +1371,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.
     let images = if prompt.is_some() {
-        std::mem::take(&mut app.pending_images)
+        app.take_pending_image_payloads()
     } else {
         Vec::new()
     };
@@ -3727,6 +3727,8 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let filter = rest.trim();
+    app.usage_provider_filter = (!filter.is_empty()).then(|| filter.to_string());
     app.open_usage_inline_loading();
     app.request_usage_report();
     true

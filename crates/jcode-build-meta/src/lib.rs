@@ -135,9 +135,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_build_override_preserves_release_identity() {
+        if let Some(expected) = option_env!("JCODE_BUILD_SEMVER").and_then(parse_release_semver) {
+            assert_eq!(super::SEMVER, expected);
+            assert_eq!(super::UPDATE_SEMVER, expected);
+        }
+    }
+
+    #[test]
     fn runtime_release_semver_accepts_only_three_numeric_components() {
         assert_eq!(parse_release_semver("v1.2.3").as_deref(), Some("1.2.3"));
         assert_eq!(parse_release_semver(" 1.2.3 ").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            parse_release_semver("v1.2.3-rc.1").as_deref(),
+            Some("1.2.3-rc.1")
+        );
         assert_eq!(parse_release_semver("1.2"), None);
         assert_eq!(parse_release_semver("1.2.3.4"), None);
         assert_eq!(parse_release_semver("1.2.beta"), None);

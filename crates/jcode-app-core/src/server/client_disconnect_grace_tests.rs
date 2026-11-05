@@ -7,6 +7,7 @@ use crate::session::{Session, SessionStatus};
 use crate::tool::Registry;
 use async_trait::async_trait;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 struct NoRequests;
@@ -100,7 +101,9 @@ impl Fixture {
                 runtime: Default::default(),
             },
         )])));
-        let sessions = Arc::new(RwLock::new(HashMap::from([(id.clone(), agent.clone())])));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([(id.clone(), agent.clone())]),
+        ));
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "original".into(),
             connection("original", &id),

@@ -21,7 +21,6 @@ use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmEvent, SwarmMember, VersionedPlan,
     debug_control_allowed, fanout_session_event,
 };
-use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::protocol::{Request, ServerEvent, TranscriptMode, decode_request, encode_event};
 use crate::provider::Provider;
@@ -32,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -252,7 +251,7 @@ pub(super) async fn inject_transcript(
 )]
 pub(super) async fn handle_debug_client(
     stream: Stream,
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: crate::server::SessionAgents,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,

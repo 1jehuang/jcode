@@ -4,7 +4,6 @@ use crate::session::Session;
 use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord, SwarmRole};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 struct TestHome {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -51,7 +50,9 @@ fn state() -> SwarmState {
     )
 }
 fn agents() -> SessionAgents {
-    Arc::new(RwLock::new(HashMap::new()))
+    Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ))
 }
 fn member(id: &str, swarm: &str) -> PersistedSwarmMember {
     PersistedSwarmMember {
@@ -451,11 +452,13 @@ async fn live_agents_are_reserved_together_then_only_selected_agents_evicted() {
     let one = make_agent("one");
     let two = make_agent("two");
     let unrelated = make_agent("unrelated");
-    sessions.write().await.extend([
+    for (id, agent) in [
         ("one".into(), one.clone()),
         ("two".into(), two.clone()),
         ("unrelated".into(), unrelated.clone()),
-    ]);
+    ] {
+        sessions.register_new(id, agent).await.unwrap();
+    }
     let raw = handle_with_gate(
         "group_transfer:inspect:{\"session_ids\":[\"one\",\"two\"]}",
         &sessions,

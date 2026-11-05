@@ -181,6 +181,19 @@ fn remote_inventory_lines(
                     Style::default().fg(dim_color()),
                 ));
             }
+            let provider_kind = if provider == ActiveProvider::OpenAI {
+                crate::usage::MultiAccountProviderKind::OpenAI
+            } else {
+                crate::usage::MultiAccountProviderKind::Anthropic
+            };
+            if let Some(banked) =
+                crate::usage::remote_account_banked_resets(provider_kind, &account.label)
+                    .and_then(|banked| banked_resets_span(&banked))
+            {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
+                row.spans.push(banked);
+            }
             lines.push(row);
         }
     }
@@ -250,6 +263,14 @@ fn inventory_lines(
                 usage_status_label(usage.as_ref()),
                 Style::default().fg(dim_color()),
             ));
+        }
+        if let Some(banked) =
+            crate::usage::cached_account_banked_resets(usage_provider, &account.label)
+                .and_then(|banked| banked_resets_span(&banked))
+        {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
+            row.spans.push(banked);
         }
         entries.push((
             account_key(account.provider, Some(&account.label)),
@@ -362,6 +383,32 @@ fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'s
         identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
     }
     row
+}
+
+/// Compact banked-reset suffix: "2 resets" when claimable, otherwise when the
+/// next one unlocks. Nothing is shown when no reset is known or upcoming.
+fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span<'static>> {
+    if banked.available > 0 {
+        let noun = if banked.available == 1 {
+            "reset"
+        } else {
+            "resets"
+        };
+        let expiry = banked
+            .expires_at
+            .as_deref()
+            .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
+            .unwrap_or_default();
+        return Some(Span::styled(
+            format!("↻ {} {noun}{expiry}", banked.available),
+            Style::default().fg(Color::Rgb(120, 190, 255)),
+        ));
+    }
+    let at = banked.next_available_at.as_deref()?;
+    Some(Span::styled(
+        format!("↻ in {}", crate::usage::format_reset_time(at)),
+        Style::default().fg(dim_color()),
+    ))
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
@@ -930,6 +977,44 @@ mod tests {
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Blocked
         );
+    }
+
+    #[test]
+    fn banked_resets_suffix_shows_count_or_next_unlock() {
+        let ready = crate::usage::AccountBankedResets {
+            available: 2,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let expiring = crate::usage::AccountBankedResets {
+            available: 1,
+            next_available_at: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        assert!(
+            banked_resets_span(&expiring)
+                .unwrap()
+                .content
+                .starts_with("↻ 1 reset · exp ")
+        );
+        let spent = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: Some("2099-01-01T00:00:00Z".into()),
+            expires_at: None,
+        };
+        assert!(
+            banked_resets_span(&spent)
+                .unwrap()
+                .content
+                .starts_with("↻ in ")
+        );
+        let none = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert!(banked_resets_span(&none).is_none());
     }
 
     #[test]

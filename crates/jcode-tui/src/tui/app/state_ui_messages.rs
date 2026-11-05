@@ -529,6 +529,20 @@ impl App {
         true
     }
 
+    /// Move a live status message (such as a progress checklist) to the end of
+    /// the transcript so it stays next to the composer while later output
+    /// arrives. Returns the message's new index.
+    pub(super) fn move_display_message_to_end(&mut self, idx: usize) -> usize {
+        let last = self.display_messages.len().saturating_sub(1);
+        if idx >= last {
+            return idx;
+        }
+        let message = self.display_messages.remove(idx);
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+        last
+    }
+
     pub(super) fn remove_display_message(&mut self, idx: usize) -> Option<DisplayMessage> {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);
@@ -714,6 +728,7 @@ impl App {
         hidden_user_prompts: usize,
     ) {
         compact_display_messages_for_storage(&mut messages);
+        carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
         self.remote_side_pane_images = images;
         self.invalidate_side_pane_images_signature();
@@ -1018,6 +1033,39 @@ impl App {
     }
 }
 
+/// History pages do not carry tool durations, but the already-loaded tail
+/// often learned them from live tool-finish events. Tool durations are part of
+/// the message cache hash, so dropping them made every reloaded tool row look
+/// changed: the prepend could not reuse the prepared tail and re-rendered the
+/// whole transcript on the scroll frame (hundreds of ms on long sessions), and
+/// the visible duration badges vanished. Restore them by tool call id.
+fn carry_over_tool_durations(previous: &[DisplayMessage], incoming: &mut [DisplayMessage]) {
+    let known: std::collections::HashMap<&str, f32> = previous
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| {
+            let tool = message.tool_data.as_ref()?;
+            let seconds = message.duration_secs?;
+            (!tool.id.is_empty()).then_some((tool.id.as_str(), seconds))
+        })
+        .collect();
+    if known.is_empty() {
+        return;
+    }
+    for message in incoming.iter_mut() {
+        if message.role != "tool" || message.duration_secs.is_some() {
+            continue;
+        }
+        if let Some(seconds) = message
+            .tool_data
+            .as_ref()
+            .and_then(|tool| known.get(tool.id.as_str()))
+        {
+            message.duration_secs = Some(*seconds);
+        }
+    }
+}
+
 fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedHistoryLazyState> {
     if message.role != "system" {
         return None;
@@ -1071,6 +1119,8 @@ fn parse_leading_usize(text: &str) -> Option<(usize, &str)> {
         .take_while(|(_, ch)| ch.is_ascii_digit())
         .map(|(idx, ch)| idx + ch.len_utf8())
         .last()?;
-    let value = text[..end].parse().ok()?;
+    let Ok(value) = text[..end].parse() else {
+        return None;
+    };
     Some((value, &text[end..]))
 }
