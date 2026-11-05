@@ -16,7 +16,7 @@
     "crates/jcode-base/src/browser_tests.rs": 1478,
     "crates/jcode-base/src/compaction_tests.rs": 1269,
     "crates/jcode-base/src/config_tests.rs": 1762,
-    "crates/jcode-base/src/file_history_tests.rs": 1259,
+    "crates/jcode-base/src/file_history_tests.rs": 1300,
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests.rs": 1286,
     "crates/jcode-base/src/provider/tests/account_failover.rs": 1240,
