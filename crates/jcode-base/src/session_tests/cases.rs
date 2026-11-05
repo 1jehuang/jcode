@@ -148,13 +148,9 @@ fn initial_session_context_is_persisted_once_and_not_overwritten() {
 fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
-    let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-first-")
-        .tempdir()
+    let first_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-first-")
         .map_err(|e| anyhow!(e))?;
-    let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-second-")
-        .tempdir()
+    let second_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-second-")
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -196,13 +192,9 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
 fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
-    let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-stale-")
-        .tempdir()
+    let first_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-stale-")
         .map_err(|e| anyhow!(e))?;
-    let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-real-")
-        .tempdir()
+    let second_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-real-")
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -245,13 +237,9 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
 fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
-    let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-original-")
-        .tempdir()
+    let first_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-original-")
         .map_err(|e| anyhow!(e))?;
-    let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-late-")
-        .tempdir()
+    let second_dir = crate::test_temp::tempdir_with_prefix("jcode-session-context-late-")
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -316,9 +304,7 @@ fn existing_non_empty_session_does_not_get_retroactive_session_context() {
 #[test]
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-startup-stub-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-startup-stub-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -393,9 +379,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
 #[test]
 fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-remote-startup-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-remote-startup-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -484,9 +468,7 @@ fn test_create_not_debug_when_test_session_env_disabled() {
 #[test]
 fn test_recover_crashed_sessions_preserves_debug_flag() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-recover-debug-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-recover-debug-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
     let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
@@ -518,9 +500,7 @@ fn test_recover_crashed_sessions_preserves_debug_flag() -> Result<()> {
 #[test]
 fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-recover-selected-crash-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-recover-selected-crash-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
     let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
@@ -562,9 +542,7 @@ fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result
 #[test]
 fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-lazy-save-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-lazy-save-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -589,8 +567,8 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
 #[test]
 fn empty_fork_is_persisted_before_first_visible_message() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::tempdir()?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let temp_home = crate::test_temp::tempdir()?;
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
     let mut child = Session::create(Some("session_empty_parent".into()), None);
     child.append_fork_notice("session_empty_parent", "empty parent");
     assert_eq!(child.visible_conversation_message_count(), 0);
@@ -616,9 +594,7 @@ fn session_created_with_title_is_persisted_before_first_visible_message() -> Res
     // Regression for #1144: `Session::create(_, Some(title))` was skipped by
     // the untouched-session gate, so later lookups by id found nothing.
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-titled-save-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-titled-save-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -636,9 +612,7 @@ fn session_created_with_title_is_persisted_before_first_visible_message() -> Res
 #[test]
 fn test_save_persists_full_session_content() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-save-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-save-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -691,9 +665,7 @@ fn test_save_persists_full_session_content() -> Result<()> {
 #[test]
 fn test_save_persists_compaction_state() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-compaction-save-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-compaction-save-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -785,9 +757,7 @@ fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
 #[test]
 fn test_save_persists_provider_key() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-provider-key-save-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-provider-key-save-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -810,11 +780,10 @@ fn test_save_persists_provider_key() -> Result<()> {
 #[test]
 fn test_save_persists_reasoning_effort() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-reasoning-effort-save-test-")
-        .tempdir()
-        .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let temp_home =
+        crate::test_temp::tempdir_with_prefix("jcode-session-reasoning-effort-save-test-")
+            .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_reasoning_effort_persist_test".to_string(),
@@ -932,9 +901,7 @@ fn context_cap_missing_is_backward_compatible_for_all_snapshot_types() -> Result
 #[test]
 fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-journal-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -979,9 +946,7 @@ fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
 #[test]
 fn test_save_checkpoints_after_full_mutation_and_clears_journal() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-checkpoint-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-checkpoint-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -1027,9 +992,7 @@ fn test_save_checkpoints_after_full_mutation_and_clears_journal() -> Result<()> 
 #[test]
 fn test_journal_replay_skips_corrupt_line_and_keeps_tail() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-corrupt-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-journal-corrupt-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -1100,11 +1063,10 @@ fn text_block(text: &str) -> ContentBlock {
 #[test]
 fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-interrupted-checkpoint-")
-        .tempdir()
-        .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let temp_home =
+        crate::test_temp::tempdir_with_prefix("jcode-session-journal-interrupted-checkpoint-")
+            .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_interrupted_checkpoint_test";
     let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
@@ -1168,9 +1130,7 @@ fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<(
 #[test]
 fn test_load_repairs_snapshot_with_duplicated_message_ids() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-duplicate-ids-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-duplicate-ids-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -1195,9 +1155,7 @@ fn test_load_repairs_snapshot_with_duplicated_message_ids() -> Result<()> {
 #[test]
 fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-glued-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-journal-glued-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -1252,9 +1210,7 @@ fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
 #[test]
 fn test_corrupt_journal_heals_via_checkpoint_on_next_save() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-heal-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-session-journal-heal-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -2187,9 +2143,7 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
 #[test]
 fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let _env_lock = lock_env();
-    let temp_home = tempfile::Builder::new()
-        .prefix("jcode-reasoning-persist-test-")
-        .tempdir()
+    let temp_home = crate::test_temp::tempdir_with_prefix("jcode-reasoning-persist-test-")
         .map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
@@ -2417,8 +2371,8 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
 #[test]
 fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _lock = lock_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let temp = crate::test_temp::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
     {
@@ -2786,8 +2740,8 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
 #[test]
 fn system_prompt_persists_before_first_message_and_across_metadata_updates() -> Result<()> {
     let _lock = lock_env();
-    let home = tempfile::tempdir()?;
-    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let home = crate::test_temp::tempdir()?;
+    let _home = EnvVarGuard::set("KCODE_HOME", home.path());
     for prompt in ["custom system prompt", ""] {
         let mut session = Session::create(None, None);
         assert_eq!(session.system_prompt, None);
