@@ -117,6 +117,12 @@ impl ClaudeCodeProvider {
             })
             .await;
 
+            // Nothing reached the child, so the seen-history checkpoint must
+            // stay put: the next request resends the full history.
+            if outcome.end == TurnEnd::CancelledBeforeSend {
+                return;
+            }
+
             state.seeded = true;
             state.history = Some(SeenHistory::new(&messages, outcome.native_history));
             if let Some(session_id) = outcome.session_id {
@@ -129,7 +135,10 @@ impl ClaudeCodeProvider {
                 dead.shutdown().await;
             }
             match outcome.end {
-                TurnEnd::Finished | TurnEnd::Cancelled | TurnEnd::RateLimited => return,
+                TurnEnd::Finished
+                | TurnEnd::Cancelled
+                | TurnEnd::CancelledBeforeSend
+                | TurnEnd::RateLimited => return,
                 TurnEnd::Exited(tail) => {
                     if attempt == 0 && !outcome.produced_output {
                         jcode_base::logging::warn(&format!(

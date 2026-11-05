@@ -843,21 +843,43 @@ async fn dropping_the_stream_interrupts_and_keeps_the_child() {
 async fn cancelling_before_the_turn_sends_never_delivers_the_prompt() {
     let fake = Fake::new();
     let provider = fake.provider();
+    // A conversation with earlier context, so the first send would carry a
+    // transcript. Cancelling before it sends must not record that history as
+    // seen, or the next request drops the earlier context.
+    let history = [
+        Message::user("earlier-context-xyz"),
+        Message::assistant_text("ok"),
+        Message::user("cancel-me"),
+    ];
     let stream = provider
-        .complete(&[Message::user("cancel-me")], &tools(), SYSTEM, None)
+        .complete(&history, &tools(), SYSTEM, None)
         .await
         .unwrap();
     // Cancel before consuming any event: the CLI start handshake is still in
     // flight, so the turn must see the closed stream and skip the send.
     drop(stream);
-    // A later turn proceeds normally on the same child.
-    let events = run_turn(&provider, &[Message::user("text")], None).await;
+    // The next cumulative request must resend the earlier context, because the
+    // cancelled turn delivered nothing to the child.
+    let next = [
+        Message::user("earlier-context-xyz"),
+        Message::assistant_text("ok"),
+        Message::user("text"),
+    ];
+    let events = run_turn(&provider, &next, None).await;
     assert_eq!(text(&events), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 1, "the started child is reused");
     assert!(
         fake.inputs()
             .iter()
             .all(|row| !row.to_string().contains("cancel-me")),
         "the cancelled prompt must never reach the CLI: {:?}",
+        fake.inputs()
+    );
+    assert!(
+        fake.inputs()
+            .iter()
+            .any(|row| row.to_string().contains("earlier-context-xyz")),
+        "earlier context must be resent after a before-send cancel: {:?}",
         fake.inputs()
     );
     provider.shutdown().await;
