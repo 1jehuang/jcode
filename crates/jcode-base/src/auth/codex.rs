@@ -247,6 +247,13 @@ pub fn active_account_label() -> Option<String> {
 }
 
 pub fn set_active_account(label: &str) -> Result<()> {
+    set_default_account(label)?;
+    set_active_account_override(Some(label.to_string()));
+    Ok(())
+}
+
+/// Persist the stored default account without setting the runtime override.
+pub fn set_default_account(label: &str) -> Result<()> {
     let _lock = refresh_cas::lock_auth_file()?;
     let mut auth = load_auth_file_unlocked()?;
     crate::auth::account_store::set_active_account(
@@ -256,9 +263,7 @@ pub fn set_active_account(label: &str) -> Result<()> {
         "No OpenAI account with label '{}' found",
         |account| account.label.as_str(),
     )?;
-    save_auth_file_unlocked(&auth)?;
-    set_active_account_override(Some(label.to_string()));
-    Ok(())
+    save_auth_file_unlocked(&auth)
 }
 
 pub fn upsert_account(account: OpenAiAccount) -> Result<String> {

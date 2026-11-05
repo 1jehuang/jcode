@@ -384,6 +384,13 @@ pub fn active_account_label() -> Option<String> {
 
 /// Persist the active account choice to disk (and set the runtime override).
 pub fn set_active_account(label: &str) -> Result<()> {
+    set_default_account(label)?;
+    set_active_account_override(Some(label.to_string()));
+    Ok(())
+}
+
+/// Persist the stored default account without setting the runtime override.
+pub fn set_default_account(label: &str) -> Result<()> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
@@ -394,9 +401,7 @@ pub fn set_active_account(label: &str) -> Result<()> {
         "No account with label '{}' found",
         |account| account.label.as_str(),
     )?;
-    save_auth_file(&auth)?;
-    set_active_account_override(Some(label.to_string()));
-    Ok(())
+    save_auth_file(&auth)
 }
 
 /// Add or update an account. Returns the label used.
@@ -440,58 +445,6 @@ pub fn remove_account(label: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rename an account's label. The label is the human-facing name shown in the
-/// picker, so this is the account "rename". References to the old label (the
-/// active account and the runtime override) are migrated. Identity-based session
-/// pins continue resolving to the renamed login.
-pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
-    let new_label = new_label.trim();
-    if new_label.is_empty() {
-        anyhow::bail!("New account name cannot be empty");
-    }
-    if matches!(new_label, "default" | "main")
-        || new_label
-            .strip_prefix("claude-")
-            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
-    {
-        anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
-    }
-    let mut auth = load_auth_file()?;
-    if new_label == old_label {
-        if auth
-            .anthropic_accounts
-            .iter()
-            .any(|account| account.label == old_label)
-        {
-            return Ok(());
-        }
-        anyhow::bail!("No account with label '{}' found", old_label);
-    }
-    if auth.anthropic_accounts.iter().any(|a| a.label == new_label) {
-        anyhow::bail!("An account named '{}' already exists", new_label);
-    }
-    let Some(account) = auth
-        .anthropic_accounts
-        .iter_mut()
-        .find(|a| a.label == old_label)
-    else {
-        anyhow::bail!("No account with label '{}' found", old_label);
-    };
-    account.label = new_label.to_string();
-
-    if auth.active_anthropic_account.as_deref() == Some(old_label) {
-        auth.active_anthropic_account = Some(new_label.to_string());
-    }
-
-    save_auth_file(&auth)?;
-
-    if get_active_account_override().as_deref() == Some(old_label) {
-        set_active_account_override(Some(new_label.to_string()));
-    }
-
-    Ok(())
-}
-
 /// Remove every stored Anthropic account in one write.
 pub fn clear_accounts() -> Result<usize> {
     let _store_lock =
@@ -527,10 +480,10 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
 
 #[path = "claude_replacement.rs"]
 mod replacement;
-pub use replacement::replace_account_if_unchanged;
 #[cfg(test)]
 use replacement::replace_saved_login;
 pub(in crate::auth) use replacement::{capture_refresh_account, commit_captured_refresh};
+pub use replacement::{rename_account, replace_account_if_unchanged};
 
 #[cfg(test)]
 #[path = "claude_replacement_tests.rs"]
@@ -827,7 +780,7 @@ pub fn pin_for_label(label: &str) -> Result<crate::auth::AccountPin> {
         &auth.anthropic_accounts,
         |account| account.label.as_str(),
         account_identity,
-        "No Claude account with label '{}' found",
+        "No account with label '{}' found",
     )
 }
 
@@ -1144,6 +1097,8 @@ pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> 
     // Never use the current login target: native reuse must not overwrite an
     // unrelated active account. Match an existing snapshot or allocate a label
     // from the latest store, skipping holes and arbitrary user labels.
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     if let Some(account) = auth.anthropic_accounts.iter().find(|account| {
         account.access == creds.access_token && account.refresh == creds.refresh_token
