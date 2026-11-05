@@ -417,6 +417,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         terminal_env: vec![("ZELLIJ_SESSION_NAME".to_string(), "sessionB".to_string())],
         account_pins: Vec::new(),
         supports_session_accounts: false,
+        client_name: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"subscribe\""));
@@ -441,6 +442,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         terminal_env,
         account_pins: _,
         supports_session_accounts: _,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));
@@ -487,6 +489,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         terminal_env,
         account_pins: _,
         supports_session_accounts: _,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));
@@ -516,6 +519,7 @@ fn test_resume_session_defaults_sync_flags() -> Result<()> {
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected ResumeSession"));
@@ -776,4 +780,23 @@ fn context_cap_wire_roundtrip() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[test]
+fn subscribe_and_resume_client_name_is_optional_and_compatible() {
+    let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
+    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    let new: Request =
+        serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
+            .unwrap();
+    assert!(
+        matches!(new, Request::Subscribe { client_name: Some(ref n), .. } if n == "jcode-ios/1.0")
+    );
+    let resume: Request = serde_json::from_str(
+        r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
+    )
+    .unwrap();
+    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    let json = serde_json::to_string(&old).unwrap();
+    assert!(!json.contains("client_name"));
 }

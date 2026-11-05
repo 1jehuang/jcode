@@ -128,6 +128,8 @@ pub struct BridgeState {
     pub crash_on_disconnect: bool,
     /// Client-side inline response renderer, negotiated in Hello.
     pub supports_user_response: bool,
+    /// Client name from Hello, forwarded on subscribe (e.g. `jcode-ios/0.3.0`).
+    pub client_name: Option<String>,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
     /// In-flight legacy `message` id, correlating `done` with `turn_done`.
@@ -198,6 +200,8 @@ pub struct BridgeState {
     current_provider: Option<String>,
     /// Credential the daemon resolved for the session (`oauth`/`api_key`).
     current_credential: Option<String>,
+    /// OAuth account label the daemon routed this session to.
+    current_account: Option<String>,
     /// Reasoning effort last reported by the daemon, so identity events can
     /// carry it without a round trip.
     current_effort: Option<String>,
@@ -584,6 +588,9 @@ impl BridgeState {
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
+                }
+                if let Some(name) = self.client_name.as_deref().filter(|n| !n.is_empty()) {
+                    subscribe["client_name"] = json!(name);
                 }
                 // Sessions rooted inside a jcode checkout are self-dev
                 // sessions: the daemon only enables the self-dev tools and
@@ -1820,6 +1827,7 @@ impl BridgeState {
                             self.current_provider = None;
                             self.current_effort = None;
                             self.current_credential = None;
+                            self.current_account = None;
                             self.model_catalog_loaded = false;
                         }
                         if self.session_id.as_deref() != Some(&session_id) {
@@ -2399,6 +2407,7 @@ impl BridgeState {
                     model: self.current_model.clone(),
                     reasoning_effort: self.current_effort.clone(),
                     auth_method: self.current_credential.clone(),
+                    account_label: self.current_account.clone(),
                 };
                 // Both a reply and a broadcast: the caller needs its request
                 // resolved, and every other client watching the session needs
@@ -2433,6 +2442,7 @@ impl BridgeState {
                         model: self.current_model.clone(),
                         reasoning_effort: self.current_effort.clone(),
                         auth_method: self.current_credential.clone(),
+                        account_label: self.current_account.clone(),
                     })
                 });
                 let Some(api_id) = self.take_simple(id, SimpleKind::ReasoningEffort) else {
@@ -2823,6 +2833,13 @@ impl BridgeState {
         if let Some(credential) = event.get("resolved_credential") {
             self.current_credential = credential.as_str().map(str::to_string);
         }
+        if let Some(label) = event.get("provider_oauth_account_label") {
+            self.current_account = label
+                .as_str()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string);
+        }
     }
 
     fn runtime_info(&self) -> ApiEvent {
@@ -2832,6 +2849,7 @@ impl BridgeState {
             model: self.current_model.clone(),
             reasoning_effort: self.current_effort.clone(),
             auth_method: self.current_credential.clone(),
+            account_label: self.current_account.clone(),
             routes: self.available_routes.clone(),
         }
     }
@@ -2846,6 +2864,7 @@ impl BridgeState {
                 .map(str::to_string)
                 .or_else(|| self.current_effort.clone()),
             auth_method: self.current_credential.clone(),
+            account_label: self.current_account.clone(),
         }
     }
 

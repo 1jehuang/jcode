@@ -401,6 +401,8 @@ pub(super) async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
+    // App name from the API Hello, used to enable mobile push per session.
+    let mut connection_client_name: Option<String> = None;
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
@@ -1118,6 +1120,11 @@ server_resumes: false,
             continue;
         }
         let sdk_session_before_request = client_session_id.clone();
+        if let Request::Subscribe { client_name: Some(name), .. }
+        | Request::ResumeSession { client_name: Some(name), .. } = &request
+        {
+            connection_client_name = Some(name.clone());
+        }
         match request {
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
@@ -1541,6 +1548,7 @@ server_resumes: false,
                 terminal_env,
                 account_pins: requested_account_pins,
                 supports_session_accounts: requested_session_accounts,
+                client_name: _,
             } => {
                 if let Err(message) =
                     validated_subscribe_working_dir(
@@ -1889,6 +1897,7 @@ server_resumes: false,
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
+                client_name: _,
             } => {
                 let pre_resume_session_id = client_session_id.clone();
                 let resume_working_dir = {
@@ -3338,6 +3347,9 @@ server_resumes: false,
             Request::ClientDebugResponse { id, output } => {
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
+        }
+        if let Some(name) = connection_client_name.as_deref() {
+            crate::mobile_push::note_client_attached(&client_session_id, name);
         }
         if sdk_session_before_request != client_session_id {
             drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));

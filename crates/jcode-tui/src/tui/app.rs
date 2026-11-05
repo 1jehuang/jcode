@@ -1908,6 +1908,8 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    /// Provider query from `/usage <provider>`; None shows every provider.
+    usage_provider_filter: Option<String>,
     usage_reset: usage_reset::ResetState,
     /// Whether a `/productivity` report generation is currently in flight.
     productivity_refreshing: bool,

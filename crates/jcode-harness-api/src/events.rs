@@ -371,6 +371,10 @@ pub enum ApiEvent {
         /// or the daemon did not report it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_method: Option<String>,
+        /// Label of the OAuth account the session's requests are routed to,
+        /// as chosen by the daemon's account router. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
     },
 
     /// Reply to `ListModels`: the models this session can switch to.
@@ -399,6 +403,10 @@ pub enum ApiEvent {
         /// key route.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_method: Option<String>,
+        /// Label of the OAuth account the session's requests are routed to,
+        /// as chosen by the daemon's account router. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
         routes: Vec<ModelRouteInfo>,
     },
 

@@ -304,6 +304,9 @@ pub(super) async fn start_processing_message(
         swarm.event_counter,
         swarm.event_tx,
     );
+    let push_session_id = client_session_id.to_string();
+    crate::mobile_push::clear_cancelled(&push_session_id);
+    let turn_started = Instant::now();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
         let event_tx = tx.clone();
@@ -358,10 +361,41 @@ pub(super) async fn start_processing_message(
                 id, error
             )),
         }
-        let completion_report = {
+        let (completion_report, push_title) = {
             let agent = report_agent.lock().await;
-            agent.recent_assistant_output_tail_after(start_message_index)
+            (
+                agent.recent_assistant_output_tail_after(start_message_index),
+                agent.session_display_title_or_name(),
+            )
         };
+        // Mobile push: fire-and-forget, skipped for user cancellation and for
+        // swarm worker sessions (their coordinator reports instead).
+        if !owned_worker && !crate::mobile_push::take_cancelled(&push_session_id) {
+            match &result {
+                Ok(())
+                    if crate::mobile_push::should_push_turn_done(
+                        &push_session_id,
+                        turn_started.elapsed(),
+                    ) =>
+                {
+                    crate::mobile_push::notify(
+                        crate::mobile_push::PushKind::TurnDone,
+                        &push_session_id,
+                        Some(&push_title),
+                        completion_report.as_deref().unwrap_or_default(),
+                        Some(id),
+                    );
+                }
+                Ok(()) => {}
+                Err(error) => crate::mobile_push::notify(
+                    crate::mobile_push::PushKind::TurnError,
+                    &push_session_id,
+                    Some(&push_title),
+                    &crate::util::format_error_chain(error),
+                    Some(id),
+                ),
+            }
+        }
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = tx.send(ServerEvent::SoftInterruptQueue { pending });

@@ -261,6 +261,7 @@ async fn report_roundtrip(subscribed: bool) {
                 terminal_env: vec![],
                 account_pins: vec![],
                 supports_session_accounts: false,
+                client_name: None,
             })
             .await;
         connection

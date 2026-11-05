@@ -14,6 +14,15 @@ pub struct AccountUsageSnapshot {
     pub seven_day_ratio: Option<f32>,
     pub resets_at: Option<String>,
     pub error: Option<String>,
+    /// Banked usage resets claimable now. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_resets: Option<u64>,
+    /// RFC3339 expiry of the soonest-expiring banked reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_expires_at: Option<String>,
+    /// RFC3339 time the next banked reset unlocks when none are claimable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_next_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -38,6 +47,9 @@ mod account_usage_tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         };
         let event = ServerEvent::AccountUsage {
             id: 71,

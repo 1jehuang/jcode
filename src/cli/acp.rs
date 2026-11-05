@@ -919,6 +919,7 @@ impl AcpRuntime {
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
                 account_pins: Vec::new(),
                 supports_session_accounts: false,
+                client_name: None,
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
@@ -1021,6 +1022,7 @@ impl AcpRuntime {
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
                 account_pins: Vec::new(),
                 supports_session_accounts: false,
+                client_name: None,
             })
             .await?;
 

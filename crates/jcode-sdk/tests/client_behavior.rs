@@ -487,6 +487,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 model: Some("new-model".into()),
                 reasoning_effort: None,
                 auth_method: None,
+                account_label: None,
             },
             writer,
         );
@@ -498,6 +499,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 model: Some("new-model".into()),
                 reasoning_effort: None,
                 auth_method: None,
+                account_label: None,
                 routes: vec![ModelRouteInfo {
                     usage: None,
                     model: "new-model".into(),

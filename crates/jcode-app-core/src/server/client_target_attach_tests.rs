@@ -67,6 +67,7 @@ fn subscribe(target: &str) -> Request {
         terminal_env: vec![],
         account_pins: Vec::new(),
         supports_session_accounts: false,
+        client_name: None,
     }
 }
 

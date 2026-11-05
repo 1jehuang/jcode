@@ -9,6 +9,9 @@ fn remote_account_fixture(label: &str) -> crate::protocol::AccountUsageSnapshot 
         seven_day_ratio: None,
         resets_at: None,
         error: None,
+        banked_resets: None,
+        banked_expires_at: None,
+        banked_next_at: None,
     }
 }
 

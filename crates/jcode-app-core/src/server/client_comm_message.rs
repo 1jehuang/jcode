@@ -457,6 +457,13 @@ server_resumes: false,
                         if crate::config::config().server.wake_mode
                             == crate::config::WakeMode::External
                         {
+                            crate::mobile_push::notify(
+                                crate::mobile_push::PushKind::Wake,
+                                session_id,
+                                None,
+                                &notification_msg,
+                                None,
+                            );
                             let _ = fanout_session_event(
                                 swarm_members,
                                 session_id,
