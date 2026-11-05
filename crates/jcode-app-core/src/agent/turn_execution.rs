@@ -227,6 +227,50 @@ impl Agent {
         result
     }
 
+    /// Run a native wake receipt turn under an existing server turn lease.
+    ///
+    /// The durable state advances only after the exact message has been
+    /// committed to this session's transcript, which is what makes the receipt
+    /// proof of delivery rather than proof of acceptance.
+    pub(crate) async fn run_reserved_streaming_mpsc_with_receipt(
+        &mut self,
+        lease: &TurnLease,
+        message: &str,
+        receipt_id: &str,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.validate_server_turn(lease)?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+        // Receipt turns carry no reminder. Per-turn reminders now live in the
+        // transcript rather than a reusable agent field, so there is no stale
+        // reminder to clear here before the synthetic wake input.
+        let announcement_start = self.session.messages.len();
+        self.announce_late_mcp_tools().await;
+        self.announce_late_skills();
+        self.emit_context_messages_since(announcement_start, &event_tx);
+        let input_start = self.session.messages.len();
+        self.append_user_context_message_with_display_role(
+            message,
+            Vec::new(),
+            Some(crate::session::StoredDisplayRole::System),
+            false,
+        )?;
+        self.emit_context_messages_since(input_start, &event_tx);
+        // System-displayed inputs do not count as visible conversation for the
+        // normal first-save guard. Force the first snapshot before proof.
+        self.session.save_prepared()?;
+        self.session.sync_wake_turn_entry()?;
+        crate::server::wake_receipts::mark_awakened(receipt_id, self.session_id())?;
+        crate::telemetry::record_turn();
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("native_wake_receipt");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
     /// Re-run the model loop for the turn already in history, without
     /// appending a new user message. Used after the server switched routes
     /// because the previous account hit a usage limit: the failed request is

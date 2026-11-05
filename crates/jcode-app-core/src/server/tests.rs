@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio::time::timeout;
 
+mod native_wake_receipt_tests;
+
 fn unwrap_test_turn_event(mut event: ServerEvent) -> ServerEvent {
     while let ServerEvent::TurnEvent { event: inner, .. } = event {
         event = *inner;

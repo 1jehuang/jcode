@@ -1,5 +1,6 @@
 use super::client_actions::{
     NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
+    handle_notify_session_receipt,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -379,6 +380,73 @@ pub(super) async fn handle_lightweight_control_request(
                 },
             )
             .await;
+        }
+        Request::NotifySessionReceipt {
+            id,
+            session_id,
+            message,
+            receipt_id,
+        } => {
+            handle_notify_session_receipt(
+                id,
+                session_id,
+                message,
+                receipt_id,
+                NotifySessionContext {
+                    sessions,
+                    soft_interrupt_queues,
+                    client_connections,
+                    swarm_members,
+                    swarms_by_id,
+                    event_history,
+                    event_counter,
+                    swarm_event_tx,
+                    client_event_tx: &client_event_tx,
+                },
+            )
+            .await;
+        }
+        Request::GetWakeReceipt { id, receipt_id } => {
+            let event = match super::wake_receipts::get(&receipt_id) {
+                Ok(Some(receipt))
+                    if !super::wake_receipts::target_is_allowed(&receipt.session_id) =>
+                {
+                    super::wake_receipts::error_event(id, "Wake receipt target is not allowed")
+                }
+                Ok(Some(receipt)) => {
+                    // A busy or unattached target leaves the receipt queued at
+                    // submit time. Let a poll advance it, so the caller is not
+                    // required to resubmit an identical request indefinitely.
+                    let status = if receipt.state == super::wake_receipts::WakeState::Queued {
+                        let started = super::live_turn::run_receipt_turn_if_idle(
+                            &receipt.session_id,
+                            &receipt.message,
+                            &receipt.receipt_id,
+                            sessions,
+                            super::live_turn::LiveTurnSwarmContext::new(
+                                swarm_members,
+                                swarms_by_id,
+                                event_history,
+                                event_counter,
+                                swarm_event_tx,
+                            ),
+                        )
+                        .await;
+                        if !started {
+                            crate::logging::debug(&format!(
+                                "wake receipt turn not started for {receipt_id}:                                  target busy or already awakened"
+                            ));
+                        }
+                        super::wake_receipts::reread_or(&receipt_id, receipt)
+                    } else {
+                        receipt
+                    };
+                    super::wake_receipts::status_event(id, status)
+                }
+                Ok(None) => super::wake_receipts::error_event(id, "Unknown wake receipt"),
+                Err(error) => super::wake_receipts::error_event(id, &error.to_string()),
+            };
+            super::wake_receipts::send_event(&client_event_tx, event);
         }
         Request::AppletAction {
             id,

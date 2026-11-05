@@ -131,6 +131,65 @@ pub(super) async fn handle_notify_session(
     }
 }
 
+pub(super) async fn handle_notify_session_receipt(
+    id: u64,
+    session_id: String,
+    message: String,
+    receipt_id: String,
+    ctx: NotifySessionContext<'_>,
+) {
+    let result = async {
+        if !super::wake_receipts::target_is_allowed(&session_id) {
+            anyhow::bail!("Session '{}' is not allowed for native wakes", session_id);
+        }
+        // Only new admissions need a live target. An identical replay must keep
+        // returning the stored state even if the target transcript was removed
+        // since, which is why the replay lookup runs before this guard.
+        if super::wake_receipts::get(&receipt_id)?.is_none() {
+            // A receipt names one existing target in this profile. Never create a
+            // new session implicitly from untrusted bridge input. An attached
+            // live session counts as existing before its first transcript save.
+            let attached = ctx.sessions.read().await.contains_key(&session_id);
+            if !attached && !crate::session::session_exists(&session_id) {
+                anyhow::bail!("Session '{}' does not exist in this profile", session_id);
+            }
+        }
+        let receipt = super::wake_receipts::submit(&receipt_id, &session_id, &message)?;
+        if receipt.state == super::wake_receipts::WakeState::Queued {
+            let has_client = ctx
+                .client_connections
+                .read()
+                .await
+                .values()
+                .any(|connection| connection.session_id == session_id);
+            if has_client {
+                super::live_turn::run_receipt_turn_if_idle(
+                    &session_id,
+                    &message,
+                    &receipt_id,
+                    ctx.sessions,
+                    super::live_turn::LiveTurnSwarmContext::new(
+                        ctx.swarm_members,
+                        ctx.swarms_by_id,
+                        ctx.event_history,
+                        ctx.event_counter,
+                        ctx.swarm_event_tx,
+                    ),
+                )
+                .await;
+            }
+        }
+        super::wake_receipts::get(&receipt_id)?
+            .ok_or_else(|| anyhow::anyhow!("receipt disappeared after submission"))
+    }
+    .await;
+    let event = match result {
+        Ok(receipt) => super::wake_receipts::status_event(id, receipt),
+        Err(error) => super::wake_receipts::error_event(id, &error.to_string()),
+    };
+    super::wake_receipts::send_event(ctx.client_event_tx, event);
+}
+
 /// A user pressed something in an agent applet: store its state, publish, then
 /// resolve a waiting `applet` tool call or wake the agent like a notification.
 pub(super) async fn handle_applet_action(
@@ -1180,6 +1239,7 @@ pub(super) async fn handle_resume_all_sessions(
             Some(reminder),
             None,
             Some("resuming interrupted session".to_string()),
+            None,
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,
                 swarms_by_id,

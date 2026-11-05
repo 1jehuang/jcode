@@ -228,13 +228,10 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             panic!("authoritative todos must precede the potentially huge History, got {other:?}")
         }
     }
-    line.clear();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tokio::io::AsyncBufReadExt::read_line(&mut peer_reader, &mut line),
-    )
-    .await
-    .expect("history follows the early todo snapshot")?;
+    let line = tokio::time::timeout(std::time::Duration::from_secs(1), peer_frames.recv())
+        .await
+        .expect("history follows the early todo snapshot")
+        .ok_or_else(|| anyhow!("peer stream closed before the history frame"))?;
     let event: ServerEvent = serde_json::from_str(line.trim())?;
     match event {
         ServerEvent::History {
