@@ -124,6 +124,15 @@ fn long_transcript_streaming_while_scrolled_perf() {
     }
     let _reset = Reset;
     let mut app = long_transcript_app(4000);
+    app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "x".repeat(200_000),
+        label: Some("img".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+        history_message_index: None,
+    }];
+    app.invalidate_side_pane_images_signature();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 50)).unwrap();
     terminal.draw(|f| crate::tui::ui::draw(f, &app)).unwrap();
     app.scroll_up(500);
