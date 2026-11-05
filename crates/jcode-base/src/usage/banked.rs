@@ -14,6 +14,24 @@ pub struct AccountBankedResets {
     pub available: u64,
     /// RFC3339 time the next reset becomes available when none are left.
     pub next_available_at: Option<String>,
+    /// RFC3339 expiry of the soonest-expiring claimable reset, when reported.
+    pub expires_at: Option<String>,
+}
+
+impl AccountBankedResets {
+    /// Soonest known expiry among claimable resets.
+    pub fn earliest_expiry(expirations: &[Option<String>]) -> Option<String> {
+        expirations
+            .iter()
+            .flatten()
+            .filter_map(|raw| {
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .ok()
+                    .map(|at| (at, raw.clone()))
+            })
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, raw)| raw)
+    }
 }
 
 fn anthropic_offers() -> &'static Mutex<HashMap<String, AccountBankedResets>> {
@@ -41,6 +59,7 @@ pub(super) fn record_anthropic_offer(
                         next_available_at: (!offer.available)
                             .then(|| offer.next_available_at.clone())
                             .flatten(),
+                        expires_at: None,
                     },
                 );
             }
@@ -75,6 +94,9 @@ pub fn cached_account_banked_resets(
                 .map(|credits| AccountBankedResets {
                     available: credits.available_count,
                     next_available_at: None,
+                    expires_at: AccountBankedResets::earliest_expiry(
+                        &credits.available_expirations,
+                    ),
                 })
         }
     }

@@ -181,6 +181,19 @@ fn remote_inventory_lines(
                     Style::default().fg(dim_color()),
                 ));
             }
+            let provider_kind = if provider == ActiveProvider::OpenAI {
+                crate::usage::MultiAccountProviderKind::OpenAI
+            } else {
+                crate::usage::MultiAccountProviderKind::Anthropic
+            };
+            if let Some(banked) =
+                crate::usage::remote_account_banked_resets(provider_kind, &account.label)
+                    .and_then(|banked| banked_resets_span(&banked))
+            {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
+                row.spans.push(banked);
+            }
             lines.push(row);
         }
     }
@@ -381,8 +394,13 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
         } else {
             "resets"
         };
+        let expiry = banked
+            .expires_at
+            .as_deref()
+            .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
+            .unwrap_or_default();
         return Some(Span::styled(
-            format!("↻ {} {noun}", banked.available),
+            format!("↻ {} {noun}{expiry}", banked.available),
             Style::default().fg(Color::Rgb(120, 190, 255)),
         ));
     }
@@ -966,11 +984,24 @@ mod tests {
         let ready = crate::usage::AccountBankedResets {
             available: 2,
             next_available_at: None,
+            expires_at: None,
         };
         assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let expiring = crate::usage::AccountBankedResets {
+            available: 1,
+            next_available_at: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        assert!(
+            banked_resets_span(&expiring)
+                .unwrap()
+                .content
+                .starts_with("↻ 1 reset · exp ")
+        );
         let spent = crate::usage::AccountBankedResets {
             available: 0,
             next_available_at: Some("2099-01-01T00:00:00Z".into()),
+            expires_at: None,
         };
         assert!(
             banked_resets_span(&spent)
@@ -981,6 +1012,7 @@ mod tests {
         let none = crate::usage::AccountBankedResets {
             available: 0,
             next_available_at: None,
+            expires_at: None,
         };
         assert!(banked_resets_span(&none).is_none());
     }
