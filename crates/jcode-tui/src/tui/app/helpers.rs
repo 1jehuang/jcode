@@ -381,11 +381,53 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
     }
 }
 
+/// True when this process is running inside an SSH session, i.e. the user's
+/// machine (and clipboard) is elsewhere. In that case the *local* clipboard
+/// belongs to the server, and the only path to the user's clipboard is an
+/// OSC 52 sequence emitted through the terminal (and forwarded by the SSH
+/// client to the client-side terminal emulator).
+fn is_remote_ssh_session() -> bool {
+    std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok()
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_local_macos_clipboard(text: &str) -> bool {
+    if arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
+    {
+        return true;
+    }
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut()
+            && stdin.write_all(text.as_bytes()).is_ok()
+        {
+            drop(child.stdin.take());
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Copy text to clipboard. On Windows and macOS, the native clipboard API
-/// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
-/// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
-/// the selection unlike arboard), then arboard, then OSC 52 as the
-/// remote-session fallback (SSH / Docker / tmux).
+/// (arboard) is authoritative for local sessions, with OSC 52 as the
+/// remote-session path. Elsewhere, try wl-copy (Wayland), then xclip/xsel
+/// (X11, which keep owning the selection unlike arboard), then arboard, then
+/// OSC 52 as the remote-session fallback (SSH / Docker / tmux).
+///
+/// Remote (SSH) sessions: the native clipboard lives on the *server* and
+/// succeeds even headless, which would short-circuit the OSC 52 path — so in
+/// an SSH session OSC 52 is emitted first (so the client-side terminal can
+/// place the text on the user's own clipboard) and the local clipboard is
+/// still filled so in-session paste keeps working.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
@@ -432,30 +474,18 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         // ignores OSC 52, yet writing the sequence to stdout "succeeds", so we
         // reported "Copied" while leaving the clipboard untouched. NSPasteboard
         // via arboard (with pbcopy as a belt-and-braces fallback) is authoritative
-        // for local sessions; OSC 52 remains as the final remote-session fallback.
+        // for local sessions. Over SSH the local clipboard is the server's and
+        // still succeeds headless, so the OSC 52 path below must run first.
         #[cfg(target_os = "macos")]
         {
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
+            if is_remote_ssh_session() && copy_to_clipboard_osc52(text) {
+                // Keep the local clipboard in sync so paste inside jcode
+                // (which reads the server-side NSPasteboard) keeps working.
+                let _ = copy_to_local_macos_clipboard(text);
                 return true;
             }
-            if let Ok(mut child) = std::process::Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut()
-                    && stdin.write_all(text.as_bytes()).is_ok()
-                {
-                    drop(child.stdin.take());
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
+            if copy_to_local_macos_clipboard(text) {
+                return true;
             }
             copy_to_clipboard_osc52(text)
         }
