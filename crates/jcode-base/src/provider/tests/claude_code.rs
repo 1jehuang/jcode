@@ -232,14 +232,15 @@ fn claude_code_routes_cover_every_instance() {
         ],
         ..Default::default()
     };
-    let routes = super::catalog_routes::claude_code_routes_for(
-        &settings,
-        &[
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6".to_string(),
-        ],
-    );
-    assert_eq!(routes.len(), 4);
+    // Each instance lists only its own discovered models.
+    let routes = super::catalog_routes::claude_code_routes_for(&settings, |instance| {
+        let mut models = vec!["claude-opus-4-8".to_string()];
+        if instance.id == "work" {
+            models.push("claude-sonnet-4-6".to_string());
+        }
+        models
+    });
+    assert_eq!(routes.len(), 3);
     let work: Vec<_> = routes
         .iter()
         .filter(|route| route.api_method == "claude-code")
@@ -250,7 +251,8 @@ fn claude_code_routes_cover_every_instance() {
         .iter()
         .filter(|route| route.api_method == "claude-code:personal")
         .collect();
-    assert_eq!(personal.len(), 2);
+    assert_eq!(personal.len(), 1);
+    assert_eq!(personal[0].model, "claude-opus-4-8");
     assert!(
         personal
             .iter()

@@ -36,6 +36,12 @@ fn catalog_refresh_reaches_every_runtime_slot_and_compatible_profile() {
                 vec!["claude-future-catalog-fixture-2099".into()]
             }
         }
+        // Stands in for the Claude Code runtime, which builds its own routes.
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            crate::provider::claude_code_routes_for(&Default::default(), |_| {
+                self.available_models_display()
+            })
+        }
         async fn prefetch_models(&self) -> Result<()> {
             self.prefetches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
