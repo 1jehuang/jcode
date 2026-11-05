@@ -840,6 +840,30 @@ async fn dropping_the_stream_interrupts_and_keeps_the_child() {
 }
 
 #[tokio::test]
+async fn cancelling_before_the_turn_sends_never_delivers_the_prompt() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let stream = provider
+        .complete(&[Message::user("cancel-me")], &tools(), SYSTEM, None)
+        .await
+        .unwrap();
+    // Cancel before consuming any event: the CLI start handshake is still in
+    // flight, so the turn must see the closed stream and skip the send.
+    drop(stream);
+    // A later turn proceeds normally on the same child.
+    let events = run_turn(&provider, &[Message::user("text")], None).await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert!(
+        fake.inputs()
+            .iter()
+            .all(|row| !row.to_string().contains("cancel-me")),
+        "the cancelled prompt must never reach the CLI: {:?}",
+        fake.inputs()
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
 async fn model_switch_uses_set_model_and_instance_switch_restarts() {
     let fake = Fake::new();
     let other_home = fake.root.join("personal");

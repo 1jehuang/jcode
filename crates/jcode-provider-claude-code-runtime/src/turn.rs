@@ -84,6 +84,19 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
     let mut reported_session: Option<String> = None;
     let mut native_history = NativeHistory::default();
 
+    // The consumer may have cancelled while we waited for the turn lock or for
+    // the CLI to start. Never send a cancelled prompt into the native session.
+    if out.is_closed() {
+        child.detach_turn();
+        return TurnOutcome {
+            end: TurnEnd::Cancelled,
+            produced_output: false,
+            child_usable: true,
+            session_id: None,
+            native_history,
+        };
+    }
+
     if let Err(err) = child.send(&user_line).await {
         child.detach_turn();
         let tail = child.stderr_tail();
