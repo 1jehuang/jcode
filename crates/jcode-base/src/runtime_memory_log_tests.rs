@@ -28,7 +28,7 @@ fn server_logging_enabled_defaults_on_and_respects_falsey_env() {
 fn append_server_sample_writes_jsonl_under_memory_logs_dir() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let sample = ServerRuntimeMemorySample {
@@ -84,7 +84,7 @@ fn append_server_sample_writes_jsonl_under_memory_logs_dir() {
 fn append_client_sample_writes_jsonl_under_memory_logs_dir() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let sample = ClientRuntimeMemorySample {

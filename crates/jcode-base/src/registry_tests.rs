@@ -38,7 +38,7 @@ fn test_registry_find_by_name() {
 #[test]
 fn find_server_by_socket_sync_returns_matching_server() {
     let _guard = lock_test_env();
-    let temp_home = tempfile::tempdir().expect("temp home");
+    let temp_home = crate::test_temp::tempdir().expect("temp home");
     let prev_home: Option<OsString> = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());
 
@@ -69,11 +69,11 @@ fn find_server_by_socket_sync_returns_matching_server() {
 #[tokio::test]
 async fn cleanup_stale_preserves_live_socket_paths() {
     let _guard = lock_test_env();
-    let temp_home = tempfile::tempdir().expect("temp home");
+    let temp_home = crate::test_temp::tempdir().expect("temp home");
     let prev_home: Option<OsString> = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());
 
-    let temp_runtime = tempfile::tempdir().expect("temp runtime");
+    let temp_runtime = crate::test_temp::tempdir().expect("temp runtime");
     let socket = temp_runtime.path().join("jcode.sock");
     let debug_socket = temp_runtime.path().join("jcode-debug.sock");
     let _listener = Listener::bind(&socket).expect("bind live socket");

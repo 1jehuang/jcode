@@ -306,7 +306,7 @@ async fn invalid_threshold_or_large_query_is_fail_closed() {
 #[test]
 fn manager_scope_active_filter_and_storage_failures() {
     let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
+    let home = crate::test_temp::tempdir().unwrap();
     let old = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", home.path());
     let result = std::panic::catch_unwind(|| {

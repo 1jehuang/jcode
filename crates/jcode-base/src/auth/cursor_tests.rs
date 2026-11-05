@@ -1,5 +1,4 @@
 use super::*;
-use tempfile::TempDir;
 
 #[test]
 fn config_file_path_under_jcode() {
@@ -11,7 +10,7 @@ fn config_file_path_under_jcode() {
 
 #[test]
 fn save_and_load_api_key() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("jcode").join("cursor.env");
 
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -24,7 +23,7 @@ fn save_and_load_api_key() {
 
 #[test]
 fn load_key_quoted() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(&file, "CURSOR_API_KEY=\"my_quoted_key\"\n").unwrap();
@@ -34,7 +33,7 @@ fn load_key_quoted() {
 
 #[test]
 fn load_key_single_quoted() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(&file, "CURSOR_API_KEY='single_quoted'\n").unwrap();
@@ -44,7 +43,7 @@ fn load_key_single_quoted() {
 
 #[test]
 fn load_key_empty_value() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(&file, "CURSOR_API_KEY=\n").unwrap();
@@ -61,7 +60,7 @@ fn load_key_missing_file() {
 
 #[test]
 fn load_key_no_cursor_line() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(&file, "OTHER_KEY=value\n").unwrap();
@@ -71,7 +70,7 @@ fn load_key_no_cursor_line() {
 
 #[test]
 fn load_key_with_whitespace() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(&file, "  CURSOR_API_KEY=  spaced_key  \n").unwrap();
@@ -81,7 +80,7 @@ fn load_key_with_whitespace() {
 
 #[test]
 fn load_key_multiple_lines() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let file = dir.path().join("cursor.env");
 
     std::fs::write(
@@ -115,7 +114,7 @@ fn cursor_auth_file_path_respects_jcode_home() {
     // provider correctly looked under `$JCODE_HOME/external/...`.
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let path = cursor_auth_file_path().expect("cursor auth path");
@@ -136,7 +135,7 @@ fn cursor_auth_file_path_respects_jcode_home() {
 #[test]
 fn cursor_auth_file_path_does_not_escape_jcode_home_on_windows() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let old_home = std::env::var_os("JCODE_HOME");
     let old_appdata = std::env::var_os("APPDATA");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -163,7 +162,7 @@ fn cursor_auth_file_path_does_not_escape_jcode_home_on_windows() {
 fn cursor_vscdb_paths_respect_jcode_home() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let paths = cursor_vscdb_paths();
@@ -192,7 +191,7 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
 
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let path = cursor_auth_file_path().expect("cursor auth path");
@@ -234,7 +233,7 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
 
 #[test]
 fn reads_cursor_state_with_embedded_sqlite() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let path = dir.path().join("state.vscdb");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
@@ -294,7 +293,7 @@ fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf
 
 #[test]
 fn vscdb_read_access_token() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "tok_abc123xyz")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken").unwrap();
     assert_eq!(result, "tok_abc123xyz");
@@ -302,7 +301,7 @@ fn vscdb_read_access_token() {
 
 #[test]
 fn vscdb_read_machine_id() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db = create_mock_vscdb(
         dir.path(),
         &[(
@@ -316,7 +315,7 @@ fn vscdb_read_machine_id() {
 
 #[test]
 fn vscdb_missing_key_returns_error() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
@@ -330,7 +329,7 @@ fn vscdb_missing_key_returns_error() {
 
 #[test]
 fn vscdb_empty_value_returns_error() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
@@ -345,7 +344,7 @@ fn vscdb_missing_file_returns_error() {
 
 #[test]
 fn vscdb_multiple_keys() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db = create_mock_vscdb(
         dir.path(),
         &[
@@ -375,7 +374,7 @@ fn vscdb_multiple_keys() {
 
 #[test]
 fn vscdb_wrong_table_name() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let db_path = dir.path().join("state.vscdb");
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection

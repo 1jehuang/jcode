@@ -818,7 +818,7 @@ mod rerun_safety_tests {
 
     impl TempHome {
         fn new() -> Self {
-            let dir = tempfile::TempDir::new().unwrap();
+            let dir = crate::test_temp::tempdir().unwrap();
             let prev = std::env::var_os("JCODE_HOME");
             crate::env::set_var("JCODE_HOME", dir.path());
             crate::config::invalidate_config_cache();

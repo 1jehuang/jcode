@@ -734,4 +734,156 @@ fn find_session_by_metadata_impl(name_or_id: &str, use_cache: bool) -> Result<St
 }
 
 #[cfg(test)]
-mod batch_crash_tests;
+mod batch_crash_tests {
+    use super::*;
+
+    #[test]
+    fn test_crashed_sessions_info_struct() {
+        let info = CrashedSessionsInfo {
+            session_ids: vec!["session_test_1".to_string(), "session_test_2".to_string()],
+            display_names: vec!["fox".to_string(), "oak".to_string()],
+            most_recent_crash: Utc::now(),
+            omitted_crashed_count: 0,
+        };
+        assert_eq!(info.session_ids.len(), 2);
+        assert_eq!(info.display_names.len(), 2);
+        assert_eq!(info.display_names[0], "fox");
+    }
+
+    #[test]
+    fn idle_dead_pid_without_streaming_marker_is_not_a_crash() {
+        // Upstream #988 extended to the PID detector: a dead owner PID with
+        // no leftover streaming marker means the session was idle — ordinary
+        // close, not crash. Daemon restarts must not stamp idle sessions.
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        assert!(
+            !had_streaming_marker("session_idle_1"),
+            "no marker file means idle"
+        );
+
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    #[test]
+    fn leftover_streaming_marker_means_interrupted() {
+        // A marker file left behind (StreamingGuard clears it on every
+        // orderly exit) proves the owner died mid-turn — genuine crash.
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        std::fs::write(dir.join("session_midturn_1"), "999999").expect("marker");
+        assert!(
+            had_streaming_marker("session_midturn_1"),
+            "leftover marker means interrupted"
+        );
+        assert!(
+            !had_streaming_marker("session_other_1"),
+            "other sessions unaffected"
+        );
+
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    #[test]
+    fn find_session_by_name_or_id_matches_custom_title() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let session_id = "session_renamecli_1770000000000";
+        let mut session = Session::create_with_id(
+            session_id.to_string(),
+            None,
+            Some("Generated planning title".to_string()),
+        );
+        session.status = SessionStatus::Closed;
+        session.rename_title(Some("RenameTest".to_string()));
+        session.save().expect("save renamed session");
+
+        assert_eq!(
+            find_session_by_name_or_id("renametest").expect("resolve custom title"),
+            session_id
+        );
+        assert_eq!(
+            find_session_by_name_or_id("Rename").expect("resolve title fragment"),
+            session_id
+        );
+
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    #[test]
+    fn find_session_by_name_or_id_accepts_imported_session_ids() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir()?;
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let imported_id = "imported_codex_test_resume";
+        let mut session =
+            Session::create_with_id(imported_id.to_string(), None, Some("Imported".to_string()));
+        session.status = SessionStatus::Closed;
+        session.save()?;
+
+        let resolved = find_session_by_name_or_id(imported_id)?;
+        assert_eq!(resolved, imported_id);
+
+        crate::env::remove_var("JCODE_HOME");
+        Ok(())
+    }
+
+    /// Regression test for issue #336: resuming a *bare* external provider id
+    /// (e.g. an OpenCode `ses_...`) must resolve to its already-imported local
+    /// snapshot even when the external tool's storage has been removed, instead
+    /// of hard-failing with "No session found matching 'ses_...'".
+    #[test]
+    fn find_session_by_name_or_id_resolves_bare_opencode_id_to_imported_snapshot()
+    -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir()?;
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let provider_id = "ses_2c72f8f4cffee6Qh7GId7D81Se";
+        let imported_id = crate::import::imported_opencode_session_id(provider_id);
+        let mut session = Session::create_with_id(
+            imported_id.clone(),
+            None,
+            Some("Analyzing /provider routing".to_string()),
+        );
+        session.status = SessionStatus::Closed;
+        session.provider_session_id = Some(provider_id.to_string());
+        session.provider_key = Some("opencode".to_string());
+        session.save()?;
+
+        // No external OpenCode store exists under JCODE_HOME/external, so the only
+        // way to resolve the bare id is via the local imported snapshot.
+        let resolved = find_session_by_name_or_id(provider_id)?;
+        assert_eq!(resolved, imported_id);
+
+        crate::env::remove_var("JCODE_HOME");
+        Ok(())
+    }
+
+    /// A bare provider id that has *no* imported snapshot on disk must still fail
+    /// (so the caller can fall back to external re-import or surface an error).
+    #[test]
+    fn find_session_by_name_or_id_bare_id_without_snapshot_still_errors() -> anyhow::Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        let temp = crate::test_temp::tempdir()?;
+        crate::env::set_var("JCODE_HOME", temp.path());
+        std::fs::create_dir_all(temp.path().join("sessions"))?;
+
+        let err = find_session_by_name_or_id("ses_does_not_exist_anywhere");
+        assert!(err.is_err(), "expected unknown bare id to error");
+
+        crate::env::remove_var("JCODE_HOME");
+        Ok(())
+    }
+}

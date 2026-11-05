@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn lifecycle() {
         let _env = crate::storage::lock_test_env();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_temp::tempdir().unwrap();
         let prev = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_HOME", dir.path());
         struct Restore(Option<std::ffi::OsString>);

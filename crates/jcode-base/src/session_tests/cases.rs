@@ -568,7 +568,7 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
 fn empty_fork_is_persisted_before_first_visible_message() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = crate::test_temp::tempdir()?;
-    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
     let mut child = Session::create(Some("session_empty_parent".into()), None);
     child.append_fork_notice("session_empty_parent", "empty parent");
     assert_eq!(child.visible_conversation_message_count(), 0);
@@ -783,7 +783,7 @@ fn test_save_persists_reasoning_effort() -> Result<()> {
     let temp_home =
         crate::test_temp::tempdir_with_prefix("jcode-session-reasoning-effort-save-test-")
             .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_reasoning_effort_persist_test".to_string(),
@@ -1066,7 +1066,7 @@ fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<(
     let temp_home =
         crate::test_temp::tempdir_with_prefix("jcode-session-journal-interrupted-checkpoint-")
             .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_interrupted_checkpoint_test";
     let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
@@ -2372,7 +2372,7 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
 fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _lock = lock_env();
     let temp = crate::test_temp::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
     {
@@ -2741,7 +2741,7 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
 fn system_prompt_persists_before_first_message_and_across_metadata_updates() -> Result<()> {
     let _lock = lock_env();
     let home = crate::test_temp::tempdir()?;
-    let _home = EnvVarGuard::set("KCODE_HOME", home.path());
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
     for prompt in ["custom system prompt", ""] {
         let mut session = Session::create(None, None);
         assert_eq!(session.system_prompt, None);

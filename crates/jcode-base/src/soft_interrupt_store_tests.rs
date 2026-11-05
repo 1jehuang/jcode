@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn append_take_and_clear_round_trip() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("temp dir");
+    let temp = crate::test_temp::tempdir().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
