@@ -166,14 +166,39 @@ list_stale_dep_generations() {
         }'
 }
 
+# Cargo writes profile output to <target>/<profile> when no --target is
+# passed, and to <target>/<triple>/<profile> when one is. The Build & Test job
+# passes --target, so both layouts must be swept or the triple directories grow
+# without bound.
+list_profile_dirs() {
+  local root="$1" profile triple_dir
+  for profile in debug release selfdev; do
+    [[ -d "$root/$profile" ]] && printf '%s\n' "$root/$profile"
+  done
+  for triple_dir in "$root"/*-*; do
+    [[ -d "$triple_dir" ]] || continue
+    for profile in debug release selfdev; do
+      [[ -d "$triple_dir/$profile" ]] && printf '%s\n' "$triple_dir/$profile"
+    done
+  done
+}
+
+# Triple component of a profile dir path, empty for a bare <target>/<profile>.
+profile_target_triple() {
+  local path="$1" rel
+  rel="${path#"$target_dir"/}"
+  case "$rel" in
+    */*) rel="${rel%%/*}"; printf '%s\n' "$rel" ;;
+  esac
+}
+
 if [[ -n "$sweep_days" ]]; then
-  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/selfdev; do
-    [[ -d "$profile_dir" ]] || continue
+  while IFS= read -r profile_dir; do
     if path_has_active_process "$profile_dir"; then
       log "SKIP sweep (active process): $profile_dir"
       continue
     fi
-    profile=$(basename "$profile_dir")
+    label="${profile_dir#"$target_dir"/}"
     if [[ -d "$profile_dir/deps" ]]; then
       swept=0
       swept_count=0
@@ -186,7 +211,7 @@ if [[ -n "$sweep_days" ]]; then
         swept_count=$((swept_count + 1))
       done < <(list_stale_dep_generations "$profile_dir/deps" "$sweep_days")
       verb=$([ "$apply" == true ] && echo "swept" || echo "would sweep")
-      log "$verb $swept_count stale dep generations (>${sweep_days}d, kept newest per crate) from $profile  [$(human "$swept")]"
+      log "$verb $swept_count stale dep generations (>${sweep_days}d, kept newest per crate) from $label  [$(human "$swept")]"
       total_reclaimed=$((total_reclaimed + swept))
     fi
     # Incremental compilation session dirs are cheap to regenerate and only
@@ -196,32 +221,35 @@ if [[ -n "$sweep_days" ]]; then
         remove_path "$d" "stale incremental session (>${sweep_days}d)"
       done < <(find "$profile_dir/incremental" -mindepth 1 -maxdepth 1 -type d -mtime "+$sweep_days" 2>/dev/null)
     fi
-  done
+  done < <(list_profile_dirs "$target_dir")
 fi
 
 # 3) Aggressive: cargo clean on stale (not-recently-active, no active process)
 #    profiles to drop accumulated fingerprints/old artifact generations.
 if [[ "$aggressive" == "true" ]]; then
-  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/selfdev; do
-    [[ -d "$profile_dir" ]] || continue
+  while IFS= read -r profile_dir; do
     profile=$(basename "$profile_dir")
+    label="${profile_dir#"$target_dir"/}"
     [[ "$profile" == "debug" ]] && profile="dev"
+    triple=$(profile_target_triple "$profile_dir")
     if ! is_safe_to_remove "$profile_dir"; then
       continue
     fi
     before=$(dir_bytes "$profile_dir"); before=${before:-0}
+    clean_args=(clean --profile "$profile")
+    [[ -n "$triple" ]] && clean_args+=(--target "$triple")
     if [[ "$apply" == "true" ]]; then
-      log "cargo clean --profile $profile (stale) ..."
-      cargo clean --profile "$profile" 2>/dev/null || log "  cargo clean failed for $profile"
+      log "cargo ${clean_args[*]} (stale) for $label ..."
+      cargo "${clean_args[@]}" 2>/dev/null || log "  cargo ${clean_args[*]} failed"
       after=$(dir_bytes "$profile_dir"); after=${after:-0}
       freed=$((before - after))
       (( freed > 0 )) && total_reclaimed=$((total_reclaimed + freed))
       log "  freed $(human "$freed") from $profile"
     else
-      log "would cargo clean --profile $profile  [up to $(human "$before")]"
+      log "would cargo clean --profile $profile${triple:+ --target $triple} for $label  [up to $(human "$before")]"
       total_reclaimed=$((total_reclaimed + before))
     fi
-  done
+  done < <(list_profile_dirs "$target_dir")
 fi
 
 log "total $([ "$apply" == true ] && echo reclaimed || echo reclaimable): $(human "$total_reclaimed")"
