@@ -192,6 +192,7 @@ pub fn should_push_turn_done(session_id: &str, elapsed: Duration) -> bool {
     elapsed >= threshold_for(is_ios_session(session_id))
 }
 
+#[cfg(test)]
 fn turn_long_enough(elapsed: Duration) -> bool {
     elapsed >= threshold_for(false)
 }

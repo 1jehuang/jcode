@@ -384,6 +384,7 @@ impl WsTestClient {
             terminal_env: Vec::new(),
             account_pins: Vec::new(),
             supports_session_accounts: false,
+            client_name: None,
         })
         .await
     }
@@ -417,6 +418,7 @@ impl WsTestClient {
             client_instance_id: None,
             client_has_local_history: false,
             allow_session_takeover: false,
+            client_name: None,
         })
         .await
     }
