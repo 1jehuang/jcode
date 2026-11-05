@@ -14,24 +14,45 @@ pub fn replace_account_if_unchanged(
     save_auth_file(&auth)
 }
 
-/// `None` means no login is saved under `label`: the token came from an
-/// approved external source (Claude Code, OpenCode) and may still refresh.
+/// `None` means no login is saved under `label` and an approved external
+/// source (Claude Code, OpenCode) holds the token, so it may still refresh.
+/// A saved login removed while its refresh was pending is rejected instead.
 pub(in crate::auth) fn capture_refresh_account(
     label: &str,
     refresh_token: &str,
 ) -> Result<Option<AnthropicAccount>> {
-    let Some(account) = load_auth_file()?
+    let account = load_auth_file()?
         .anthropic_accounts
         .into_iter()
-        .find(|account| account.label == label)
-    else {
-        return Ok(None);
-    };
+        .find(|account| account.label == label);
     anyhow::ensure!(
-        !refresh_token.is_empty() && account.refresh == refresh_token,
+        !refresh_token.is_empty()
+            && account.as_ref().map_or_else(
+                || approved_external_source_holds(refresh_token),
+                |account| account.refresh == refresh_token
+            ),
         "Claude login changed before token refresh; retry with the current login"
     );
-    Ok(Some(account))
+    Ok(account)
+}
+
+/// Same consent rules as `load_credentials`, uncached so revocation applies.
+fn approved_external_source_holds(refresh_token: &str) -> bool {
+    use crate::config::Config;
+    let holds = |creds: super::ClaudeCredentials| creds.refresh_token == refresh_token;
+    let claude_code = super::claude_code_path().is_ok_and(|path| {
+        Config::external_auth_source_allowed_for_path(super::CLAUDE_CODE_AUTH_SOURCE_ID, &path)
+    }) && super::load_claude_code_credentials().is_ok_and(holds);
+    let native = super::native_source_allowed()
+        && super::load_claude_code_env_credentials().is_some_and(holds);
+    let opencode = super::opencode_path().is_ok_and(|path| {
+        Config::external_auth_source_allowed_for_path(super::OPENCODE_AUTH_SOURCE_ID, &path)
+            || Config::external_auth_source_allowed_for_path(
+                crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
+                &path,
+            )
+    }) && super::load_opencode_credentials().is_ok_and(holds);
+    claude_code || native || opencode
 }
 
 /// Commit tokens refreshed after [`capture_refresh_account`].

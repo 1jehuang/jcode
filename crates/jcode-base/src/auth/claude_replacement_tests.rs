@@ -12,6 +12,17 @@ impl Drop for TestHome {
     }
 }
 
+struct ClaudeConfigDir(Option<std::ffi::OsString>);
+
+impl Drop for ClaudeConfigDir {
+    fn drop(&mut self) {
+        match self.0.as_ref() {
+            Some(previous) => crate::env::set_var("CLAUDE_CONFIG_DIR", previous),
+            None => crate::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    }
+}
+
 #[test]
 fn replacement_public_api_roundtrip_preserves_defaults_and_rejections_preserve_disk_bytes() {
     let _lock = crate::storage::lock_test_env();
@@ -222,6 +233,24 @@ fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_o
     let _home = TestHome(std::env::var_os("JCODE_HOME"));
     crate::env::set_var("JCODE_HOME", temp.path());
     save_auth_file(&JcodeAuthFile::default()).unwrap();
+    let config = temp.path().join("claude-config");
+    let _config = ClaudeConfigDir(std::env::var_os("CLAUDE_CONFIG_DIR"));
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config);
+    let external = config.join(".credentials.json");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        &external,
+        r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"external-refresh","expiresAt":1}}"#,
+    )
+    .unwrap();
+    // Unapproved files and removed saved logins are not external logins.
+    assert!(capture_refresh_account("claude-1", "external-refresh").is_err());
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    assert!(capture_refresh_account("claude-1", "removed-saved-refresh").is_err());
     assert!(
         capture_refresh_account("claude-1", "external-refresh")
             .unwrap()
