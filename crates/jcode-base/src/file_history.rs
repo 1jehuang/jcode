@@ -54,6 +54,12 @@ struct FileMetadata {
     gid: u32,
     #[cfg(unix)]
     xattrs: BTreeMap<String, Vec<u8>>,
+    // macOS stores its access-control list outside the named xattrs that
+    // `xattrs` captures, so it needs its own capture/restore via the acl(3)
+    // APIs. Empty means the file had no extended ACL. Text form (`acl_to_text`).
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    acl: Vec<u8>,
     // Self-relative Windows security descriptor (DACL). A file can carry a
     // stricter DACL than its parent; the atomic replace in `apply` must restore
     // it onto the staged sibling, which otherwise inherits the parent's.
@@ -266,6 +272,8 @@ fn state(dir: &Path, path: &Path) -> Result<FileState> {
             uid: metadata.uid(),
             gid: metadata.gid(),
             xattrs: read_xattrs(path)?,
+            #[cfg(target_os = "macos")]
+            acl: read_acl(path)?,
         })
     };
     #[cfg(windows)]
@@ -508,6 +516,84 @@ fn write_xattrs(_path: &Path, _attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> 
     Ok(())
 }
 
+// macOS ACL access via acl(3). `libc` does not expose these, so declare them.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: u32 = 0x0000_0100;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_get_file(path: *const libc::c_char, acl_type: u32) -> *mut libc::c_void;
+    fn acl_set_file(
+        path: *const libc::c_char,
+        acl_type: u32,
+        acl: *mut libc::c_void,
+    ) -> libc::c_int;
+    fn acl_to_text(acl: *mut libc::c_void, len: *mut isize) -> *mut libc::c_char;
+    fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+}
+
+/// Read a macOS extended ACL as its text form. Empty means no extended ACL
+/// (the common case: `acl_get_file` returns null). Best effort, like xattrs.
+#[cfg(target_os = "macos")]
+fn read_acl(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let acl = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut len: isize = 0;
+    let text = unsafe { acl_to_text(acl, &mut len) };
+    let result = if text.is_null() {
+        Err(std::io::Error::last_os_error()).context("Could not serialize ACL")
+    } else {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len.max(0) as usize) }.to_vec();
+        unsafe { acl_free(text.cast::<libc::c_void>()) };
+        Ok(bytes)
+    };
+    unsafe { acl_free(acl) };
+    result
+}
+
+/// Restore a captured macOS ACL onto the staged file before it replaces the
+/// original. An empty capture means the original had none, so clear any ACL
+/// the sibling inherited rather than let the replacement widen access.
+#[cfg(target_os = "macos")]
+fn write_acl(path: &Path, acl_text: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    if acl_text.is_empty() {
+        let empty = unsafe { acl_init(0) };
+        if empty.is_null() {
+            return Err(std::io::Error::last_os_error()).context("Could not build empty ACL");
+        }
+        let rc = unsafe { acl_set_file(c_path.as_ptr(), ACL_TYPE_EXTENDED, empty) };
+        unsafe { acl_free(empty) };
+        // Clearing an ACL that is already absent reports ENOENT; that is fine.
+        if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENOENT) {
+                return Err(error).context("Could not clear inherited ACL");
+            }
+        }
+        return Ok(());
+    }
+    let c_text = std::ffi::CString::new(acl_text)?;
+    let acl = unsafe { acl_from_text(c_text.as_ptr()) };
+    if acl.is_null() {
+        return Err(std::io::Error::last_os_error()).context("Could not parse stored ACL");
+    }
+    let rc = unsafe { acl_set_file(c_path.as_ptr(), ACL_TYPE_EXTENDED, acl) };
+    unsafe { acl_free(acl) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("Could not restore ACL");
+    }
+    Ok(())
+}
+
 /// Read a file's DACL as a self-relative security descriptor. Best effort: a
 /// file whose DACL cannot be read is simply left unrecorded, so normal edits
 /// keep working; the preservation guarantee applies to DACLs we captured.
@@ -649,6 +735,10 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
         #[cfg(unix)]
         if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
             write_xattrs(&temporary, &metadata.xattrs)?;
+            // macOS ACLs live outside named xattrs; restore them separately so
+            // a deny rule on the original cannot vanish across the replace.
+            #[cfg(target_os = "macos")]
+            write_acl(&temporary, &metadata.acl)?;
         }
         #[cfg(not(unix))]
         if let Some(mode) = desired.mode {

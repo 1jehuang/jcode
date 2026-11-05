@@ -152,9 +152,16 @@ fn observed_state(path: &Path) -> Result<FileState> {
             uid: metadata.uid(),
             gid: metadata.gid(),
             xattrs: super::read_xattrs(path)?,
+            #[cfg(target_os = "macos")]
+            acl: super::read_acl(path)?,
         })
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let metadata_state =
+        super::read_security_descriptor(path).map(|descriptor| super::FileMetadata {
+            security_descriptor: descriptor,
+        });
+    #[cfg(not(any(unix, windows)))]
     let metadata_state = None;
     Ok(FileState {
         blob: Some(hex::encode(Sha256::digest(data))),

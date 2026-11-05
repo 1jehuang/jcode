@@ -1257,3 +1257,44 @@ fn windows_edit_and_rewind_preserve_a_protected_file_dacl() {
         "rewind must restore the original protected DACL"
     );
 }
+
+/// macOS keeps a file's ACL outside the named xattrs, so a checkpointed edit
+/// that replaced the file through a freshly created sibling used to drop it,
+/// widening or narrowing access. `apply` must restore the captured ACL, and
+/// rewind must too.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_edit_and_rewind_preserve_the_file_acl() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("acl-file");
+    fs::write(&path, b"before").unwrap();
+    // An additive entry gives the file a non-default extended ACL without
+    // blocking the test's own writes or the temp-dir cleanup.
+    let set = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(set.success(), "chmod +a must set an ACL");
+    let original = read_acl(&path).unwrap();
+    assert!(!original.is_empty(), "the file has an extended ACL");
+
+    let cp = checkpoint("macos-acl", 0, "edit").unwrap();
+    mutate("macos-acl", &path, Some(b"after")).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+    assert_eq!(
+        read_acl(&path).unwrap(),
+        original,
+        "the atomic replace must restore the original ACL"
+    );
+    assert!(checkpoints("macos-acl").unwrap()[0].can_restore_files);
+
+    restore("macos-acl", &cp.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(
+        read_acl(&path).unwrap(),
+        original,
+        "rewind must restore the original ACL"
+    );
+}
