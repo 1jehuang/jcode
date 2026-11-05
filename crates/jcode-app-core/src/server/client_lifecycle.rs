@@ -1142,8 +1142,23 @@ server_resumes: false,
                     continue;
                 }
                 // The user's message supersedes a server-initiated turn that
-                // is waiting for a usage-limit reset.
-                super::usage_limit_resume::cancel_pending_resume(&client_session_id);
+                // is waiting for a usage-limit reset. Cancellation only wakes
+                // that turn's task; it still holds the turn lease until it is
+                // polled and drops it. Wait for the release before claiming,
+                // or `start_processing_message` races the stale lease and
+                // rejects the user's message with "Already processing a
+                // message". Bounded, so an unrelated held turn cannot hang us.
+                if super::usage_limit_resume::cancel_pending_resume(&client_session_id) {
+                    let release = agent.lock().await.turn_release_signal();
+                    if tokio::time::timeout(std::time::Duration::from_secs(5), release.wait())
+                        .await
+                        .is_err()
+                    {
+                        crate::logging::warn(&format!(
+                            "Timed out waiting for the superseded turn to release before session {client_session_id}'s message; the claim may be rejected"
+                        ));
+                    }
+                }
                 if !client_is_processing {
                     // A live resume cannot replace stdin routing while the old
                     // turn owns the agent. Restore it when this client starts a
