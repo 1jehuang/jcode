@@ -2334,21 +2334,25 @@ async fn resolve_oauth_access_token(
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    // Check if token needs refresh (expired or expiring within 5 minutes)
-    if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
-        // A refresh token the provider already rejected as unrecoverable
-        // cannot start working again. Retrying it added a doomed network
-        // round-trip to the critical path of every single turn, so fail
-        // straight through to the caller's API-key fallback instead.
-        if auth::refresh_state::refresh_token_is_known_rejected(
+    // A refresh token the provider already rejected as unrecoverable cannot
+    // start working again. Retrying it added a doomed network round-trip to
+    // the critical path of every single turn, so fail straight through to the
+    // caller's API-key fallback instead. Rejection blocks refresh, not a
+    // still-live access token, which falls through to be cached and used.
+    let rejected = !fresh_creds.refresh_token.is_empty()
+        && auth::refresh_state::refresh_token_is_known_rejected(
             "claude",
             &fresh_creds.refresh_token,
-        ) {
-            anyhow::bail!(
-                "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-            );
-        }
+        );
+    if rejected && fresh_creds.expires_at <= now {
+        anyhow::bail!(
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+        );
+    }
 
+    // Check if token needs refresh (expired or expiring within 5 minutes)
+    if !rejected && fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty()
+    {
         jcode_base::logging::info("OAuth token expired or expiring soon, attempting refresh...");
 
         match oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, &refresh_label)

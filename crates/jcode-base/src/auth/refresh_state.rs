@@ -161,6 +161,7 @@ pub fn record_success(provider_id: &str) -> Result<()> {
             last_success_ms: Some(now_ms),
             last_error: None,
             rejected_refresh_fingerprint: None,
+            rejected_refresh_fingerprints: Vec::new(),
         },
     )
 }
@@ -177,6 +178,7 @@ pub fn record_failure(provider_id: &str, error: impl AsRef<str>) -> Result<()> {
         last_success_ms: None,
         last_error: None,
         rejected_refresh_fingerprint: None,
+        rejected_refresh_fingerprints: Vec::new(),
     });
     record.last_attempt_ms = now_ms;
     record.last_error = Some(message);
@@ -208,6 +210,7 @@ pub fn record_permanent_rejection(
         last_success_ms: None,
         last_error: None,
         rejected_refresh_fingerprint: None,
+        rejected_refresh_fingerprints: Vec::new(),
     });
     record.rejected_refresh_fingerprint = Some(refresh_token_fingerprint(refresh_token));
     upsert(provider_id, record)
@@ -221,9 +224,11 @@ pub fn refresh_token_is_known_rejected(provider_id: &str, refresh_token: &str) -
     if refresh_token.trim().is_empty() {
         return false;
     }
-    get(provider_id)
-        .and_then(|record| record.rejected_refresh_fingerprint)
-        .is_some_and(|fingerprint| fingerprint == refresh_token_fingerprint(refresh_token))
+    let fingerprint = refresh_token_fingerprint(refresh_token);
+    get(provider_id).is_some_and(|record| {
+        record.rejected_refresh_fingerprint.as_ref() == Some(&fingerprint)
+            || record.rejected_refresh_fingerprints.contains(&fingerprint)
+    })
 }
 
 /// True when the provider's response describes an unrecoverable refresh token
@@ -262,8 +267,20 @@ pub fn format_record_label(record: &ProviderRefreshRecord) -> String {
     }
 }
 
-fn upsert(provider_id: &str, record: ProviderRefreshRecord) -> Result<()> {
+fn upsert(provider_id: &str, mut record: ProviderRefreshRecord) -> Result<()> {
+    let _lock =
+        super::account_store::lock_store(&crate::storage::jcode_dir()?, REFRESH_STATUS_FILE)?;
     let mut records = load_all();
+    // Merge under the store lock so concurrent account refreshes cannot erase
+    // each other's terminal rejections, even when their snapshots are stale.
+    let mut rejected = std::collections::BTreeSet::new();
+    if let Some(previous) = records.get(provider_id) {
+        rejected.extend(previous.rejected_refresh_fingerprints.iter().cloned());
+        rejected.extend(previous.rejected_refresh_fingerprint.iter().cloned());
+    }
+    rejected.extend(record.rejected_refresh_fingerprints);
+    rejected.extend(record.rejected_refresh_fingerprint.iter().cloned());
+    record.rejected_refresh_fingerprints = rejected.into_iter().collect();
     records.insert(provider_id.to_string(), record);
     crate::storage::write_json(&status_path()?, &records)
 }
@@ -291,6 +308,7 @@ mod tests {
             last_success_ms: Some(chrono::Utc::now().timestamp_millis()),
             last_error: Some("refresh denied".to_string()),
             rejected_refresh_fingerprint: None,
+            rejected_refresh_fingerprints: Vec::new(),
         };
         assert!(format_record_label(&record).contains("failed"));
         assert!(format_record_label(&record).contains("refresh denied"));
@@ -304,6 +322,7 @@ mod tests {
             last_success_ms: Some(now_ms),
             last_error: None,
             rejected_refresh_fingerprint: None,
+            rejected_refresh_fingerprints: Vec::new(),
         };
         assert!(format_record_label(&record).starts_with("ok "));
     }
@@ -386,9 +405,10 @@ mod tests {
             .expect("refresh state should be written");
         assert!(!raw.contains(dead), "refresh token must never be persisted");
 
-        // Re-login records a success, clearing suppression entirely.
+        // A successful fresh login never makes an old rejected token usable.
         record_success("claude").expect("record success");
-        assert!(!refresh_token_is_known_rejected("claude", dead));
+        assert!(refresh_token_is_known_rejected("claude", dead));
+        assert!(!refresh_token_is_known_rejected("claude", fresh));
     }
 
     #[test]
@@ -420,6 +440,40 @@ mod tests {
         assert_eq!(
             cred_state("openai", Some("freshly-minted")),
             CredState::Stale
+        );
+    }
+
+    #[test]
+    fn rejected_tokens_survive_other_account_rejection_and_success() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let first = "first-account-rejected-refresh";
+        let second = "second-account-rejected-refresh";
+        // Existing files contain only the singular fingerprint field.
+        let legacy = serde_json::json!({
+            "claude": {
+                "last_attempt_ms": 1,
+                "rejected_refresh_fingerprint": refresh_token_fingerprint(first)
+            }
+        });
+        crate::storage::write_json(&status_path().unwrap(), &legacy).unwrap();
+        assert!(refresh_token_is_known_rejected("claude", first));
+        record_permanent_rejection("claude", second, "invalid_grant").unwrap();
+        record_success("claude").unwrap();
+        record_failure("claude", "temporary network failure").unwrap();
+        for token in [first, second] {
+            assert!(refresh_token_is_known_rejected("claude", token));
+            assert!(ensure_refresh_allowed("claude", token, "sign in again").is_err());
+            assert!(!refresh_token_is_known_rejected("openai", token));
+        }
+        assert!(!refresh_token_is_known_rejected(
+            "claude",
+            "new-account-refresh"
+        ));
+        let raw = std::fs::read_to_string(status_path().unwrap()).unwrap();
+        assert!(!raw.contains(first) && !raw.contains(second));
+        assert_eq!(
+            get("claude").unwrap().rejected_refresh_fingerprints.len(),
+            2
         );
     }
 
