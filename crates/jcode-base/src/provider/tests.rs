@@ -13,7 +13,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     // registry the binary uses. Registration is idempotent (last write wins),
     // and per-test overrides can re-register a different stub.
     register_test_external_runtimes();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     let prev_subscription =
         std::env::var_os(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);

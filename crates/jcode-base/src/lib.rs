@@ -106,6 +106,11 @@ pub mod subscription_api;
 pub mod subscription_catalog;
 pub mod subscription_notice;
 pub mod telegram;
+/// Test-only temp-dir helpers. Gated like the other in-crate test helpers
+/// (`storage::lock_test_env`, `auth::test_sandbox`): compiled for this crate's
+/// own tests and exposed to downstream test targets through `test-support`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_temp;
 pub mod telemetry {
     pub use jcode_telemetry_core::*;
 }

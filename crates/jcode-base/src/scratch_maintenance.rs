@@ -465,24 +465,25 @@ mod tests {
     /// `prune_pass_keeps_directory_with_live_process_and_removes_idle_one` covers the
     /// probe + prune composition, but it hands in its own scratch root and busy list.
     /// The real caller is `prune_stale_scratch`, which additionally resolves the home
-    /// via `KCODE_HOME`, honours the 24h stamp gate, canonicalises the scratch root,
+    /// via `JCODE_HOME`, honours the 24h stamp gate, canonicalises the scratch root,
     /// and writes the stamp afterwards. Any of those could reintroduce the bug while
     /// the lower-level test still passed.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn scheduled_entry_point_keeps_live_directory_and_removes_idle_one() {
         let _guard = crate::storage::lock_test_env();
-        let prev_home = std::env::var_os("KCODE_HOME");
+        let prev_home = std::env::var_os("JCODE_HOME");
         let prev_retention = std::env::var_os(SCRATCH_RETENTION_ENV);
 
-        // NOTE: `tempfile::tempdir()` is unusable for a KCODE_HOME here. In this harness TMPDIR
+        // NOTE: `tempfile::tempdir()` is unusable for a JCODE_HOME here. In this harness TMPDIR
         // points at `~/.jcode/scratch`, so a default tempdir is created *inside* a jcode directory
-        // and `require_kcode_path` correctly rejects it. Use an explicit root outside all jcode paths.
+        // and the test would prune the very scratch tree it is asserting on. Use an explicit root
+        // outside all jcode paths.
         let temp = tempfile::Builder::new()
             .prefix("scratch-prune-entrypoint-")
             .tempdir_in("/private/tmp")
             .expect("tempdir outside jcode paths");
-        crate::env::set_var("KCODE_HOME", temp.path());
+        crate::env::set_var("JCODE_HOME", temp.path());
         // Pin retention so the test cannot be defeated by an ambient value.
         crate::env::set_var(SCRATCH_RETENTION_ENV, "7");
 
@@ -519,7 +520,7 @@ mod tests {
         assert_eq!(
             resolved,
             temp.path(),
-            "KCODE_HOME did not redirect storage::jcode_dir"
+            "JCODE_HOME did not redirect storage::jcode_dir"
         );
         assert!(scratch.is_dir(), "scratch root must exist under the redirected home");
         assert!(
@@ -541,8 +542,8 @@ mod tests {
             None => crate::env::remove_var(SCRATCH_RETENTION_ENV),
         }
         match prev_home {
-            Some(value) => crate::env::set_var("KCODE_HOME", value),
-            None => crate::env::remove_var("KCODE_HOME"),
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
         }
 
         assert!(
