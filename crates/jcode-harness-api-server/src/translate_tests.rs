@@ -2390,6 +2390,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         reasoning_effort,
         auth_method,
         routes,
+        ..
     } = event
     else {
         panic!("expected runtime info, got {event:?}");
@@ -4039,4 +4040,34 @@ fn context_cap_requests_reply_broadcast_and_validate() {
             ..
         }
     ));
+}
+
+/// The account router's choice reaches remote clients so they can show which
+/// OAuth account a session bills against. A later event that omits the key
+/// keeps the known label, and an explicit null clears it.
+#[test]
+fn account_label_follows_the_daemons_routed_account() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "m",
+        "provider_oauth_account_label": "work",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+    assert!(
+        matches!(state.runtime_info(), ApiEvent::RuntimeInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "model_changed", "id": 99, "model": "m2"}));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    state.note_models(&json!({"provider_oauth_account_label": null}));
+    assert!(state.current_account.is_none());
 }
