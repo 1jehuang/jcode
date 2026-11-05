@@ -26,6 +26,9 @@ pub enum TurnEnd {
     Finished,
     /// The consumer dropped the stream (user cancelled).
     Cancelled,
+    /// Cancelled before the prompt was sent: nothing reached the child, so the
+    /// caller must not advance the seen-history checkpoint.
+    CancelledBeforeSend,
     /// A rejected rate limit parked the turn; it was interrupted.
     RateLimited,
     /// The child exited before the turn finished. Carries recent stderr.
@@ -89,7 +92,7 @@ pub async fn drive_turn(req: TurnRequest<'_>) -> TurnOutcome {
     if out.is_closed() {
         child.detach_turn();
         return TurnOutcome {
-            end: TurnEnd::Cancelled,
+            end: TurnEnd::CancelledBeforeSend,
             produced_output: false,
             child_usable: true,
             session_id: None,
