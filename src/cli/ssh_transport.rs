@@ -323,21 +323,16 @@ impl SshConnection {
         // remote daemon routinely exceeds the plain SSH startup deadline.
         let cloud = super::cloud_managed::is_managed(&options.host)
             || super::cloud_ephemeral::host_id(&options.host).is_some();
-        let (deadline, attempts) = if cloud {
-            (CLOUD_WAKE_TIMEOUT, 2)
+        let deadline = if cloud {
+            CLOUD_WAKE_TIMEOUT
         } else {
-            (STARTUP_TIMEOUT, 1)
+            STARTUP_TIMEOUT
         };
-        let mut last = None;
-        for _ in 0..attempts {
-            match Self::spawn(options.command(), deadline).await {
-                Ok(connection) => return Ok(connection),
-                Err(error) => last = Some(error),
-            }
+        let mut result = Self::spawn(options.command(), deadline).await;
+        if cloud && result.is_err() {
+            result = Self::spawn(options.command(), deadline).await;
         }
-        Err(last
-            .expect("at least one attempt")
-            .context(format!("connecting native Jcode on {}", options.host)))
+        result.with_context(|| format!("connecting native Jcode on {}", options.host))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {
