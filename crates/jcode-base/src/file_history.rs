@@ -54,6 +54,12 @@ struct FileMetadata {
     gid: u32,
     #[cfg(unix)]
     xattrs: BTreeMap<String, Vec<u8>>,
+    // Self-relative Windows security descriptor (DACL). A file can carry a
+    // stricter DACL than its parent; the atomic replace in `apply` must restore
+    // it onto the staged sibling, which otherwise inherits the parent's.
+    #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    security_descriptor: Vec<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -262,7 +268,11 @@ fn state(dir: &Path, path: &Path) -> Result<FileState> {
             xattrs: read_xattrs(path)?,
         })
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let metadata_state = read_security_descriptor(path).map(|descriptor| FileMetadata {
+        security_descriptor: descriptor,
+    });
+    #[cfg(not(any(unix, windows)))]
     let metadata_state = None;
     Ok(FileState {
         blob: Some(blob),
@@ -498,6 +508,72 @@ fn write_xattrs(_path: &Path, _attrs: &BTreeMap<String, Vec<u8>>) -> Result<()> 
     Ok(())
 }
 
+/// Read a file's DACL as a self-relative security descriptor. Best effort: a
+/// file whose DACL cannot be read is simply left unrecorded, so normal edits
+/// keep working; the preservation guarantee applies to DACLs we captured.
+#[cfg(windows)]
+fn read_security_descriptor(path: &Path) -> Option<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetFileSecurityW};
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // First call with a null buffer reports the required length.
+    let mut needed = 0u32;
+    unsafe {
+        GetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        );
+    }
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; needed as usize];
+    let ok = unsafe {
+        GetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(needed as usize);
+    Some(buf)
+}
+
+/// Apply a captured DACL to the staged file before it replaces the original.
+/// A failure here aborts the atomic replace, so the caller falls back to an
+/// in-place write that keeps the original DACL rather than dropping it.
+#[cfg(windows)]
+fn write_security_descriptor(path: &Path, descriptor: &[u8]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetFileSecurityW};
+    if descriptor.is_empty() {
+        return Ok(());
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SetFileSecurityW takes a mutable pointer but treats the descriptor as
+    // read-only input; only its DACL is applied per the information flag.
+    let ok = unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            descriptor.as_ptr() as *mut std::ffi::c_void,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not restore Windows security descriptor");
+    }
+    Ok(())
+}
+
 fn bytes(dir: &Path, state: &FileState) -> Result<Option<Vec<u8>>> {
     let Some(hash) = &state.blob else {
         return Ok(None);
@@ -579,6 +655,13 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
             let mut permissions = file.metadata()?.permissions();
             permissions.set_readonly(mode != 0);
             file.set_permissions(permissions)?;
+        }
+        // Restore the original DACL onto the staged sibling, which was created
+        // with the parent directory's inherited access. A new file records no
+        // descriptor, so it keeps that inherited access, like an ordinary write.
+        #[cfg(windows)]
+        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
+            write_security_descriptor(&temporary, &metadata.security_descriptor)?;
         }
         file.sync_all()?;
         // Recheck after staging, rather than overwriting a newer external edit.

@@ -33,7 +33,7 @@
     "crates/jcode-base/src/background.rs": 1657,
     "crates/jcode-base/src/browser.rs": 2271,
     "crates/jcode-base/src/compaction.rs": 1832,
-    "crates/jcode-base/src/file_history.rs": 1228,
+    "crates/jcode-base/src/file_history.rs": 1311,
     "crates/jcode-base/src/gmail.rs": 1537,
     "crates/jcode-base/src/import.rs": 1610,
     "crates/jcode-base/src/jev.rs": 1863,

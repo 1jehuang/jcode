@@ -1148,3 +1148,112 @@ async fn external_change_of_previously_unchanged_path_is_not_hidden_by_expected_
     assert_eq!(session.messages.len(), 2);
     assert_eq!(fs::read(path).unwrap(), b"human");
 }
+
+/// A file can carry a protected DACL stricter than its parent directory. The
+/// checkpointed edit replaces it via a sibling that inherits the parent's
+/// looser access, so `apply` must restore the original DACL onto the sibling
+/// before the rename, and rewind must do the same. Otherwise the replacement
+/// silently widens access to the file.
+#[cfg(windows)]
+#[test]
+fn windows_edit_and_rewind_preserve_a_protected_file_dacl() {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // Replace the file's DACL with a protected (non-inherited) owner-only ACE,
+    // so it cannot equal whatever the staging sibling inherits from the parent.
+    fn set_protected_owner_only_dacl(path: &std::path::Path) {
+        let mut token = null_mut();
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        let mut needed = 0u32;
+        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed) };
+        assert_ne!(needed, 0);
+        let word = std::mem::size_of::<usize>();
+        let mut token_user = vec![0usize; (needed as usize).div_ceil(word)];
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    token_user.as_mut_ptr().cast::<c_void>(),
+                    needed,
+                    &mut needed,
+                )
+            },
+            0
+        );
+        let user = unsafe { &*(token_user.as_ptr().cast::<TOKEN_USER>()) };
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: user.User.Sid.cast::<u16>(),
+        };
+        let access = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: 0,
+            Trustee: trustee,
+        };
+        let mut acl = null_mut();
+        assert_eq!(unsafe { SetEntriesInAclW(1, &access, null(), &mut acl) }, 0);
+        let mut wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                wide.as_mut_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null(),
+            )
+        };
+        unsafe { LocalFree(acl.cast::<c_void>()) };
+        assert_eq!(status, 0);
+        unsafe { CloseHandle(token) };
+    }
+
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("secret.txt");
+    fs::write(&path, b"before").unwrap();
+    set_protected_owner_only_dacl(&path);
+    let original = read_security_descriptor(&path).expect("file DACL is readable");
+
+    let cp = checkpoint("win-dacl", 0, "edit").unwrap();
+    mutate("win-dacl", &path, Some(b"after")).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+    assert_eq!(
+        read_security_descriptor(&path).as_deref(),
+        Some(original.as_slice()),
+        "the atomic replace must restore the original protected DACL"
+    );
+
+    restore("win-dacl", &cp.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(
+        read_security_descriptor(&path).as_deref(),
+        Some(original.as_slice()),
+        "rewind must restore the original protected DACL"
+    );
+}
