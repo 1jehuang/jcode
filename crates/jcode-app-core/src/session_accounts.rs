@@ -186,28 +186,9 @@ pub fn default_label(kind: AccountProviderKind) -> Option<String> {
 pub fn set_default_label(kind: AccountProviderKind, label: &str) -> Result<()> {
     let label = label.trim();
     match kind {
-        AccountProviderKind::Claude => {
-            let mut auth = crate::auth::claude::load_auth_file()?;
-            crate::auth::account_store::set_active_account(
-                label,
-                &auth.anthropic_accounts,
-                &mut auth.active_anthropic_account,
-                "No Claude account with label '{}' found",
-                |account| account.label.as_str(),
-            )?;
-            crate::auth::claude::save_auth_file(&auth)?;
-        }
-        AccountProviderKind::OpenAi => {
-            let mut auth = crate::auth::codex::load_auth_file()?;
-            crate::auth::account_store::set_active_account(
-                label,
-                &auth.openai_accounts,
-                &mut auth.active_openai_account,
-                "No OpenAI account with label '{}' found",
-                |account| account.label.as_str(),
-            )?;
-            crate::auth::codex::save_auth_file(&auth)?;
-        }
+        // Locked read/change/save, so a concurrent refresh or removal survives.
+        AccountProviderKind::Claude => crate::auth::claude::set_default_account(label)?,
+        AccountProviderKind::OpenAi => crate::auth::codex::set_default_account(label)?,
         AccountProviderKind::ClaudeCode => {
             anyhow::bail!(
                 "The default Claude Code instance is set by [provider.claude_code].default_instance in config.toml (currently '{}'); use /accounts claude-code switch {label} to pin this session",
