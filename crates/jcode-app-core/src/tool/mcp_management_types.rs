@@ -63,13 +63,22 @@ fn connection_config(
         }
     }
     Ok(McpServerConfig {
-        command: params.command.clone().unwrap_or_default(),
-        args: params.args.clone().unwrap_or_default(),
-        env: params.env.clone().unwrap_or_default(),
+        command: params
+            .command
+            .as_ref()
+            .map_or_else(String::new, Clone::clone),
+        args: params.args.as_ref().map_or_else(Vec::new, Clone::clone),
+        env: params
+            .env
+            .as_ref()
+            .map_or_else(Default::default, Clone::clone),
         shared: true,
         transport: params.transport.clone(),
         url: params.url.clone(),
-        headers: params.headers.clone().unwrap_or_default(),
+        headers: params
+            .headers
+            .as_ref()
+            .map_or_else(Default::default, Clone::clone),
         enabled: None,
         disabled: None,
         timeout_secs: None,

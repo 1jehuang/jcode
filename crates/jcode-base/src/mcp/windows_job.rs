@@ -93,7 +93,11 @@ pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, OwnedHandle)> {
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = child.start_kill();
+        if let Err(cleanup_error) = child.start_kill() {
+            crate::logging::warn(&format!(
+                "MCP rejected child cleanup failed: {cleanup_error}"
+            ));
+        }
         return Err(error);
     }
     Ok((child, job))

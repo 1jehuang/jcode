@@ -14,7 +14,9 @@ type Handle = *mut c_void;
 static SPAWN_OBSERVER: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
 #[cfg(feature = "test-support")]
 pub(super) fn test_set_spawn_observer(observer: Option<fn()>) {
-    *SPAWN_OBSERVER.lock().unwrap() = observer;
+    *SPAWN_OBSERVER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = observer;
 }
 include!("windows_native_launch_ffi.rs");
 
@@ -109,7 +111,9 @@ impl<'a> RemoteHandle<'a> {
 }
 impl Drop for RemoteHandle<'_> {
     fn drop(&mut self) {
-        let _ = self.close();
+        if let Err(error) = self.close() {
+            crate::logging::warn(&format!("MCP remote handle cleanup failed: {error}"));
+        }
     }
 }
 
@@ -342,7 +346,11 @@ fn spawn_inner(
     let mut remote_err = RemoteHandle::new(&child_err, &broker.process)?;
     #[cfg(feature = "test-support")]
     {
-        let observer = { *SPAWN_OBSERVER.lock().unwrap() };
+        let observer = {
+            *SPAWN_OBSERVER
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        };
         if let Some(observer) = observer {
             observer();
         }

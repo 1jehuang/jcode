@@ -34,7 +34,7 @@ mod tests {
             "server-specific-secret".to_string(),
         )]);
 
-        let env = mcp_child_env(inherited, &explicit);
+        let env = mcp_child_env(inherited, &explicit).unwrap();
         assert_eq!(
             env.get(std::ffi::OsStr::new("PATH")).map(|v| v.as_os_str()),
             Some(std::ffi::OsStr::new("/bin"))
@@ -76,7 +76,7 @@ mod tests {
     async fn child_environment_fixture() {
         let inherited = std::env::vars_os().collect();
         let explicit = HashMap::from([("EXPLICIT_API_KEY".to_string(), "opted-in".to_string())]);
-        let env = mcp_child_env(inherited, &explicit);
+        let env = mcp_child_env(inherited, &explicit).unwrap();
         let mut command = tokio::process::Command::new("/usr/bin/env");
         configure_mcp_command_env(&mut command, &env);
         let output = command.output().await.unwrap();
@@ -189,9 +189,17 @@ mod windows_env_tests {
         for invalid in ["", "A=B", "BAD\0KEY"] {
             let inherited = HashMap::from([("Path".into(), "fixture".into())]);
             let explicit = HashMap::from([(invalid.to_string(), "value".to_string())]);
-            let env = mcp_child_env(inherited, &explicit);
-            let result = super::super::windows_native_env::environment_block(env.into_iter());
-            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+            let result = mcp_child_env(inherited, &explicit).and_then(|env| {
+                super::super::windows_native_env::environment_block(env).map_err(Into::into)
+            });
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
         }
     }
     #[test]
@@ -213,9 +221,9 @@ mod windows_env_tests {
         ]);
         let explicit_path = explicit_dir.path().to_str().unwrap().to_string();
         let explicit = HashMap::from([("PATH".to_string(), explicit_path.clone())]);
-        let env = mcp_child_env(inherited, &explicit);
+        let env = mcp_child_env(inherited, &explicit).unwrap();
         assert_eq!(env.get(OsStr::new("JCODE_HOME")), Some(&non_unicode));
-        let path = super::super::windows_native_command::child_path(&env);
+        let path = super::super::windows_native_command::child_path(&env).unwrap();
         assert_eq!(path, Some(OsStr::new(&explicit_path)));
         assert_eq!(
             super::super::windows_native_resolve::resolve(OsStr::new(name), path).unwrap(),
@@ -233,5 +241,14 @@ mod windows_env_tests {
             .collect();
         assert!(entries.contains(&format!("PATH={explicit_path}")));
         assert_eq!(entries.len(), 2);
+    }
+    #[test]
+    fn windows_unicode_environment_override_is_case_insensitive() {
+        let inherited = HashMap::from([("JCODE_\u{00c4}".into(), "old".into())]);
+        let explicit = HashMap::from([("jcode_\u{00e4}".to_string(), "new".to_string())]);
+        let env = mcp_child_env(inherited, &explicit).unwrap();
+        let block = super::super::windows_native_env::environment_block(env).unwrap();
+        let expected: Vec<u16> = "jcode_\u{00e4}=new\0\0".encode_utf16().collect();
+        assert_eq!(block, expected);
     }
 }

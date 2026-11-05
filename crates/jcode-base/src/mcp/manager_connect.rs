@@ -7,7 +7,13 @@ impl McpManager {
 
     /// Create a new manager in owned in-process mode (used by tests and local harnesses).
     pub fn new() -> Self {
-        let project_dir = std::env::current_dir().ok();
+        let project_dir = match std::env::current_dir() {
+            Ok(directory) => Some(directory),
+            Err(error) => {
+                crate::logging::warn(&format!("MCP current directory unavailable: {error}"));
+                None
+            }
+        };
         Self {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
@@ -75,10 +81,6 @@ impl McpManager {
 
     /// Connect to all configured servers.
     /// Shared servers go to the pool, non-shared are spawned per-session.
-    #[expect(
-        clippy::collapsible_if,
-        reason = "MCP connect flow keeps shared-pool and owned-server paths explicit"
-    )]
     pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
         let _admission = self.admit().await?;
         self.connect_all_inner().await
@@ -104,10 +106,6 @@ impl McpManager {
         Ok((successes, failures))
     }
     /// Connect to a specific server
-    #[expect(
-        clippy::collapsible_if,
-        reason = "MCP connect flow keeps shared-pool and owned-server paths explicit"
-    )]
     pub async fn connect(&self, name: &str, config: &McpServerConfig) -> Result<()> {
         let _admission = self.admit().await?;
         self.connect_inner(name, config).await
@@ -136,12 +134,10 @@ impl McpManager {
                  coarse usage counts are shared per the disclosed policy"
             ));
         }
-        if config.shared {
-            if self.pool.is_some() {
-                return self
-                    .connect_shared_using(name, config, std::future::ready(()))
-                    .await;
-            }
+        if config.shared && self.pool.is_some() {
+            return self
+                .connect_shared_using(name, config, std::future::ready(()))
+                .await;
         }
 
         // Owned (non-shared or no pool available). Coordinate concurrent
@@ -192,7 +188,7 @@ impl McpManager {
         if !leader {
             let receiver = waiter
                 .as_mut()
-                .expect("owned MCP connection waiter must have a receiver");
+                .context("owned MCP connection waiter must have a receiver")?;
             receiver.changed().await.with_context(|| {
                 format!("MCP server '{}' connection attempt was cancelled", name)
             })?;
@@ -203,7 +199,7 @@ impl McpManager {
                 .map_err(anyhow::Error::msg);
         }
 
-        let sender = sender.expect("owned MCP connection leader must have a sender");
+        let sender = sender.context("owned MCP connection leader must have a sender")?;
         let mut attempt_guard =
             OwnedConnectionAttemptGuard::new(Arc::clone(&self.connecting), name, sender.clone());
         let connection = async {
@@ -236,7 +232,7 @@ impl McpManager {
             .is_some_and(|current| current.same_channel(&sender))
         {
             connecting.remove(name);
-            let _ = sender.send(Some(result.clone()));
+            drop(sender.send_replace(Some(result.clone())));
         }
         attempt_guard.disarm();
 

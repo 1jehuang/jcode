@@ -8,8 +8,8 @@ use std::sync::atomic::AtomicUsize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-include!("remote_test_peer.rs");
-include!("remote_test_http.rs");
-include!("remote_test_calls.rs");
-include!("remote_test_boundaries.rs");
-include!("remote_test_recovery.rs");
+include!("remote_peer_tests.rs");
+include!("remote_http_tests.rs");
+include!("remote_call_tests.rs");
+include!("remote_boundary_tests.rs");
+include!("remote_recovery_tests.rs");

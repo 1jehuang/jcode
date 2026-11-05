@@ -1,4 +1,6 @@
 import json,os,pathlib,sys,time
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
 record=pathlib.Path(sys.argv[1]);mode=sys.argv[2]
 def write(stage,**extra):
     with record.open('a') as stream:
@@ -37,6 +39,7 @@ try:
                 result={'jsonrpc':'2.0','id':identity,'error':{'code':-32000,'message':'synthetic initialization failure'}}
             else:
                 result={'jsonrpc':'2.0','id':identity,'result':{'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'natural-fixture','version':'1'}}}
+        elif method=='fixture/environment':result={'jsonrpc':'2.0','id':identity,'result':{key:os.environ.get(key) for key in message.get('params',{}).get('keys',[])}}
         elif method=='tools/list':result={'jsonrpc':'2.0','id':identity,'result':{'tools':[]}}
         else:result={'jsonrpc':'2.0','id':identity,'result':message.get('params',{})}
         print(json.dumps(result),flush=True)

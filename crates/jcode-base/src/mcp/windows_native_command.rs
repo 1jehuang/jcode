@@ -38,7 +38,7 @@ fn spawn_mode(
 ) -> io::Result<Spawned> {
     let entries: Vec<(OsString, OsString)> =
         env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let child_path = child_path(env);
+    let child_path = child_path(env)?;
     let resolved = windows_native_resolve::resolve(OsStr::new(program), child_path)?;
     let args: Vec<OsString> = args.iter().map(Into::into).collect();
     let batch = resolved
@@ -87,8 +87,11 @@ fn spawn_mode(
     )
 }
 
-pub(super) fn child_path(env: &HashMap<OsString, OsString>) -> Option<&OsStr> {
-    env.iter()
-        .find(|(k, _)| windows_native_env::same_key(k, OsStr::new("PATH")))
-        .map(|(_, v)| v.as_os_str())
+pub(super) fn child_path(env: &HashMap<OsString, OsString>) -> io::Result<Option<&OsStr>> {
+    for (key, value) in env {
+        if windows_native_env::same_key(key, OsStr::new("PATH"))? {
+            return Ok(Some(value.as_os_str()));
+        }
+    }
+    Ok(None)
 }

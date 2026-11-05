@@ -288,7 +288,6 @@ impl McpClient {
         matches!(self.backend, Backend::Remote(_))
     }
 
-    /// Shutdown the server
     // === Legacy compatibility methods that delegate to handle ===
 
     pub fn name(&self) -> &str {
@@ -334,27 +333,35 @@ fn is_sensitive_inherited_env_key(key: &str) -> bool {
 fn mcp_child_env(
     mut inherited: HashMap<std::ffi::OsString, std::ffi::OsString>,
     explicit: &HashMap<String, String>,
-) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
+) -> Result<HashMap<std::ffi::OsString, std::ffi::OsString>> {
     inherited.retain(|key, _| !is_sensitive_inherited_env_key(&key.to_string_lossy()));
     #[cfg(windows)]
     {
         let mut entries: Vec<_> = explicit.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         for (key, value) in entries {
-            inherited
-                .retain(|existing, _| !super::windows_native_env::same_key(existing, key.as_ref()));
+            let mut replaced = Vec::new();
+            for existing in inherited.keys() {
+                if super::windows_native_env::same_key(existing, key.as_ref())? {
+                    replaced.push(existing.clone());
+                }
+            }
+            for existing in replaced {
+                drop(inherited.remove(&existing));
+            }
             inherited.insert(key.into(), value.into());
         }
-        return inherited;
+        Ok(inherited)
     }
     #[cfg(not(windows))]
-    inherited.extend(
-        explicit
-            .iter()
-            .map(|(key, value)| (key.into(), value.into())),
-    );
-    #[cfg(not(windows))]
-    inherited
+    {
+        inherited.extend(
+            explicit
+                .iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        Ok(inherited)
+    }
 }
 
 #[cfg(not(windows))]

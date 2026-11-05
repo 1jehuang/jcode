@@ -239,7 +239,7 @@ impl Tool for McpSearchTool {
                 if !allowed {
                     return None;
                 }
-                let description = tool.description.as_deref().unwrap_or_default();
+                let description = tool.description.as_deref().unwrap_or("");
                 let rank = match_rank(&query_terms, &name, &server, &tool.name, description)?;
                 Some((
                     rank,

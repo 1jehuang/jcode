@@ -157,6 +157,95 @@ async fn actual_client_echo_eof_and_natural_job_drain() {
             .contains("natural_exit")
     );
 }
+
+#[tokio::test]
+async fn actual_client_rejects_invalid_env_and_roundtrips_unicode() {
+    if std::env::var("JCODE_MCP_ENV_CHILD").as_deref() != Ok("1") {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "actual_client_rejects_invalid_env_and_roundtrips_unicode",
+                "--nocapture",
+            ])
+            .env("JCODE_MCP_ENV_CHILD", "1")
+            .env("JCODE_SYNTHETIC_API_KEY", "fixture-inherited")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    assert_eq!(
+        std::env::var("JCODE_SYNTHETIC_API_KEY").unwrap(),
+        "fixture-inherited"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let record = temp.path().join("environment.jsonl");
+    for key in ["", "A=B", "BAD\0KEY"] {
+        let mut invalid = config(&record, "normal");
+        invalid.env.insert(key.into(), "value".into());
+        let error = McpClient::connect_natural_test("invalid-env".into(), &invalid)
+            .await
+            .err()
+            .expect("invalid environment must be rejected");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(
+            !record.exists(),
+            "invalid environment must fail before spawn"
+        );
+    }
+    let mut configuration = config(&record, "normal");
+    configuration
+        .env
+        .insert("JCODE_\u{00c4}".into(), "\u{2603}".into());
+    let mut client = McpClient::connect_natural_test("unicode-env".into(), &configuration)
+        .await
+        .unwrap();
+    let job = retain_job(client.test_owned_job_handle().unwrap());
+    let response = client
+        .handle()
+        .request(
+            "fixture/environment",
+            Some(serde_json::json!({"keys": ["jcode_\u{00e4}", "JCODE_SYNTHETIC_API_KEY"]})),
+        )
+        .await
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["jcode_\u{00e4}"], "\u{2603}");
+    assert!(response["JCODE_SYNTHETIC_API_KEY"].is_null());
+    client.shutdown().await.unwrap();
+    drained(&job).await;
+    configuration
+        .env
+        .insert("JCODE_SYNTHETIC_API_KEY".into(), "fixture-explicit".into());
+    let mut explicit = McpClient::connect_natural_test("explicit-env".into(), &configuration)
+        .await
+        .unwrap();
+    let job = retain_job(explicit.test_owned_job_handle().unwrap());
+    let response = explicit
+        .handle()
+        .request(
+            "fixture/environment",
+            Some(serde_json::json!({"keys": ["JCODE_SYNTHETIC_API_KEY"]})),
+        )
+        .await
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["JCODE_SYNTHETIC_API_KEY"], "fixture-explicit");
+    explicit.shutdown().await.unwrap();
+    drained(&job).await;
+}
 #[tokio::test]
 async fn cancelled_shutdown_closes_guard_without_terminating_fixture() {
     let temp = tempfile::tempdir().unwrap();

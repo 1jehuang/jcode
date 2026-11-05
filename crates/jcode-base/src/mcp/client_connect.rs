@@ -1,7 +1,9 @@
 impl McpClient {
     #[cfg(all(windows, feature = "test-support"))]
     pub fn test_set_native_observer(observer: Option<NativeObserver>) {
-        *NATIVE_OBSERVER.lock().unwrap() = observer;
+        *NATIVE_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = observer;
     }
     #[cfg(all(windows, feature = "test-support"))]
     pub fn test_set_spawn_window_observer(observer: Option<fn()>) {
@@ -9,7 +11,9 @@ impl McpClient {
     }
     #[cfg(all(windows, feature = "test-support"))]
     pub fn test_set_shutdown_observer(observer: Option<fn()>) {
-        *SHUTDOWN_OBSERVER.lock().unwrap() = observer;
+        *SHUTDOWN_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = observer;
     }
     /// Connect to an MCP server, inheriting the current process working directory
     pub async fn connect(name: String, config: &McpServerConfig) -> Result<Self> {
@@ -69,7 +73,7 @@ impl McpClient {
         // its process environment, and blindly inheriting them exposes those
         // credentials to every configured MCP executable (issue #771).
         let inherited = std::env::vars_os().collect();
-        let env = mcp_child_env(inherited, &config.env);
+        let env = mcp_child_env(inherited, &config.env)?;
 
         #[cfg(not(windows))]
         let (child, stdin, stdout, stderr) = {
@@ -124,7 +128,11 @@ impl McpClient {
             }
             #[cfg(feature = "test-support")]
             {
-                let observer = { *NATIVE_OBSERVER.lock().unwrap() };
+                let observer = {
+                    *NATIVE_OBSERVER
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                };
                 if let Some(observer) = observer {
                     let (job, root, broker, root_id, broker_id) =
                         spawned.process.test_owned_handles()?;
@@ -205,8 +213,10 @@ impl McpClient {
                         if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
                             if let Some(id) = response.id {
                                 let mut pending = pending_clone.lock().await;
-                                if let Some(tx) = pending.remove(&id) {
-                                    let _ = tx.send(response);
+                                if let Some(tx) = pending.remove(&id)
+                                    && tx.send(response).is_err()
+                                {
+                                    crate::logging::debug("MCP response receiver already closed");
                                 }
                             }
                         } else {

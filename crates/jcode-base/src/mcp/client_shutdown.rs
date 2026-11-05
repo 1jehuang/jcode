@@ -3,6 +3,7 @@ impl McpClient {
         self.shutdown_pending
     }
 
+    /// Shutdown the server.
     pub async fn shutdown(&mut self) -> Result<()> {
         self.shutdown_pending = true;
         self.handle.closed.store(true, Ordering::SeqCst);
@@ -13,11 +14,18 @@ impl McpClient {
                     .shutdown_guard()
                     .context("Cannot retain owned MCP Job for shutdown")?;
                 #[cfg(not(windows))]
-                let _ = self
+                if self
                     .handle
                     .writer_tx
                     .send("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n".to_string())
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    crate::logging::warn(&format!(
+                        "MCP [{}]: shutdown notification could not be queued",
+                        self.handle.name
+                    ));
+                }
                 #[cfg(windows)]
                 if !matches!(
                     tokio::time::timeout(
@@ -36,7 +44,11 @@ impl McpClient {
                 }
                 #[cfg(all(windows, feature = "test-support"))]
                 {
-                    let observer = { *SHUTDOWN_OBSERVER.lock().unwrap() };
+                    let observer = {
+                        *SHUTDOWN_OBSERVER
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                    };
                     if let Some(observer) = observer {
                         observer();
                     }
