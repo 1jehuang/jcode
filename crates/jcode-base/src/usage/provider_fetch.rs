@@ -77,6 +77,7 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     stored.then_some(account_label.as_str()),
                 )
                 .await;
+                super::banked::record_anthropic_offer(&account_label, offer.as_ref());
                 report.anthropic_limit_reset = offer;
                 if ineligible {
                     report
