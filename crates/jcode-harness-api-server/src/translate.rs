@@ -138,6 +138,8 @@ pub struct BridgeState {
     pub crash_on_disconnect: bool,
     /// Client-side inline response renderer, negotiated in Hello.
     pub supports_user_response: bool,
+    /// Client name from Hello, forwarded on subscribe (e.g. `jcode-ios/0.3.0`).
+    pub client_name: Option<String>,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
     /// Legacy id of the in-flight `message` request, so `done` maps to
@@ -596,6 +598,9 @@ impl BridgeState {
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
+                }
+                if let Some(name) = self.client_name.as_deref().filter(|n| !n.is_empty()) {
+                    subscribe["client_name"] = json!(name);
                 }
                 // Sessions rooted inside a jcode checkout are self-dev
                 // sessions: the daemon only enables the self-dev tools and

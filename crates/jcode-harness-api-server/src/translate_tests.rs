@@ -633,6 +633,25 @@ fn attach_session_unknown_target_error_is_correlated_and_clears_pending_attach()
 }
 
 #[test]
+fn subscribe_forwards_hello_client_name() {
+    let mut state = BridgeState::default();
+    state.client_name = Some("jcode-ios/0.3.0".into());
+    let out =
+        state.api_request_to_legacy(&json!({"req": "attach_session", "id": 1, "session_id": "s1"}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["client_name"], "jcode-ios/0.3.0");
+
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(value.get("client_name").is_none());
+}
+
+#[test]
 fn desktop_owned_session_requests_crash_on_disconnect() {
     let mut state = BridgeState::with_crash_on_disconnect(true);
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));

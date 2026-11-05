@@ -196,6 +196,9 @@ pub enum Request {
         /// to the client's terminal instead of its own stale startup env (#405).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_env: Vec<(String, String)>,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Declare that this client is intentionally detaching before its transport
@@ -257,6 +260,9 @@ pub enum Request {
         client_has_local_history: bool,
         #[serde(default)]
         allow_session_takeover: bool,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Resume/continue every live session that was interrupted and would
