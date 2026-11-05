@@ -3680,6 +3680,27 @@ fn provider_card_stacks_labels_instead_of_clipping_when_narrow() {
     }
     let gauges = text.iter().filter(|row| row.contains('▰')).count();
     assert_eq!(gauges, 2, "{text:#?}");
+    // Every framed width keeps whole gauge labels and countdowns: they wrap,
+    // they are never clipped with an ellipsis.
+    for width in 22..=80u16 {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let body: String = lines[1..]
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = without_whitespace(&body).replace('│', "");
+        for expected in ["5-hourwindow", "7-dayOpuswindow", "↻2h6m", "↻4d2h"] {
+            assert!(
+                body.contains(expected),
+                "width {width}: missing {expected}: {body}"
+            );
+        }
+        assert!(!body.contains('…'), "width {width}: {body}");
+        // The status pill stays visible, in the border or as the first row.
+        let header: String = lines[..2].iter().map(extract_line_text).collect();
+        assert!(header.contains('●'), "width {width}: {header}");
+    }
 }
 
 #[test]

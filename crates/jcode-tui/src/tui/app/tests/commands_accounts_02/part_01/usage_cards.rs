@@ -121,7 +121,7 @@ fn test_usage_card_responsive_terminal_layout() {
             .collect();
         assert!(!card_rows.is_empty(), "{width} cols:\n{text}");
         for row in &card_rows {
-            assert_eq!(row.matches('│').count() >= 2, true, "{width} cols:\n{text}");
+            assert!(row.matches('│').count() >= 2, "{width} cols:\n{text}");
         }
         let start = border.find('╭').unwrap();
         let end = border.find('╮').unwrap();

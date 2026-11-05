@@ -192,8 +192,16 @@ impl<'a> ProviderCard<'a> {
         }
         let border = Style::default().fg(rgb(120, 140, 190));
         let inner = box_width - 6;
-        let mut lines = vec![card_top_border(title, status, box_width, border)];
-        for line in self.body_lines(inner, display_used) {
+        let (top, status_in_border) = card_top_border(title, status.clone(), box_width, border);
+        let mut body = Vec::new();
+        if !status_in_border {
+            // No room beside the title: keep the status as the first row
+            // rather than dropping it.
+            body.push(Line::from(status));
+        }
+        body.extend(self.body_lines(inner, display_used));
+        let mut lines = vec![top];
+        for line in body {
             let line = super::truncate_line_with_ellipsis_to_width(&line, inner);
             let pad = inner.saturating_sub(line.width());
             let mut spans = vec![Span::styled("│  ", border)];
@@ -275,16 +283,35 @@ impl<'a> ProviderCard<'a> {
                     if inline {
                         lines.push(bar(label, column + 2, countdown_width));
                     } else {
+                        // Label above the bar, wrapped rather than clipped, with
+                        // the countdown right-aligned on the label's last line
+                        // (or its own line when the card is very narrow).
                         let tail = reset.map(countdown).unwrap_or_default();
                         let room = inner.saturating_sub(tail.width() + 2);
-                        let label = clip_to_width(label, room.max(1).min(inner));
-                        let gap = inner.saturating_sub(label.width() + tail.width());
-                        let mut spans = vec![Span::styled(label, label_style)];
-                        if !tail.is_empty() && gap >= 2 {
-                            spans.push(Span::raw(" ".repeat(gap)));
-                            spans.push(Span::styled(tail, countdown_style));
+                        let (parts, tail_inline) = if tail.is_empty() {
+                            (wrap_words(label, inner), true)
+                        } else if room >= 6 {
+                            (wrap_words(label, room), true)
+                        } else {
+                            (wrap_words(label, inner), false)
+                        };
+                        let last = parts.len().saturating_sub(1);
+                        for (index, part) in parts.into_iter().enumerate() {
+                            let gap = inner.saturating_sub(part.width() + tail.width());
+                            let mut spans = vec![Span::styled(part, label_style)];
+                            if index == last && tail_inline && !tail.is_empty() {
+                                spans.push(Span::raw(" ".repeat(gap)));
+                                spans.push(Span::styled(tail.clone(), countdown_style));
+                            }
+                            lines.push(Line::from(spans));
                         }
-                        lines.push(Line::from(spans));
+                        if !tail_inline {
+                            let pad = inner.saturating_sub(tail.width());
+                            lines.push(Line::from(vec![
+                                Span::raw(" ".repeat(pad)),
+                                Span::styled(tail, countdown_style),
+                            ]));
+                        }
                         lines.push(bar("", 0, 0));
                     }
                 }
@@ -314,7 +341,9 @@ impl<'a> ProviderCard<'a> {
                             ]));
                         }
                     } else {
-                        lines.push(Line::from(Span::styled(key.to_owned(), label_style)));
+                        for part in wrap_words(key, inner) {
+                            lines.push(Line::from(Span::styled(part, label_style)));
+                        }
                         for part in wrap_words(value, inner.saturating_sub(2).max(1)) {
                             lines
                                 .push(Line::from(vec![Span::raw("  "), Span::styled(part, style)]));
@@ -370,16 +399,18 @@ fn card_title_spans(title: &str) -> Vec<Span<'static>> {
     }
 }
 
-/// `╭─ Title ───────── ● status ─╮`, dropping the status and then clipping
-/// the title when the card is too narrow, so the border never wraps.
+/// `╭─ Title ───────── ● status ─╮`. When the card is too narrow it drops the
+/// title qualifier, then moves the status out of the border (the returned flag
+/// is false) and clips the title, so the border never wraps.
 fn card_top_border(
     title: &str,
     status: Vec<Span<'static>>,
     box_width: usize,
     border: Style,
-) -> Line<'static> {
+) -> (Line<'static>, bool) {
     let status_width: usize = status.iter().map(|span| span.width()).sum();
-    let fits = |line: &Line<'_>| box_width >= 8 + line.width() + status_width + 1;
+    // Frame and padding take 8 cells, plus at least one cell of border rule.
+    let fits = |line: &Line<'_>| box_width > 8 + line.width() + status_width;
     // Prefer dropping the dim qualifier ("(Claude)") over the status pill,
     // and the status over clipping the brand.
     let full = Line::from(card_title_spans(title));
@@ -410,7 +441,7 @@ fn card_top_border(
         let fill = box_width.saturating_sub(5 + title_line.width()).max(1);
         spans.push(Span::styled(format!(" {}╮", "─".repeat(fill)), border));
     }
-    Line::from(spans)
+    (Line::from(spans), with_status)
 }
 
 /// Dim note text with `code` spans picked out in the accent color, so slash
