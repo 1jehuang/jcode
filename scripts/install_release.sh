@@ -96,6 +96,14 @@ ln -sfn "$version_dir/jcode" "$stable_dir/jcode"
 # Update stable-version marker
 printf '%s\n' "$hash" > "$builds_dir/stable-version"
 
+manifest="$builds_dir/manifest.json"
+if [ -f "$manifest" ] && command -v jq >/dev/null 2>&1; then
+  jq --arg stable "$hash" '.stable = $stable' "$manifest" > "$manifest.tmp.$$" \
+    && jq -e . "$manifest.tmp.$$" >/dev/null 2>&1 \
+    && mv -f "$manifest.tmp.$$" "$manifest" \
+    || rm -f "$manifest.tmp.$$"
+fi
+
 # Update current symlink + marker
 current_dir="$builds_dir/current"
 mkdir -p "$current_dir"
