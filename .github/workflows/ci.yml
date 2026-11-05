@@ -278,6 +278,18 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
           cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
 
+      - name: Run macOS ACL preservation regression (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Checkpointed writes preserve a file's macOS ACL via acl(3); this test
+        # sets an ACL and asserts it survives an edit and a rewind. It is
+        # compiled on every platform by the --no-run step above but only runs
+        # here, so execute it explicitly rather than leaving it looks-green.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-base --lib macos_edit_and_rewind_preserve_the_file_acl -- --nocapture
+
       - name: Run automatic model discovery regressions (Linux only)
         if: runner.os == 'Linux'
         shell: bash
