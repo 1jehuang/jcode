@@ -14,24 +14,74 @@ pub fn replace_account_if_unchanged(
     save_auth_file(&auth)
 }
 
+/// `None` means no login is saved under `label`: the token came from an
+/// approved external source (Claude Code, OpenCode) and may still refresh.
 pub(in crate::auth) fn capture_refresh_account(
     label: &str,
     refresh_token: &str,
-) -> Result<AnthropicAccount> {
-    load_auth_file()?
+) -> Result<Option<AnthropicAccount>> {
+    let Some(account) = load_auth_file()?
         .anthropic_accounts
         .into_iter()
-        .find(|account| {
-            account.label == label && !refresh_token.is_empty() && account.refresh == refresh_token
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Claude login changed before token refresh; retry with the current login"
-            )
-        })
+        .find(|account| account.label == label)
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !refresh_token.is_empty() && account.refresh == refresh_token,
+        "Claude login changed before token refresh; retry with the current login"
+    );
+    Ok(Some(account))
 }
 
-pub(in crate::auth) fn commit_refresh_account(
+/// Commit tokens refreshed after [`capture_refresh_account`].
+pub(in crate::auth) fn commit_captured_refresh(
+    label: &str,
+    expected: Option<&AnthropicAccount>,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    match expected {
+        Some(expected) => commit_refresh_account(expected, tokens),
+        None => commit_external_refresh(label, tokens),
+    }
+}
+
+/// Anthropic rotates refresh tokens, so an external login's old token is spent
+/// once refreshed. Keep the new tokens, unless a login took the label meanwhile.
+pub(super) fn commit_external_refresh(
+    label: &str,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    anyhow::ensure!(
+        !auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == label),
+        "Claude login changed while token refresh was pending; refreshed tokens were not saved"
+    );
+    crate::auth::account_store::upsert_account(
+        super::ACCOUNT_LABEL_PREFIX,
+        &mut auth.anthropic_accounts,
+        &mut auth.active_anthropic_account,
+        AnthropicAccount {
+            label: label.to_string(),
+            access: tokens.access_token.clone(),
+            refresh: tokens.refresh_token.clone(),
+            expires: tokens.expires_at,
+            email: None,
+            subscription_type: None,
+            scopes: tokens.scopes.clone(),
+        },
+        |account| account.label.as_str(),
+        |account, label| account.label = label,
+    );
+    save_auth_file(&auth)
+}
+
+pub(super) fn commit_refresh_account(
     expected: &AnthropicAccount,
     tokens: &crate::auth::oauth::OAuthTokens,
 ) -> Result<()> {

@@ -1,3 +1,4 @@
+use super::replacement::{commit_external_refresh, commit_refresh_account};
 use super::*;
 
 struct TestHome(Option<std::ffi::OsString>);
@@ -98,7 +99,9 @@ fn pending_refresh_cannot_overwrite_a_replacement_login_or_recreate_a_removed_on
     let _home = TestHome(std::env::var_os("JCODE_HOME"));
     crate::env::set_var("JCODE_HOME", temp.path());
     save_auth_file(&fixture()).unwrap();
-    let expected = capture_refresh_account("work", "refresh-work").unwrap();
+    let expected = capture_refresh_account("work", "refresh-work")
+        .unwrap()
+        .unwrap();
     let tokens = crate::auth::oauth::OAuthTokens {
         access_token: "refreshed-old-access".into(),
         refresh_token: "rotated-old-refresh".into(),
@@ -129,7 +132,9 @@ fn refresh_follows_the_original_login_across_rename_without_changing_metadata() 
     let _home = TestHome(std::env::var_os("JCODE_HOME"));
     crate::env::set_var("JCODE_HOME", temp.path());
     save_auth_file(&fixture()).unwrap();
-    let expected = capture_refresh_account("work", "refresh-work").unwrap();
+    let expected = capture_refresh_account("work", "refresh-work")
+        .unwrap()
+        .unwrap();
     rename_account("work", "renamed").unwrap();
     let tokens = crate::auth::oauth::OAuthTokens {
         access_token: "new-access".into(),
@@ -208,4 +213,46 @@ fn replacement_accepts_own_identity_without_duplicate_label() {
     .unwrap();
     assert_eq!(auth.anthropic_accounts.len(), 2);
     assert_eq!(auth.anthropic_accounts[0].label, "work");
+}
+
+#[test]
+fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_one() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&JcodeAuthFile::default()).unwrap();
+    assert!(
+        capture_refresh_account("claude-1", "external-refresh")
+            .unwrap()
+            .is_none()
+    );
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "external-access".into(),
+        refresh_token: "external-rotated".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    commit_external_refresh("claude-1", &tokens).unwrap();
+    let saved = load_auth_file().unwrap();
+    assert_eq!(saved.anthropic_accounts.len(), 1);
+    let stored = &saved.anthropic_accounts[0];
+    assert_eq!(stored.refresh, "external-rotated");
+    assert_eq!(
+        saved.active_anthropic_account.as_deref(),
+        Some(stored.label.as_str())
+    );
+    // The rotated login is now saved, so the next refresh takes the strict path.
+    assert!(
+        capture_refresh_account(&stored.label, "external-rotated")
+            .unwrap()
+            .is_some()
+    );
+    assert!(capture_refresh_account(&stored.label, "external-refresh").is_err());
+
+    save_auth_file(&fixture()).unwrap();
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    assert!(commit_external_refresh("work", &tokens).is_err());
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
 }
