@@ -177,4 +177,9 @@ pub struct ProviderRefreshRecord {
     /// while still refreshing immediately once re-login mints a new token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_refresh_fingerprint: Option<String>,
+    /// Durable rejection history across accounts. A success with another token
+    /// must never resurrect an already rejected refresh token. The singular
+    /// field above is retained for compatibility with older state files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_refresh_fingerprints: Vec<String>,
 }
