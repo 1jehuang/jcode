@@ -477,7 +477,7 @@ pub(super) fn prepare_messages(
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
     super::note_prep_restage(restage_start.elapsed());
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
 
@@ -936,7 +936,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return build();
     }
 
@@ -962,7 +962,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_body(app, width, false));
     }
 
@@ -2727,3 +2727,26 @@ fn wrap_lines_with_map(
 #[cfg(test)]
 #[path = "ui_prepare/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+static ENABLE_PREP_CACHE_IN_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Tests bypass the prep caches by default for determinism. Perf probes opt in
+/// so they measure the production cached path.
+#[cfg(test)]
+pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
+    ENABLE_PREP_CACHE_IN_TESTS.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[inline]
+fn prep_cache_bypassed() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_PREP_CACHE_IN_TESTS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}

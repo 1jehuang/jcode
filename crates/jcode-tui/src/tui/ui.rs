@@ -57,6 +57,8 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[cfg(test)]
+pub(crate) use frame_metrics::body_last_path_for_tests;
 #[path = "ui_header.rs"]
 pub(crate) mod header;
 #[path = "ui_inline_image.rs"]

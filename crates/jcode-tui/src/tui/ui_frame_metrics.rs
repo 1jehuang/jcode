@@ -1432,3 +1432,12 @@ mod draw_call_tests {
         assert_ne!(a, c);
     }
 }
+
+#[cfg(test)]
+pub(crate) fn body_last_path_for_tests() -> (String, Option<usize>) {
+    let stats = frame_perf_stats_snapshot();
+    (
+        stats.body_last_path,
+        stats.body_last_incremental_base_messages,
+    )
+}
