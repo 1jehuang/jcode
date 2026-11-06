@@ -49,7 +49,11 @@ fn spawn_detached_creates_new_session() {
 
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
-        .arg("ps -o sid= -p $$ > \"$JCODE_TEST_OUTPUT\"")
+        // `ps -o sid=` only exists on Linux; macOS ps rejects the keyword.
+        // `pgid=` is portable, and after setsid() the child is session and
+        // process-group leader with pid == pgid == sid, so pgid is an
+        // equivalent witness for the new session.
+        .arg("ps -o pgid= -p \"$$\" > \"$JCODE_TEST_OUTPUT\"")
         .env("JCODE_TEST_OUTPUT", &output_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -58,19 +62,19 @@ fn spawn_detached_creates_new_session() {
     let status = child.wait().expect("wait for child");
     assert!(status.success(), "child should exit successfully");
 
-    let child_sid = std::fs::read_to_string(&output_path)
-        .expect("read child sid")
+    let child_pgid = std::fs::read_to_string(&output_path)
+        .expect("read child pgid")
         .trim()
         .parse::<u32>()
-        .expect("parse child sid");
+        .expect("parse child pgid");
 
     assert_eq!(
-        child_sid,
+        child_pgid,
         child.id(),
         "detached child should lead its own session"
     );
     assert_ne!(
-        child_sid as i32, parent_sid,
+        child_pgid as i32, parent_sid,
         "detached child should not share parent session"
     );
 }
