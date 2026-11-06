@@ -723,6 +723,13 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
         if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
             write_security_descriptor(&temporary, &metadata.security_descriptor)?;
         }
+        // macOS: an inheritable parent ACL reaches the sibling despite mode
+        // 0600. Apply (or clear) the original ACL before any bytes land; it is
+        // re-applied below, after owner and mode changes, as the final state.
+        #[cfg(target_os = "macos")]
+        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
+            write_acl(&temporary, &metadata.acl)?;
+        }
         file.write_all(&data)?;
         #[cfg(unix)]
         if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
