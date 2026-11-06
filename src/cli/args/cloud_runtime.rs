@@ -53,7 +53,7 @@ mod tests {
             parsed.command,
             Some(Command::Cloud(CloudCommand::Runtime {
                 action: CloudRuntimeCommand::Push { artifact }
-            })) if artifact == PathBuf::from("portable.tar.gz")
+            })) if artifact == std::path::Path::new("portable.tar.gz")
         ));
     }
 

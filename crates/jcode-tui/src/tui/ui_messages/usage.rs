@@ -108,6 +108,10 @@ fn parse_card_percent(text: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
+#[path = "usage_activity_pair_tests.rs"]
+mod activity_pair_tests;
+
+#[cfg(test)]
 mod card_parse_error_tests {
     use super::*;
 
@@ -353,7 +357,7 @@ impl<'a> ProviderCard<'a> {
         let activity_pair = activity("Today").zip(activity("Lifetime"));
         let mut activity_rendered = false;
         for row in &self.rows {
-            if activity_pair.is_some()
+            if let Some((today, lifetime)) = activity_pair
                 && matches!(
                     row,
                     CardRow::Detail {
@@ -363,7 +367,6 @@ impl<'a> ProviderCard<'a> {
                 )
             {
                 if !activity_rendered {
-                    let (today, lifetime) = activity_pair.unwrap();
                     lines.extend(activity_summary_lines(today, lifetime, inner));
                     activity_rendered = true;
                 }
