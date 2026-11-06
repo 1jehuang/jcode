@@ -25,10 +25,14 @@ fn remote_command(verb: &str, value: Option<&str>) -> Result<String> {
         ("pin", Some(version)) if valid_release_tag(version) => {}
         _ => bail!("invalid managed runtime operation"),
     }
-    let suffix = value.map(|value| format!(" {value}")).unwrap_or_default();
-    Ok(format!(
-        "test -x {HELPER} || {{ echo 'Managed runtime updater is not installed on this host. Ask the cloud operator to migrate it.' >&2; exit 1; }}; sudo -n {HELPER} {verb}{suffix}"
-    ))
+    let mut command = format!(
+        "test -x {HELPER} || {{ echo 'Managed runtime updater is not installed on this host. Ask the cloud operator to migrate it.' >&2; exit 1; }}; sudo -n {HELPER} {verb}"
+    );
+    if let Some(value) = value {
+        command.push(' ');
+        command.push_str(value);
+    }
+    Ok(command)
 }
 
 fn valid_release_tag(value: &str) -> bool {
@@ -140,6 +144,24 @@ mod tests {
         assert!(remote_command("push", Some(&"A".repeat(64))).is_err());
         assert!(remote_command("status; reboot", None).is_err());
         assert!(remote_command("status", Some("anything")).is_err());
+        for verb in ["status", "check", "use-stable"] {
+            assert!(
+                remote_command(verb, None)
+                    .unwrap()
+                    .ends_with(&format!(" {verb}"))
+            );
+        }
+        assert!(
+            remote_command("pin", Some("v987.654.321"))
+                .unwrap()
+                .ends_with(" pin v987.654.321")
+        );
+        let digest = "a".repeat(64);
+        assert!(
+            remote_command("push", Some(&digest))
+                .unwrap()
+                .ends_with(&format!(" push {digest}"))
+        );
     }
 
     #[test]
