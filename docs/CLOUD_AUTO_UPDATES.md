@@ -1,52 +1,66 @@
 # Managed cloud automatic updates
 
-Status: control-plane updater deployed November 6, 2026, but that deployment
-overwrite of earlier live repairs requires additive recovery. Existing-host
-migration and development upload have not occurred.
+Status: deployed November 6, 2026. Owner-host migration and explicit development
+upload are verified. The newer package is pending, not running: activation waits
+for the existing daemon's next normal start.
 
 ## Deployment evidence
 
-The managed API deployment is Worker version
-`6e3f342d-8bc2-44bb-91d1-d6e8f07c52bc`, from backend commits `6ce9f0f`
-and `6118d73`. The live manifest returned HTTP 200 with live discovery on
-November 6, 2026, and selected official stable `v0.99.1`. The live installer
-matched the tested source byte-for-byte, and API health passed. Backend
-validation passed 422 JavaScript tests and nine updater subprocess tests.
+Initial Worker deployment `6e3f342d-8bc2-44bb-91d1-d6e8f07c52bc` included backend
+commits `6ce9f0f` and `6118d73`. It overwrote earlier live repairs, described below.
+Coordinated recovery deployed Worker `d1b0ef3f-4c96-4a03-8291-eb249744bf5c`,
+deployment `a698139f-fc20-458c-9531-ccec357d99d7`, preserving updater assets.
+The recovered manifest and installer were checked read-only. The installer
+matched the tested source byte-for-byte. At 12:21 UTC the manifest returned
+generation `420797989`, official stable `v0.99.1`, and `last-good` discovery.
+A cold-cache request briefly returned the verified static fallback, not missing
+live discovery. Recovery owner verified discovery code was preserved exactly.
+
+At 12:20:57 UTC, authenticated SSH installed the verified updater on the owner
+host, adopted `v0.99.724-dev (f21e0197a)` as `legacy_external`, and preserved
+persistent development policy. The system timer is enabled and active. At
+12:21:25 UTC, the explicit CLI upload successfully staged portable
+`v0.99.760-dev (3c448c323, dirty)` at:
+
+```text
+/opt/jcode-cloud/releases/05a4befc5a95ad758100a42109f5dba3e742536d19ed7f63d220e186ecc7e3c8/jcode
+```
+
+The archive digest is the directory name. Remote version and modern group
+protocol help passed. A subsequent helper `check` preserved development policy
+and the pending package. Daemon PID `2694` remained active with the original
+`.724-dev` executable and unchanged launcher symlink. The installed service
+drop-in invokes activation only at its next normal start. No forced restart or
+live activation was attempted, and rollback/activation were not live-exercised.
+The helper's running-version field is null for adopted external paths, so the
+actual process was verified separately through systemd and `/proc/2694/exe`.
+
+Newly provisioned hosts receive the updater through bootstrap. Other existing
+accounts were not migrated or awakened in this deployment. This is not a claim
+that every preexisting cloud host has been updated.
+
+### Deployment regression, recovery, and guard
+
+The initial source checkout lacked existing script-API hosted-build, mobile-sync,
+scoped-key, and plan-proportional cloud entitlement repairs. Deploying it replaced
+those live repairs. Initial health and updater-route checks were insufficient.
+The lost allowance repair caused the incorrect 50-hour limit and rejected owner
+SSH access at 60.1 hours. After coordinated recovery, authenticated status showed
+the correct 5,000-hour allowance and normal access resumed. No billing override
+or alternate administrative access was used.
+
+Recovery owner reported 536 full tests, nine billing and 13 mobile/wake tests
+against the actual bundle, and a successful hosted acceptance run. This session
+independently verified the restored entitlement, manifest, installer, and owner
+runtime workflow. No competing control-plane deployment was made.
+
+Backend commit `21bb577` adds a fail-closed bundled-code inventory check to both
+`npm run deploy` and the direct Wrangler build hook. Nine guard tests and 431
+full backend tests pass. The unreconciled source fails a real Wrangler dry-run
+before upload. Reconcile live repairs into source before normal deployment
+resumes. The inventory is a minimum-feature guard, not full behavioral equivalence.
 Client validation passed hosted check, five runtime CLI tests, and 25 managed
-preflight tests.
-
-A portable `v0.99.760-dev (3c448c323, dirty)` package was built and validated
-locally for explicit upload. The owner host was previously observed running
-`v0.99.724-dev (f21e0197a)`, which must not be automatically replaced with
-older stable `v0.99.1`. Migration would adopt its existing external runtime
-under persistent development policy without restarting it.
-
-At 12:08 UTC on November 6, 2026, authenticated cloud status reported the
-owner host stopped with 60.1 hours used against a 50-hour monthly allowance.
-SSH authorization rejected further access with an allowance-exhausted error.
-This diagnosis is provisional: the deployment also overwrote the existing
-plan-proportional allowance repair, so entitlement and access must be checked
-again after recovery before asking the account owner to change allowance.
-Consequently the existing host has NOT been migrated, the prepared development
-package has NOT been uploaded or activated, and its updater timer has NOT been
-verified live. No allowance override or alternate administrative access was used.
-The new bootstrap applies to newly provisioned hosts. Other existing accounts
-have not been migrated or awakened as part of this deployment.
-
-### Deployment regression and guard
-
-The source checkout lacked existing script-API hosted-build, mobile-sync, scoped
-key, and plan-proportional cloud entitlement repairs. Deploying it replaced those
-live repairs. Initial health and updater-route checks were insufficient to catch
-the regression. Further deployments from this session are paused, while a
-separate coordinated recovery restores the lost features without removing the
-managed updater or live settings. Recovery has not yet been verified here.
-
-Backend commit `21bb577` installs a fail-closed bundled-code inventory check in
-both `npm run deploy` and the direct Wrangler build hook. Nine guard tests and
-431 full backend tests pass. The actual divergent source now fails a real
-Wrangler dry-run before upload. This is a minimum-feature inventory, not complete
-behavioral equivalence or automatic reconciliation with future live changes.
+preflight tests. Updater validation passed nine subprocess tests.
 
 ## Implemented client workflow
 
@@ -101,7 +115,7 @@ approved stable release and safe daemon activation. Do not enable the ordinary
 CLI updater on these hosts and do not restart the fleet immediately on every
 GitHub release. Updates must not depend on a user opening a local client.
 
-## Current implementation
+## Historical baseline before this deployment
 
 The managed service is in the separate `solosystems-managed-cloud` repository:
 `workers/api/src/cloud_hosts.js`.
