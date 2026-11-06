@@ -145,6 +145,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn("download-artifact", workflow)
         self.assertNotIn("head_sha }}", workflow)
+        # API list consistency must not let a retry cancel an unseen active build.
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}",
+                      (ROOT / ".github/workflows/preview.yml").read_text())
         self.assertIn("python3 scripts/test_reconcile_preview_release.py",
                       (ROOT / ".github/workflows/ci.yml").read_text())
 
