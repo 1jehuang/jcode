@@ -426,6 +426,20 @@ fn test_model_picker_copilot_models_have_copilot_route() {
 
 #[test]
 fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
+    // Same ambient-profile hazard as the copilot picker tests: with an
+    // exported JCODE_NAMED_PROVIDER_PROFILE the configured-check takes the
+    // named-profile path and the Comtegra route is dropped for copilot.
+    // The env lock serializes this capture against sibling tests that
+    // rewrite process env, the same lock with_temp_jcode_home holds.
+    let _env_lock = crate::storage::lock_test_env();
+    let _env_guard = EnvRestoreGuard::capture([
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]);
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
     let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
     crate::env::set_var("COMTEGRA_API_KEY", "test-key");
 

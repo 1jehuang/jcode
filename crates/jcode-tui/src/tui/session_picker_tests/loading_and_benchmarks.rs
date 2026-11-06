@@ -209,6 +209,9 @@ fn loading_picker_filter_choice_survives_refresh() {
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
+        .unwrap();
     let chosen = picker.filter_mode;
     assert!(picker.filter_mode_user_chosen);
     assert_eq!(chosen, SessionFilterMode::CurrentDir);
