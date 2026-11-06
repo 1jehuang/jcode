@@ -2430,8 +2430,12 @@ impl Provider for MultiProvider {
                 .active_openrouter_execution_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI-compatible provider not available"))?
                 .set_reasoning_effort(effort),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .ok_or_else(|| anyhow::anyhow!("Bedrock provider not available"))?
+                .set_reasoning_effort(effort),
             _ => Err(anyhow::anyhow!(
-                "Reasoning effort is only supported for OpenAI, Anthropic, and compatible reasoning models"
+                "Reasoning effort is only supported for OpenAI, Anthropic, Bedrock, and compatible reasoning models"
             )),
         }
     }

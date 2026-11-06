@@ -1846,6 +1846,7 @@ impl crate::tui::TuiState for App {
                 self.remote_startup_phase.is_some(),
                 crate::usage::remote_account_usage_received(),
             ),
+            overview_disabled: !crate::config::config().display.single_overview,
             context_info,
             context_info_stale: !context_snapshot.fresh,
             historical_context: false,
@@ -1853,6 +1854,23 @@ impl crate::tui::TuiState for App {
             context_limit: Some(self.context_limit as usize),
             model,
             reasoning_effort,
+            // Agent model overrides (agents.swarm_model / agents.memory_model).
+            // None means inherit, which renders no row. In remote sessions
+            // the server owns these settings, and in replay the recording's
+            // model is the truth: today's local overrides would mislead in
+            // both cases, so keep the rows unset instead of guessing.
+            swarm_model_override: (!uses_remote_widget_metadata)
+                .then(|| crate::config::config().agents.swarm_model.clone())
+                .flatten(),
+            swarm_model_effort: (!uses_remote_widget_metadata)
+                .then(|| crate::config::config().agents.swarm_effort.clone())
+                .flatten(),
+            memory_model_override: (!uses_remote_widget_metadata)
+                .then(|| crate::config::config().agents.memory_model.clone())
+                .flatten(),
+            memory_model_effort: (!uses_remote_widget_metadata)
+                .then(|| crate::config::config().agents.memory_effort.clone())
+                .flatten(),
             service_tier: if !self.is_remote {
                 service_tier
             } else {

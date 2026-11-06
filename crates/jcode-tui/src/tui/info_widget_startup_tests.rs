@@ -48,7 +48,7 @@ fn startup_slots_keep_changes_at_same_row_as_runtime_then_usage_arrive() {
         let inner = Rect::new(0, 0, width, 40);
         let frames: Vec<_> = [&initial, &runtime, &ready]
             .into_iter()
-            .map(|data| render_sections(data, inner, None))
+            .map(|data| render_sections(data, inner, None, now_secs()))
             .collect();
         let row = |lines: &Vec<Line<'static>>| {
             lines
@@ -155,7 +155,7 @@ fn startup_usage_slots_are_only_for_pending_openai_oauth() {
     };
     assert!(!data.has_data_for(WidgetKind::UsageLimits));
     assert_eq!(model_info_height(&data), 0);
-    assert!(render_sections(&data, Rect::new(0, 0, 30, 10), None).is_empty());
+    assert!(render_sections(&data, Rect::new(0, 0, 30, 10), None, now_secs()).is_empty());
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn startup_placeholders_fit_even_zero_or_one_cell_width() {
         ..pending()
     };
     for width in 0..20 {
-        let lines = render_sections(&data, Rect::new(0, 0, width, 10), None);
+        let lines = render_sections(&data, Rect::new(0, 0, width, 10), None, now_secs());
         assert_eq!(lines.len(), 4);
         for line in lines {
             let text = line_text(&line);
@@ -197,7 +197,7 @@ fn known_usage_and_limit_warning_override_startup_reservation() {
         let rows = crate::tui::info_widget_overview::render_overview_usage(&data, 40);
         assert_eq!(rows.len(), if limit_reached { 1 } else { 3 });
         assert!(!rows.iter().any(|line| line_text(line).contains("Loading")));
-        let all = render_sections(&data, Rect::new(0, 0, 40, 30), None);
+        let all = render_sections(&data, Rect::new(0, 0, 40, 30), None, now_secs());
         assert_eq!(
             compute_page_layout(&data, 40, 30).max_page_height as usize,
             all.len()
