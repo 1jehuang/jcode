@@ -1,7 +1,7 @@
 use super::info_widget::{
     AuthMethod, InfoWidgetData, OVERVIEW_COMMITS_MAX_ROWS, changes_section_height,
-    commits_has_data_at, compact_usage_rows, is_traceworthy_memory_event, model_info_height,
-    now_secs,
+    commit_row_lines, commits_has_data_at, compact_usage_rows, is_traceworthy_memory_event,
+    model_info_height, now_secs,
 };
 use ratatui::layout::Rect;
 
@@ -63,12 +63,12 @@ pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVi
     let mut overview = data.clone();
     overview.memory_info = None;
     let inner_height = rect.height.saturating_sub(2);
-    let model_h = model_info_height(&overview);
+    let model_h = model_info_height(&overview, rect.width);
     let background_h = compact_background_height(&overview);
     let usage_h = compact_usage_height(&overview);
     let compaction_h = compact_compaction_height(&overview);
-    let changes_h = changes_section_height(&overview);
-    let commits_h = compact_commits_height(&overview);
+    let changes_h = changes_section_height(&overview, rect.width);
+    let commits_h = compact_commits_height_at(&overview, rect.width, now_secs());
     let fits = |front: u16, section: u16| {
         section > 0
             && front
@@ -108,10 +108,10 @@ pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVi
 
 pub(crate) fn compute_page_layout(
     data: &InfoWidgetData,
-    _inner_width: usize,
+    inner_width: usize,
     inner_height: u16,
 ) -> PageLayout {
-    let compact_height = compact_overview_height(data);
+    let compact_height = compact_overview_height(data, inner_width as u16);
     if compact_height == 0 {
         return PageLayout {
             pages: Vec::new(),
@@ -245,33 +245,40 @@ fn compact_compaction_height(data: &InfoWidgetData) -> u16 {
 /// Must mirror `render_commits_compact_at` exactly: header + shown commits +
 /// overflow row. Callers that also render the section in the same frame must
 /// pass the same `now` they render with, so freshness (`COMMITS_FRESH_SECS`)
-/// cannot flip between measurement and draw.
-fn compact_commits_height_at(data: &InfoWidgetData, now: i64) -> u16 {
+/// cannot flip between measurement and draw. Wrapped commit rows count their
+/// continuation lines.
+fn compact_commits_height_at(data: &InfoWidgetData, width: u16, now: i64) -> u16 {
     let Some(info) = data.git_info.as_ref() else {
         return 0;
     };
     if !commits_has_data_at(info, now) || info.recent_commits.is_empty() {
         return 0;
     }
+    let w = width.saturating_sub(2) as usize;
     let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    let wrapped: u16 = info.recent_commits[..rows]
+        .iter()
+        .map(|commit| commit_row_lines(commit, w, now) as u16)
+        .sum();
     let overflow = u16::from(info.recent_commits.len() > rows);
-    1 + rows as u16 + overflow
+    1 + wrapped + overflow
 }
 
-fn compact_commits_height(data: &InfoWidgetData) -> u16 {
-    compact_commits_height_at(data, now_secs())
+fn compact_commits_height(data: &InfoWidgetData, width: u16) -> u16 {
+    compact_commits_height_at(data, width, now_secs())
 }
 
 /// Overview height. Status-line facts (model identity, context %, branch and
-/// counts) are not sections here, only the detail behind them.
-fn compact_overview_height(data: &InfoWidgetData) -> u16 {
-    model_info_height(data)
+/// counts) are not sections here, only the detail behind them. Width-aware
+/// because wrapped rows (runtime, changes, commits) occupy continuation lines.
+fn compact_overview_height(data: &InfoWidgetData, width: u16) -> u16 {
+    model_info_height(data, width)
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_compaction_height(data)
-        + changes_section_height(data)
-        + compact_commits_height(data)
+        + changes_section_height(data, width)
+        + compact_commits_height(data, width)
         + u16::from(data.cloud_info.is_some())
 }
 
@@ -344,7 +351,7 @@ mod tests {
         let now = 1_700_000_000;
         // Fresh commit: height counts the section, render draws it.
         let fresh = data(23 * 3600);
-        assert_eq!(super::compact_commits_height_at(&fresh, now), 2);
+        assert_eq!(super::compact_commits_height_at(&fresh, 40, now), 2);
         let rendered = crate::tui::info_widget::render_commits_compact_at(
             fresh.git_info.as_ref().expect("git info"),
             40,
@@ -354,7 +361,7 @@ mod tests {
 
         // Stale pushed commit: height 0, render empty, same `now`.
         let stale = data(25 * 3600);
-        assert_eq!(super::compact_commits_height_at(&stale, now), 0);
+        assert_eq!(super::compact_commits_height_at(&stale, 40, now), 0);
         let rendered = crate::tui::info_widget::render_commits_compact_at(
             stale.git_info.as_ref().expect("git info"),
             40,

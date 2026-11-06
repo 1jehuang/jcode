@@ -58,13 +58,11 @@ use unicode_width::UnicodeWidthStr;
 
 use commits::render_commits_widget;
 pub(crate) use commits::{
-    OVERVIEW_COMMITS_MAX_ROWS, commits_has_data, commits_has_data_at, now_secs,
+    OVERVIEW_COMMITS_MAX_ROWS, commit_row_lines, commits_has_data, commits_has_data_at, now_secs,
     render_commits_compact_at,
 };
 use frame::Framed;
-use git::{
-    changes_has_data, changes_height, changes_legend, render_changes_framed, render_git_widget,
-};
+use git::{changes_has_data, changes_legend, render_changes_framed, render_git_widget};
 pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
@@ -80,16 +78,22 @@ pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
-pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
+/// Width-aware: wrapped paths count their continuation lines. The dual-repo
+/// layout keeps its pre-overview file-unit rows and height.
+pub(super) fn changes_section_height(data: &InfoWidgetData, width: u16) -> u16 {
     if let Some(dual) = &data.dual_git_info {
         return git::dual_git_height(dual);
     }
-    data.git_info.as_ref().map(changes_height).unwrap_or(0)
+    data.git_info
+        .as_ref()
+        .map(|info| git::changes_height(data, info, width))
+        .unwrap_or(0)
 }
 
 /// Overview rows used by the Runtime section, mirroring [`render_sections`].
-pub(super) fn model_info_height(data: &InfoWidgetData) -> u16 {
-    overview_runtime_height(data)
+/// Width-aware: wrapped rows count their continuation lines.
+pub(super) fn model_info_height(data: &InfoWidgetData, width: u16) -> u16 {
+    overview_runtime_height(data, width)
 }
 
 /// Types of info widgets that can be displayed
@@ -264,7 +268,6 @@ pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
             | WidgetKind::Compaction
             | WidgetKind::ModelInfo
             | WidgetKind::UsageLimits
-            | WidgetKind::KvCache
             | WidgetKind::GitStatus
             | WidgetKind::Commits
     )

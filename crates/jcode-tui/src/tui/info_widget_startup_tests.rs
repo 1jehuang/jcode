@@ -117,18 +117,18 @@ fn startup_runtime_slots_preserve_partial_and_extra_metadata() {
         startup_runtime_pending: true,
         ..Default::default()
     };
-    assert_eq!(model_info_height(&data), 2);
+    assert_eq!(model_info_height(&data, 30), 2);
     data.session_name = Some("otter".into());
-    assert_eq!(model_info_height(&data), 2);
+    assert_eq!(model_info_height(&data, 30), 2);
     data.connection_type = Some("websocket".into());
     data.upstream_provider = Some("upstream".into());
-    assert_eq!(model_info_height(&data), 3);
+    assert_eq!(model_info_height(&data, 30), 3);
     data.startup_runtime_pending = false;
-    assert_eq!(model_info_height(&data), 3);
+    assert_eq!(model_info_height(&data, 30), 3);
     data.session_name = None;
     data.connection_type = None;
     data.upstream_provider = None;
-    assert_eq!(model_info_height(&data), 0);
+    assert_eq!(model_info_height(&data, 30), 0);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn startup_usage_slots_are_only_for_pending_openai_oauth() {
         ..pending()
     };
     assert!(!data.has_data_for(WidgetKind::UsageLimits));
-    assert_eq!(model_info_height(&data), 0);
+    assert_eq!(model_info_height(&data, 30), 0);
     assert!(render_sections(&data, Rect::new(0, 0, 30, 10), None, now_secs()).is_empty());
 }
 

@@ -124,19 +124,43 @@ pub(super) fn changes_has_data(info: &GitInfo) -> bool {
 }
 
 /// Content rows the Changes widget renders, mirroring [`render_git_widget`].
-pub(super) fn changes_height(info: &GitInfo) -> u16 {
+/// Width-aware: wrapped paths count their continuation lines. `data` supplies
+/// the agent-edited set, which the wrapped rows check the same way the render
+/// does.
+pub(super) fn changes_height(data: &InfoWidgetData, info: &GitInfo, width: u16) -> u16 {
     if !changes_has_data(info) {
         return 0;
     }
     // Overview section: up to CHANGES_MAX_FILES rows, the last of which
-    // becomes `+N more` when files overflow.
+    // becomes `+N more` when files overflow, mirroring [`render_git_widget`],
+    // which reserves that row out of the file budget.
     let total = info.dirty_total.max(info.dirty_files.len());
-    let shown = info.dirty_files.len().min(CHANGES_MAX_FILES);
-    if total > shown {
-        CHANGES_MAX_FILES.min(shown + 1) as u16
-    } else {
-        shown as u16
+    let mut max_files = CHANGES_MAX_FILES;
+    if total > max_files && max_files > 0 {
+        max_files -= 1;
     }
+    let shown = info.dirty_files.len().min(max_files);
+    let overflow = u16::from(total > shown);
+    // One shared counts column, exactly like the render.
+    let count_w = info
+        .dirty_files
+        .iter()
+        .take(shown)
+        .map(|f| line_counts(f).map_or(0, |(a, r)| a.chars().count() + 1 + r.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let root = info.repo_root.as_deref();
+    let w = width as usize;
+    let rows: u16 = info
+        .dirty_files
+        .iter()
+        .take(shown)
+        .map(|file| {
+            let agent = is_agent_edited(root, &file.path, &data.agent_edited);
+            changes_file_row_lines(file, agent, count_w, w) as u16
+        })
+        .sum();
+    rows + overflow
 }
 
 /// Standalone Changes widget. Border layout: `Changes` top-left, all-file
@@ -229,6 +253,30 @@ fn changes_file_lines(
         .collect()
 }
 
+/// Overview variant: long paths wrap onto continuation lines instead of
+/// truncating, so every dirty file stays identifiable. Returns the rendered
+/// rows plus how many files were listed (a wrapped file owns several rows).
+fn changes_file_rows_wrapped(
+    data: &InfoWidgetData,
+    info: &GitInfo,
+    max_files: usize,
+    w: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let shown: Vec<&DirtyFile> = info.dirty_files.iter().take(max_files).collect();
+    let count_w = shown
+        .iter()
+        .map(|f| line_counts(f).map_or(0, |(a, r)| a.chars().count() + 1 + r.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let root = info.repo_root.as_deref();
+    let mut lines = Vec::new();
+    for file in &shown {
+        let agent = is_agent_edited(root, &file.path, &data.agent_edited);
+        lines.extend(changes_file_lines_wrapped(file, agent, count_w, w));
+    }
+    (lines, shown.len())
+}
+
 /// Overview section rows (no border of its own): files plus an inline
 /// `+N more` row carrying the all-file totals.
 pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
@@ -250,9 +298,9 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         max_files -= 1;
     }
 
-    let mut lines = changes_file_lines(data, info, max_files, w);
+    let (mut lines, shown) = changes_file_rows_wrapped(data, info, max_files, w);
 
-    let hidden = total.saturating_sub(lines.len());
+    let hidden = total.saturating_sub(shown);
     if hidden > 0 {
         let dim = Style::default().fg(rgb(100, 100, 115));
         let mut spans = vec![Span::styled(format!("  +{hidden} more"), dim)];
@@ -300,9 +348,25 @@ fn truncate_cells(text: &str, width: usize) -> String {
     out
 }
 
+/// File-count height for the dual-repo rows, mirroring [`render_dual_git`],
+/// which still lists one (truncated) row per file and splits its budget in
+/// file units. Wrapping does not apply on this pre-overview path.
+fn changes_rows_single(info: &GitInfo) -> u16 {
+    if !changes_has_data(info) {
+        return 0;
+    }
+    let total = info.dirty_total.max(info.dirty_files.len());
+    let shown = info.dirty_files.len().min(CHANGES_MAX_FILES);
+    if total > shown {
+        CHANGES_MAX_FILES.min(shown + 1) as u16
+    } else {
+        shown as u16
+    }
+}
+
 fn repo_rows(state: &super::super::cloud_git::RepoState) -> u16 {
     match state {
-        super::super::cloud_git::RepoState::Ready(info) => 1 + changes_height(info),
+        super::super::cloud_git::RepoState::Ready(info) => 1 + changes_rows_single(info),
         _ => 1,
     }
 }
@@ -413,6 +477,43 @@ fn line_counts(file: &DirtyFile) -> Option<(String, String)> {
 }
 
 fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize) -> Line<'static> {
+    changes_file_line_spans(file, agent, count_w, width, false).0
+}
+
+/// Overview variant of [`changes_file_line`]: the path keeps its full text
+/// and wraps onto continuation lines (indented under the status letter)
+/// instead of ending in `…`. Returns every line the row occupies.
+fn changes_file_lines_wrapped(
+    file: &DirtyFile,
+    agent: bool,
+    count_w: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let (line, indent) = changes_file_line_spans(file, agent, count_w, width, true);
+    super::frame::wrap_row_lines(line, width, indent)
+}
+
+/// Rows the file takes in the Overview Changes section after wrapping, shared
+/// by the render and the height mirror so they can never drift.
+pub(crate) fn changes_file_row_lines(
+    file: &DirtyFile,
+    agent: bool,
+    count_w: usize,
+    width: usize,
+) -> usize {
+    changes_file_lines_wrapped(file, agent, count_w, width).len()
+}
+
+/// Build one dirty-file row. `keep_full_path` skips the single-row truncation
+/// so the caller can wrap instead; the row then intentionally exceeds
+/// `width` until wrapped.
+fn changes_file_line_spans(
+    file: &DirtyFile,
+    agent: bool,
+    count_w: usize,
+    width: usize,
+    keep_full_path: bool,
+) -> (Line<'static>, usize) {
     let (letter_color, path_color) = match file.status {
         'A' => (rgb(100, 200, 100), rgb(170, 190, 170)),
         'D' => (rgb(255, 120, 110), rgb(150, 130, 130)),
@@ -431,7 +532,11 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
     } else {
         width.saturating_sub(PREFIX)
     };
-    let name = truncate_smart(&changes_display_path(&file.path), name_w);
+    let name = if keep_full_path {
+        changes_display_path(&file.path)
+    } else {
+        truncate_smart(&changes_display_path(&file.path), name_w)
+    };
     let name_len = unicode_width::UnicodeWidthStr::width(name.as_str());
 
     let mut spans = vec![
@@ -457,7 +562,10 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
         } else {
             a.chars().count() + 1 + r.chars().count()
         };
+        // Counts right-align against `width` while the row fits; once the
+        // path pushes past it the row reflows, so only the gap remains.
         let pad = width.saturating_sub(PREFIX + name_len + this_w);
+        let pad = if keep_full_path { pad.max(1) } else { pad };
         spans.push(Span::raw(" ".repeat(pad)));
         if !a.is_empty() {
             spans.push(Span::styled(a, Style::default().fg(rgb(90, 170, 100))));
@@ -465,7 +573,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
             spans.push(Span::styled(r, Style::default().fg(rgb(200, 100, 95))));
         }
     }
-    Line::from(spans)
+    (Line::from(spans), PREFIX)
 }
 
 /// Show the file name first: the tail of the path is what identifies it in a
@@ -582,14 +690,15 @@ mod tests {
             ..Default::default()
         };
         let lines = render_git_widget(&data, Rect::new(0, 0, 30, 10));
-        assert_eq!(lines.len() as u16, changes_height(&git));
+        assert_eq!(lines.len() as u16, changes_height(&data, &git, 30));
         assert!(text(&lines).contains("+19 more"), "{}", text(&lines));
     }
 
     #[test]
     fn clean_or_ahead_only_tree_has_no_changes_widget() {
         assert!(!changes_has_data(&info(&[], 0)));
-        assert_eq!(changes_height(&info(&[], 0)), 0);
+        let data = InfoWidgetData::default();
+        assert_eq!(changes_height(&data, &info(&[], 0), 30), 0);
     }
 
     #[test]
@@ -669,7 +778,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            assert_eq!(super::super::changes_section_height(&data), 2);
+            assert_eq!(super::super::changes_section_height(&data, 70), 2);
             let rows = render_git_widget(&data, Rect::new(0, 0, 70, 2));
             assert_eq!(rows.len(), 2);
             let text: String = rows

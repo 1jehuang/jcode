@@ -879,7 +879,20 @@ fn workspace_widget_has_high_priority_when_enabled() {
         centered: false,
         ..Default::default()
     };
-    let placements = calculate_placements(Rect::new(0, 0, 80, 20), &margins, &data);
+    let placements = {
+        // Stateless placement (`calculate_placements_anchored`) instead of the
+        // shared-state `calculate_placements`: parallel tests mutate the
+        // global widget state (anchors survive between tests), which would
+        // flake the priority assertion.
+        let outcome = super::super::info_widget_layout::calculate_placements_anchored(
+            Rect::new(0, 0, 80, 20),
+            &margins,
+            &data,
+            true,
+            &[],
+        );
+        outcome.visible
+    };
     assert_eq!(
         placements.first().map(|p| p.kind),
         Some(WidgetKind::WorkspaceMap)

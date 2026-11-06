@@ -18,8 +18,13 @@ pub(super) fn runtime_height(data: &InfoWidgetData) -> u16 {
 }
 
 /// Content rows in the unframed overview, which retains every runtime fact.
-pub(super) fn overview_runtime_height(data: &InfoWidgetData) -> u16 {
-    runtime_rows(data).len() as u16
+/// Long rows wrap onto continuation lines, so the height is width-aware.
+pub(super) fn overview_runtime_height(data: &InfoWidgetData, width: u16) -> u16 {
+    let max_len = width.saturating_sub(2) as usize;
+    runtime_rows(data)
+        .into_iter()
+        .map(|row| row.into_wrapped_lines(max_len).len() as u16)
+        .sum()
 }
 
 pub(super) fn runtime_has_data(data: &InfoWidgetData) -> bool {
@@ -36,12 +41,13 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         .footer_right(footer.into_line(max_len))
 }
 
-/// Overview section: every runtime fact as a row, no border.
+/// Overview section: every runtime fact as a row, no border. Long rows wrap
+/// onto continuation lines instead of truncating, so no field is cut off.
 pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let max_len = inner.width.saturating_sub(2) as usize;
     runtime_rows(data)
         .into_iter()
-        .map(|row| row.into_line(max_len))
+        .flat_map(|row| row.into_wrapped_lines(max_len))
         .collect()
 }
 
@@ -72,6 +78,7 @@ fn runtime_frame_rows(data: &InfoWidgetData) -> (Vec<RuntimeRow>, RuntimeRow) {
             "tok/s n/a".into()
         },
         text_color: rgb(140, 140, 150),
+        wrap: true,
     };
     (rows, footer)
 }
@@ -81,6 +88,22 @@ struct RuntimeRow {
     icon_color: Color,
     text: String,
     text_color: Color,
+    /// Chrome placeholders (startup "Loading…" slots) truncate instead of
+    /// wrapping: they are transient filler, and repo TUI style keeps UI chrome
+    /// on one row.
+    wrap: bool,
+}
+
+impl Default for RuntimeRow {
+    fn default() -> Self {
+        Self {
+            icon: "",
+            icon_color: Color::Reset,
+            text: String::new(),
+            text_color: Color::Reset,
+            wrap: true,
+        }
+    }
 }
 
 impl RuntimeRow {
@@ -100,6 +123,40 @@ impl RuntimeRow {
             ])
         };
         jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, max_len)
+    }
+
+    /// Same row, wrapped onto continuation lines instead of truncated. The
+    /// icon rides the first line; continuation lines are indented under it so
+    /// a wrapped row reads as one fact. A single source for render and height
+    /// mirrors keeps them in lockstep.
+    fn into_wrapped_lines(self, max_len: usize) -> Vec<Line<'static>> {
+        let line = if self.icon.is_empty() {
+            Line::from(Span::styled(
+                self.text,
+                Style::default().fg(self.text_color),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", self.icon),
+                    Style::default().fg(self.icon_color),
+                ),
+                Span::styled(self.text, Style::default().fg(self.text_color)),
+            ])
+        };
+        if max_len == 0 {
+            // Match the single-row path: a zero-width column still renders
+            // one (empty) row, so render and height stay in lockstep.
+            return vec![jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &line, 0,
+            )];
+        }
+        if !self.wrap {
+            return vec![jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &line, max_len,
+            )];
+        }
+        crate::tui::markdown::wrap_line(line, max_len)
     }
 }
 
@@ -121,6 +178,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: rgb(255, 135, 200),
             text,
             text_color: rgb(220, 220, 230),
+            wrap: true,
         });
     }
 
@@ -139,6 +197,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: rgb(255, 200, 100),
             text,
             text_color: muted,
+            wrap: true,
         });
     } else if let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
         rows.push(RuntimeRow {
@@ -146,6 +205,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: rgb(255, 200, 100),
             text: format!("· {effort}"),
             text_color: muted,
+            wrap: true,
         });
     }
     // The memory row also appears for an effort-only setting
@@ -161,6 +221,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: rgb(200, 150, 255),
             text,
             text_color: muted,
+            wrap: true,
         });
     } else if let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
         rows.push(RuntimeRow {
@@ -168,6 +229,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: rgb(200, 150, 255),
             text: format!("· {effort}"),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -185,6 +247,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
                 format!("{tier} tier")
             },
             text_color: rgb(200, 140, 255),
+            wrap: true,
         });
     }
 
@@ -194,6 +257,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: format!("via {upstream}"),
             text_color: rgb(220, 190, 120),
+            wrap: true,
         });
     }
 
@@ -203,6 +267,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: connection.to_lowercase(),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -215,6 +280,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: format!("{tps:.0} tok/s"),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -231,6 +297,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: session_parts.join(" · "),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -248,6 +315,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
                     String::new()
                 },
                 text_color: muted,
+                wrap: false,
             });
         }
     }
@@ -451,8 +519,8 @@ mod tests {
         d.tokens_per_second = Some(61.7);
         d.session_name = Some("sauropod".into());
         let overview = render_model_info(&d, Rect::new(0, 0, 80, 8));
-        assert_eq!(overview.len() as u16, overview_runtime_height(&d));
-        assert_eq!(overview_runtime_height(&d), runtime_height(&d) + 1);
+        assert_eq!(overview.len() as u16, overview_runtime_height(&d, 80));
+        assert_eq!(overview_runtime_height(&d, 80), runtime_height(&d) + 1);
         d.startup_runtime_pending = true;
         d.service_tier = None;
         d.connection_type = None;
@@ -460,9 +528,9 @@ mod tests {
         d.session_name = None;
         assert_eq!(
             render_model_info(&d, Rect::new(0, 0, 80, 8)).len() as u16,
-            overview_runtime_height(&d)
+            overview_runtime_height(&d, 80)
         );
-        assert_eq!(overview_runtime_height(&d), 2);
+        assert_eq!(overview_runtime_height(&d, 80), 2);
     }
 
     #[test]
