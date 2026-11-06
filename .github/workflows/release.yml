@@ -223,9 +223,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
             compat_container: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact: jcode-linux-aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
@@ -259,19 +256,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      # Termux (Android) kernels implement ELF TLS Variant 1 while glibc
-      # expects Variant 2, so native __thread variables are zero-initialized at
-      # runtime and Tokio's runtime detection false-positives and panics.
-      # Building the aarch64 glibc binary with emulated TLS
-      # (pthread_getspecific) sidesteps kernel TLS entirely. That needs
-      # nightly (-Z tls-model, -Z build-std) with rust-src.
-      - name: Install nightly for emulated TLS (aarch64 only)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: aarch64-unknown-linux-gnu
-          components: rust-src
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
@@ -372,6 +356,127 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${RELEASE_TAG}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
+
+  # Linux aarch64 is built by cross-compiling inside an ubuntu:22.04 container
+  # (glibc 2.35) with gcc-aarch64-linux-gnu, instead of natively on an
+  # ubuntu-24.04-arm runner (glibc 2.39). The resulting binary runs on any
+  # distro with glibc >= 2.35, matching the portability of the x86_64 build.
+  # Emulated TLS (-Z tls-model=emulated + -Z build-std) is preserved from the
+  # original native build so Termux/Android keeps working.
+  build-linux-aarch64:
+    name: Build (aarch64-unknown-linux-gnu, glibc 2.35 compat)
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      # Install git before checkout: when git is missing from the base image,
+      # actions/checkout falls back to downloading a REST API tarball that has
+      # no .git, leaving build.rs unable to embed the git hash/date/changelog.
+      # This step also installs python3, which the recovery step needs.
+      - name: Install cross-compilation prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          dpkg --add-architecture arm64
+          cat > /etc/apt/sources.list << 'EOF'
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu jammy-security main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main universe
+          EOF
+          apt-get update -qq
+          apt-get install -y -qq curl ca-certificates git python3 gcc g++ gcc-aarch64-linux-gnu libssl-dev:arm64 pkg-config
+          # ubuntu:22.04 ships git 2.34, which does not support the `*` wildcard
+          # for safe.directory (that landed in 2.36). Name the checkout exactly.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git --version
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
+          fetch-depth: 0
+
+      - name: Verify git checkout has history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d .git || { echo "::error::.git missing after checkout; build metadata would be '(unknown)'"; exit 1; }
+          echo "git HEAD: $(git rev-parse --short HEAD)"
+
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
+
+      # Nightly + rust-src are required for -Z build-std and -Z tls-model=emulated
+      # (Termux/Android support), matching the original ubuntu-24.04-arm build.
+      - name: Install nightly Rust with rust-src
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rust-src
+
+      - name: Build release binary
+        env:
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+          OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
+          OPENSSL_INCLUDE_DIR: /usr/include/openssl
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          # Embed the same git metadata as the native build. Exporting explicitly
+          # makes a git failure fail the build instead of silently shipping
+          # "(unknown)" for the hash/date/changelog.
+          export JCODE_BUILD_GIT_HASH="$(git rev-parse --short HEAD)"
+          export JCODE_BUILD_GIT_DATE="$(git log -1 --format=%ci)"
+          export JCODE_BUILD_GIT_TAG="$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
+          export JCODE_BUILD_CHANGELOG_RAW="$(git log -700 --format='%h|%ct|%D|%s')"
+          echo "Embedding git metadata: ${JCODE_BUILD_GIT_HASH} / ${JCODE_BUILD_GIT_DATE}"
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          rustflags = ["-Z", "tls-model=emulated"]
+          EOF
+          cargo +nightly build --locked --release -Z build-std=std,panic_abort --target aarch64-unknown-linux-gnu
+
+      - name: Verify release build preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/jcode dist/jcode-linux-aarch64
+          chmod +x dist/jcode-linux-aarch64
+          cd dist && tar czf jcode-linux-aarch64.tar.gz jcode-linux-aarch64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jcode-linux-aarch64
+          path: dist/jcode-linux-aarch64.tar.gz
+
+      # Attach this platform's asset to the draft release. It remains hidden
+      # until the final job verifies the complete release set.
+      - name: Publish asset to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${RELEASE_TAG}" "dist/jcode-linux-aarch64.tar.gz" --clobber
 
   build-windows:
     name: Build (${{ matrix.target }})
@@ -756,7 +861,7 @@ jobs:
 
   release:
     name: Finalize release
-    needs: [create-release, build-linux-macos, publish-windows, build-freebsd]
+    needs: [create-release, build-linux-macos, build-linux-aarch64, publish-windows, build-freebsd]
     # Every platform is independent. Wait until all jobs reach a terminal state,
     # then require all platform assets before publishing. Partial sets stay draft.
     if: ${{ always() && needs.create-release.result == 'success' }}
