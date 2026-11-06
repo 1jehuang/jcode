@@ -24,6 +24,10 @@ function Assert-PrivateAcl($Acl, [string]$ExpectedSid, [string]$Context) {{
 {script}
 "#)])
         .env("JCODE_ACL_TEST_ROOT", root)
+        // CI invokes cargo from pwsh (PowerShell 7). Its module path can make
+        // Windows PowerShell 5 load incompatible Get-Acl assemblies. Let the
+        // child initialize its own native module path instead.
+        .env_remove("PSModulePath")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run Windows ACL assertions");
