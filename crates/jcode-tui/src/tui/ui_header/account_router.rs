@@ -181,6 +181,19 @@ fn remote_inventory_lines(
                     Style::default().fg(dim_color()),
                 ));
             }
+            let provider_kind = if provider == ActiveProvider::OpenAI {
+                crate::usage::MultiAccountProviderKind::OpenAI
+            } else {
+                crate::usage::MultiAccountProviderKind::Anthropic
+            };
+            if let Some(banked) =
+                crate::usage::remote_account_banked_resets(provider_kind, &account.label)
+                    .and_then(|banked| banked_resets_span(&banked))
+            {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
+                row.spans.push(banked);
+            }
             lines.push(row);
         }
     }
@@ -252,7 +265,7 @@ fn inventory_lines(
             ));
         }
         if let Some(banked) =
-            crate::usage::cached_account_banked_resets(usage_provider, &account.label)
+            header_account_banked_resets(usage_provider, &account.label)
                 .and_then(|banked| banked_resets_span(&banked))
         {
             row.spans
@@ -372,6 +385,36 @@ fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'s
     row
 }
 
+// Quotas already use the daemon mirror for connected local clients. Resets must
+// use the same source rather than an unrelated, process-local endpoint cache.
+fn header_account_banked_resets(
+    provider: crate::usage::MultiAccountProviderKind,
+    label: &str,
+) -> Option<crate::usage::AccountBankedResets> {
+    if crate::usage::remote_account_usage_received() {
+        crate::usage::remote_account_banked_resets(provider, label)
+    } else {
+        crate::usage::cached_account_banked_resets(provider, label)
+    }
+}
+
+/// Warmer colors mean less time to spend a reset. Unknown expiry stays blue.
+fn banked_expiry_color(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Color {
+    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else {
+        return Color::Rgb(120, 190, 255);
+    };
+    let remaining = expiry.signed_duration_since(now);
+    if remaining <= chrono::Duration::hours(24) {
+        Color::Rgb(255, 100, 100)
+    } else if remaining <= chrono::Duration::days(3) {
+        Color::Rgb(255, 180, 80)
+    } else if remaining <= chrono::Duration::days(7) {
+        Color::Rgb(230, 210, 100)
+    } else {
+        Color::Rgb(100, 210, 130)
+    }
+}
+
 /// Compact banked-reset suffix: "2 resets" when claimable, otherwise when the
 /// next one unlocks. Nothing is shown when no reset is known or upcoming.
 fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span<'static>> {
@@ -381,9 +424,17 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
         } else {
             "resets"
         };
+        let expiry = banked
+            .expires_at
+            .as_deref()
+            .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
+            .unwrap_or_default();
         return Some(Span::styled(
-            format!("↻ {} {noun}", banked.available),
-            Style::default().fg(Color::Rgb(120, 190, 255)),
+            format!("↻ {} {noun}{expiry}", banked.available),
+            Style::default().fg(banked_expiry_color(
+                banked.expires_at.as_deref(),
+                chrono::Utc::now(),
+            )),
         ));
     }
     let at = banked.next_available_at.as_deref()?;
@@ -961,15 +1012,50 @@ mod tests {
     }
 
     #[test]
+    fn banked_expiry_colors_cover_boundaries_and_unknown() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-06T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (hours, expected) in [
+            (-1, Color::Rgb(255, 100, 100)),
+            (24, Color::Rgb(255, 100, 100)),
+            (25, Color::Rgb(255, 180, 80)),
+            (72, Color::Rgb(255, 180, 80)),
+            (73, Color::Rgb(230, 210, 100)),
+            (168, Color::Rgb(230, 210, 100)),
+            (169, Color::Rgb(100, 210, 130)),
+        ] {
+            let expiry = (now + chrono::Duration::hours(hours)).to_rfc3339();
+            assert_eq!(banked_expiry_color(Some(&expiry), now), expected);
+        }
+        for expiry in [None, Some("invalid")] {
+            assert_eq!(banked_expiry_color(expiry, now), Color::Rgb(120, 190, 255));
+        }
+    }
+
+    #[test]
     fn banked_resets_suffix_shows_count_or_next_unlock() {
         let ready = crate::usage::AccountBankedResets {
             available: 2,
             next_available_at: None,
+            expires_at: None,
         };
         assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let expiring = crate::usage::AccountBankedResets {
+            available: 1,
+            next_available_at: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        assert!(
+            banked_resets_span(&expiring)
+                .unwrap()
+                .content
+                .starts_with("↻ 1 reset · exp ")
+        );
         let spent = crate::usage::AccountBankedResets {
             available: 0,
             next_available_at: Some("2099-01-01T00:00:00Z".into()),
+            expires_at: None,
         };
         assert!(
             banked_resets_span(&spent)
@@ -980,6 +1066,7 @@ mod tests {
         let none = crate::usage::AccountBankedResets {
             available: 0,
             next_available_at: None,
+            expires_at: None,
         };
         assert!(banked_resets_span(&none).is_none());
     }

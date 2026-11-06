@@ -962,22 +962,29 @@ fn test_system_param_split_oauth() {
     let result = build_system_param_split(static_content, dynamic_content, true);
 
     if let Some(ApiSystem::Blocks(blocks)) = result {
-        // Should have 4 blocks: identity, notice, static (cached), dynamic (not cached)
-        assert_eq!(blocks.len(), 4);
+        // 3 blocks: billing attribution, static (cached), dynamic (not cached).
+        // No identity sentence: it made the model claim Jcode is built on the
+        // Claude Agent SDK, and the billing block alone is enough for OAuth.
+        assert_eq!(blocks.len(), 3);
 
-        // Block 0: identity (no cache)
+        // Block 0: billing attribution (no cache)
         assert!(blocks[0].cache_control.is_none());
+        assert!(blocks[0].text.starts_with("x-anthropic-billing-header: "));
 
-        // Block 1: notice (no cache)
-        assert!(blocks[1].cache_control.is_none());
+        // Block 1: static (cached)
+        assert!(blocks[1].cache_control.is_some());
+        assert!(blocks[1].text.contains("static"));
 
-        // Block 2: static (cached)
-        assert!(blocks[2].cache_control.is_some());
-        assert!(blocks[2].text.contains("static"));
+        // Block 2: dynamic (not cached)
+        assert!(blocks[2].cache_control.is_none());
+        assert!(blocks[2].text.contains("dynamic"));
 
-        // Block 3: dynamic (not cached)
-        assert!(blocks[3].cache_control.is_none());
-        assert!(blocks[3].text.contains("dynamic"));
+        assert!(
+            !blocks.iter().any(|b| b.text.contains("Agent SDK")
+                || b.text.contains("You are a Claude agent")
+                || b.text.contains("You are Claude Code")),
+            "OAuth system blocks must not inject a Claude identity sentence"
+        );
     } else {
         panic!("Expected Blocks variant");
     }

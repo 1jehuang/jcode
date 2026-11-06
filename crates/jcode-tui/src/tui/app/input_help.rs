@@ -176,7 +176,7 @@ impl App {
                 "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
             }
             "usage" => {
-                "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
+                "/usage [provider]\nFetch and display usage limits for connected providers. Pass a provider (claude, openai, copilot, cursor, gemini, ...) to show a card for just that provider. This command only reports real connected-provider usage windows and reset times."
             }
             "subscription" => {
                 "/subscription\nCompatibility alias for /hosted status. Shows hosted-model usage, your monthly spending limit, billing status, and router configuration."

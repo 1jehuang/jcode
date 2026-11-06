@@ -1410,6 +1410,43 @@ fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
 }
 
+/// Drop every frame-level reference to `base` except the caller's, so the
+/// incremental body build can mutate it in place. Otherwise `Arc::make_mut`
+/// deep-clones the whole wrapped transcript (tens of ms on long sessions) on
+/// every appended message.
+///
+/// The base was just taken out of the body cache because no body entry matched
+/// the current key, so any full-prep frame embedding it is keyed on an older
+/// transcript and cannot be hit again. The last drawn frame is republished by
+/// the draw that triggered this build.
+pub(super) fn release_frame_refs_to_body(base: &Arc<PreparedMessages>) {
+    let holds = |frame: &Arc<PreparedChatFrame>| {
+        frame
+            .sections
+            .iter()
+            .any(|section| Arc::ptr_eq(&section.prepared, base))
+    };
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        cache.entries.retain(|entry| !holds(&entry.prepared));
+        cache
+            .oversized_entries
+            .retain(|entry| !holds(&entry.prepared));
+    }
+    #[cfg(test)]
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(holds) {
+            *slot = None;
+        }
+    });
+    #[cfg(not(test))]
+    if let Ok(mut slot) = last_chat_frame_state().lock()
+        && slot.as_ref().is_some_and(holds)
+    {
+        *slot = None;
+    }
+}
+
 /// Drop only reconstructible presentation data. Call after retaining a bounded
 /// terminal frame so idle repaints cannot immediately recreate these caches.
 pub(crate) fn release_idle_render_caches() {
@@ -3145,7 +3182,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
+    let blocker_height = blocker_lines
+        .len()
+        .min(usize::from(chat_area.height.saturating_sub(6))) as u16;
+    let inline_ui_gap_height: u16 = blocker_height.max(if inline_block_height > 0 { 1 } else { 0 });
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
@@ -3635,6 +3676,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Draw inline UI if active
     if inline_block_height > 0 {
         draw_inline_ui(frame, app, chunks[5]);
+    }
+
+    if blocker_height > 0 {
+        frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
     }
 
     let _input_cursor = input_ui::draw_input(

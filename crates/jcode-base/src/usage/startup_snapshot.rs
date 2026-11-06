@@ -318,6 +318,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         };
         publisher.publish(&[], &[account]).unwrap();
         let bytes = read_private(&publisher.path).unwrap();
@@ -368,6 +371,9 @@ mod tests {
             seven_day_ratio: Some(0.5),
             resets_at: Some("2026-01-01T00:00:00Z".into()),
             error: Some("Usage unavailable".into()),
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         }];
         let reset = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()

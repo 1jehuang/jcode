@@ -852,6 +852,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
@@ -930,6 +931,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
 

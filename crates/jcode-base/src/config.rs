@@ -798,6 +798,9 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+    /// Send mobile push notifications through the Jcode API when an account
+    /// key is available. `None` means enabled; set `false` to opt out.
+    pub mobile_push: Option<bool>,
 }
 
 /// Agent Client Protocol adapter configuration.

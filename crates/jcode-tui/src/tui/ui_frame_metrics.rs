@@ -612,6 +612,7 @@ pub(super) fn note_body_cache_miss() {
 }
 
 pub(super) fn note_body_incremental_reuse(base_messages: usize) {
+    note_test_body_last(None, Some(base_messages));
     with_frame_perf_stats_mut(|stats| {
         stats.body_incremental_reuses += 1;
         stats.body_last_incremental_base_messages = Some(base_messages);
@@ -624,6 +625,7 @@ pub(super) fn note_body_built(
     elapsed: Duration,
     build_path: &'static str,
 ) {
+    note_test_body_last(Some(build_path), None);
     with_frame_perf_stats_mut(|stats| {
         let elapsed_ms = duration_ms(elapsed);
         stats.body_build_ms += elapsed_ms;
@@ -1447,10 +1449,30 @@ mod draw_call_tests {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+thread_local! {
+    // Per-thread copy of the last body path, so assertions are not clobbered by
+    // tests drawing on other threads into the process-global stats.
+    static TEST_BODY_LAST: std::cell::RefCell<(String, Option<usize>)> =
+        const { std::cell::RefCell::new((String::new(), None)) };
+}
+
+#[cfg(test)]
 pub(crate) fn body_last_path_for_tests() -> (String, Option<usize>) {
-    let stats = frame_perf_stats_snapshot();
-    (
-        stats.body_last_path,
-        stats.body_last_incremental_base_messages,
-    )
+    TEST_BODY_LAST.with(|last| last.borrow().clone())
+}
+
+fn note_test_body_last(path: Option<&str>, base: Option<usize>) {
+    #[cfg(test)]
+    TEST_BODY_LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some(path) = path {
+            last.0 = path.to_string();
+        }
+        if base.is_some() {
+            last.1 = base;
+        }
+    });
+    #[cfg(not(test))]
+    let _ = (path, base);
 }
