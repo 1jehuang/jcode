@@ -409,7 +409,7 @@ pub(super) async fn run_reserved_followups(
                 crate::logging::info(&format!(
                     "Remote continuation paused for session {session_id}: {notice}"
                 ));
-                let _ = event_tx.send(ServerEvent::Notification {
+                if let Err(error) = event_tx.send(ServerEvent::Notification {
                     from_session: "runtime".into(),
                     from_name: Some("cloud continuation".into()),
                     notification_type: crate::protocol::NotificationType::Message {
@@ -418,7 +418,11 @@ pub(super) async fn run_reserved_followups(
                         tldr: None,
                     },
                     message: notice,
-                });
+                }) {
+                    crate::logging::debug(&format!(
+                        "Could not broadcast remote continuation pause for {session_id}: {error}"
+                    ));
+                }
             }
             return Ok(());
         };

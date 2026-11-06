@@ -335,9 +335,18 @@ fn start_cloud_command(
         }
         CloudCommand::Replace { host, yes, dry_run } => {
             let cwd = super::commands::active_working_dir(app).or_else(|| {
-                (!app.is_remote)
-                    .then(|| std::env::current_dir().ok())
-                    .flatten()
+                if app.is_remote {
+                    return None;
+                }
+                match std::env::current_dir() {
+                    Ok(cwd) => Some(cwd),
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot resolve local directory for cloud replacement: {error}"
+                        ));
+                        None
+                    }
+                }
             });
             let Some(cwd) = cwd.filter(|path| path.is_dir()) else {
                 app.push_display_message(DisplayMessage::error(

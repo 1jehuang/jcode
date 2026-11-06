@@ -212,6 +212,88 @@ fn event_mapper_maps_tool_lifecycle() {
 }
 
 #[test]
+fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    for id in ["a", "b"] {
+        mapper.map_event(ServerEvent::ToolStart {
+            id: id.to_string(),
+            name: "bash".to_string(),
+        });
+        assert!(
+            mapper
+                .map_event(ServerEvent::ToolInput {
+                    id: Some(id.to_string()),
+                    delta: "{\"command\":".to_string(),
+                })
+                .is_empty()
+        );
+    }
+    for (id, command) in [("a", "true"), ("b", "false")] {
+        let updates = mapper.map_event(ServerEvent::ToolInput {
+            id: Some(id.to_string()),
+            delta: format!("\"{command}\"}}"),
+        });
+        assert_eq!(
+            updates,
+            vec![json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "rawInput": {"command": command},
+            })]
+        );
+    }
+    for (id, command) in [("a", "true"), ("b", "false")] {
+        let updates = mapper.map_event(ServerEvent::ToolExec {
+            id: id.to_string(),
+            name: "bash".to_string(),
+        });
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["toolCallId"], id);
+        assert_eq!(updates[0]["status"], "in_progress");
+        assert_eq!(updates[0]["rawInput"], json!({"command": command}));
+    }
+}
+
+#[test]
+fn event_mapper_suppresses_incomplete_legacy_tool_input() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    assert!(
+        mapper
+            .map_event(ServerEvent::ToolInput {
+                id: None,
+                delta: "ignored without a tool".to_string(),
+            })
+            .is_empty()
+    );
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "legacy".to_string(),
+        name: "bash".to_string(),
+    });
+    for delta in ["", "{", "\"command\":"] {
+        assert!(
+            mapper
+                .map_event(ServerEvent::ToolInput {
+                    id: None,
+                    delta: delta.to_string(),
+                })
+                .is_empty()
+        );
+    }
+    let updates = mapper.map_event(ServerEvent::ToolInput {
+        id: None,
+        delta: "\"true\"}".to_string(),
+    });
+    assert_eq!(
+        updates,
+        vec![json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "legacy",
+            "rawInput": {"command": "true"},
+        })]
+    );
+}
+
+#[test]
 fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
     let params = json!({"mcpServers": [{"name": "fs"}]});
     assert!(validate_acp_mcp_servers(&params).is_ok());

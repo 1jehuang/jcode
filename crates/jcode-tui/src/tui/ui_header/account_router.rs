@@ -64,12 +64,30 @@ fn load_inventory() -> Inventory {
     // Local auth files only. Retain metadata, never access/refresh tokens.
     let now = chrono::Utc::now().timestamp_millis();
     let mut expired = Vec::new();
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+    let claude_accounts = match crate::auth::claude::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Claude account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in claude_accounts {
         if account.expires <= now {
             expired.push(("claude", account.label));
         }
     }
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+    let codex_accounts = match crate::auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Codex account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in codex_accounts {
         if account.expires_at.is_some_and(|expires| expires <= now) {
             expired.push(("openai", account.label));
         }
