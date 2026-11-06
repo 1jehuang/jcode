@@ -61,6 +61,19 @@ immediately. A later successful CI rerun could not restart publishing, and a
 transient release build failure had no automatic retry. The recovery workflow
 addresses that separate orchestration gap without weakening authorization.
 
+An additional hosted-build prerequisite failed during validation:
+`POST /internal/builds/charge` returned a missing-route 404. Local justrust
+reported a local fallback, which could not validate hosted execution. Linux
+preview builds deliberately prohibit that fallback.
+The live account API had drifted from its checked-in billing routes. A
+separately reviewed, SHA-pinned additive backend restoration preserved all
+existing live modules, 41 bindings/settings, mobile handlers, machine-key
+restrictions, transactional billing and tenant isolation. No allowance or
+billing bypass was introduced. The backend's 536 tests passed, and a real
+forced-hosted Rust test passed with `justrust show` confirming
+`where remote on hosted` (run `20261106-032554574-1606144`). The source-pinned
+preview client did not need changing.
+
 ## Verification
 
 ```sh
