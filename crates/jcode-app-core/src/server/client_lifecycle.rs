@@ -1638,8 +1638,12 @@ pub(super) async fn handle_client(
                     // session or the target-aware subscribe silently creates a
                     // different session and every subsequent command reports a
                     // wrong-session attachment.
-                    if crate::session::session_exists(&target_session_id)
-                        || sessions.read().await.contains_key(&target_session_id)
+                    //
+                    // Whether the target is LIVE IN MEMORY decides two things
+                    // below, so compute it once: it admits the target as an
+                    // existing session, and it decides MCP registration.
+                    let target_is_live = sessions.read().await.contains_key(&target_session_id);
+                    if crate::session::session_exists(&target_session_id) || target_is_live
                     {
                         let pre_resume_session_id = client_session_id.clone();
                         agent = crate::hooks::with_client_terminal_env(
@@ -1696,7 +1700,21 @@ pub(super) async fn handle_client(
                                 id,
                                 subscribe_working_dir,
                                 selfdev,
-                                false,
+                                // Register MCP unless this is a takeover of a
+                                // session that is ALREADY live: that owner has
+                                // already registered its servers, and a second
+                                // registration would double every tool and open a
+                                // second connection to every MCP server.
+                                //
+                                // A target that exists only on disk is the case
+                                // this used to get wrong. `session/load` - what the
+                                // ACP adoption shim issues - resumed a persisted
+                                // session, took this branch with a hardcoded
+                                // `false`, and registered nothing: the session ran
+                                // with no `mcp__*` tools at all, silently, while a
+                                // freshly created session had them. The flag is
+                                // therefore `!target_is_live`, not a constant.
+                                !target_is_live,
                                 &mut client_selfdev,
                                 &client_session_id,
                                 &client_connection_id,
