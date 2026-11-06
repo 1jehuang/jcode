@@ -1,6 +1,112 @@
 # Managed cloud automatic updates
 
-Status: proposed design, not deployed. Source inspection: November 6, 2026.
+Status: deployed November 6, 2026. Owner-host migration and explicit development
+upload are verified. The newer package is pending, not running: activation waits
+for the existing daemon's next normal start.
+
+## Deployment evidence
+
+Initial Worker deployment `6e3f342d-8bc2-44bb-91d1-d6e8f07c52bc` included backend
+commits `6ce9f0f` and `6118d73`. It overwrote earlier live repairs, described below.
+Coordinated recovery deployed Worker `d1b0ef3f-4c96-4a03-8291-eb249744bf5c`,
+deployment `a698139f-fc20-458c-9531-ccec357d99d7`, preserving updater assets.
+The recovered manifest and installer were checked read-only. The installer
+matched the tested source byte-for-byte. At 12:21 UTC the manifest returned
+generation `420797989`, official stable `v0.99.1`, and `last-good` discovery.
+A cold-cache request briefly returned the verified static fallback, not missing
+live discovery. Recovery owner verified discovery code was preserved exactly.
+
+At 12:20:57 UTC, authenticated SSH installed the verified updater on the owner
+host, adopted `v0.99.724-dev (f21e0197a)` as `legacy_external`, and preserved
+persistent development policy. The system timer is enabled and active. At
+12:21:25 UTC, the explicit CLI upload successfully staged portable
+`v0.99.760-dev (3c448c323, dirty)` at:
+
+```text
+/opt/jcode-cloud/releases/05a4befc5a95ad758100a42109f5dba3e742536d19ed7f63d220e186ecc7e3c8/jcode
+```
+
+The archive digest is the directory name. Remote version and modern group
+protocol help passed. A subsequent helper `check` preserved development policy
+and the pending package. Daemon PID `2694` remained active with the original
+`.724-dev` executable and unchanged launcher symlink. The installed service
+drop-in invokes activation only at its next normal start. No forced restart or
+live activation was attempted, and rollback/activation were not live-exercised.
+The helper's running-version field is null for adopted external paths, so the
+actual process was verified separately through systemd and `/proc/2694/exe`.
+
+Newly provisioned hosts receive the updater through bootstrap. Other existing
+accounts were not migrated or awakened in this deployment. This is not a claim
+that every preexisting cloud host has been updated.
+
+### Deployment regression, recovery, and guard
+
+The initial source checkout lacked existing script-API hosted-build, mobile-sync,
+scoped-key, and plan-proportional cloud entitlement repairs. Deploying it replaced
+those live repairs. Initial health and updater-route checks were insufficient.
+The lost allowance repair caused the incorrect 50-hour limit and rejected owner
+SSH access at 60.1 hours. After coordinated recovery, authenticated status showed
+the correct 5,000-hour allowance and normal access resumed. No billing override
+or alternate administrative access was used.
+
+Recovery owner reported 536 full tests, nine billing and 13 mobile/wake tests
+against the actual bundle, and a successful hosted acceptance run. This session
+independently verified the restored entitlement, manifest, installer, and owner
+runtime workflow. No competing control-plane deployment was made.
+
+Backend commit `21bb577` adds a fail-closed bundled-code inventory check to both
+`npm run deploy` and the direct Wrangler build hook. Nine guard tests and 431
+full backend tests pass. The unreconciled source fails a real Wrangler dry-run
+before upload. Reconcile live repairs into source before normal deployment
+resumes. The inventory is a minimum-feature guard, not full behavioral equivalence.
+Client validation passed hosted check, five runtime CLI tests, and 25 managed
+preflight tests. Updater validation passed nine subprocess tests.
+
+## Implemented client workflow
+
+The CLI now provides these managed-host operations. They use authenticated SSH,
+so they can wake your account's cloud machine. A runtime selection applies to
+the whole host, not just one session.
+
+```sh
+jcode cloud runtime status
+jcode cloud runtime check
+jcode cloud runtime push --artifact /path/to/jcode-linux-x86_64.tar.gz
+jcode cloud runtime pin v0.99.1 --yes
+jcode cloud runtime stable --yes
+```
+
+Push selects persistent `dev` policy. Pin and stable explicitly change policy,
+and can intentionally select an older runtime. None of these operations restarts
+an active daemon. The initial deployment stages a verified pending package and
+activates it only at the daemon's next normal start. Automatic idle activation
+and health-metric-based fleet promotion remain future work, not shipped claims.
+
+For a portable development package built from this checkout, forward explicit
+identity metadata because hosted source snapshots do not contain `.git`:
+
+```sh
+# Derive the same dev version as the build script for the current 0.99.1 base.
+export JCODE_BUILD_SEMVER="0.99.$((1 + $(git rev-list --count v0.99.1..HEAD)))"
+export JCODE_BUILD_GIT_HASH="$(git rev-parse --short HEAD)"
+export JCODE_BUILD_GIT_DATE="$(git log -1 --format=%ci)"
+export JCODE_BUILD_GIT_TAG="$(git describe --tags --always)"
+# Set this when the checkout has uncommitted changes.
+export JCODE_BUILD_GIT_DIRTY=1
+justrust zigbuild --remote --profile selfdev -p jcode --bin jcode \
+  --target x86_64-unknown-linux-gnu.2.17 \
+  --features linux-compat-vendored-openssl
+scripts/package_cloud_runtime.sh \
+  target/x86_64-unknown-linux-gnu/selfdev/jcode \
+  /path/to/jcode-linux-x86_64.tar.gz
+```
+
+Packaging validates the Linux x86_64 ELF, glibc requirements, and unbundled shared
+libraries. It does not upload anything. The cloud helper independently checks
+the package digest, archive contents, actual version, and baseline capabilities.
+The package digest distinguishes dirty artifacts even when their Git hash and
+version match. Build and upload source only through an explicitly authorized
+build workflow.
 
 ## Decision
 
@@ -9,7 +115,7 @@ approved stable release and safe daemon activation. Do not enable the ordinary
 CLI updater on these hosts and do not restart the fleet immediately on every
 GitHub release. Updates must not depend on a user opening a local client.
 
-## Current implementation
+## Historical baseline before this deployment
 
 The managed service is in the separate `solosystems-managed-cloud` repository:
 `workers/api/src/cloud_hosts.js`.

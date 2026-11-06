@@ -108,6 +108,10 @@ fn parse_card_percent(text: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
+#[path = "usage_activity_pair_tests.rs"]
+mod activity_pair_tests;
+
+#[cfg(test)]
 mod card_parse_error_tests {
     use super::*;
 
