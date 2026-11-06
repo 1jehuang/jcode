@@ -54,7 +54,7 @@ impl Token {
 }
 
 /// Characters that separate one command from the next.
-const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "\n", "(", ")"];
+const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n", "(", ")"];
 
 /// Split a command line into individual command segments, each tokenized.
 ///
@@ -158,11 +158,25 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 op.is_operator = true;
                 tokens.push(op);
             }
+            '&' if chars.peek() == Some(&'>') => {
+                // `&>file` / `&>>file` redirect stdout+stderr; they are not a
+                // background `&`, so the command keeps its later arguments.
+                flush!();
+                chars.next();
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                } else {
+                    pending_redirect = true;
+                }
+            }
             '&' | '|' => {
                 flush!();
                 let mut text = c.to_string();
                 if chars.peek() == Some(&c) {
                     text.push(c);
+                    chars.next();
+                } else if c == '|' && chars.peek() == Some(&'&') {
+                    // `|&` pipes stderr too; it is still a pipe, not `&`.
                     chars.next();
                 }
                 let mut op = Token::word(text);

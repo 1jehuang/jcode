@@ -723,3 +723,25 @@ fn issue_1753_inert_text_stays_safe() {
         assert!(level(command).runs_immediately(), "{command:?}");
     }
 }
+
+#[test]
+fn background_operator_separates_commands() {
+    // A lone `&` ends a command just like `;`, so the command after it must
+    // be assessed as its own program rather than as an operand.
+    assert_eq!(level("sleep 1 & rm -rf ~"), RiskLevel::Catastrophic);
+    assert_eq!(level("true &rm -rf /"), RiskLevel::Catastrophic);
+    assert_eq!(level("ls |& rm -f"), RiskLevel::Confirm);
+    let segments = crate::tokenize::split_segments("ls |& rm -f");
+    assert_eq!(segments.len(), 2);
+    assert!(segments[1].iter().all(|token| token.receives_pipe));
+}
+
+#[test]
+fn ampersand_redirect_does_not_split_command() {
+    // `&>` / `&>>` are redirects, so arguments after them still reach chmod.
+    assert_eq!(level("chmod &>/dev/null -R 777 ~"), RiskLevel::Catastrophic);
+    assert_eq!(
+        level("chmod &>>/dev/null -R 777 ~"),
+        RiskLevel::Catastrophic
+    );
+}
