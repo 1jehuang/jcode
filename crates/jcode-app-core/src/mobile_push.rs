@@ -192,10 +192,6 @@ pub fn should_push_turn_done(session_id: &str, elapsed: Duration) -> bool {
     elapsed >= threshold_for(is_ios_session(session_id))
 }
 
-fn turn_long_enough(elapsed: Duration) -> bool {
-    elapsed >= threshold_for(false)
-}
-
 /// Queue a push. Returns immediately; never errors.
 pub fn notify(
     kind: PushKind,
@@ -461,8 +457,13 @@ mod tests {
         assert!(env_opted_out(Some("false")));
         assert!(!env_opted_out(Some("1")));
         assert!(!env_opted_out(None));
-        assert!(!turn_long_enough(Duration::from_secs(19)));
-        assert!(turn_long_enough(MIN_TURN_DURATION_FOR_PUSH));
+        let sid = "session_mobile_push_test_threshold";
+        assert!(!should_push_turn_done(sid, Duration::ZERO));
+        assert!(!should_push_turn_done(
+            sid,
+            MIN_TURN_DURATION_FOR_PUSH - Duration::from_nanos(1)
+        ));
+        assert!(should_push_turn_done(sid, MIN_TURN_DURATION_FOR_PUSH));
         assert_eq!(threshold_for(true), Duration::ZERO);
     }
 
