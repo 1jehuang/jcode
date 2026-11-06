@@ -143,10 +143,12 @@ pub struct ResolvedOpenAiCompatibleProfile {
 }
 
 mod catalog;
+mod llmtr;
 mod muse;
 
 pub use catalog::*;
 use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
+pub use llmtr::{LLMTR_LOGIN_PROVIDER, LLMTR_PROFILE};
 pub use muse::{
     META_MUSE_LOGIN_PROVIDER, META_MUSE_PROFILE, MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     MUSE_SUBSCRIPTION_PROFILE,
@@ -348,6 +350,21 @@ mod tests {
         };
         assert_eq!(profile.api_base, "https://api.z.ai/api/coding/paas/v4");
         assert_eq!(profile.setup_url, "https://docs.z.ai/devpack/quick-start");
+    }
+
+    #[test]
+    fn llmtr_login_keeps_catalog_model_ids() {
+        let provider = resolve_login_provider("llmtr.com").expect("LLMTR alias");
+        assert_eq!(provider.id, "llmtr");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("LLMTR should use the OpenAI-compatible runtime");
+        };
+        assert_eq!(profile.api_base, "https://llmtr.com/v1");
+        assert_eq!(profile.api_key_env, "LLMTR_API_KEY");
+        assert_eq!(profile.env_file, "llmtr.env");
+        // `llmtr/...` is the model id. The profile prefix is only `llmtr:`.
+        assert_eq!(profile.default_model, Some("qwen/qwen3.8-27b-free"));
+        assert!(profile.requires_api_key);
     }
 
     #[test]
