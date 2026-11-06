@@ -492,8 +492,7 @@ pub(super) async fn run_live_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
@@ -515,8 +514,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 /// Catch only unwind panics. A killed process cannot emit a trustworthy event.

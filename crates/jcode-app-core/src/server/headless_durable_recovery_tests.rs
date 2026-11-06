@@ -616,3 +616,42 @@ async fn manual_resume_all_stop_during_assignment_capture_never_runs_orphan() ->
     assert_eq!(provider.calls(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn rejected_live_turn_launch_reports_false_so_callers_keep_the_message() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _env = IsolatedEnv::new(root.path());
+    let id = seed("running", false, false)?;
+    let provider = Arc::new(RecordingProvider::default());
+    let server = Server::new(provider.clone());
+    server.recover_headless_sessions_on_startup().await;
+    wait_status(&server, &id, "ready").await;
+    // The agent mutex is free (the idle check passes), but another owner
+    // holds the turn reservation, so the launch itself must be rejected.
+    let agent = server.sessions.read().await[&id].clone();
+    let lease = agent.lock().await.claim_server_turn()?;
+    let calls_before = provider.calls();
+    let context = crate::server::live_turn::LiveTurnSwarmContext::new(
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.event_history,
+        &server.event_counter,
+        &server.swarm_event_tx,
+    );
+    assert!(
+        !crate::server::live_turn::run_live_turn_if_idle(
+            &id,
+            "must-not-be-dropped",
+            None,
+            &server.sessions,
+            context
+        )
+        .await,
+        "a rejected launch must report false so the caller saves the message"
+    );
+    settle().await;
+    assert_eq!(provider.calls(), calls_before, "no turn may start");
+    drop(lease);
+    Ok(())
+}
