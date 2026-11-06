@@ -501,7 +501,12 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let repo = repo().await;
         let name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
-        std::fs::write(repo.path().join(name), b"contents").unwrap();
+        if std::fs::write(repo.path().join(name), b"contents").is_err() {
+            // APFS refuses to create files whose names are not valid UTF-8, so
+            // git can never list one here. The UTF-8 rejection itself stays
+            // covered on filesystems that allow arbitrary bytes (ext4 on CI).
+            return;
+        }
         assert!(
             snapshot(repo.path())
                 .await

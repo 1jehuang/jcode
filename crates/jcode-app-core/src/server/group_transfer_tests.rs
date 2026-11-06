@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 struct TestHome {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: storage::TestEnvGuard,
     _dir: tempfile::TempDir,
     home: Option<std::ffi::OsString>,
     runtime: Option<std::ffi::OsString>,

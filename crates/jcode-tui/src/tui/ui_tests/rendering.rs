@@ -571,6 +571,10 @@ fn test_plan_memory_tile_truncates_long_category_title() {
 /// tests through the process-global theme mode.
 #[test]
 fn test_light_theme_adapted_frame_has_readable_contrast() {
+    // Full `ui::draw` renders mutate process-global render state (scroll
+    // metrics, layout snapshots, flicker history) that sibling tests assert on;
+    // serialize on the shared render-state lock like every other drawing test.
+    let _lock = viewport_snapshot_test_lock();
     fn channel_lum(c: ratatui::style::Color) -> Option<f32> {
         let (r, g, b) = match c {
             ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
@@ -651,6 +655,9 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
 /// guards the hook's presence and its ordering relative to the light/dark pass.
 #[test]
 fn test_configured_palette_recolors_a_real_rendered_frame() {
+    // Same lock discipline as the contrast test above: `ui::draw` touches
+    // shared render state, so take the render-state lock for the whole body.
+    let _lock = viewport_snapshot_test_lock();
     fn render() -> ratatui::buffer::Buffer {
         let messages = vec![
             DisplayMessage {

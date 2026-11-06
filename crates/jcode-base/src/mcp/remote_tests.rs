@@ -761,8 +761,15 @@ async fn remote_handshake_deadline_is_independent_of_long_tool_timeout() {
         open_stream(&mut socket, "text/event-stream").await.unwrap();
         started_tx.send(()).unwrap();
         // Never send a response. The client must close the socket on deadline.
+        // The client can close with unread SSE bytes still in flight, so the
+        // peer may send RST instead of FIN; both orderly EOF and reset are a
+        // valid close from the client's side.
         let mut bytes = Vec::new();
-        socket.read_to_end(&mut bytes).await.unwrap();
+        match socket.read_to_end(&mut bytes).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            Err(e) => panic!("server read failed: {e}"),
+        }
     });
     let config: McpServerConfig = serde_json::from_value(json!({
         "type": "http", "url": url, "timeout_secs": 3600

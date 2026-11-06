@@ -251,13 +251,42 @@ mod macos {
         pth_name: [u8; 64],
     }
 
-    // Take this from `libc` rather than hand-rolling it. It was previously
-    // defined locally as 2, which is `TH_STATE_STOPPED`, so a thread blocked on
-    // `read(0)` never registered and macOS stdin forwarding never fired
-    // (issue #651). Apple's `mach/thread_info.h` has RUNNING=1, STOPPED=2,
-    // WAITING=3, and `libc` already exposes it, so sourcing it removes the
-    // opportunity for this constant to drift again.
-    use libc::TH_STATE_WAITING;
+    // Take these from `libc` rather than hand-rolling them. `TH_STATE_WAITING`
+    // was previously defined locally as 2, which is `TH_STATE_STOPPED`, so a
+    // thread blocked on `read(0)` never registered and macOS stdin forwarding
+    // never fired (issue #651). Apple's `mach/thread_info.h` has RUNNING=1,
+    // STOPPED=2, WAITING=3, and `libc` already exposes it, so sourcing it
+    // removes the opportunity for this constant to drift again.
+    use libc::{TH_FLAGS_SWAPPED, TH_STATE_WAITING};
+
+    /// Whether one sampled thread is blocked on `read(0)`.
+    ///
+    /// `TH_STATE_WAITING` means "blocked", not "blocked on stdin": macOS
+    /// reports it for threads parked on a condition variable or in a timed
+    /// sleep too, so the run state alone made every process with an idle
+    /// thread look like it was waiting for terminal input (issue #1146).
+    ///
+    /// `TH_FLAGS_SWAPPED` tracks kernel-stack reclamation: the kernel sets it
+    /// whenever `thread->kernel_stack` is null (`osfmk/kern/thread.c`). A
+    /// thread that parks hands its stack off within milliseconds, while a
+    /// thread blocked in `read(2)` on a tty or a pipe keeps it. Measured on
+    /// macOS aarch64 (2026-10-11) by sampling
+    /// `proc_pidinfo(PROC_PIDTHREADINFO)`: `cat` blocked on a pty slave and on
+    /// a pipe both report `WAITING` with flags `0x0` for as long as they stay
+    /// blocked (10s), whereas `sleep`, a shell waiting on a child, and threads
+    /// parked on condition variables report `WAITING` with flags `0x1` within
+    /// ~55ms of parking. Requiring the flag to be clear therefore keeps real
+    /// stdin waits and drops parked ones.
+    ///
+    /// The asymmetry is deliberate: a swapped-out thread that really is in
+    /// `read(2)` is missed (no "waiting for stdin" hint), whereas counting
+    /// parked threads reports every sleeping command as waiting for input. The
+    /// residual false positive is a thread sampled inside that ~55ms parking
+    /// window; the bash tool waits `STDIN_INITIAL_DELAY_MS` (300ms) before its
+    /// first poll, so a command that parks at startup is swapped out by then.
+    pub(super) fn thread_is_reading_stdin(run_state: i32, flags: i32) -> bool {
+        run_state == TH_STATE_WAITING && flags & TH_FLAGS_SWAPPED == 0
+    }
 
     pub fn check(pid: u32) -> StdinState {
         // Check if fd 0 (stdin) is a pipe or pty
@@ -271,7 +300,122 @@ mod macos {
             return StdinState::Reading;
         }
 
+        // The process itself is not reading, but a wrapper shell's own thread
+        // parks while it waits on a child, and the `TH_FLAGS_SWAPPED` filter
+        // above correctly excludes that parked thread. `bash -c 'cat; echo'`
+        // never exec-optimizes multi-command scripts, so the actual reader is
+        // a grandchild: walk the descendant tree so the blocked `cat` is still
+        // detected and the stdin prompt fires. Children inherit the wrapper's
+        // fd 0 by default, so the same pipe/pty gate keeps unrelated readers
+        // out.
+        if descendant_is_reading(pid) {
+            return StdinState::Reading;
+        }
+
         StdinState::NotReading
+    }
+
+    /// `struct kinfo_proc` is not exposed by the `libc` crate, but its
+    /// layout is a stable kernel ABI: total size 648 bytes with `kp_proc.p_pid`
+    /// at offset 40 and `kp_eproc.e_ppid` at offset 560 (verified against
+    /// `sys/sysctl.h` on macOS 15). Parsing the raw `sysctl` buffer with these
+    /// offsets avoids hand-rolling the full struct and its padding rules.
+    const KINFO_PROC_SIZE: usize = 648;
+    const KINFO_PID_OFFSET: usize = 40;
+    const KINFO_PPID_OFFSET: usize = 560;
+
+    /// One `sysctl(KERN_PROC_ALL)` snapshot mapped to parent-child edges,
+    /// so the walk costs one syscall regardless of tree width. A process that
+    /// spawned between the snapshot and a thread check is simply missed until
+    /// the next poll.
+    fn child_map() -> std::collections::HashMap<u32, Vec<u32>> {
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+        let mut size = 0usize;
+        let ret = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret != 0 || size == 0 || !size.is_multiple_of(KINFO_PROC_SIZE) {
+            return std::collections::HashMap::new();
+        }
+        // Bound the snapshot: a busy machine can report thousands of processes,
+        // and this runs inside the bash tool's poll loop.
+        let count = (size / KINFO_PROC_SIZE).min(4096);
+        let mut buf: Vec<u8> = vec![0u8; count * KINFO_PROC_SIZE];
+        // Pass the buffer capacity, not the probe's full-table size: macOS
+        // sysctl fills a partial buffer only when oldlen matches oldp, and a
+        // short buffer with the full-table length fails with ENOMEM, which
+        // would silently zero the snapshot on any machine with >4096 procs.
+        let mut filled_len = buf.len();
+        let filled = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut filled_len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if filled != 0 {
+            return std::collections::HashMap::new();
+        }
+        let count = (filled_len / KINFO_PROC_SIZE).min(count);
+        let read_pid = |entry: &[u8], offset: usize| -> u32 {
+            i32::from_ne_bytes([
+                entry[offset],
+                entry[offset + 1],
+                entry[offset + 2],
+                entry[offset + 3],
+            ]) as u32
+        };
+        let mut map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for i in 0..count {
+            let entry = &buf[i * KINFO_PROC_SIZE..(i + 1) * KINFO_PROC_SIZE];
+            let child = read_pid(entry, KINFO_PID_OFFSET);
+            let parent = read_pid(entry, KINFO_PPID_OFFSET);
+            if parent == 0 {
+                continue;
+            }
+            map.entry(parent).or_default().push(child);
+        }
+        map
+    }
+
+    /// Breadth-first descent of the descendant tree looking for a blocked
+    /// stdin reader, mirroring Linux's `check_process_tree`. The fd 0 gate
+    /// applies to every descendant, so a background child that redirected its
+    /// own stdin elsewhere never matches.
+    fn descendant_is_reading(pid: u32) -> bool {
+        const MAX_DEPTH: usize = 32;
+        const MAX_VISITED: usize = 512;
+        let children = child_map();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(pid);
+        let mut queue: std::collections::VecDeque<(u32, usize)> = children
+            .get(&pid)
+            .map(|cs| cs.iter().map(|&c| (c, 1usize)).collect())
+            .unwrap_or_default();
+        while let Some((child, depth)) = queue.pop_front() {
+            if !visited.insert(child) || visited.len() > MAX_VISITED || depth > MAX_DEPTH {
+                continue;
+            }
+            if stdin_is_interactive(child as i32) && is_thread_waiting(child as i32) {
+                return true;
+            }
+            if let Some(grandchildren) = children.get(&child) {
+                for &grandchild in grandchildren {
+                    queue.push_back((grandchild, depth + 1));
+                }
+            }
+        }
+        false
     }
 
     fn stdin_is_interactive(pid: i32) -> bool {
@@ -342,7 +486,7 @@ mod macos {
                 )
             };
 
-            if ret > 0 && tinfo.pth_run_state == TH_STATE_WAITING {
+            if ret > 0 && thread_is_reading_stdin(tinfo.pth_run_state, tinfo.pth_flags) {
                 return true;
             }
         }
