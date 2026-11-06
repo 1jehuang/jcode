@@ -3743,3 +3743,25 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
 
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
+
+#[test]
+fn credential_failure_is_returned_instead_of_a_silently_closed_stream() {
+    let provider = OpenRouterProvider {
+        supports_model_catalog: false,
+        auth: Arc::new(|| Err(anyhow::anyhow!("external key approval revoked"))),
+        ..make_custom_compatible_provider()
+    };
+    let messages = vec![Message::user("hello")];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let error = match rt.block_on(provider.complete(&messages, &[], "", None)) {
+        Ok(_) => panic!("a credential failure must not start a stream"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("external key approval revoked"),
+        "{error:#}"
+    );
+}
