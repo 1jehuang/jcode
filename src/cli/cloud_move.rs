@@ -52,6 +52,12 @@ mod repo_tests;
 #[path = "cloud_replace.rs"]
 mod replace;
 
+#[path = "cloud_session_ops.rs"]
+mod ops;
+
+#[path = "cloud_diagnostics.rs"]
+mod diagnostics;
+
 #[path = "cloud_env.rs"]
 pub(super) mod environment;
 
@@ -2044,6 +2050,52 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::Fork {
+            session,
+            prompt,
+            target,
+            json,
+        } => ops::fork(
+            session.as_deref(),
+            prompt.as_deref(),
+            &target_of(target),
+            json,
+        ),
+        C::Send {
+            session,
+            message,
+            json,
+        } => ops::send(&session, &message, json),
+        C::Status {
+            session,
+            messages,
+            json,
+        } => ops::status(&session, messages, json),
+        C::Wait {
+            session,
+            timeout,
+            messages,
+            json,
+        } => {
+            let result = ops::wait(&session, timeout, messages, json);
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.downcast_ref::<ops::WaitTimeout>().is_some())
+            {
+                std::process::exit(2);
+            }
+            result
+        }
+        C::Logs { session, lines } => ops::logs(&session, lines),
+        C::Problems { limit, json } => diagnostics::problems(limit, json),
+        C::Doctor { target, json } => diagnostics::doctor(&target_of(target), json),
+        C::Inspect {
+            session,
+            messages,
+            log_lines,
+        } => ops::inspect(&session, messages, log_lines),
+        C::RunDetached { session, message } => ops::run_detached(&session, &message),
         C::GroupProtocol => {
             println!("{}", serde_json::json!({ "version": 1 }));
             Ok(())
