@@ -714,6 +714,15 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
             options.mode(if desired.mode.is_some() { 0o600 } else { 0o666 });
         }
         let mut file = options.open(&temporary)?;
+        // Restore the original DACL onto the still-empty sibling before any
+        // contents land: it was created with the parent's inherited access, so
+        // writing first would briefly expose a private file. The open handle
+        // keeps write access. A new file records no descriptor and keeps the
+        // inherited access, like an ordinary write.
+        #[cfg(windows)]
+        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
+            write_security_descriptor(&temporary, &metadata.security_descriptor)?;
+        }
         file.write_all(&data)?;
         #[cfg(unix)]
         if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
@@ -745,13 +754,6 @@ fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
             let mut permissions = file.metadata()?.permissions();
             permissions.set_readonly(mode != 0);
             file.set_permissions(permissions)?;
-        }
-        // Restore the original DACL onto the staged sibling, which was created
-        // with the parent directory's inherited access. A new file records no
-        // descriptor, so it keeps that inherited access, like an ordinary write.
-        #[cfg(windows)]
-        if let Some(metadata) = desired.metadata.as_ref().or(actual.metadata.as_ref()) {
-            write_security_descriptor(&temporary, &metadata.security_descriptor)?;
         }
         file.sync_all()?;
         // Recheck after staging, rather than overwriting a newer external edit.
