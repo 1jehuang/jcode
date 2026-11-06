@@ -905,6 +905,8 @@ fn test_resize_resets_diagram_and_side_panel_diagram_view_to_fit() {
 
 #[test]
 fn test_side_panel_visibility_change_resets_diagram_fit_context() {
+    let _lock = crate::storage::lock_test_env();
+    let _provider_env = ProviderEnvGuard::clear();
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;

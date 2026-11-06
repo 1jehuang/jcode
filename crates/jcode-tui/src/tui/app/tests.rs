@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 mod tool_duration;
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
