@@ -2646,6 +2646,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
 #[test]
 fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
             &app.session.id,
@@ -2846,6 +2847,7 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
 #[test]
 fn test_finish_turn_challenges_confidence_spike_once() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
             &app.session.id,
