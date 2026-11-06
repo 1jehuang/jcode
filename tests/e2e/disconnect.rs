@@ -411,6 +411,38 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
                                 .any(|e| matches!(e, ServerEvent::Done { id: 2 })),
                             "cancelled turn must not report successful completion"
                         );
+                        // `Interrupted` only signals cancellation was requested;
+                        // the original task may still be unwinding. Wait until
+                        // the session reports no active turn before trusting the
+                        // saved transcript, or a stuck cancel would pass.
+                        timeout(Duration::from_secs(10), async {
+                            loop {
+                                send_native(
+                                    &mut writer,
+                                    serde_json::json!({"type":"get_history", "id":40}),
+                                )
+                                .await?;
+                                let events = native_until(&mut reader, |e| {
+                                    matches!(e,
+                                        ServerEvent::History {id:40, session_id: id, ..}
+                                        if id == &session_id
+                                    )
+                                })
+                                .await?;
+                                let idle = events.iter().any(|e| {
+                                    matches!(e,
+                                        ServerEvent::History {id:40, session_id: id, activity, ..}
+                                        if id == &session_id
+                                            && activity.as_ref().is_none_or(|a| !a.is_processing)
+                                    )
+                                });
+                                if idle {
+                                    break Ok::<_, anyhow::Error>(());
+                                }
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                        })
+                        .await??;
                     } else {
                         provider.finish.notify_one();
                         let events =
