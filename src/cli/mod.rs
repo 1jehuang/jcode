@@ -6,6 +6,7 @@ pub mod auth_test;
 pub mod cloud_ephemeral;
 pub mod cloud_managed;
 pub mod cloud_move;
+pub mod cloud_runtime;
 pub mod commands;
 pub mod compatible_runtime;
 pub mod debug;
