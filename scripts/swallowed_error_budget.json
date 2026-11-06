@@ -1,9 +1,9 @@
 {
-  "total": 4192,
+  "total": 4209,
   "totals_by_pattern": {
-    "dot_ok": 1653,
-    "let_underscore": 1505,
-    "unwrap_or_default": 1034
+    "dot_ok": 1660,
+    "let_underscore": 1513,
+    "unwrap_or_default": 1036
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -2378,7 +2378,7 @@
     },
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": {
       "dot_ok": 1,
-      "let_underscore": 4,
+      "let_underscore": 5,
       "unwrap_or_default": 6
     },
     "crates/jcode-tui/src/tui/app/commands_desktop.rs": {
@@ -2862,7 +2862,7 @@
       "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/ui_header/account_router.rs": {
-      "dot_ok": 1,
+      "dot_ok": 2,
       "let_underscore": 1,
       "unwrap_or_default": 3
     },
@@ -2981,6 +2981,11 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
+    "src/cli/cloud_diagnostics.rs": {
+      "dot_ok": 5,
+      "let_underscore": 6,
+      "unwrap_or_default": 2
+    },
     "src/cli/cloud_managed.rs": {
       "dot_ok": 5,
       "let_underscore": 1,
@@ -2990,6 +2995,11 @@
       "dot_ok": 26,
       "let_underscore": 14,
       "unwrap_or_default": 7
+    },
+    "src/cli/cloud_session_ops.rs": {
+      "dot_ok": 1,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
     },
     "src/cli/commands.rs": {
       "dot_ok": 13,
