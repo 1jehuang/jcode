@@ -214,13 +214,16 @@ pub enum Request {
         allow_session_takeover: bool,
         /// Legacy ownership hint, retained for wire compatibility. Disconnects
         /// only mark a session crashed when they interrupt unfinished processing,
-        /// regardless of this flag. Idle/completed sessions close normally.
+        /// regardless of this flag. Unless continuation is requested,
+        /// idle/completed sessions close normally.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         crash_on_disconnect: bool,
-        /// Keep an already-running turn alive when this transport disconnects.
-        /// Opt-in for remote clients only. Idle sessions still close normally,
-        /// and reattachment uses persisted history plus future live events, not
-        /// replay of missed deltas. This does not survive daemon termination.
+        /// Keep the live session and any running turn when this transport
+        /// disconnects.
+        /// Opt-in for remote clients only. Idle sessions remain available for
+        /// swarm reports and wake turns. Reattachment uses persisted history
+        /// plus future live events, not replay of missed deltas. This does not
+        /// survive daemon termination.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         continue_on_disconnect: bool,
         /// Terminal-identifying env vars (tmux/zellij/kitty/DISPLAY/...) captured
