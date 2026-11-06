@@ -146,6 +146,7 @@ jobs:
           python3 tests/test_bash_platform_guards.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
+          python3 scripts/test_reconcile_preview_release.py
           python3 tests/test_preview_linux_hosted.py
           python3 tests/test_package_preview_linux_hosted.py
           python3 tests/test_verify_public_release.py

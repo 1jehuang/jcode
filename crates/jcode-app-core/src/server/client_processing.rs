@@ -13,7 +13,14 @@ pub(super) async fn reconcile_processing_completions(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     while let Some((done_id, result, completion_report, owner, _finalization, published)) =
-        completion.take().or_else(|| receiver.try_recv().ok())
+        completion.take().or_else(|| match receiver.try_recv() {
+            Ok(completion) => Some(completion),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                crate::logging::debug("Processing completion channel disconnected");
+                None
+            }
+        })
     {
         if Some(done_id) != *state.message_id
             || state.task.as_ref().map(|task| task.id()) != Some(owner)
