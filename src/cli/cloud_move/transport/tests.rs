@@ -11,6 +11,18 @@ fn scripted_target(script: &str) -> Result<(tempfile::TempDir, Target)> {
     Ok((dir, target))
 }
 
+#[test]
+fn ssh_retry_reports_the_underlying_failure() {
+    let message = ssh_retry_message("jcode-cloud", 1, b"ssh: authentication failed\n");
+    assert!(message.contains("retrying (1/3)"));
+    assert!(message.ends_with("ssh: authentication failed"));
+    assert!(!message.contains("dropped"));
+    assert_eq!(
+        ssh_retry_message("host", 2, b" \n"),
+        "connection to `host` failed, retrying (2/3)"
+    );
+}
+
 fn account() -> CloudAccount {
     CloudAccount {
         provider: transfer::TransferProvider::OpenAi,
