@@ -17,7 +17,8 @@ struct LoggedProblem {
     ts: String,
     version: String,
     command: String,
-    session_id: String,
+    #[serde(rename = "session_id")]
+    _session_id: String,
     exit_code: Option<i32>,
     stderr: String,
 }
@@ -77,7 +78,6 @@ fn safe_problem(raw: LoggedProblem) -> Problem {
         | "problems" | "start" | "stop") => command.to_string(),
         _ => "cloud operation".into(),
     };
-    let _ = raw.session_id;
     Problem {
         ts,
         version,
@@ -115,7 +115,7 @@ fn read_problems(path: &Path, limit: usize) -> Problems {
             bytes = bytes
                 .splitn(2, |b| *b == b'\n')
                 .nth(1)
-                .unwrap_or_default()
+                .unwrap_or(&[])
                 .to_vec();
         }
         Ok(bytes)
@@ -131,7 +131,13 @@ fn read_problems(path: &Path, limit: usize) -> Problems {
         let record = if line.len() > MAX_LINE_BYTES {
             None
         } else {
-            serde_json::from_slice::<LoggedProblem>(line).ok()
+            match serde_json::from_slice::<LoggedProblem>(line) {
+                Ok(record) => Some(record),
+                Err(_) => {
+                    report.malformed_lines += 1;
+                    continue;
+                }
+            }
         };
         match record {
             Some(record) if limit > 0 => {
@@ -202,15 +208,16 @@ fn lease_counts(root: &Path) -> (usize, usize, usize) {
         if entry.path().extension().is_none_or(|ext| ext != "json") {
             continue;
         }
-        let lease = std::fs::File::open(entry.path()).ok().and_then(|file| {
+        let lease = (|| -> anyhow::Result<crate::storage::SessionLease> {
+            let file = std::fs::File::open(entry.path())?;
             let mut bytes = Vec::new();
-            file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
-            serde_json::from_slice::<crate::storage::SessionLease>(&bytes).ok()
-        });
+            file.take(64 * 1024).read_to_end(&mut bytes)?;
+            Ok(serde_json::from_slice(&bytes)?)
+        })();
         match lease {
-            Some(lease) if lease.away_host.is_some() => away += 1,
-            Some(_) => here += 1,
-            None => bad += 1,
+            Ok(lease) if lease.away_host.is_some() => away += 1,
+            Ok(_) => here += 1,
+            Err(_) => bad += 1,
         }
     }
     (away, here, bad)
@@ -219,6 +226,15 @@ fn lease_counts(root: &Path) -> (usize, usize, usize) {
 // No Target::run_remote, ssh_command, master_is_live, or custom transport here.
 // All can execute provisioning or user-supplied side effects. Disable proxy
 // execution on ordinary SSH aliases too, since an alias may point at managed SSH.
+fn stop_probe(child: &mut std::process::Child) {
+    if let Err(error) = child.kill() {
+        crate::logging::info(&format!("Could not stop cloud version probe: {error}"));
+    }
+    if let Err(error) = child.wait() {
+        crate::logging::info(&format!("Could not reap cloud version probe: {error}"));
+    }
+}
+
 fn version_probe(host: &str, binary: &str) -> (&'static str, Option<String>) {
     if host.starts_with('-') || host.trim().is_empty() {
         return ("invalid target", None);
@@ -239,14 +255,13 @@ fn version_probe(host: &str, binary: &str) -> (&'static str, Option<String>) {
         return ("SSH unavailable", None);
     };
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_probe(&mut child);
         return ("probe failed", None);
     };
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = stdout.take(4097).read_to_end(&mut bytes);
-        bytes
+        stdout.take(4097).read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
     });
     let deadline = Instant::now() + Duration::from_secs(8);
     let status = loop {
@@ -254,13 +269,16 @@ fn version_probe(host: &str, binary: &str) -> (&'static str, Option<String>) {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_probe(&mut child);
                 break None;
             }
         }
     };
-    let bytes = reader.join().unwrap_or_default();
+    let bytes = match reader.join() {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return ("probe output unreadable", None),
+        Err(_) => return ("probe reader failed", None),
+    };
     match status {
         Some(status) if status.success() => ("reachable", safe_version(&bytes)),
         Some(status) if status.code() == Some(255) => {
@@ -273,7 +291,13 @@ fn version_probe(host: &str, binary: &str) -> (&'static str, Option<String>) {
 
 fn safe_version(bytes: &[u8]) -> Option<String> {
     // Only emit the numeric release, never arbitrary SSH/banner/program output.
-    let text = std::str::from_utf8(bytes).ok()?.trim();
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text.trim(),
+        Err(_) => {
+            crate::logging::info("Cloud version probe returned non-UTF-8 output (withheld)");
+            return None;
+        }
+    };
     let version = text.strip_prefix("jcode ")?.split_whitespace().next()?;
     let release = version.trim_start_matches('v').split('-').next()?;
     (release.len() <= 40
@@ -441,6 +465,7 @@ mod tests {
             Some("jcode 0.99.714".into())
         );
         assert!(safe_version(b"Bearer secret-token").is_none());
+        assert!(safe_version(b"jcode \xff").is_none());
     }
 
     #[test]
