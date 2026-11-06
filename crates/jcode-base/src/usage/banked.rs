@@ -24,10 +24,12 @@ impl AccountBankedResets {
         expirations
             .iter()
             .flatten()
-            .filter_map(|raw| {
-                chrono::DateTime::parse_from_rfc3339(raw)
-                    .ok()
-                    .map(|at| (at, raw.clone()))
+            .filter_map(|raw| match chrono::DateTime::parse_from_rfc3339(raw) {
+                Ok(at) => Some((at, raw.clone())),
+                Err(error) => {
+                    crate::logging::info(&format!("Ignoring invalid banked reset expiry: {error}"));
+                    None
+                }
             })
             .min_by_key(|(at, _)| *at)
             .map(|(_, raw)| raw)
@@ -81,10 +83,10 @@ pub fn cached_account_banked_resets(
     }
     match provider {
         super::MultiAccountProviderKind::Anthropic => {
-            anthropic_offers().try_lock().ok()?.get(label).cloned()
+            try_cache_lock(anthropic_offers())?.get(label).cloned()
         }
         super::MultiAccountProviderKind::OpenAI => {
-            let map = super::cache::openai_usage_cache().try_lock().ok()?;
+            let map = try_cache_lock(super::cache::openai_usage_cache())?;
             let data = map.get(&format!("label:{label}"))?;
             if data.last_error.is_some() {
                 return None;
@@ -102,9 +104,46 @@ pub fn cached_account_banked_resets(
     }
 }
 
+fn try_cache_lock<T>(mutex: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            crate::logging::info("Banked reset cache poisoned, skipping cached offer");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_expirations_do_not_hide_valid_ones() {
+        assert_eq!(
+            AccountBankedResets::earliest_expiry(&[
+                Some("invalid".into()),
+                Some("2099-02-01T00:00:00Z".into()),
+                Some("2099-01-01T00:00:00Z".into()),
+            ])
+            .as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn busy_and_poisoned_caches_are_unavailable() {
+        let cache = Mutex::new(());
+        let guard = cache.lock().unwrap();
+        assert!(try_cache_lock(&cache).is_none());
+        drop(guard);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("poison cache");
+        });
+        assert!(try_cache_lock(&cache).is_none());
+    }
 
     #[test]
     fn anthropic_offer_is_recorded_and_cleared() {

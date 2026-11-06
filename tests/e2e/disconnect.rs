@@ -1,4 +1,4 @@
-//! Desktop-style abrupt disconnects through the real server and durable storage.
+//! Desktop and remote abrupt disconnects through the real server and durable storage.
 
 use crate::test_support::*;
 use jcode::session::SessionStatus;
@@ -132,32 +132,13 @@ async fn abrupt_disconnect(turn: Turn, continue_on_disconnect: bool) -> Result<(
         drop(writer);
         drop(reader);
         if continue_on_disconnect {
-            // Remote continuation is a session lifetime policy: after EOF the
-            // coordinator is retained (never Closed/Crashed), so it stays
-            // addressable for worker reports and wake turns. Confirm it both
-            // settles into retention and holds there.
-            timeout(Duration::from_secs(5), async {
-                for _ in 0..50 {
-                    let session = Session::load(&session_id)?;
-                    anyhow::ensure!(
-                        !matches!(
-                            session.status,
-                            SessionStatus::Closed | SessionStatus::Crashed { .. }
-                        ),
-                        "continue_on_disconnect session must be retained, got {:?}",
-                        session.status
-                    );
-                    if matches!(turn, Turn::Completed) {
-                        anyhow::ensure!(
-                            serde_json::to_string(&session)?.contains("finished successfully"),
-                            "completed transcript must persist"
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await??;
+            assert_retained_and_reconnect(&socket, &session_id).await?;
+            if matches!(turn, Turn::Completed) {
+                assert!(
+                    serde_json::to_string(&Session::load(&session_id)?)?
+                        .contains("finished successfully")
+                );
+            }
             return Ok(());
         }
         timeout(Duration::from_secs(10), async {
@@ -280,6 +261,39 @@ enum RemoteTurnEnd {
     Reattach,
     Detached,
     Cancel,
+}
+
+/// Observe durable retention after EOF, then reclaim the same idle live session.
+async fn assert_retained_and_reconnect(socket: &std::path::Path, session_id: &str) -> Result<()> {
+    // Give the old attachment's EOF cleanup a chance to run. Check throughout
+    // the interval rather than accepting a single pre-cleanup Active snapshot.
+    for _ in 0..25 {
+        assert_eq!(Session::load(session_id)?.status, SessionStatus::Active);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let connection = server::connect_socket(socket).await?;
+    let (reader, mut writer) = connection.into_split();
+    let mut reader = BufReader::new(reader);
+    send_native(
+        &mut writer,
+        serde_json::json!({
+            "type":"subscribe", "id":61, "working_dir":std::env::current_dir()?,
+            "target_session_id":session_id, "continue_on_disconnect":true,
+            "client_has_local_history":false,
+        }),
+    )
+    .await?;
+    let events = native_until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 61 })).await?;
+    anyhow::ensure!(
+        events.iter().any(|e| matches!(e,
+            ServerEvent::History {session_id: id, activity, ..}
+                if id == session_id && activity.as_ref().is_none_or(|a| !a.is_processing)
+        )),
+        "reconnect must restore the same retained idle session"
+    );
+    assert_eq!(Session::load(session_id)?.status, SessionStatus::Active);
+    drop((reader, writer));
+    Ok(())
 }
 
 async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
@@ -494,33 +508,27 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
         timeout(Duration::from_secs(10), async {
             loop {
                 let session = Session::load(&session_id)?;
-                anyhow::ensure!(
-                    !matches!(session.status, SessionStatus::Crashed { .. }),
-                    "opted-in disconnected turn must not crash"
-                );
-                anyhow::ensure!(
-                    session.status != SessionStatus::Closed,
-                    "continue_on_disconnect session must be retained, not closed"
-                );
+                assert_eq!(session.status, SessionStatus::Active);
                 let transcript = serde_json::to_string(&session)?;
-                let settled = if matches!(end, RemoteTurnEnd::Cancel) {
-                    // Cancellation was already confirmed via the Interrupted
-                    // event; the stopped stream must never persist its output.
-                    anyhow::ensure!(
-                        !transcript.contains("after reconnect"),
-                        "cancel must stop provider stream"
-                    );
-                    true
-                } else {
-                    transcript.contains("after reconnect")
-                };
-                if settled {
+                if matches!(end, RemoteTurnEnd::Cancel) || transcript.contains("after reconnect") {
+                    if matches!(end, RemoteTurnEnd::Cancel) {
+                        anyhow::ensure!(
+                            !transcript.contains("after reconnect"),
+                            "cancel must stop provider stream"
+                        );
+                    } else {
+                        anyhow::ensure!(
+                            transcript.contains("after reconnect"),
+                            "completed work must persist"
+                        );
+                    }
                     break Ok::<_, anyhow::Error>(());
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await??;
+        assert_retained_and_reconnect(&socket, &session_id).await?;
         if matches!(end, RemoteTurnEnd::Detached) {
             let connection = server::connect_socket(&socket).await?;
             let (reader, mut writer) = connection.into_split();
@@ -566,7 +574,7 @@ async fn remote_disconnect_reattaches_twice_and_finishes_original_turn() -> Resu
 }
 
 #[tokio::test]
-async fn remote_disconnect_finishes_without_reattach_and_closes_session() -> Result<()> {
+async fn remote_disconnect_finishes_without_reattach_and_retains_session() -> Result<()> {
     remote_disconnect_turn(RemoteTurnEnd::Detached).await
 }
 
@@ -576,12 +584,12 @@ async fn remote_disconnect_reattaches_and_cancels_original_turn() -> Result<()> 
 }
 
 #[tokio::test]
-async fn remote_disconnect_while_idle_closes_session() -> Result<()> {
+async fn remote_disconnect_while_idle_retains_session() -> Result<()> {
     abrupt_disconnect(Turn::Idle, true).await
 }
 
 #[tokio::test]
-async fn remote_disconnect_after_done_closes_session() -> Result<()> {
+async fn remote_disconnect_after_done_retains_session() -> Result<()> {
     abrupt_disconnect(Turn::Completed, true).await
 }
 

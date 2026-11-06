@@ -11,6 +11,8 @@ maintenance checks are advisory only for previews, not stable releases.
 
 New pushes intentionally cancel obsolete previews. The quiet period is not a
 promise to publish in 15 minutes: CI and all platform builds must finish too.
+Manual/recovery dispatches queue instead of cancelling an active build, even
+if the Actions run-list API has not caught up yet.
 
 **Preview Recovery** now reconciles current master when push CI completes,
 and at minutes 17 and 47 each hour. Scheduled Actions can be delayed by GitHub.

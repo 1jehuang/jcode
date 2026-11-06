@@ -95,12 +95,39 @@ enum CardRow<'a> {
     Spacer,
 }
 
+fn parse_card_percent(text: &str) -> Option<f32> {
+    match text.parse::<f32>() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Invalid usage card percentage, rendering as text: {error}"
+            ));
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod card_parse_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_header_falls_back_and_invalid_gauge_remains_visible() {
+        assert!(ProviderCard::parse("*%\tnot-a-number").is_none());
+        let card = ProviderCard::parse("*ok\tReady\n= Window\tbad\tsoon").unwrap();
+        assert!(matches!(card.rows[0], CardRow::Note("Window\tbad\tsoon")));
+        let card = ProviderCard::parse("*%\t42.4\n= Window\t101%\tsoon").unwrap();
+        assert!(matches!(card.status, CardStatus::Peak(42)));
+        assert!(matches!(card.rows[0], CardRow::Gauge { used: 100, .. }));
+    }
+}
+
 impl<'a> ProviderCard<'a> {
     fn parse(content: &'a str) -> Option<Self> {
         let mut lines = content.lines();
         let (level, text) = lines.next()?.strip_prefix('*')?.split_once('\t')?;
         let status = if level == "%" {
-            CardStatus::Peak(text.parse::<f32>().ok()?.round().clamp(0.0, 100.0) as u8)
+            CardStatus::Peak(parse_card_percent(text)?.round().clamp(0.0, 100.0) as u8)
         } else {
             CardStatus::Level(level, text)
         };
@@ -118,10 +145,12 @@ impl<'a> ProviderCard<'a> {
                     CardRow::Spacer
                 } else if let Some(rest) = raw.strip_prefix("= ") {
                     let mut parts = rest.splitn(3, '\t');
-                    let label = parts.next().unwrap_or_default();
+                    let Some(label) = parts.next() else {
+                        return CardRow::Note(rest);
+                    };
                     match parts
                         .next()
-                        .and_then(|pct| pct.trim_end_matches('%').parse::<f32>().ok())
+                        .and_then(|pct| parse_card_percent(pct.trim_end_matches('%')))
                     {
                         Some(pct) => CardRow::Gauge {
                             label,
@@ -286,7 +315,10 @@ impl<'a> ProviderCard<'a> {
                         // Label above the bar, wrapped rather than clipped, with
                         // the countdown right-aligned on the label's last line
                         // (or its own line when the card is very narrow).
-                        let tail = reset.map(countdown).unwrap_or_default();
+                        let tail = match reset {
+                            Some(reset) => countdown(reset),
+                            None => String::new(),
+                        };
                         let room = inner.saturating_sub(tail.width() + 2);
                         let (parts, tail_inline) = if tail.is_empty() {
                             (wrap_words(label, inner), true)
