@@ -138,6 +138,7 @@ impl App {
         if self.try_coalesce_repeated_display_message(&message) {
             return;
         }
+        self.maybe_ingest_six_lens_review_message(&message);
         let is_tool = message.role == "tool";
         // Track the trailing run of assistant messages so a provider
         // RetryRollback can remove exactly the current attempt's committed
@@ -174,6 +175,8 @@ impl App {
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
+        self.suggested_replies.last_reviewed_edit_count = self.display_edit_tool_message_count;
+        self.maybe_ingest_latest_six_lens_review_from_history();
         self.note_runtime_memory_event_force("display_messages_replaced", "display_history_reset");
     }
 
@@ -652,6 +655,7 @@ impl App {
     }
 
     pub(super) fn clear_display_messages(&mut self) {
+        self.invalidate_suggested_replies_on_session_switch();
         self.compacted_history_lazy = CompactedHistoryLazyState::default();
         // The transcript is about to be discarded; forget where the live reasoning
         // block started so a stale offset can't slice the new stream.

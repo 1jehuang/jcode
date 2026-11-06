@@ -698,11 +698,20 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
+    if input::is_alternate_enter(code, modifiers)
+        && (!app.input.trim().starts_with('/') || app.suggested_replies_has_staged_input())
+    {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
 
+        app.try_stage_suggested_reply_for_remote_enter(true);
+        if app.input.trim().starts_with('/') {
+            if input::try_queue_command(app) {
+                return Ok(());
+            }
+            return submit_remote_enter_input(app, remote).await;
+        }
         if !app.input.is_empty() {
             let prepared = input::take_prepared_input(app);
 
@@ -726,6 +735,10 @@ pub(super) async fn handle_remote_key_internal(
     }
 
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
+        return Ok(());
+    }
+
+    if app.handle_suggested_replies_arrow_key(code, modifiers) {
         return Ok(());
     }
 
@@ -760,6 +773,8 @@ pub(super) async fn handle_remote_key_internal(
             _ => {}
         }
     }
+
+    app.cancel_suggested_replies_for_cursor_key(code);
 
     // A modified chord (or function key) that reached this point is not bound
     // to anything; tell the user instead of silently swallowing it.
@@ -809,7 +824,9 @@ pub(super) async fn handle_remote_key_internal(
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            app.autocomplete();
+            if app.handle_suggested_replies_tab_remote() {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Enter => {
             submit_remote_enter_input(app, remote).await?;

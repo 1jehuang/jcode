@@ -268,6 +268,7 @@ fn primary_status_spinner_fast_path_available_with_policy(
         && !state.centered_mode()
         && !state.has_pending_mouse_scroll_animation()
         && !state.remote_startup_phase_active()
+        && !state.explorer_countdown_active()
 }
 
 fn primary_status_spinner_needs_full_redraw_with_policy(
@@ -435,6 +436,10 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         return REDRAW_COPY_AUTOSCROLL;
     }
 
+    if state.explorer_countdown_active() {
+        return REDRAW_IDLE;
+    }
+
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
     // worth a fast tick: decorative animations are paused and the run loop only
     // repaints throttled idle frames. Use the slow deep-idle interval so the
@@ -446,6 +451,7 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
+        && !state.explorer_countdown_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
     {
@@ -460,6 +466,7 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
+        && !state.explorer_countdown_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
         && state.openai_reset_hint().is_none()
@@ -608,6 +615,7 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
+        && !state.explorer_countdown_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
         && state.openai_reset_hint().is_none()
@@ -684,6 +692,9 @@ fn live_activity_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
     }
     if state.remote_startup_phase_active() {
         return Some("remote_startup");
+    }
+    if state.explorer_countdown_active() {
+        return Some("explorer_countdown");
     }
     None
 }

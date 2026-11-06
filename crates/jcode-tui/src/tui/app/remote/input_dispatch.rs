@@ -38,6 +38,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
         app.cloud_recovery_context = None;
         app.cloud_recovery_auto_pending = false;
     }
+    app.clear_suggested_replies_for_new_turn();
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;

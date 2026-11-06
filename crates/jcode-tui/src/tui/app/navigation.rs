@@ -1344,6 +1344,10 @@ impl App {
             }};
         }
 
+        if let Some(tag) = self.handle_suggested_reply_mouse_click(mouse) {
+            finish_mouse_event!(false, tag);
+        }
+
         if self.panel_image_preview.is_some() {
             if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
                 self.close_panel_image_preview();
