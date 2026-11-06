@@ -55,15 +55,16 @@ fn approved_external_source_holds(refresh_token: &str) -> bool {
     claude_code || native || opencode
 }
 
-/// Commit tokens refreshed after [`capture_refresh_account`].
+/// Commit tokens refreshed after [`capture_refresh_account`], retaining the original token.
 pub(in crate::auth) fn commit_captured_refresh(
     label: &str,
     expected: Option<&AnthropicAccount>,
+    refresh_token: &str,
     tokens: &crate::auth::oauth::OAuthTokens,
 ) -> Result<()> {
     match expected {
         Some(expected) => commit_refresh_account(expected, tokens),
-        None => commit_external_refresh(label, tokens),
+        None => commit_external_refresh(label, refresh_token, tokens),
     }
 }
 
@@ -71,6 +72,7 @@ pub(in crate::auth) fn commit_captured_refresh(
 /// once refreshed. Keep the new tokens, unless a login took the label meanwhile.
 pub(super) fn commit_external_refresh(
     label: &str,
+    refresh_token: &str,
     tokens: &crate::auth::oauth::OAuthTokens,
 ) -> Result<()> {
     let _store_lock =
@@ -82,6 +84,10 @@ pub(super) fn commit_external_refresh(
             .iter()
             .any(|account| account.label == label),
         "Claude login changed while token refresh was pending; refreshed tokens were not saved"
+    );
+    anyhow::ensure!(
+        !refresh_token.is_empty() && approved_external_source_holds(refresh_token),
+        "Claude external login approval changed while token refresh was pending; refreshed tokens were not saved"
     );
     crate::auth::account_store::upsert_account(
         super::ACCOUNT_LABEL_PREFIX,
