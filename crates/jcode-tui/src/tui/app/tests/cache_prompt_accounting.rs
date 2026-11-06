@@ -484,11 +484,11 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
 
 #[test]
 fn replay_runtime_suppresses_local_agent_model_override_rows() {
-    // Replay playback shows the recording's own model; today's local
-    // `agents.swarm_model`/`agents.memory_model` overrides belong to a live
-    // session and would mislead if rendered against a recording. Both remote
-    // and replay suppress the rows, so drive the config through a temp home
-    // and assert each runtime mode in isolation.
+    // Replay playback shows the recording's own model; today's live-session
+    // worker models would mislead if rendered against a recording. Replay
+    // suppresses the rows, while local and daemon-attached (remote) sessions
+    // resolve them from config + session overrides. Drive the config through
+    // a temp home and assert each runtime mode in isolation.
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -518,16 +518,28 @@ fn replay_runtime_suppresses_local_agent_model_override_rows() {
     let app = create_test_app();
     assert_eq!(overrides_visible(&app), (true, true, true, true));
 
+    // Daemon-attached (remote) sessions resolve the same config + session
+    // overrides: the swarm model row must report instead of vanishing.
+    let mut remote = create_test_app();
+    remote.is_remote = true;
+    remote.runtime_mode = AppRuntimeMode::RemoteClient;
+    assert_eq!(overrides_visible(&remote), (true, true, true, true));
+
+    // A per-session /agents pick arrives through History and outranks config.
+    let mut session_scoped = create_test_app();
+    session_scoped.is_remote = true;
+    session_scoped.runtime_mode = AppRuntimeMode::RemoteClient;
+    session_scoped
+        .session
+        .agent_model_overrides
+        .insert("swarm".to_string(), "glm-5.2-air".to_string());
+    let data = crate::tui::TuiState::info_widget_data(&session_scoped);
+    assert_eq!(data.swarm_model_override.as_deref(), Some("glm-5.2-air"));
+
     // Replay runtime: the recording is the truth; overrides stay hidden.
     let mut replay = create_test_app();
     replay.runtime_mode = AppRuntimeMode::Replay;
     assert_eq!(overrides_visible(&replay), (false, false, false, false));
-
-    // Remote client: server owns the settings (pre-existing behavior).
-    let mut remote = create_test_app();
-    remote.is_remote = true;
-    remote.runtime_mode = AppRuntimeMode::RemoteClient;
-    assert_eq!(overrides_visible(&remote), (false, false, false, false));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

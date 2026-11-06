@@ -182,14 +182,21 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
         });
     }
 
-    // Agent model overrides from config. Only shown when actually set; the
-    // inherit default (None) is silent to keep the panel compact. Like the
-    // memory row below, the swarm row also appears for an effort-only
-    // setting (`agents.swarm_effort` without `agents.swarm_model`), so users
-    // can verify the worker effort in the panel.
+    // Agent model overrides from config. A concrete override always shows;
+    // the explicit "inherit"/"coordinator" sentinels also render (as an
+    // inherit row) so users can verify the setting in the panel, matching
+    // the pickers' "inherit coordinator" entry. Like the memory row below,
+    // the swarm row also appears for an effort-only setting
+    // (`agents.swarm_effort` without `agents.swarm_model`), so users can
+    // verify the worker effort in the panel.
     if let Some(model) = non_empty(data.swarm_model_override.as_deref()) {
-        let mut text = model.to_string();
-        if let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
+        let inherited = is_inherit_sentinel(model);
+        let mut text = if inherited {
+            "inherit coordinator".to_string()
+        } else {
+            model.to_string()
+        };
+        if !inherited && let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
             text.push_str(&format!(" · {effort}"));
         }
         rows.push(RuntimeRow {
@@ -212,8 +219,13 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
     // (`agents.memory_effort` without a model override), so users can
     // verify the sidecar effort in the panel.
     if let Some(model) = non_empty(data.memory_model_override.as_deref()) {
-        let mut text = model.to_string();
-        if let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
+        let inherited = is_inherit_sentinel(model);
+        let mut text = if inherited {
+            "inherit coordinator".to_string()
+        } else {
+            model.to_string()
+        };
+        if !inherited && let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
             text.push_str(&format!(" · {effort}"));
         }
         rows.push(RuntimeRow {
@@ -325,6 +337,14 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The "inherit"/"coordinator" sentinels mean the worker takes the
+/// coordinator's model instead of a concrete override. Case-insensitive like
+/// the server's `is_inherit_sentinel` so a hand-edited config still matches.
+fn is_inherit_sentinel(model: &str) -> bool {
+    let trimmed = model.trim();
+    trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
 }
 
 fn short_service_tier(service_tier: &str) -> Option<&str> {
@@ -585,6 +605,28 @@ mod tests {
         let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
         assert!(overview.contains("🐝 · low"), "{overview}");
         assert_eq!(runtime_height(&d), 2);
+    }
+
+    #[test]
+    fn inherit_sentinels_render_explicit_inherit_rows() {
+        // `agents.swarm_model = "inherit"` (or "coordinator") is an explicit
+        // setting users must be able to verify in the panel, not a silent no-op:
+        // the row renders "inherit coordinator" and drops the effort suffix
+        // (inherited workers use the coordinator's settings wholesale).
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_override = Some(" Inherit ".to_string());
+        d.swarm_model_effort = Some("low".to_string());
+        d.memory_model_override = Some("coordinator".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 inherit coordinator"), "{out}");
+        assert!(out.contains("🧠 inherit coordinator"), "{out}");
+        assert!(!out.contains("· low"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("🐝 inherit coordinator"), "{overview}");
+        // Selected model row plus one inherit row per override target.
+        assert_eq!(runtime_height(&d), 3);
     }
 
     #[test]

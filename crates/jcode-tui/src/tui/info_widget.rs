@@ -2135,7 +2135,8 @@ fn render_sections(
 
     // Section order matches master's Overview so both stay visually aligned:
     // Runtime → Memory → Background → Usage → KV cache → Compaction
-    // → Changes → Commits → Swarm.
+    // → Changes → Commits. (Swarm members live in the inline gallery/dock,
+    // not here.)
 
     // Detail layer only: model identity, context %, and branch/counts live on
     // the overscroll status line and are never repeated here.

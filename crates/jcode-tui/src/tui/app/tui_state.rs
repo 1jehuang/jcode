@@ -306,6 +306,31 @@ impl App {
         }
     }
 
+    /// Effective worker model for one agent target ("swarm", "memory"),
+    /// resolving session > global exactly like the server's spawn path
+    /// (`session_swarm_model` + `effective_agent_model`). Live daemon-attached
+    /// sessions receive the per-session `/agents` picks through History, so
+    /// this reports the model workers actually run on instead of suppressing
+    /// the row. Prefers the in-memory overrides (kept current by History and
+    /// the pickers) so the per-frame widget data path does not hit the
+    /// sidecar file. SSH-remote sessions suppress the global-config fallback:
+    /// their server owns the config and the client's file may differ. The
+    /// returned string keeps "inherit"/"coordinator" sentinels verbatim,
+    /// which the runtime rows render as an inherit row.
+    fn effective_worker_model(&self, target: &str) -> Option<String> {
+        if let Some(model) = self.session.agent_model_overrides.get(target) {
+            return Some(model.clone());
+        }
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        match target {
+            "swarm" => crate::config::config().agents.swarm_model.clone(),
+            "memory" => crate::config::config().agents.memory_model.clone(),
+            _ => None,
+        }
+    }
+
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
         let remote_provider_name = if uses_remote_widget_metadata {
@@ -1854,21 +1879,24 @@ impl crate::tui::TuiState for App {
             context_limit: Some(self.context_limit as usize),
             model,
             reasoning_effort,
-            // Agent model overrides (agents.swarm_model / agents.memory_model).
-            // None means inherit, which renders no row. In remote sessions
-            // the server owns these settings, and in replay the recording's
-            // model is the truth: today's local overrides would mislead in
-            // both cases, so keep the rows unset instead of guessing.
-            swarm_model_override: (!uses_remote_widget_metadata)
-                .then(|| crate::config::config().agents.swarm_model.clone())
+            // Agent model overrides (agents.swarm_model / agents.memory_model
+            // plus per-session /agents picks). Replay stays unset: the
+            // recording's model is the truth and today's overrides would
+            // mislead. Live sessions (local or daemon-attached) resolve
+            // session > global, exactly like the spawn path does, so the
+            // panel shows the model workers actually run on. A concrete
+            // override renders its row; "inherit"/"coordinator" sentinels
+            // render an explicit inherit row so the setting is verifiable.
+            swarm_model_override: (!self.is_replay_runtime())
+                .then(|| self.effective_worker_model("swarm"))
                 .flatten(),
-            swarm_model_effort: (!uses_remote_widget_metadata)
+            swarm_model_effort: (!self.is_replay_runtime())
                 .then(|| crate::config::config().agents.swarm_effort.clone())
                 .flatten(),
-            memory_model_override: (!uses_remote_widget_metadata)
-                .then(|| crate::config::config().agents.memory_model.clone())
+            memory_model_override: (!self.is_replay_runtime())
+                .then(|| self.effective_worker_model("memory"))
                 .flatten(),
-            memory_model_effort: (!uses_remote_widget_metadata)
+            memory_model_effort: (!self.is_replay_runtime())
                 .then(|| crate::config::config().agents.memory_effort.clone())
                 .flatten(),
             service_tier: if !self.is_remote {
