@@ -3173,7 +3173,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
+    let blocker_height = blocker_lines
+        .len()
+        .min(usize::from(chat_area.height.saturating_sub(6))) as u16;
+    let inline_ui_gap_height: u16 = blocker_height.max(if inline_block_height > 0 { 1 } else { 0 });
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
@@ -3663,6 +3667,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Draw inline UI if active
     if inline_block_height > 0 {
         draw_inline_ui(frame, app, chunks[5]);
+    }
+
+    if blocker_height > 0 {
+        frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
     }
 
     let _input_cursor = input_ui::draw_input(
