@@ -56,6 +56,14 @@ fn mobile_does_not_match_command_prefixes() {
 
 #[test]
 fn mobile_is_registered_once_and_visible_in_command_help() {
+    let app = crate::tui::app::tests::create_test_app();
+    for topic in ["mobile", "/mobile", " MOBILE "] {
+        let detailed = app
+            .command_help(topic)
+            .expect("mobile detailed help should exist");
+        assert!(detailed.contains("/mobile cancel"));
+        assert!(detailed.contains("push notification"));
+    }
     assert_eq!(
         crate::tui::app::registered_command_names()
             .filter(|name| *name == "/mobile")
