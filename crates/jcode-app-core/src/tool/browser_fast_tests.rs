@@ -612,6 +612,36 @@ fn whole_tab_actions_cannot_escape_explicit_subframe() {
     }
 }
 
+#[test]
+fn scoped_inputs_inherit_requested_browser() {
+    let mut parent = input();
+    parent.browser = Some("edge".into());
+    let observe = scoped(
+        BrowserInput {
+            action: "eval".into(),
+            script: Some(OBSERVE_SCRIPT.into()),
+            ..Default::default()
+        },
+        &parent,
+    )
+    .unwrap();
+    assert_eq!(observe.browser.as_deref(), Some("edge"));
+    let click = scoped(
+        serde_json::from_value(json!({"action":"click","selector":"#go"})).unwrap(),
+        &parent,
+    )
+    .unwrap();
+    assert_eq!(click.browser.as_deref(), Some("edge"));
+    assert!(
+        scoped(
+            serde_json::from_value(json!({"action":"click","selector":"#go","browser":"firefox"}))
+                .unwrap(),
+            &parent,
+        )
+        .is_err()
+    );
+}
+
 #[tokio::test]
 async fn mismatched_window_is_rejected_before_observing_page() {
     let browser = MockBrowser::new(vec![]);
