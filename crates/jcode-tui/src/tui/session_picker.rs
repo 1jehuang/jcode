@@ -312,6 +312,8 @@ pub struct SessionPicker {
     transcript_search: transcript_search::TranscriptSearch,
     /// Briefly follow new best matches, unless the user starts browsing.
     search_selection: filter::SearchSelection,
+    /// Enter waits for the current query results, never for a new deadline.
+    pending_search_submission: Option<KeyModifiers>,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
     resume_latency: latency::Latency,
@@ -406,6 +408,7 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
+            pending_search_submission: None,
             loading_message: None,
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
@@ -466,6 +469,7 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
+            pending_search_submission: None,
             loading_message: Some("Loading sessions…".to_string()),
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
@@ -558,6 +562,7 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
+            pending_search_submission: None,
             loading_message: None,
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
@@ -1227,6 +1232,44 @@ impl SessionPicker {
         }
     }
 
+    pub fn search_submission_pending(&self) -> bool {
+        self.pending_search_submission.is_some()
+    }
+
+    /// Advance queued Enter without waiting on transcript I/O. Repeated Enter
+    /// cannot extend the existing query-following deadline.
+    pub fn poll_search_submission(&mut self) -> Option<OverlayAction> {
+        let modifiers = self.pending_search_submission?;
+        self.poll_transcript_search();
+        if self.transcript_search.pending() && self.search_selection.following() {
+            return None;
+        }
+        self.pending_search_submission = None;
+        self.rebuild_items_following();
+        let targets = self.selection_or_current_targets();
+        if targets.is_empty() {
+            // Keep a no-match query editable. Later results must not auto-submit.
+            self.search_active = true;
+            return None;
+        }
+        self.search_active = false;
+        Some(OverlayAction::Selected(
+            self.selection_result_for_enter(targets, modifiers),
+        ))
+    }
+
+    fn queue_search_submission(&mut self, modifiers: KeyModifiers) -> bool {
+        if !self.search_query.trim().is_empty()
+            && self.search_selection.following()
+            && self.transcript_search.pending()
+        {
+            self.pending_search_submission = Some(modifiers);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Standalone picker input follows the main TUI's press/repeat policy.
     /// Release events must not trigger navigation, editing, or selection.
     fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
@@ -1248,6 +1291,13 @@ impl SessionPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<OverlayAction> {
+        if code != KeyCode::Enter {
+            self.pending_search_submission = None;
+        } else if self.pending_search_submission.is_some() {
+            return Ok(self
+                .poll_search_submission()
+                .unwrap_or(OverlayAction::Continue));
+        }
         let at = std::time::Instant::now();
         let before = self.latency_selection_id();
         let result = self.handle_overlay_key_inner(code, modifiers);
@@ -1327,6 +1377,9 @@ impl SessionPicker {
                 }
                 if self.onboarding_review_recent_project_highlighted() {
                     return Ok(OverlayAction::Selected(PickerResult::ReviewRecentProject));
+                }
+                if self.queue_search_submission(modifiers) {
+                    return Ok(OverlayAction::Continue);
                 }
                 let targets = self.selection_or_current_targets();
                 if !targets.is_empty() {
@@ -2318,6 +2371,9 @@ impl SessionPicker {
                         ));
                     }
                 }
+            }
+            if let Some(OverlayAction::Selected(result)) = self.poll_search_submission() {
+                break Ok(Some(result));
             }
             if event::poll(input_poll_timeout)? {
                 match event::read()? {

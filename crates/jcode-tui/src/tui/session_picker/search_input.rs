@@ -69,6 +69,10 @@ impl SessionPicker {
                 self.rebuild_items();
             }
             KeyCode::Enter => {
+                // Enter waits for the current query's best match to settle.
+                if self.queue_search_submission(modifiers) {
+                    return Ok(OverlayAction::Continue);
+                }
                 self.search_active = false;
                 if self.visible_sessions.is_empty() {
                     self.search_query.clear();

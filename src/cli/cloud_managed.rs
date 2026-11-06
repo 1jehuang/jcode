@@ -645,7 +645,26 @@ version_at_least() {{
       exit 0;
     }}'
 }}
-if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version_at_least "$cli" || ! version_at_least "$backend"; }}; }} || [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" = 1 ]; then
+managed_updater="$(dirname "$backend")/runtime-update"
+if [ -x "$managed_updater" ]; then
+  # Once migrated, the host owns release policy and the shared install lock.
+  # Never let a client preflight silently replace a dev/pinned runtime, even
+  # when this client's release number is newer or a fallback upload was built.
+  [ -z "$development_candidate" ] || {{
+    echo '[cloud prepare] this host has managed runtime policy; explicitly select a compatible package with jcode cloud runtime push --artifact PATH' >&2
+    exit 1
+  }}
+  if ! capable "$cli" || ! capable "$backend"; then
+    {privilege}"$managed_updater" check >/dev/null || {{
+      echo '[cloud prepare] managed runtime check failed; preserving the current policy and installation' >&2
+      exit 1
+    }}
+  fi
+  capable "$cli" && capable "$backend" || {{
+    echo '[cloud prepare] selected cloud runtime lacks required handoff capabilities; use jcode cloud runtime push --artifact PATH or explicitly change its runtime policy' >&2
+    exit 1
+  }}
+elif ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version_at_least "$cli" || ! version_at_least "$backend"; }}; }} || [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" = 1 ]; then
   if [ -z "$want" ] && [ -z "$development_candidate" ]; then
     # Development builds have no corresponding published tag. Resolve the
     # canonical latest redirect, then pin and validate that exact release.

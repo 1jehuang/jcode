@@ -46,9 +46,17 @@ fn assert_cached_selection(
     );
     assert_eq!(picker.selected_session().unwrap().id, expected);
     assert!(rendered_text(&mut picker).contains(expected));
-    let action = picker
+    let mut action = picker
         .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
+    if picker.search_submission_pending() {
+        // Enter waits for the typed query's search to settle. Ending the
+        // follow window must still resolve to the typed target, not another.
+        picker.search_selection.expire_for_test();
+        action = picker
+            .poll_search_submission()
+            .unwrap_or(OverlayAction::Continue);
+    }
     assert!(matches!(
         action,
         OverlayAction::Selected(
