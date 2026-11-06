@@ -3570,6 +3570,29 @@ impl App {
             let mut picker = picker_cell.borrow_mut();
             picker.handle_overlay_key(code, modifiers)?
         };
+        self.handle_session_picker_action(action);
+        Ok(())
+    }
+
+    pub(super) fn poll_session_picker_search_submission(&mut self) -> bool {
+        let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
+            return false;
+        };
+        let (pending, action) = {
+            let mut picker = picker_cell.borrow_mut();
+            (
+                picker.search_submission_pending(),
+                picker.poll_search_submission(),
+            )
+        };
+        let Some(action) = action else {
+            return pending;
+        };
+        self.handle_session_picker_action(action);
+        true
+    }
+
+    fn handle_session_picker_action(&mut self, action: OverlayAction) {
         match action {
             OverlayAction::Continue => {}
             OverlayAction::Close => {
@@ -3593,7 +3616,7 @@ impl App {
                         if self.handle_live_claude_takeover(&target) {
                             self.onboarding_finish();
                         }
-                        return Ok(());
+                        return;
                     }
                     PickerResult::RestoreCrashedGroup(_) => Vec::new(),
                     PickerResult::StartNewSession => {
@@ -3602,13 +3625,13 @@ impl App {
                         self.session_picker_overlay = None;
                         self.session_picker_mode = SessionPickerMode::Resume;
                         self.onboarding_show_suggestions();
-                        return Ok(());
+                        return;
                     }
                     PickerResult::ReviewRecentProject => {
                         self.session_picker_overlay = None;
                         self.session_picker_mode = SessionPickerMode::Resume;
                         self.onboarding_start_recent_project_review();
-                        return Ok(());
+                        return;
                     }
                 };
                 self.session_picker_overlay = None;
@@ -3658,7 +3681,6 @@ impl App {
                 self.session_picker_mode = SessionPickerMode::Resume;
             }
         }
-        Ok(())
     }
 
     /// Switch to the picked model row, applying `effort` (the level chosen
@@ -4880,6 +4902,10 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "queued_picker_submission_tests.rs"]
+mod queued_picker_submission_tests;
 
 #[cfg(test)]
 #[path = "inline_interactive_tests.rs"]

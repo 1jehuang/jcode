@@ -223,6 +223,46 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
     }
 
     #[test]
+    fn managed_policy_keeps_capable_runtime_despite_newer_client_release() {
+        let f = Fixture::new();
+        f.installed(true);
+        executable(
+            &f.dir.path().join("opt/runtime-update"),
+            "#!/bin/sh\necho unexpected-policy-change >&2\nexit 98\n",
+        );
+        let result = f.run(Some("v99.0.0"));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        f.assert_old();
+        assert!(!f.dir.path().join("downloads").exists());
+    }
+
+    #[test]
+    fn managed_policy_rejects_implicit_dev_upload_and_missing_capabilities() {
+        let f = Fixture::new();
+        f.installed(false);
+        executable(
+            &f.dir.path().join("opt/runtime-update"),
+            "#!/bin/sh\n[ \"$1\" = check ] || exit 98\necho checked >> \"$HOME/policy-checks\"\n",
+        );
+        let result = f.run(None);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("selected cloud runtime lacks"));
+        assert!(f.dir.path().join("policy-checks").exists());
+        assert!(!f.dir.path().join("downloads").exists());
+        let result = f.run_candidate(None, Some("jcode"));
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("explicitly select a compatible package")
+        );
+        f.assert_old();
+    }
+
+    #[test]
     fn development_keeps_capable_cli_without_downloading() {
         let f = Fixture::new();
         f.installed(true);

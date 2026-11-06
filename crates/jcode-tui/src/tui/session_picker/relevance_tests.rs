@@ -233,6 +233,7 @@ fn newly_discovered_stronger_hit_reorders_without_moving_manually_scrolled_selec
             },
         ))
         .unwrap();
+    picker.search_selection.publish_next_poll_for_test();
     picker.poll_transcript_search();
     assert_eq!(picker.selected_session().unwrap().id, "first");
     picker.scroll_preview_up(1);
@@ -247,6 +248,7 @@ fn newly_discovered_stronger_hit_reorders_without_moving_manually_scrolled_selec
             },
         ))
         .unwrap();
+    picker.search_selection.publish_next_poll_for_test();
     picker.poll_transcript_search();
     assert_eq!(ids(&picker), ["stronger", "first"]);
     assert_eq!(picker.selected_session().unwrap().id, "first");

@@ -1,9 +1,9 @@
 {
-  "total": 4174,
+  "total": 4175,
   "totals_by_pattern": {
     "dot_ok": 1640,
     "let_underscore": 1504,
-    "unwrap_or_default": 1030
+    "unwrap_or_default": 1031
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -2965,6 +2965,11 @@
       "dot_ok": 26,
       "let_underscore": 14,
       "unwrap_or_default": 7
+    },
+    "src/cli/cloud_runtime.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "src/cli/commands.rs": {
       "dot_ok": 13,

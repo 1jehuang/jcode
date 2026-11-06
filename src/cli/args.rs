@@ -7,9 +7,11 @@ mod cloud_env;
 pub(crate) mod plugin;
 pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
+mod cloud_runtime;
 mod google;
 mod mcp;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
+pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -814,6 +816,11 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Inspect or update the managed cloud runtime without interrupting work.
+    Runtime {
+        #[command(subcommand)]
+        action: CloudRuntimeCommand,
+    },
     /// Transfer explicit project environment requirements without exposing values.
     Env {
         #[command(subcommand)]

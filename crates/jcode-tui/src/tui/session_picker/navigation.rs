@@ -16,6 +16,7 @@ impl SessionPicker {
 
     pub fn next(&mut self) {
         self.user_selection_intent = true;
+        self.pending_search_submission = None;
         self.search_selection.stop();
         // Onboarding actions form a short list above the resumable sessions.
         if self.onboarding_review_recent_project_highlighted() {
@@ -43,6 +44,7 @@ impl SessionPicker {
 
     pub fn previous(&mut self) {
         self.user_selection_intent = true;
+        self.pending_search_submission = None;
         self.search_selection.stop();
         // Onboarding: already on the first action -> nothing above it.
         if self.onboarding_review_recent_project_highlighted() {
@@ -77,6 +79,7 @@ impl SessionPicker {
     /// the offset changed relative to the last rendered maximum so the shared
     /// mouse-scroll momentum can stop draining once the bottom is reached.
     pub fn scroll_preview_down(&mut self, amount: u16) -> bool {
+        self.pending_search_submission = None;
         self.search_selection.stop();
         let before = self.scroll_offset;
         let target = before.saturating_add(amount);
@@ -93,6 +96,7 @@ impl SessionPicker {
 
     /// Scroll the preview up by `amount` lines. Returns whether the offset moved.
     pub fn scroll_preview_up(&mut self, amount: u16) -> bool {
+        self.pending_search_submission = None;
         self.search_selection.stop();
         let before = self.scroll_offset;
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
