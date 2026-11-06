@@ -131,6 +131,35 @@ async fn abrupt_disconnect(turn: Turn, continue_on_disconnect: bool) -> Result<(
         // An abrupt socket EOF is what the runtime sees when Desktop is killed.
         drop(writer);
         drop(reader);
+        if continue_on_disconnect {
+            // Remote continuation is a session lifetime policy: after EOF the
+            // coordinator is retained (never Closed/Crashed), so it stays
+            // addressable for worker reports and wake turns. Confirm it both
+            // settles into retention and holds there.
+            timeout(Duration::from_secs(5), async {
+                for _ in 0..50 {
+                    let session = Session::load(&session_id)?;
+                    anyhow::ensure!(
+                        !matches!(
+                            session.status,
+                            SessionStatus::Closed | SessionStatus::Crashed { .. }
+                        ),
+                        "continue_on_disconnect session must be retained, got {:?}",
+                        session.status
+                    );
+                    if matches!(turn, Turn::Completed) {
+                        anyhow::ensure!(
+                            serde_json::to_string(&session)?.contains("finished successfully"),
+                            "completed transcript must persist"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            return Ok(());
+        }
         timeout(Duration::from_secs(10), async {
             loop {
                 let session = Session::load(&session_id)?;
@@ -428,28 +457,34 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
             provider.finish.notify_one();
         }
 
+        // continue_on_disconnect sessions are retained (never Closed) after the
+        // turn settles. Wait for the turn to persist, then confirm retention.
         timeout(Duration::from_secs(10), async {
             loop {
                 let session = Session::load(&session_id)?;
-                if session.status == SessionStatus::Closed {
-                    let transcript = serde_json::to_string(&session)?;
-                    if matches!(end, RemoteTurnEnd::Cancel) {
-                        anyhow::ensure!(
-                            !transcript.contains("after reconnect"),
-                            "cancel must stop provider stream"
-                        );
-                    } else {
-                        anyhow::ensure!(
-                            transcript.contains("after reconnect"),
-                            "completed work must persist"
-                        );
-                    }
-                    break Ok::<_, anyhow::Error>(());
-                }
                 anyhow::ensure!(
                     !matches!(session.status, SessionStatus::Crashed { .. }),
                     "opted-in disconnected turn must not crash"
                 );
+                anyhow::ensure!(
+                    session.status != SessionStatus::Closed,
+                    "continue_on_disconnect session must be retained, not closed"
+                );
+                let transcript = serde_json::to_string(&session)?;
+                let settled = if matches!(end, RemoteTurnEnd::Cancel) {
+                    // Cancellation was already confirmed via the Interrupted
+                    // event; the stopped stream must never persist its output.
+                    anyhow::ensure!(
+                        !transcript.contains("after reconnect"),
+                        "cancel must stop provider stream"
+                    );
+                    true
+                } else {
+                    transcript.contains("after reconnect")
+                };
+                if settled {
+                    break Ok::<_, anyhow::Error>(());
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
