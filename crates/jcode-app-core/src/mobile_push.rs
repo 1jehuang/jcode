@@ -235,6 +235,52 @@ struct SendReply {
     devices: Option<u64>,
 }
 
+/// Explicit user-requested handoff. Unlike automatic turn notifications this
+/// bypasses duration thresholds, opt-outs, and the no-devices suppression cache.
+pub async fn request_mobile_resume(
+    session_id: &str,
+    title: Option<&str>,
+) -> anyhow::Result<String> {
+    let (key, base) = credentials().ok_or_else(|| {
+        anyhow::anyhow!("Sign in first with `jcode account login`, then retry /mobile.")
+    })?;
+    let payload = build_payload(
+        PushKind::Wake,
+        session_id,
+        title,
+        "Tap to resume this session on Jcode Cloud.",
+        None,
+    );
+    send_mobile_resume(&key, &base, &payload).await
+}
+
+async fn send_mobile_resume(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> anyhow::Result<String> {
+    let response = reqwest::Client::new()
+        .post(format!("{base}/push/send"))
+        .bearer_auth(key)
+        .json(&payload)
+        .timeout(SEND_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
+    let reply = response.json::<SendReply>().await?;
+    match (reply.devices, reply.sent) {
+        (Some(0), _) => anyhow::bail!(
+            "No mobile devices registered. Open the Jcode app, sign in to the same account, and enable notifications, then retry /mobile."
+        ),
+        (_, Some(sent)) if sent > 0 => Ok(format!(
+            "Mobile notification sent to {sent} device(s). Tap it to open this session."
+        )),
+        _ => anyhow::bail!(
+            "No mobile notification was delivered. Check notification permissions in the Jcode app, then retry /mobile."
+        ),
+    }
+}
+
 async fn send(key: &str, base: &str, payload: &PushPayload) {
     let client = match reqwest::Client::builder().timeout(SEND_TIMEOUT).build() {
         Ok(c) => c,
@@ -276,6 +322,84 @@ async fn send(key: &str, base: &str, payload: &PushPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_resume_reports_delivery_and_preserves_session_target() {
+        use std::io::{Read, Write};
+        for (status, body, expected) in [
+            (200, r#"{"sent":1,"devices":1}"#, "Mobile notification sent"),
+            (
+                200,
+                r#"{"sent":0,"devices":0}"#,
+                "No mobile devices registered",
+            ),
+            (
+                200,
+                r#"{"sent":0,"devices":1}"#,
+                "No mobile notification was delivered",
+            ),
+            (200, "not json", "error decoding response body"),
+            (401, "{}", "401 Unauthorized"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let reason = if status == 200 { "OK" } else { "Unauthorized" };
+                write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                String::from_utf8(request).unwrap()
+            });
+            let payload = build_payload(
+                PushKind::Wake,
+                "session_resume",
+                Some("My task"),
+                "Tap to resume",
+                None,
+            );
+            let result = send_mobile_resume("test-key", &base, &payload).await;
+            let message = match result {
+                Ok(message) => message,
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                message.contains(expected),
+                "{message:?} should contain {expected:?}"
+            );
+            let request = server.join().unwrap();
+            assert!(request.starts_with("POST /push/send "));
+            assert!(
+                request
+                    .to_lowercase()
+                    .contains("authorization: bearer test-key")
+            );
+            let body = request.split_once("\r\n\r\n").unwrap().1;
+            let json: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(json["session_id"], "session_resume");
+            assert_eq!(json["kind"], "wake");
+        }
+    }
 
     #[test]
     fn mobile_push_payload_serializes_per_contract() {

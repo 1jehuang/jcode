@@ -2,6 +2,73 @@ use super::*;
 
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
+
+#[test]
+fn parses_mobile_as_a_move_to_managed_cloud() {
+    for input in ["/mobile", "/mobile ", " /mobile\t"] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Move {
+                host: Some("jcode-cloud".into()),
+            }),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn parses_mobile_cancel() {
+    for input in ["/mobile cancel", "/mobile\tcancel "] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Cancel),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn mobile_rejects_unexpected_arguments() {
+    for input in [
+        "/mobile box",
+        "/mobile --host box",
+        "/mobile --session-only",
+        "/mobile --include-session other",
+        "/mobile --dry-run",
+        "/mobile status",
+        "/mobile cancel extra",
+        "/mobile cancel cancel",
+    ] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::MoveUsage),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn mobile_does_not_match_command_prefixes() {
+    for input in ["/mobilex", "/mobilex cancel", "/mobile-cancel"] {
+        assert_eq!(parse_cloud_command(input), None, "{input}");
+    }
+}
+
+#[test]
+fn mobile_is_registered_once_and_visible_in_command_help() {
+    assert_eq!(
+        crate::tui::app::registered_command_names()
+            .filter(|name| *name == "/mobile")
+            .count(),
+        1
+    );
+    let (_, help) = crate::tui::app::registered_command_entries()
+        .find(|(name, _)| *name == "/mobile")
+        .expect("/mobile should be discoverable in command help");
+    assert!(!help.is_empty());
+    assert!(!crate::tui::app::registered_command_names().any(|name| name == "/mobilex"));
+}
+
 #[test]
 fn parses_explicit_group_selection_without_treating_flags_as_hosts() {
     assert_eq!(
