@@ -70,6 +70,36 @@ fn mobile_is_registered_once_and_visible_in_command_help() {
 }
 
 #[test]
+#[cfg(unix)]
+fn mobile_push_feedback_is_visible_without_failing_cloud_status() {
+    for result in [
+        Ok("Mobile notification sent".to_string()),
+        Err("No mobile devices registered".to_string()),
+    ] {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let tx = fake_job(&mut app, CloudCommand::Where);
+        app.cloud_job.as_mut().unwrap().trimmed = "/mobile".into();
+        let expected = result
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or_else(|error| error.as_str())
+            .to_string();
+        tx.send(CloudEvent::MobilePushResult(result)).unwrap();
+        tx.send(CloudEvent::Done(Ok(output(true, "session is on cloud"))))
+            .unwrap();
+        assert!(app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|message| message.content.contains(&expected))
+        );
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
+}
+
+#[test]
 fn parses_explicit_group_selection_without_treating_flags_as_hosts() {
     assert_eq!(
         parse_cloud_command("/cloud box --include-session one --include-session two --dry-run"),
