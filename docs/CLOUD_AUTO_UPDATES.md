@@ -1,7 +1,8 @@
 # Managed cloud automatic updates
 
-Status: control-plane updater deployed November 6, 2026. Existing-host migration
-and development-package upload are blocked by the account runtime allowance.
+Status: control-plane updater deployed November 6, 2026, but that deployment
+overwrite of earlier live repairs requires additive recovery. Existing-host
+migration and development upload have not occurred.
 
 ## Deployment evidence
 
@@ -22,12 +23,30 @@ under persistent development policy without restarting it.
 
 At 12:08 UTC on November 6, 2026, authenticated cloud status reported the
 owner host stopped with 60.1 hours used against a 50-hour monthly allowance.
-SSH authorization rejected further access because that allowance was exhausted.
+SSH authorization rejected further access with an allowance-exhausted error.
+This diagnosis is provisional: the deployment also overwrote the existing
+plan-proportional allowance repair, so entitlement and access must be checked
+again after recovery before asking the account owner to change allowance.
 Consequently the existing host has NOT been migrated, the prepared development
 package has NOT been uploaded or activated, and its updater timer has NOT been
 verified live. No allowance override or alternate administrative access was used.
 The new bootstrap applies to newly provisioned hosts. Other existing accounts
 have not been migrated or awakened as part of this deployment.
+
+### Deployment regression and guard
+
+The source checkout lacked existing script-API hosted-build, mobile-sync, scoped
+key, and plan-proportional cloud entitlement repairs. Deploying it replaced those
+live repairs. Initial health and updater-route checks were insufficient to catch
+the regression. Further deployments from this session are paused, while a
+separate coordinated recovery restores the lost features without removing the
+managed updater or live settings. Recovery has not yet been verified here.
+
+Backend commit `21bb577` installs a fail-closed bundled-code inventory check in
+both `npm run deploy` and the direct Wrangler build hook. Nine guard tests and
+431 full backend tests pass. The actual divergent source now fails a real
+Wrangler dry-run before upload. This is a minimum-feature inventory, not complete
+behavioral equivalence or automatic reconciliation with future live changes.
 
 ## Implemented client workflow
 
