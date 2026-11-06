@@ -86,10 +86,7 @@ fn output_with_ssh_retry(
         {
             return Ok(output);
         }
-        step(
-            "prepare",
-            &ssh_retry_message(host, attempt, &output.stderr),
-        );
+        step("prepare", &ssh_retry_message(host, attempt, &output.stderr));
         std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
         attempt += 1;
     }
@@ -399,10 +396,7 @@ impl Target {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             // The prepare script is idempotent and serialized by its own lock.
             if ssh_connection_failed(&output.status) && attempt < SSH_ATTEMPTS {
-                step(
-                    "prepare",
-                    &ssh_retry_message(host, attempt, &output.stderr),
-                );
+                step("prepare", &ssh_retry_message(host, attempt, &output.stderr));
                 std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
                 attempt += 1;
                 continue;
