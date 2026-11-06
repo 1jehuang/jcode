@@ -78,25 +78,31 @@ fn identity_lines(data: &InfoWidgetData, width: u16) -> Vec<Line<'static>> {
     let max = usize::from(width);
     let mut lines = Vec::new();
     if let Some(model) = data.model.as_deref().filter(|m| !m.trim().is_empty()) {
-        let mut spans = vec![Span::styled(
-            truncate_smart(
-                &crate::tui::session_facts::pretty_model(model),
-                max.saturating_sub(8),
-            ),
-            Style::default().fg(rgb(255, 150, 200)).bold(),
-        )];
-        if let Some(effort) = data
+        // Size the model allowance from the real effort suffix so the row fits
+        // its cells; the final pass ellipsizes if even the suffix cannot.
+        let suffix = data
             .reasoning_effort
             .as_deref()
             .map(str::trim)
             .filter(|e| !e.is_empty())
-        {
-            spans.push(Span::styled(
-                format!(" ({effort})"),
+            .map_or(String::new(), |effort| format!(" ({effort})"));
+        let model_line = Line::from(Span::styled(
+            crate::tui::session_facts::pretty_model(model),
+            Style::default().fg(rgb(255, 150, 200)).bold(),
+        ));
+        let mut line = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &model_line,
+            max.saturating_sub(UnicodeWidthStr::width(suffix.as_str())),
+        );
+        if !suffix.is_empty() {
+            line.spans.push(Span::styled(
+                suffix,
                 Style::default().fg(rgb(255, 200, 100)),
             ));
         }
-        lines.push(Line::from(spans));
+        lines.push(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &line, max,
+        ));
     }
 
     let mut detail = Vec::new();
@@ -184,26 +190,21 @@ fn context_line(data: &InfoWidgetData, width: u16) -> Option<Line<'static>> {
         .round()
         .clamp(0.0, 100.0) as u8;
     let left_pct = 100u8.saturating_sub(used_pct);
-    let color = if left_pct <= 20 {
-        rgb(255, 100, 100)
-    } else if left_pct <= 50 {
-        rgb(255, 200, 100)
-    } else {
-        rgb(100, 200, 100)
-    };
+    // Context usage renders through the shared limit bar, like every other
+    // usage indicator: same glyphs, thresholds and used/left wording.
+    let color = crate::tui::info_widget::usage_limit_color(left_pct);
     let mut spans = vec![
         Span::styled(format!("{label} "), Style::default().fg(rgb(140, 140, 150))),
         Span::styled(format!("{tokens} "), Style::default().fg(color).bold()),
     ];
-    let fixed = UnicodeWidthStr::width(label) + 1 + tokens.len() + 1;
-    let bar = usize::from(width).saturating_sub(fixed).min(24);
-    if bar >= 3 {
-        let filled = ((used as f64 / limit as f64) * bar as f64).round() as usize;
-        let filled = filled.min(bar);
-        spans.push(Span::styled("▰".repeat(filled), Style::default().fg(color)));
-        spans.push(Span::styled(
-            "▱".repeat(bar - filled),
-            Style::default().fg(rgb(50, 50, 60)),
+    let percentage = format!(" {used_pct}% used").len();
+    let fixed = UnicodeWidthStr::width(label) + 1 + tokens.len() + 1 + percentage;
+    let cells = usize::from(width).saturating_sub(fixed).min(12);
+    if cells >= 3 {
+        spans.extend(crate::tui::info_widget::render_inline_limit_bar(
+            left_pct,
+            cells as u16,
+            true,
         ));
     }
     Some(Line::from(spans))
@@ -381,4 +382,55 @@ pub fn dock_text_lines(data: &InfoWidgetData, width: u16) -> Vec<String> {
                 .collect::<String>()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod dock_row_tests {
+    use super::*;
+
+    fn text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn effort_row_keeps_suffix_and_fits_the_narrowest_dock() {
+        let data = InfoWidgetData {
+            model: Some("claude-sonnet-very-long-model-name-for-the-dock".into()),
+            reasoning_effort: Some("medium".into()),
+            ..Default::default()
+        };
+        // Narrowest dock interior: 34 columns minus the two border cells.
+        for width in [32u16, 20, 9, 4] {
+            let lines = identity_lines(&data, width);
+            let row = text(&lines[0]);
+            assert!(
+                UnicodeWidthStr::width(row.as_str()) <= usize::from(width),
+                "{width}: {row:?}"
+            );
+            if width >= 20 {
+                assert!(row.ends_with(" (medium)"), "{width}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn context_row_uses_the_shared_limit_bar() {
+        let data = InfoWidgetData {
+            observed_context_tokens: Some(60_000),
+            context_limit: Some(100_000),
+            ..Default::default()
+        };
+        let line = context_line(&data, 40).expect("context row");
+        let shared = crate::tui::info_widget::render_inline_limit_bar(40, 12, true);
+        assert!(
+            line.spans.ends_with(&shared),
+            "{:?} should end with the shared bar {:?}",
+            line.spans,
+            shared
+        );
+        assert!(UnicodeWidthStr::width(text(&line).as_str()) <= 40);
+    }
 }
