@@ -1,6 +1,79 @@
 # Managed cloud automatic updates
 
-Status: proposed design, not deployed. Source inspection: November 6, 2026.
+Status: control-plane updater deployed November 6, 2026. Existing-host migration
+and development-package upload are blocked by the account runtime allowance.
+
+## Deployment evidence
+
+The managed API deployment is Worker version
+`6e3f342d-8bc2-44bb-91d1-d6e8f07c52bc`, from backend commits `6ce9f0f`
+and `6118d73`. The live manifest returned HTTP 200 with live discovery on
+November 6, 2026, and selected official stable `v0.99.1`. The live installer
+matched the tested source byte-for-byte, and API health passed. Backend
+validation passed 422 JavaScript tests and nine updater subprocess tests.
+Client validation passed hosted check, five runtime CLI tests, and 25 managed
+preflight tests.
+
+A portable `v0.99.760-dev (3c448c323, dirty)` package was built and validated
+locally for explicit upload. The owner host was previously observed running
+`v0.99.724-dev (f21e0197a)`, which must not be automatically replaced with
+older stable `v0.99.1`. Migration would adopt its existing external runtime
+under persistent development policy without restarting it.
+
+At 12:08 UTC on November 6, 2026, authenticated cloud status reported the
+owner host stopped with 60.1 hours used against a 50-hour monthly allowance.
+SSH authorization rejected further access because that allowance was exhausted.
+Consequently the existing host has NOT been migrated, the prepared development
+package has NOT been uploaded or activated, and its updater timer has NOT been
+verified live. No allowance override or alternate administrative access was used.
+The new bootstrap applies to newly provisioned hosts. Other existing accounts
+have not been migrated or awakened as part of this deployment.
+
+## Implemented client workflow
+
+The CLI now provides these managed-host operations. They use authenticated SSH,
+so they can wake your account's cloud machine. A runtime selection applies to
+the whole host, not just one session.
+
+```sh
+jcode cloud runtime status
+jcode cloud runtime check
+jcode cloud runtime push --artifact /path/to/jcode-linux-x86_64.tar.gz
+jcode cloud runtime pin v0.99.1 --yes
+jcode cloud runtime stable --yes
+```
+
+Push selects persistent `dev` policy. Pin and stable explicitly change policy,
+and can intentionally select an older runtime. None of these operations restarts
+an active daemon. The initial deployment stages a verified pending package and
+activates it only at the daemon's next normal start. Automatic idle activation
+and health-metric-based fleet promotion remain future work, not shipped claims.
+
+For a portable development package built from this checkout, forward explicit
+identity metadata because hosted source snapshots do not contain `.git`:
+
+```sh
+# Derive the same dev version as the build script for the current 0.99.1 base.
+export JCODE_BUILD_SEMVER="0.99.$((1 + $(git rev-list --count v0.99.1..HEAD)))"
+export JCODE_BUILD_GIT_HASH="$(git rev-parse --short HEAD)"
+export JCODE_BUILD_GIT_DATE="$(git log -1 --format=%ci)"
+export JCODE_BUILD_GIT_TAG="$(git describe --tags --always)"
+# Set this when the checkout has uncommitted changes.
+export JCODE_BUILD_GIT_DIRTY=1
+justrust zigbuild --remote --profile selfdev -p jcode --bin jcode \
+  --target x86_64-unknown-linux-gnu.2.17 \
+  --features linux-compat-vendored-openssl
+scripts/package_cloud_runtime.sh \
+  target/x86_64-unknown-linux-gnu/selfdev/jcode \
+  /path/to/jcode-linux-x86_64.tar.gz
+```
+
+Packaging validates the Linux x86_64 ELF, glibc requirements, and unbundled shared
+libraries. It does not upload anything. The cloud helper independently checks
+the package digest, archive contents, actual version, and baseline capabilities.
+The package digest distinguishes dirty artifacts even when their Git hash and
+version match. Build and upload source only through an explicitly authorized
+build workflow.
 
 ## Decision
 
