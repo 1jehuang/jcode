@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_ROOT="$REPO_ROOT/.ghe-installer-test-$$"
 INSTALLER="$REPO_ROOT/scripts/install_ghe.sh"
 readonly REPO_ROOT FIXTURE_ROOT INSTALLER
+# The installer honours JCODE_HOME; never let an inherited one reach a real store.
+unset JCODE_HOME
 checksum() { shasum -a 256 "$@"; }
 inode() {
   if [[ "$(uname -s)" == Darwin ]]; then stat -Lf %i "$1"; else stat -Lc %i "$1"; fi
@@ -329,6 +331,20 @@ should_preflight_later_rollback_targets() {
   assert_equal "$BUILDS/current/jcode" "$(readlink "$HOME_DIR/.local/bin/jcode")"
 }
 
+should_honor_jcode_home_for_store_and_config() {
+  create_fixture jcode-home
+  local other_home="$FIXTURE/other-home" version
+  mkdir -p "$other_home"
+  # The store and config live under JCODE_HOME, not HOME/.jcode.
+  HOME="$other_home" JCODE_HOME="$HOME_DIR/.jcode" TEST_HOME="$HOME_DIR" \
+    JCODE_INSTALL_DIR="$HOME_DIR/.local/bin" \
+    bash "$INSTALLER" "$FIXTURE/custom-jcode" > "$FIXTURE/output" 2> "$FIXTURE/errors"
+  version="$(cat "$BUILDS/current-version")"
+  [[ "$version" != 0.91.0 ]] || { echo "JCODE_HOME store was not updated" >&2; exit 1; }
+  assert_equal "$BUILDS/versions/$version/jcode" "$(readlink "$BUILDS/current/jcode")"
+  [[ ! -e "$other_home/.jcode" ]] || { echo "Default home store was touched" >&2; exit 1; }
+}
+
 should_preserve_stable_symlink
 should_preserve_stock_payload
 should_preserve_stable_marker
@@ -358,4 +374,5 @@ should_reject_missing_rollback_payload_before_any_mutation legacy
 should_record_resolved_backup_targets
 should_preflight_later_rollback_targets launcher
 should_preflight_later_rollback_targets server
-printf 'install_ghe: 28 regression tests passed\n'
+should_honor_jcode_home_for_store_and_config
+printf 'install_ghe: 29 regression tests passed\n'

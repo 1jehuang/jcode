@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Install an already-built GHE binary without changing the stock stable channel.
-# Requires [features] check_updates = false in ~/.jcode/config.toml.
+# Requires [features] check_updates = false in $JCODE_HOME/config.toml
+# (default ~/.jcode), the same home the reloaded daemon uses.
 set -Eeuo pipefail
 umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILDS_DIR="$HOME/.jcode/builds"
+JCODE_HOME_DIR="${JCODE_HOME:-$HOME/.jcode}"
+BUILDS_DIR="$JCODE_HOME_DIR/builds"
 INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 BACKUPS_DIR="$BUILDS_DIR/ghe-install-backups"
-CONFIG_FILE="$HOME/.jcode/config.toml"
-readonly REPO_ROOT BUILDS_DIR INSTALL_DIR BACKUPS_DIR CONFIG_FILE
+CONFIG_FILE="$JCODE_HOME_DIR/config.toml"
+readonly REPO_ROOT JCODE_HOME_DIR BUILDS_DIR INSTALL_DIR BACKUPS_DIR CONFIG_FILE
 PATHS=(
   "$BUILDS_DIR/current/jcode"
   "$BUILDS_DIR/shared-server/jcode"
