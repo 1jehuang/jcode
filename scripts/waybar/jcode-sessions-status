@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Waybar custom module: jcode active sessions (event-driven).
+
+Subscribes to all jcode debug sockets for status_change and member_change
+events. When an event fires, re-queries root-session and live swarm-agent
+counts and prints updated JSON to stdout for waybar to pick up.
+
+Falls back to periodic refresh every 10s for socket discovery and
+as a safety net.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import select
+import socket
+import sys
+import time
+import threading
+import subprocess
+import shlex
+from pathlib import Path
+
+SOCKET_TIMEOUT = 2
+REFRESH_INTERVAL = 10
+CLOUD_REFRESH_INTERVAL = 30
+
+
+def _pid_is_live(path: Path) -> bool:
+    try:
+        pid = int(path.read_text().strip())
+        if not 0 < pid <= 2147483647:
+            return False
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _cloud_probe(root=None) -> dict:
+    """Read Jcode's presence registry, including internal/swarm sessions.
+
+    This mirrors storage::session_presence and needs no debug-control access.
+    Multiple sessions can share one daemon PID, so count sessions, not PIDs.
+    """
+    root = Path(root or os.environ.get("JCODE_HOME") or Path.home() / ".jcode")
+    active = root / "active_pids"
+    try:
+        paths = list(active.iterdir()) if active.exists() else []
+        live = [path for path in paths if _pid_is_live(path)]
+        return {
+            "alive": len(live),
+            "streaming": sum(_pid_is_live(root / "streaming_pids" / path.name)
+                             for path in live),
+        }
+    except OSError:
+        return {"streaming": None, "alive": None, "detail": "cloud presence registry unreadable"}
+
+
+def _run(args, **kwargs):
+    return subprocess.run(args, capture_output=True, text=True, timeout=20,
+                          check=True, **kwargs)
+
+
+def _query_cloud_counts() -> dict:
+    """Do not provision cloud machines just to display a status indicator."""
+    try:
+        jcode = str(Path.home() / ".local/bin/jcode")
+        status = _run([jcode, "--no-update", "--no-selfdev", "cloud", "machine", "status"]).stdout
+        offline = any(state in status for state in
+                      ("`: stopped", "`: sleeping", "`: not provisioned"))
+        if "`: running" not in status and not offline:
+            raise ValueError("machine state unavailable")
+        root = Path.home() / ".jcode/cloud"
+        hosts = [] if offline else [(root / "ssh_config", "jcode-cloud")]
+        machines = json.loads(_run([jcode, "--no-update", "--no-selfdev", "cloud",
+                                    "ephemeral", "list", "--json"]).stdout)
+        if not isinstance(machines, list):
+            raise ValueError("invalid cloud inventory")
+        for machine in machines:
+            if machine["state"] == "running":
+                machine_id = machine["id"]
+                if not isinstance(machine_id, str) or not machine_id.startswith("cm_") or not machine_id[3:].isalnum():
+                    raise ValueError("invalid machine ID")
+                hosts.append((root / "ephemeral" / machine_id / "ssh_config",
+                              "jcode-ephemeral-" + machine_id))
+            elif machine["state"] not in ("terminated", "stopped", "sleeping", "expired"):
+                raise ValueError("cloud machine is transitioning")
+        # The managed proxy authorizes SSH. Only invoke it after the read-only
+        # machine status confirms this machine is already running.
+        command = "python3 -c " + shlex.quote(Path(__file__).read_text()) + " --cloud-probe"
+        totals = {"streaming": 0, "alive": 0}
+        for config, host in hosts:
+            result = _run(["ssh", "-F", str(config), "-T", "-o", "BatchMode=yes",
+                           "-o", "ConnectTimeout=5", "-o", "PermitLocalCommand=no",
+                           "-o", "ClearAllForwardings=yes", host, command])
+            counts = json.loads(result.stdout)
+            if counts.get("alive") is None:
+                return {"streaming": None, "alive": None,
+                        "detail": counts.get("detail", "cloud population unavailable")}
+            if any(type(counts.get(key)) is not int for key in totals):
+                raise ValueError("cloud population unavailable")
+            if not 0 <= counts["streaming"] <= counts["alive"]:
+                raise ValueError("invalid cloud population")
+            for key in totals:
+                totals[key] += counts[key]
+        return {**totals, "detail": "managed + ephemeral cloud, including detached and swarm agents"}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+        return {"streaming": None, "alive": None, "detail": "cloud status unavailable"}
+
+
+class CloudPoller(threading.Thread):
+    def __init__(self, on_update):
+        super().__init__(daemon=True)
+        self.on_update = on_update
+        self.counts = {"streaming": None, "alive": None, "detail": "checking cloud"}
+
+    def run(self):
+        while True:
+            self.counts = _query_cloud_counts()
+            self.on_update()
+            time.sleep(CLOUD_REFRESH_INTERVAL)
+
+
+def _find_debug_sockets() -> list[str]:
+    sockets = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    for path in glob.glob(os.path.join(runtime_dir, "jcode*-debug.sock")):
+        sockets.append(path)
+    for path in glob.glob("/tmp/jcode*-debug.sock"):
+        sockets.append(path)
+    return sockets
+
+
+def _send_cmd(sock_path: str, command: str) -> dict | None:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(SOCKET_TIMEOUT)
+            s.connect(sock_path)
+            req = {"type": "debug_command", "id": 1, "command": command}
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = []
+            while True:
+                byte = s.recv(1)
+                if not byte:
+                    break
+                buf.append(byte)
+                if byte == b"\n":
+                    break
+            raw = b"".join(buf).decode("utf-8", errors="replace").strip()
+            return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _query_sessions(sock_path: str) -> list[dict]:
+    resp = _send_cmd(sock_path, "sessions")
+    if not resp or not resp.get("ok"):
+        return []
+    try:
+        sessions = json.loads(resp.get("output", "[]"))
+        return sessions if isinstance(sessions, list) else []
+    except Exception:
+        return []
+
+
+def _query_server_info(sock_path: str) -> dict:
+    resp = _send_cmd(sock_path, "server:info")
+    if not resp or not resp.get("ok"):
+        return {}
+    try:
+        info = json.loads(resp.get("output", "{}"))
+        return info if isinstance(info, dict) else {}
+    except Exception:
+        return {}
+
+
+def _collect_counts(sockets: list[str]) -> tuple[int, int, int]:
+    sessions_by_id: dict[str, dict] = {}
+    spawned_agents_by_server: dict[str, int] = {}
+    for sock_path in sockets:
+        for session in _query_sessions(sock_path):
+            session_id = session.get("session_id")
+            if session_id:
+                sessions_by_id[session_id] = session
+        info = _query_server_info(sock_path)
+        server_id = info.get("id")
+        if server_id:
+            spawned_count = info.get("spawned_swarm_agent_count", 0)
+            spawned_agents_by_server[server_id] = (
+                max(0, spawned_count) if isinstance(spawned_count, int) else 0
+            )
+
+    streaming = sum(1 for session in sessions_by_id.values() if session.get("is_processing"))
+    return streaming, len(sessions_by_id), sum(spawned_agents_by_server.values())
+
+
+def _build_output(streaming: int, total: int, swarm_agents: int, cloud=None) -> dict:
+    # Nerd Font icons: spinner = streaming, copies = sessions, sitemap = swarm
+    text = f"\uf110 {streaming}  \uf24d {total}  \uf0e8 {swarm_agents}"
+    cloud = cloud or {"streaming": None, "alive": None, "detail": "checking cloud"}
+    cloud_streaming = cloud["streaming"]
+    cloud_alive = cloud["alive"]
+    shown = lambda value: "?" if value is None else str(value)
+    text += f"  \uf0c2 {shown(cloud_streaming)}/{shown(cloud_alive)}"
+    tooltip = (f"Local: {streaming} streaming, {total} root sessions, "
+               f"{swarm_agents} live non-root swarm agents\n"
+               f"Cloud: {shown(cloud_streaming)} streaming / {shown(cloud_alive)} alive\n"
+               f"{cloud['detail']} (refreshes every {CLOUD_REFRESH_INTERVAL}s)")
+    if total == 0 and swarm_agents == 0 and cloud_alive == 0:
+        return {
+            "text": text,
+            "tooltip": tooltip,
+            "class": "none",
+        }
+    return {
+        "text": text,
+        "tooltip": tooltip,
+        "class": "streaming" if streaming > 0 or (cloud_streaming or 0) > 0 else "active",
+    }
+
+
+def _emit(data: dict):
+    print(json.dumps(data), flush=True)
+
+
+class SocketSubscriber(threading.Thread):
+    """Subscribe to a debug socket's event stream in a background thread."""
+
+    def __init__(self, sock_path: str, on_event):
+        super().__init__(daemon=True)
+        self.sock_path = sock_path
+        self.on_event = on_event
+        self.alive = True
+
+    def run(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(None)
+            s.connect(self.sock_path)
+            req = {
+                "type": "debug_command",
+                "id": 1,
+                "command": "events:subscribe:status_change,member_change",
+            }
+            s.sendall((json.dumps(req) + "\n").encode())
+
+            buf = b""
+            while self.alive:
+                s.settimeout(30)
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        data = json.loads(line.decode("utf-8", errors="replace"))
+                        if data.get("type") == "event":
+                            self.on_event(self.sock_path, data)
+                    except Exception:
+                        pass
+            s.close()
+        except Exception:
+            pass
+        self.alive = False
+
+    def stop(self):
+        self.alive = False
+
+
+def main():
+    last_output: str | None = None
+    subscribers: dict[str, SocketSubscriber] = {}
+    event_flag = threading.Event()
+    cloud = CloudPoller(event_flag.set)
+    cloud.start()
+
+    def on_event(sock_path, data):
+        event_flag.set()
+
+    def refresh():
+        nonlocal last_output
+        sockets = _find_debug_sockets()
+
+        streaming, total, swarm_agents = _collect_counts(sockets)
+        out = _build_output(streaming, total, swarm_agents, cloud.counts)
+
+        out_str = json.dumps(out)
+        if out_str != last_output:
+            _emit(out)
+            last_output = out_str
+
+        dead = [p for p in subscribers if p not in sockets]
+        for p in dead:
+            subscribers[p].stop()
+            del subscribers[p]
+
+        for sock_path in sockets:
+            if sock_path not in subscribers or not subscribers[sock_path].alive:
+                sub = SocketSubscriber(sock_path, on_event)
+                subscribers[sock_path] = sub
+                sub.start()
+
+    refresh()
+
+    while True:
+        triggered = event_flag.wait(timeout=REFRESH_INTERVAL)
+        if triggered:
+            event_flag.clear()
+            time.sleep(0.05)
+            while event_flag.is_set():
+                event_flag.clear()
+                time.sleep(0.05)
+        refresh()
+
+
+if __name__ == "__main__":
+    if "--cloud-probe" in sys.argv:
+        _emit(_cloud_probe())
+    else:
+        main()
