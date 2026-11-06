@@ -242,6 +242,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Move this session and swarm to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
+    RegisteredCommand::public(
+        "/mobile",
+        "Move to Jcode Cloud and send a push to resume on mobile",
+    ),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
     RegisteredCommand::public("/auth", "Show authentication status"),

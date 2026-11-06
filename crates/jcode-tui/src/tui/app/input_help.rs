@@ -7,6 +7,9 @@ impl App {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
             }
+            "mobile" => {
+                "/mobile\nMove this session and its swarm to your managed Jcode Cloud host, then send a push notification. Tap it in the mobile app to open this session. If already on cloud, only the notification is sent.\n\nSign in to the same Jcode account in the CLI and app, and enable app notifications. Push failures do not undo a successful cloud move.\n\n/mobile cancel\nCancel a queued handoff. An already-running transfer cannot be cancelled here."
+            }
             "compact" => {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }
