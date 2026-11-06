@@ -281,7 +281,7 @@ async fn handle_with_gate(
     };
     let before = snapshots(state).await;
     let (admitted_ids, _) = expand_selection(&selection, &before)?;
-    let _idle = gate.try_idle_sessions(&admitted_ids).ok_or_else(|| {
+    let _idle = admit_transfer(gate, &admitted_ids, action, std::time::Duration::from_secs(2)).await.ok_or_else(|| {
         anyhow::anyhow!(
             "group_transfer action={action} phase=idle_admission: selected sessions or unscoped background tasks are busy; wait for selected turns and callbacks to finish"
         )
@@ -500,6 +500,32 @@ async fn handle_with_gate(
             Ok(Some("{\"reserved\":true}".into()))
         }
         _ => bail!("unknown group_transfer action: {action}"),
+    }
+}
+
+/// A client-side turn-complete event can precede release of the daemon's turn
+/// reservation or its detached callbacks. Host preparation does not establish
+/// daemon quiescence either. Briefly tolerate that drain race, but acquire the
+/// same atomic fence on every attempt and never ignore genuinely busy work.
+/// Recovery operations retain their immediate admission behavior.
+async fn admit_transfer(
+    gate: &crate::runtime_activity::ActivityGate,
+    sessions: &BTreeSet<String>,
+    action: &str,
+    drain_timeout: std::time::Duration,
+) -> Option<crate::runtime_activity::SessionIdleReservation> {
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+    loop {
+        if let Some(idle) = gate.try_idle_sessions(sessions) {
+            return Some(idle);
+        }
+        if !matches!(action, "inspect" | "prepare") || tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(25)),
+        )
+        .await;
     }
 }
 
