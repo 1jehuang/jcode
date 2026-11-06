@@ -100,7 +100,10 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
             let info = client.server_info();
             let mut tools = client.tools();
             tools.sort_by(|left, right| left.name.cmp(&right.name));
-            client.shutdown().await;
+            client
+                .shutdown()
+                .await
+                .with_context(|| format!("MCP server '{name}' disconnect was not confirmed"))?;
             println!("Connected to MCP server '{name}' and disconnected cleanly.");
             if let Some(info) = info {
                 println!(

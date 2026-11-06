@@ -4,12 +4,24 @@ use super::protocol::*;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(not(windows))]
 use tokio::process::{Child, Command};
+#[cfg(not(windows))]
+type StdioProcess = Child;
+#[cfg(windows)]
+type StdioProcess = super::windows_native_process::NativeProcess;
 use tokio::sync::{Mutex, mpsc, oneshot};
+#[cfg(all(windows, feature = "test-support"))]
+type NativeObserver = fn(usize, usize, usize, u32, u32);
+#[cfg(all(windows, feature = "test-support"))]
+static NATIVE_OBSERVER: std::sync::Mutex<Option<NativeObserver>> = std::sync::Mutex::new(None);
+#[cfg(all(windows, feature = "test-support"))]
+static SHUTDOWN_OBSERVER: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
 
 /// Shared communication handle for an MCP server.
 /// Multiple sessions can hold clones of this and send concurrent requests.
@@ -65,6 +77,15 @@ pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
 }
 
 impl McpHandle {
+    #[cfg(feature = "test-support")]
+    pub async fn test_pending_count(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+    #[cfg(feature = "test-support")]
+    pub fn test_writer_remaining_capacity(&self) -> usize {
+        self.writer_tx.capacity()
+    }
+
     /// Send a request and wait for response
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
@@ -172,304 +193,22 @@ impl McpHandle {
 pub struct McpClient {
     handle: McpHandle,
     backend: Backend,
+    shutdown_pending: bool,
 }
 
 /// What actually carries the JSON-RPC messages for a client.
 enum Backend {
     /// Local child process speaking newline-delimited JSON over stdio.
-    Stdio(Child),
+    Stdio(StdioProcess),
     /// Remote server over Streamable HTTP or legacy SSE.
     Remote(super::remote::RemoteConnection),
 }
 
+include!("client_connect.rs");
+include!("client_remote.rs");
+include!("client_shutdown.rs");
+
 impl McpClient {
-    /// Connect to an MCP server, inheriting the current process working directory
-    pub async fn connect(name: String, config: &McpServerConfig) -> Result<Self> {
-        Self::connect_in_dir(name, config, None).await
-    }
-
-    /// Connect to an MCP server, optionally running it in `working_dir`.
-    ///
-    /// The working directory is only applied when it exists; otherwise the
-    /// subprocess falls back to inheriting the current process cwd (issue #557).
-    pub async fn connect_in_dir(
-        name: String,
-        config: &McpServerConfig,
-        working_dir: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        if let Some(transport) = config.remote_transport() {
-            return Self::connect_remote(name, config, transport).await;
-        }
-        let working_dir = working_dir.filter(|dir| dir.is_dir());
-        crate::logging::info(&format!(
-            "MCP: Connecting to '{}' ({} {:?}) cwd={:?}",
-            name, config.command, config.args, working_dir
-        ));
-
-        // Credentials must be opted into an MCP server explicitly through its
-        // config. The long-lived jcode daemon contains provider credentials in
-        // its process environment, and blindly inheriting them exposes those
-        // credentials to every configured MCP executable (issue #771).
-        let inherited: HashMap<String, String> = std::env::vars().collect();
-        let env = mcp_child_env(inherited, &config.env);
-
-        let mut command = Command::new(&config.command);
-        command
-            .args(&config.args)
-            .envs(&env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = working_dir {
-            command.current_dir(dir);
-        }
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("Failed to spawn MCP server: {}", config.command))?;
-
-        let stdin = child.stdin.take().context("No stdin")?;
-        let stdout = child.stdout.take().context("No stdout")?;
-        let stderr = child.stderr.take().context("No stderr")?;
-
-        // Spawn stderr reader
-        let server_name = name.clone();
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            crate::logging::warn(&format!(
-                                "MCP [{}] stderr: {}",
-                                server_name, trimmed
-                            ));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        // Setup channels
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (writer_tx, mut writer_rx) = mpsc::channel::<String>(32);
-
-        // Spawn writer task
-        let mut stdin = stdin;
-        tokio::spawn(async move {
-            while let Some(msg) = writer_rx.recv().await {
-                if stdin.write_all(msg.as_bytes()).await.is_err() {
-                    break;
-                }
-                if stdin.flush().await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Spawn reader task
-        let pending_clone = Arc::clone(&pending);
-        let closed = Arc::new(AtomicBool::new(false));
-        let closed_clone = Arc::clone(&closed);
-        let reader_name = name.clone();
-        let mut reader = BufReader::new(stdout);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => {
-                        crate::logging::debug(&format!("MCP [{}]: stdout EOF", reader_name));
-                        break;
-                    }
-                    Ok(_) => {
-                        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                            if let Some(id) = response.id {
-                                let mut pending = pending_clone.lock().await;
-                                if let Some(tx) = pending.remove(&id) {
-                                    let _ = tx.send(response);
-                                }
-                            }
-                        } else {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() {
-                                crate::logging::debug(&format!(
-                                    "MCP [{}] non-JSON output: {}",
-                                    reader_name, trimmed
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        crate::logging::warn(&format!("MCP [{}] read error: {}", reader_name, e));
-                        break;
-                    }
-                }
-            }
-            // Server can never reply now: drop in-flight senders, fail later requests fast.
-            let mut pending = pending_clone.lock().await;
-            closed_clone.store(true, Ordering::SeqCst);
-            pending.clear();
-        });
-
-        let handle = McpHandle {
-            name: name.clone(),
-            request_id: Arc::new(AtomicU64::new(1)),
-            pending,
-            closed,
-            writer_tx,
-            server_info: Arc::new(std::sync::RwLock::new(None)),
-            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
-            tools: Arc::new(std::sync::RwLock::new(Vec::new())),
-            request_timeout: request_timeout_for(config),
-        };
-
-        let mut client = Self {
-            handle,
-            backend: Backend::Stdio(child),
-        };
-
-        client
-            .initialize()
-            .await
-            .with_context(|| format!("MCP server '{}' failed to initialize", name))?;
-
-        client
-            .handle
-            .refresh_tools()
-            .await
-            .with_context(|| format!("MCP server '{}' failed to list tools", name))?;
-
-        crate::logging::info(&format!(
-            "MCP: Connected to '{}' with {} tools",
-            name,
-            client.handle.tools().len()
-        ));
-
-        Ok(client)
-    }
-
-    fn new_handle(
-        name: &str,
-        config: &McpServerConfig,
-        pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
-        closed: Arc<AtomicBool>,
-        writer_tx: mpsc::Sender<String>,
-    ) -> McpHandle {
-        McpHandle {
-            name: name.to_string(),
-            request_id: Arc::new(AtomicU64::new(1)),
-            pending,
-            closed,
-            writer_tx,
-            server_info: Arc::new(std::sync::RwLock::new(None)),
-            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
-            tools: Arc::new(std::sync::RwLock::new(Vec::new())),
-            request_timeout: request_timeout_for(config),
-        }
-    }
-
-    /// Bound discovery, authentication refresh, initialization, fallback and
-    /// tool listing together. `timeout_secs` can extend legitimate tool calls,
-    /// but must not turn connecting to a remote server into an indefinite wait.
-    async fn connect_remote(
-        name: String,
-        config: &McpServerConfig,
-        transport: RemoteTransport,
-    ) -> Result<Self> {
-        tokio::time::timeout(
-            REMOTE_MCP_HANDSHAKE_TIMEOUT,
-            Self::connect_remote_handshake(&name, config, transport),
-        )
-        .await
-        .with_context(|| format!("MCP server '{name}' connection timed out after 30s"))?
-    }
-
-    /// Connect to a remote (Streamable HTTP or legacy SSE) MCP server. A
-    /// Streamable HTTP endpoint that rejects `initialize` with 400/404/405 is
-    /// retried once as legacy SSE, mirroring the spec's backwards-compat rule.
-    async fn connect_remote_handshake(
-        name: &str,
-        config: &McpServerConfig,
-        transport: RemoteTransport,
-    ) -> Result<Self> {
-        crate::logging::info(&format!(
-            "MCP: Connecting to '{}' ({})",
-            name,
-            config.display_target()
-        ));
-        match Self::connect_remote_once(name, config, transport).await {
-            Ok(client) => Ok(client),
-            Err((err, wants_sse)) if wants_sse && transport == RemoteTransport::StreamableHttp => {
-                crate::logging::info(&format!(
-                    "MCP: '{}' rejected Streamable HTTP ({:#}); retrying as legacy SSE",
-                    name, err
-                ));
-                Self::connect_remote_once(name, config, RemoteTransport::LegacySse)
-                    .await
-                    .map_err(|(sse_err, _)| {
-                        sse_err.context(format!(
-                            "MCP server '{name}' failed over both Streamable HTTP ({err:#}) and SSE"
-                        ))
-                    })
-            }
-            Err((err, _)) => Err(err),
-        }
-    }
-
-    async fn connect_remote_once(
-        name: &str,
-        config: &McpServerConfig,
-        transport: RemoteTransport,
-    ) -> std::result::Result<Self, (anyhow::Error, bool)> {
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let closed = Arc::new(AtomicBool::new(false));
-        let (writer_tx, writer_rx) = mpsc::channel::<String>(32);
-        let connection = super::remote::start(
-            name,
-            config,
-            transport,
-            writer_rx,
-            Arc::clone(&pending),
-            Arc::clone(&closed),
-        )
-        .await
-        .map_err(|err| (err, false))?;
-
-        let handle = Self::new_handle(name, config, pending, closed, writer_tx);
-        let mut client = Self {
-            handle,
-            backend: Backend::Remote(connection),
-        };
-
-        if let Err(err) = client.initialize().await {
-            let wants_sse = matches!(&client.backend, Backend::Remote(c) if c.wants_sse_fallback());
-            return Err((
-                err.context(format!("MCP server '{name}' failed to initialize")),
-                wants_sse,
-            ));
-        }
-        client
-            .handle
-            .refresh_tools()
-            .await
-            .with_context(|| format!("MCP server '{name}' failed to list tools"))
-            .map_err(|err| (err, false))?;
-
-        crate::logging::info(&format!(
-            "MCP: Connected to '{}' with {} tools",
-            name,
-            client.handle.tools().len()
-        ));
-        Ok(client)
-    }
-
     /// Get a shareable handle to this client
     pub fn handle(&self) -> McpHandle {
         self.handle.clone()
@@ -549,24 +288,6 @@ impl McpClient {
         matches!(self.backend, Backend::Remote(_))
     }
 
-    /// Shutdown the server
-    pub async fn shutdown(&mut self) {
-        match &mut self.backend {
-            Backend::Stdio(child) => {
-                let _ = self
-                    .handle
-                    .writer_tx
-                    .send("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n".to_string())
-                    .await;
-
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                let _ = child.kill().await;
-            }
-            Backend::Remote(connection) => connection.shutdown().await,
-        }
-    }
-
     // === Legacy compatibility methods that delegate to handle ===
 
     pub fn name(&self) -> &str {
@@ -610,12 +331,45 @@ fn is_sensitive_inherited_env_key(key: &str) -> bool {
 }
 
 fn mcp_child_env(
-    mut inherited: HashMap<String, String>,
+    mut inherited: HashMap<std::ffi::OsString, std::ffi::OsString>,
     explicit: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    inherited.retain(|key, _| !is_sensitive_inherited_env_key(key));
-    inherited.extend(explicit.clone());
-    inherited
+) -> Result<HashMap<std::ffi::OsString, std::ffi::OsString>> {
+    inherited.retain(|key, _| !is_sensitive_inherited_env_key(&key.to_string_lossy()));
+    #[cfg(windows)]
+    {
+        let mut entries: Vec<_> = explicit.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, value) in entries {
+            let mut replaced = Vec::new();
+            for existing in inherited.keys() {
+                if super::windows_native_env::same_key(existing, key.as_ref())? {
+                    replaced.push(existing.clone());
+                }
+            }
+            for existing in replaced {
+                drop(inherited.remove(&existing));
+            }
+            inherited.insert(key.into(), value.into());
+        }
+        Ok(inherited)
+    }
+    #[cfg(not(windows))]
+    {
+        inherited.extend(
+            explicit
+                .iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        Ok(inherited)
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_mcp_command_env(
+    command: &mut Command,
+    env: &HashMap<std::ffi::OsString, std::ffi::OsString>,
+) {
+    command.env_clear().envs(env);
 }
 
 impl Drop for McpClient {
@@ -626,132 +380,4 @@ impl Drop for McpClient {
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::{McpClient, is_sensitive_inherited_env_key, mcp_child_env};
-    use crate::mcp::protocol::McpServerConfig;
-    use std::collections::HashMap;
-
-    #[test]
-    fn inherited_mcp_env_scrubs_provider_credentials() {
-        for key in [
-            "ANTHROPIC_API_KEY",
-            "openai_api_key",
-            "CURSOR_ACCESS_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-        ] {
-            assert!(is_sensitive_inherited_env_key(key), "must scrub {key}");
-        }
-        for key in ["PATH", "HOME", "RUST_LOG", "JCODE_OPENROUTER_API_KEY_NAME"] {
-            assert!(!is_sensitive_inherited_env_key(key), "must preserve {key}");
-        }
-    }
-
-    #[test]
-    fn explicit_mcp_env_can_opt_a_credential_back_in() {
-        let inherited = HashMap::from([
-            ("PATH".to_string(), "/bin".to_string()),
-            ("ANTHROPIC_API_KEY".to_string(), "daemon-secret".to_string()),
-        ]);
-        let explicit = HashMap::from([(
-            "ANTHROPIC_API_KEY".to_string(),
-            "server-specific-secret".to_string(),
-        )]);
-
-        let env = mcp_child_env(inherited, &explicit);
-        assert_eq!(env.get("PATH").map(String::as_str), Some("/bin"));
-        assert_eq!(
-            env.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("server-specific-secret")
-        );
-    }
-
-    /// A minimal fake stdio MCP server (shell script) that reports its own
-    /// process cwd as the serverInfo name.
-    fn fake_server_config() -> McpServerConfig {
-        let script = r#"
-while IFS= read -r line; do
-  case "$line" in
-    *'"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"%s","version":"0"}}}\n' "$PWD"
-      ;;
-    *'"tools/list"'*)
-      printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'
-      ;;
-  esac
-done
-"#;
-        McpServerConfig {
-            command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), script.to_string()],
-            env: Default::default(),
-            shared: false,
-            transport: None,
-            url: None,
-            headers: std::collections::HashMap::new(),
-            enabled: None,
-            disabled: None,
-            timeout_secs: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn connect_fails_fast_when_server_exits_before_initialize() {
-        // A server that prints to stderr and exits before answering
-        // `initialize` must fail connect promptly, even with a huge
-        // `timeout_secs` (previously the pending request waited it out).
-        let config = McpServerConfig {
-            command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "echo boom >&2; exit 1".to_string()],
-            timeout_secs: Some(86_400),
-            ..fake_server_config()
-        };
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            McpClient::connect("dead".to_string(), &config),
-        )
-        .await
-        .expect("connect must not hang on a server that exited");
-        let err = format!("{:#}", result.err().expect("connect must fail"));
-        assert!(err.contains("exited"), "unexpected error: {err}");
-    }
-
-    #[tokio::test]
-    async fn connect_in_dir_sets_subprocess_cwd() {
-        // Issue #557: owned MCP servers must run in the session project dir.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let expected = dir.path().canonicalize().expect("canonicalize");
-
-        let client = McpClient::connect_in_dir(
-            "cwd-test".to_string(),
-            &fake_server_config(),
-            Some(dir.path()),
-        )
-        .await
-        .expect("connect");
-
-        let reported = client.server_info().expect("server info").name;
-        assert_eq!(
-            std::path::Path::new(&reported)
-                .canonicalize()
-                .expect("canonicalize reported"),
-            expected
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_in_dir_missing_dir_falls_back_to_inherited_cwd() {
-        let client = McpClient::connect_in_dir(
-            "cwd-fallback-test".to_string(),
-            &fake_server_config(),
-            Some(std::path::Path::new("/nonexistent/jcode-557")),
-        )
-        .await
-        .expect("connect should fall back to inherited cwd");
-
-        let reported = client.server_info().expect("server info").name;
-        assert!(!reported.is_empty());
-    }
-}
+include!("client_tests.rs");

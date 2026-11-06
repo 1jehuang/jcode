@@ -335,9 +335,8 @@ impl SshConnection {
                 Err(error) => last = Some(error),
             }
         }
-        Err(last
-            .expect("at least one attempt")
-            .context(format!("connecting native Jcode on {}", options.host)))
+        let error = last.context("native SSH connection attempts produced no result")?;
+        Err(error.context(format!("connecting native Jcode on {}", options.host)))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {

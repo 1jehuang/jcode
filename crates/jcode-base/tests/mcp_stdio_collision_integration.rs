@@ -215,7 +215,7 @@ async fn exercise_proxies() {
     );
     let eager = create_mcp_tools(manager.clone()).await;
     let eager_targets = targets(&eager).await;
-    manager.read().await.disconnect_all().await;
+    manager.read().await.disconnect_all().await.unwrap();
 
     // Cached proxies are built with neither server connected. Executing them
     // exercises the actual connect-on-first-call path, not a warmed manager.
@@ -235,7 +235,7 @@ async fn exercise_proxies() {
         targets(&create_mcp_tools(manager.clone()).await).await,
         eager_targets
     );
-    manager.read().await.disconnect_all().await;
+    manager.read().await.disconnect_all().await.unwrap();
 
     // A partial live surface is intentionally a different naming set. Document
     // that adding a colliding server renames the old key, but never retargets
@@ -277,6 +277,6 @@ async fn exercise_proxies() {
         "old proxy was retargeted"
     );
     assert_eq!(call(cached_proxy).await["server"], "server-a");
-    manager.read().await.disconnect_all().await;
+    manager.read().await.disconnect_all().await.unwrap();
     assert!(!manager.read().await.has_connections().await);
 }
