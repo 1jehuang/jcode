@@ -8,6 +8,7 @@ mod rewind_checkpoint;
 #[path = "tests/rewind_recovery.rs"]
 mod rewind_recovery;
 mod tool_duration;
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");

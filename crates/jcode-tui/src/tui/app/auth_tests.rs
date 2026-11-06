@@ -72,6 +72,7 @@ fn claude_code_choice_does_not_launch_terminal_with_custom_profile() {
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
+    let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
     let saved_env = [
         "JCODE_HOME",
@@ -89,9 +90,6 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     .map(|key| (key, std::env::var_os(key)));
 
     crate::env::set_var("JCODE_HOME", temp.path());
-    for (key, _) in saved_env.iter().skip(1) {
-        crate::env::remove_var(key);
-    }
 
     let result = f();
 

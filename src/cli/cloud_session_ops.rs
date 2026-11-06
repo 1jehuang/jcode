@@ -89,9 +89,14 @@ pub(super) fn fork(
 
 fn target() -> super::Target {
     super::Target {
-        transport: std::env::var("JCODE_CLOUD_TRANSPORT")
-            .ok()
-            .filter(|v| !v.trim().is_empty()),
+        transport: match std::env::var("JCODE_CLOUD_TRANSPORT") {
+            Ok(value) => Some(value).filter(|v| !v.trim().is_empty()),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                crate::logging::info("Ignoring non-Unicode JCODE_CLOUD_TRANSPORT");
+                None
+            }
+        },
         ..Default::default()
     }
 }
@@ -336,8 +341,11 @@ pub(super) fn run_detached(reference: &str, message: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (reference, message);
-        bail!("detached cloud turns require a Unix host");
+        bail!(
+            "detached cloud turns require a Unix host (session reference length {}, message length {})",
+            reference.len(),
+            message.len()
+        );
     }
     #[cfg(unix)]
     {

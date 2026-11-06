@@ -827,12 +827,12 @@ impl Session {
             // the owner's summary on replay, and the next resume or split would
             // see the full uncompacted transcript and emergency-compact it.
             if self.persist_state.transcript_stripped
-                || entry_meta.compaction.is_some()
+                || (entry_meta.compaction.is_some()
                     && self
                         .persist_state
                         .last_meta
                         .as_ref()
-                        .is_some_and(|prev| prev.compaction == entry_meta.compaction)
+                        .is_some_and(|prev| prev.compaction == entry_meta.compaction))
             {
                 entry_meta.compaction = None;
                 entry_meta.compaction_unchanged = true;

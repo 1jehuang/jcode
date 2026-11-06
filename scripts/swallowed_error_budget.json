@@ -1,9 +1,9 @@
 {
-  "total": 4203,
+  "total": 4174,
   "totals_by_pattern": {
-    "dot_ok": 1658,
-    "let_underscore": 1511,
-    "unwrap_or_default": 1034
+    "dot_ok": 1640,
+    "let_underscore": 1504,
+    "unwrap_or_default": 1030
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -123,11 +123,6 @@
     },
     "crates/jcode-app-core/src/lib.rs": {
       "dot_ok": 1,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-app-core/src/mobile_push.rs": {
-      "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -1431,11 +1426,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/usage/banked.rs": {
-      "dot_ok": 3,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
     "crates/jcode-base/src/usage/cache.rs": {
       "dot_ok": 10,
       "let_underscore": 0,
@@ -1470,11 +1460,6 @@
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 6
-    },
-    "crates/jcode-base/src/usage/remote_accounts.rs": {
-      "dot_ok": 3,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/usage/startup_snapshot.rs": {
       "dot_ok": 11,
@@ -2886,11 +2871,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 10
     },
-    "crates/jcode-tui/src/tui/ui_messages/usage.rs": {
-      "dot_ok": 2,
-      "let_underscore": 0,
-      "unwrap_or_default": 2
-    },
     "crates/jcode-tui/src/tui/ui_onboarding.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
@@ -2976,11 +2956,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "src/cli/cloud_diagnostics.rs": {
-      "dot_ok": 5,
-      "let_underscore": 6,
-      "unwrap_or_default": 2
-    },
     "src/cli/cloud_managed.rs": {
       "dot_ok": 5,
       "let_underscore": 1,
@@ -2990,11 +2965,6 @@
       "dot_ok": 26,
       "let_underscore": 14,
       "unwrap_or_default": 7
-    },
-    "src/cli/cloud_session_ops.rs": {
-      "dot_ok": 1,
-      "let_underscore": 1,
-      "unwrap_or_default": 0
     },
     "src/cli/commands.rs": {
       "dot_ok": 13,
