@@ -182,6 +182,7 @@ impl App {
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+        self.clear_retrying_outcome();
     }
 
     /// Stop automatically resuming a held turn whose retry budget is spent.
