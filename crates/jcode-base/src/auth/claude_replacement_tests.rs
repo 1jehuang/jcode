@@ -251,11 +251,8 @@ fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_o
     )
     .unwrap();
     assert!(capture_refresh_account("claude-1", "removed-saved-refresh").is_err());
-    assert!(
-        capture_refresh_account("claude-1", "external-refresh")
-            .unwrap()
-            .is_none()
-    );
+    let captured = capture_refresh_account("claude-1", "external-refresh").unwrap();
+    assert!(captured.is_none());
     let tokens = crate::auth::oauth::OAuthTokens {
         access_token: "external-access".into(),
         refresh_token: "external-rotated".into(),
@@ -263,7 +260,26 @@ fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_o
         id_token: None,
         scopes: vec![],
     };
-    commit_external_refresh("claude-1", &tokens).unwrap();
+    // Approval can be revoked while the captured login's HTTP refresh is pending.
+    crate::config::Config::revoke_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    let error = commit_captured_refresh("claude-1", captured.as_ref(), "external-refresh", &tokens)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("approval changed"));
+    assert!(!error.contains("external-refresh"));
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
+    assert!(load_auth_file().unwrap().anthropic_accounts.is_empty());
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    commit_captured_refresh("claude-1", captured.as_ref(), "external-refresh", &tokens).unwrap();
     let saved = load_auth_file().unwrap();
     assert_eq!(saved.anthropic_accounts.len(), 1);
     let stored = &saved.anthropic_accounts[0];
@@ -282,6 +298,6 @@ fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_o
 
     save_auth_file(&fixture()).unwrap();
     let before = std::fs::read(jcode_path().unwrap()).unwrap();
-    assert!(commit_external_refresh("work", &tokens).is_err());
+    assert!(commit_external_refresh("work", "external-refresh", &tokens).is_err());
     assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
 }

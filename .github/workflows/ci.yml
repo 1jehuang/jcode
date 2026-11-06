@@ -273,6 +273,13 @@ jobs:
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
+      - name: Run Claude refresh consent regressions
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-base --lib auth::claude::replacement_tests -- --test-threads=1
+
       - name: Run browser session liveness and reuse regressions
         shell: bash
         run: |
