@@ -412,12 +412,21 @@ impl CloudClient {
 
     /// Reset the account's unread badge (the app came to the foreground).
     pub fn reset_push_badge(&self, account: &Account) -> Result<()> {
-        self.account_call(account, "POST", "/push/badge", serde_json::json!({"count": 0}))
+        self.account_call(
+            account,
+            "POST",
+            "/push/badge",
+            serde_json::json!({"count": 0}),
+        )
     }
 
     /// Ask the control plane to push `notification` to every device on the
     /// account. Servers call this with their own account key.
-    pub fn send_push(&self, account: &Account, notification: &PushNotification) -> Result<PushReceipt> {
+    pub fn send_push(
+        &self,
+        account: &Account,
+        notification: &PushNotification,
+    ) -> Result<PushReceipt> {
         let client = Self {
             api_base: account.api_base.trim_end_matches('/').to_string(),
             ..self.clone()
@@ -766,7 +775,10 @@ mod tests {
             (200, r#"{"ok":true}"#),
             (200, r#"{"sent":1,"devices":1}"#),
             (200, r#"{"ok":true}"#),
-            (401, r#"{"error":{"code":"unauthorized","message":"revoked"}}"#),
+            (
+                401,
+                r#"{"error":{"code":"unauthorized","message":"revoked"}}"#,
+            ),
         ]);
         let cloud = CloudClient::new("t");
         let account = Account {
@@ -798,7 +810,13 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(receipt, PushReceipt { sent: 1, devices: 1 });
+        assert_eq!(
+            receipt,
+            PushReceipt {
+                sent: 1,
+                devices: 1
+            }
+        );
         assert!(seen.recv().unwrap().contains(r#""kind":"turn_done""#));
 
         cloud.unregister_push_device(&account, "ab01").unwrap();
