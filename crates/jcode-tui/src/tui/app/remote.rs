@@ -109,7 +109,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .as_ref()
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
-    let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = crate::tui::periodic_redraw_required(app)
+        | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
         && let Err(error) = remote.poll_account_usage().await
@@ -527,11 +528,10 @@ pub(super) async fn handle_terminal_event(
     // lag. Mirrors the identical drain in `local::handle_terminal_event`.
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            break;
-        }
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(Some(event)) = crate::tui::terminal_events::try_read() {
             needs_redraw |= apply_terminal_event(app, terminal, remote, Some(Ok(event))).await?;
+        } else {
+            break;
         }
     }
     Ok(needs_redraw)
