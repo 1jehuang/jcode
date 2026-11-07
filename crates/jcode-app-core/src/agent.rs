@@ -417,7 +417,7 @@ impl Agent {
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
         self.current_skills_snapshot()
-            .list()
+            .list_model_invocable()
             .iter()
             .map(|skill| crate::prompt::SkillInfo {
                 name: skill.name.clone(),
