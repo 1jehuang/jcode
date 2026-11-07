@@ -1,8 +1,8 @@
 {
-  "total": 3961,
+  "total": 3960,
   "totals_by_pattern": {
     "dot_ok": 1553,
-    "let_underscore": 1428,
+    "let_underscore": 1427,
     "unwrap_or_default": 980
   },
   "tracked_files": {
@@ -921,9 +921,14 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/hooks.rs": {
+    "crates/jcode-base/src/hooks/mod.rs": {
       "dot_ok": 0,
-      "let_underscore": 3,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/hooks/sync_runner.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/image_normalize.rs": {
