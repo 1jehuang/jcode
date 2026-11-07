@@ -73,6 +73,8 @@ export interface ModelRouteInfo {
   available: boolean;
   detail: string;
   usage?: ModelUsage;
+  /** Efforts `set_reasoning_effort` accepts on this route; empty = none, absent = not reported. */
+  reasoning_efforts?: string[];
 }
 
 export interface TextMatch {

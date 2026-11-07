@@ -46,6 +46,10 @@ pub async fn run_model_command(
                     model: route.model.clone(),
                     method: cli_api_method_display(&route.api_method),
                     available: route.available,
+                    reasoning_efforts: crate::provider::route_reasoning_efforts(
+                        &route.api_method,
+                        &route.model,
+                    ),
                 })
                 .collect(),
         };

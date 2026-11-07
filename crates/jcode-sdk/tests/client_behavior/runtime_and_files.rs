@@ -85,6 +85,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     let seen = std::sync::Arc::clone(&requests);
     let routes = vec![
         ModelRouteInfo {
+            reasoning_efforts: None,
             usage: Some(jcode_sdk::ModelUsage {
                 count: 7,
                 last_used_unix_secs: Some(100),
@@ -99,6 +100,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             detail: "ready".to_string(),
         },
         ModelRouteInfo {
+            reasoning_efforts: None,
             usage: None,
             model: "gemini".to_string(),
             provider: "google".to_string(),

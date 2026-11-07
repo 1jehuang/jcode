@@ -67,7 +67,7 @@ pub use jcode_provider_core::{
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    oauth_account_label, provider_from_model_key, shared_http_client,
+    oauth_account_label, provider_from_model_key, route_reasoning_efforts, shared_http_client,
     summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{

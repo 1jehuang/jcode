@@ -2103,6 +2103,9 @@ struct ModelListRouteReport {
     model: String,
     method: String,
     available: bool,
+    /// Efforts selectable for this model on this route, as the model picker
+    /// offers them; empty when the route has none.
+    reasoning_efforts: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
