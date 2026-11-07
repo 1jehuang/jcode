@@ -42,6 +42,11 @@ fn session_creation_does_not_wait_for_unreachable_telemetry() {
         .env("JCODE_HOME", home.path())
         .env_remove("JCODE_NO_TELEMETRY")
         .env_remove("DO_NOT_TRACK")
+        // Clear OTEL endpoint vars so the child does not try to export spans
+        // through the blocking proxy (this test exercises anonymous telemetry
+        // delivery only, not OTEL span export).
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env("HTTPS_PROXY", &proxy)
         .env("https_proxy", &proxy)
         .env("ALL_PROXY", &proxy)

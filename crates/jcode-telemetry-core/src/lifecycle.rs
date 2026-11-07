@@ -8,6 +8,27 @@ pub(super) fn emit_lifecycle_event(
     clear_state: bool,
 ) {
     if !is_enabled() {
+        // Anonymous telemetry is opted out. If an OTEL endpoint is configured,
+        // finalize any pending turn span before clearing state — the session span
+        // was already exported by export_otel_session_span_from_state before we
+        // get here, but finalize_current_turn hasn't been called yet so the final
+        // turn would be lost. No anonymous analytics payload is produced here.
+        if clear_state {
+            if otel::is_otel_enabled() {
+                if let Ok(mut guard) = SESSION_STATE.lock() {
+                    let id_opt = get_or_create_id();
+                    let now = Instant::now();
+                    if let Some(ref mut state) = *guard {
+                        if let Some(ref id) = id_opt {
+                            finalize_current_turn(id, state, now, reason.as_str(), DeliveryMode::Background);
+                        }
+                    }
+                }
+            }
+            if let Ok(mut guard) = SESSION_STATE.lock() {
+                *guard = None;
+            }
+        }
         return;
     }
     // Superseding a session does not exit the process. In particular, a new
@@ -148,6 +169,8 @@ pub(super) fn emit_lifecycle_event(
                 provider_switches: s.provider_switches,
                 model_switches: s.model_switches,
                 todo: s.todo.clone(),
+                otel_start_nanos: s.otel_start_nanos,
+                otel_session_span_id: s.otel_session_span_id.clone(),
             },
             None => return,
         };
@@ -362,6 +385,7 @@ pub(super) fn emit_lifecycle_event(
     if let Ok(payload) = serde_json::to_value(&todo_event) {
         let _ = send_payload(payload, delivery);
     }
+    unregister_active_session(&state.session_id);
     if session_success {
         emit_onboarding_step_once("first_session_success", None, None);
     }
