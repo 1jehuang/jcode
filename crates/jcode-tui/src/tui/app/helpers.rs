@@ -386,7 +386,7 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
 /// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
 /// the selection unlike arboard), then arboard, then OSC 52 as the
 /// remote-session fallback (SSH / Docker / tmux).
-pub(super) fn copy_to_clipboard(text: &str) -> bool {
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
     // which forks a clipboard server that does not exit; waiting on it hangs the
