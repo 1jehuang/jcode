@@ -52,10 +52,7 @@ pub(super) async fn awaited_member_statuses(
                     )
                 })
                 .unwrap_or((None, "unknown".to_string(), None));
-            let done = target_status.contains(&status)
-                || (status == "unknown"
-                    && (target_status.contains(&"stopped".to_string())
-                        || target_status.contains(&"completed".to_string())));
+            let done = target_status.contains(&status);
             AwaitedMemberStatus {
                 session_id: session_id.clone(),
                 friendly_name: name,
