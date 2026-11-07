@@ -265,6 +265,17 @@ pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const RUNCRATE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "runcrate",
+    display_name: "Runcrate",
+    api_base: "https://api.runcrate.ai/v1",
+    api_key_env: "RUNCRATE_API_KEY",
+    env_file: "runcrate.env",
+    setup_url: "https://www.runcrate.ai/docs/welcome/home?utm_source=jcode&utm_medium=directory&utm_campaign=gpu_pricing",
+    default_model: Some("deepseek-ai/DeepSeek-V4.1-Flash"),
+    requires_api_key: true,
+};
+
 pub const GROQ_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "groq",
     display_name: "Groq",
@@ -509,7 +520,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 46] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -536,6 +547,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     NEBIUS_PROFILE,
     SCALEWAY_PROFILE,
     STACKIT_PROFILE,
+    RUNCRATE_PROFILE,
     GROQ_PROFILE,
     MISTRAL_PROFILE,
     PERPLEXITY_PROFILE,
@@ -971,6 +983,19 @@ pub const STACKIT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     order: LoginProviderSurfaceOrder::new(Some(29), Some(29), Some(29), Some(29), Some(29)),
 };
 
+pub const RUNCRATE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "runcrate",
+    display_name: "Runcrate",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &[],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(RUNCRATE_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(29), Some(29), Some(29), Some(29), Some(29)),
+};
+
 pub const GROQ_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "groq",
     display_name: "Groq",
@@ -1290,7 +1315,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 58] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1322,6 +1347,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     NEBIUS_LOGIN_PROVIDER,
     SCALEWAY_LOGIN_PROVIDER,
     STACKIT_LOGIN_PROVIDER,
+    RUNCRATE_LOGIN_PROVIDER,
     GROQ_LOGIN_PROVIDER,
     MISTRAL_LOGIN_PROVIDER,
     PERPLEXITY_LOGIN_PROVIDER,
