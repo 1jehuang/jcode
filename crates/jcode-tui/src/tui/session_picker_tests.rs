@@ -83,6 +83,7 @@ fn copy_shortcut_does_not_interfere_with_search_or_empty_picker() {
 /// The picker shortcut invokes the shared clipboard implementation.
 #[test]
 fn copy_shortcut_copies_highlighted_session() {
+    let _lock = crate::tui::ui::render_state_test_lock();
     let mut picker = SessionPicker::new(vec![make_session(
         "session_alpha",
         "alpha",
