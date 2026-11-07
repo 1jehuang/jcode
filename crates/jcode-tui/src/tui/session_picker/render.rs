@@ -658,12 +658,16 @@ impl SessionPicker {
 
         title_parts.push(Span::styled(" ", Style::default()));
 
-        let mut help = if self.search_active && self.loading_message.is_some() {
+        let mut help = if self.search_submission_pending() {
+            " confirming best match… · waits ≤1s · ↑↓ take control · Esc cancel ".to_string()
+        } else if self.search_active && self.loading_message.is_some() {
             " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
         } else if self.loading_message.is_some() {
             " / search · s/S filter · Esc cancel ".to_string()
+        } else if self.transcript_search.pending() && self.search_selection.following() {
+            " finding best match… · auto-focus ≤1s · ↑↓ take control · Enter confirm ".to_string()
         } else if self.transcript_search.pending() {
-            " searching full transcripts… · type to refine · Ctrl+C cancel ".to_string()
+            " searching in background… · selection held · ↑↓ nav · Enter confirm ".to_string()
         } else if self.search_active {
             " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
         } else {
@@ -682,7 +686,10 @@ impl SessionPicker {
 
         let border_dim: Color = rgb(70, 70, 70);
         let border_focus: Color = rgb(130, 130, 160);
-        let border_color = if self.focus == PaneFocus::Sessions {
+        let border_color = if self.transcript_search.pending() && self.search_selection.following()
+        {
+            rgb(220, 180, 100)
+        } else if self.focus == PaneFocus::Sessions {
             border_focus
         } else {
             border_dim

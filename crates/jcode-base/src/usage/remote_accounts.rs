@@ -12,6 +12,19 @@ struct RemoteAccounts {
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
 
+fn try_remote_lock(
+    mutex: &Mutex<RemoteAccounts>,
+) -> Option<std::sync::MutexGuard<'_, RemoteAccounts>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            crate::logging::info("Remote account usage cache poisoned, skipping snapshot");
+            None
+        }
+    }
+}
+
 /// Enter daemon-only mode without claiming that a response has arrived.
 pub fn clear_remote_account_usage() {
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
@@ -23,7 +36,7 @@ pub fn clear_remote_account_usage() {
 pub fn remote_account_usage_received() -> bool {
     REMOTE
         .get()
-        .and_then(|state| state.try_lock().ok())
+        .and_then(try_remote_lock)
         .is_some_and(|state| state.received.is_some())
 }
 
@@ -53,7 +66,7 @@ pub(super) fn set_remote_account_usage_with_age(
 
 /// Daemon-reported OAuth accounts `(anthropic, openai)`, once a response arrived.
 pub fn remote_account_list() -> Option<(Vec<AccountUsageSnapshot>, Vec<AccountUsageSnapshot>)> {
-    let state = REMOTE.get()?.try_lock().ok()?;
+    let state = try_remote_lock(REMOTE.get()?)?;
     state.received?;
     let convert = |list: &[jcode_protocol::AccountUsageSnapshot]| {
         list.iter()
@@ -116,6 +129,28 @@ impl RemoteAccounts {
     }
 }
 
+/// Daemon-reported banked resets for one account, when the daemon knows them.
+pub fn remote_account_banked_resets(
+    provider: MultiAccountProviderKind,
+    label: &str,
+) -> Option<super::AccountBankedResets> {
+    let state = try_remote_lock(REMOTE.get()?)?;
+    state.received?;
+    let accounts = match provider {
+        MultiAccountProviderKind::Anthropic => &state.anthropic,
+        MultiAccountProviderKind::OpenAI => &state.openai,
+    };
+    let data = accounts.iter().find(|data| data.label == label.trim())?;
+    if data.banked_resets.is_none() && data.banked_next_at.is_none() {
+        return None;
+    }
+    Some(super::AccountBankedResets {
+        available: data.banked_resets.unwrap_or(0),
+        next_available_at: data.banked_next_at.clone(),
+        expires_at: data.banked_expires_at.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +191,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         });
         assert_eq!(
             state

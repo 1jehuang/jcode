@@ -142,6 +142,8 @@ fn launch_prompts_keep_plan_and_refactor_review_semantics() {
 #[derive(Clone, Default)]
 struct RecordingProvider {
     calls: Arc<AtomicUsize>,
+    progress_session: Arc<std::sync::Mutex<Option<String>>>,
+    progress_turns: usize,
 }
 
 #[async_trait::async_trait]
@@ -153,7 +155,15 @@ impl Provider for RecordingProvider {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call <= self.progress_turns {
+            if let Some(session_id) = self.progress_session.lock().unwrap().as_ref() {
+                let mut snapshot = open_snapshot();
+                snapshot.todos[0].content =
+                    format!("Complete remaining campaign work after step {call}");
+                todo::save_todos(session_id, &snapshot.todos)?;
+            }
+        }
         Ok(Box::pin(futures::stream::iter([
             Ok(StreamEvent::TextDelta(
                 "A real remote model turn completed.".into(),
@@ -184,6 +194,46 @@ impl Drop for RestoreHome {
         }
         crate::config::Config::invalidate_cache();
     }
+}
+
+#[tokio::test]
+async fn productive_remote_campaign_exceeds_old_turn_cap_then_stops_on_no_progress() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let progress_session = Arc::new(std::sync::Mutex::new(None));
+    // Allocate a session first so the provider can publish durable progress
+    // exactly as a model's todo tool would during each real continuation.
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(RecordingProvider {
+            calls: Arc::clone(&calls),
+            progress_session: Arc::clone(&progress_session),
+            progress_turns: 40,
+        }),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    *progress_session.lock().unwrap() = Some(session_id.clone());
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    initialize_remote_session(&session_id, true).unwrap();
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(rx);
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 43);
+    let state = read_state(&state_path(&session_id).unwrap()).unwrap();
+    assert!(state.poke_enabled, "productive work must not disable poke");
+    assert_eq!(state.turns, 43);
+    initialize_remote_session(&session_id, true).unwrap();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        43,
+        "no-progress budget survives reattach"
+    );
 }
 
 #[tokio::test]

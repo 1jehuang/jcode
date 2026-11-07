@@ -342,7 +342,8 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
-# Optional aggregate weak-point follow-up, once per completed todo cycle.
+# Optional automatic todo quality reviews (confidence, ownership, long-session,
+# and aggregate weak-point checks). Disabled by default.
 # Requires auto-poke. Does not control the display-only completion report.
 todo_gate_digest = false
 # Show which disabled end-of-turn gates would have fired in completion reports.

@@ -371,6 +371,7 @@ pub(super) fn take_run_gate_digest_if_turn_ended(
 }
 
 pub(super) fn build_run_auto_poke_follow_up_from_todos(
+    quality_reviews_enabled: bool,
     todos: &[crate::todo::TodoItem],
     confidence_spike_challenged: bool,
     gate_digest: Option<String>,
@@ -388,6 +389,9 @@ pub(super) fn build_run_auto_poke_follow_up_from_todos(
             count: incomplete.len(),
             message: build_run_poke_message(&incomplete),
         });
+    }
+    if !quality_reviews_enabled {
+        return None;
     }
     // Verify the weak points before judging completion confidence: the digest
     // may prompt work that changes those very assessments.

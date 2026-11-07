@@ -1190,6 +1190,10 @@ pub struct App {
     // Running `/cloud` or `/local` job (wakes the machine, moves the session).
     cloud_job: Option<commands_cloud::CloudJob>,
     pending_cloud_handoff: Option<commands_cloud::PendingCloudHandoff>,
+    // Request id of a ready handoff that already interrupted the running turn.
+    cloud_interrupt_sent_for: Option<u64>,
+    // Remote mode: the daemon turn must be cancelled for a ready handoff.
+    cloud_remote_interrupt_pending: bool,
     cloud_recovery_context: Option<(String, String)>,
     cloud_recovery_auto_pending: bool,
     // One autonomous diagnosis per command/session per client lifetime. A
@@ -1841,6 +1845,8 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    /// Provider query from `/usage <provider>`; None shows every provider.
+    usage_provider_filter: Option<String>,
     usage_reset: usage_reset::ResetState,
     /// Whether a `/productivity` report generation is currently in flight.
     productivity_refreshing: bool,
