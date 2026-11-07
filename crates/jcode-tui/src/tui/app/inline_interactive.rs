@@ -100,7 +100,6 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 
 #[path = "inline_interactive_placeholder_routes.rs"]
 mod placeholder_routes;
-use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
@@ -1864,18 +1863,12 @@ impl App {
             }
 
             // Expand each route only across the effort ladder its runtime can
-            // actually apply. The same model can be reachable through native
-            // OpenAI (where `max` is real) and OpenRouter (where `max` aliases
-            // `xhigh`), so model-id-only inference over-advertises values.
+            // actually apply.
             let mut effort_routes = Vec::new();
             let mut plain_routes = Vec::new();
             let mut model_efforts = Vec::new();
             for route in entry_routes {
-                let efforts = if route_supports_reasoning_effort(&route.api_method) {
-                    inferred_reasoning_efforts(Some(&route.api_method), Some(name))
-                } else {
-                    Vec::new()
-                };
+                let efforts = jcode_provider_core::route_reasoning_efforts(&route.api_method, name);
                 if efforts.is_empty() {
                     plain_routes.push(route);
                 } else {

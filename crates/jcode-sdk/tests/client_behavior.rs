@@ -504,6 +504,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 auth_method: None,
                 account_label: None,
                 routes: vec![ModelRouteInfo {
+                    reasoning_efforts: None,
                     usage: None,
                     model: "new-model".into(),
                     provider: "openai-api".into(),

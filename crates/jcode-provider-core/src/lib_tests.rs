@@ -518,3 +518,28 @@ fn grok_build_runtime_key_is_internally_tagged_wire_safe() {
     let decoded: RuntimeKey = serde_json::from_value(json).expect("GrokBuild must deserialize");
     assert_eq!(decoded, RuntimeKey::GrokBuild);
 }
+
+// Clients read a route's effort ladder from the route payload; older
+// daemons' routes, without it, must still deserialize.
+#[test]
+fn serialized_route_reports_its_effort_ladder_and_round_trips() {
+    let route = ModelRoute {
+        model: "gpt-5.4".to_string(),
+        provider: "OpenRouter".to_string(),
+        api_method: "openrouter".to_string(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    };
+    let value = serde_json::to_value(&route).unwrap();
+    assert_eq!(
+        value["reasoning_efforts"],
+        serde_json::json!(OPENROUTER_SELECTABLE_EFFORTS)
+    );
+    assert_eq!(serde_json::from_value::<ModelRoute>(value).unwrap(), route);
+
+    let mut legacy = serde_json::to_value(&route).unwrap();
+    legacy.as_object_mut().unwrap().remove("reasoning_efforts");
+    assert_eq!(serde_json::from_value::<ModelRoute>(legacy).unwrap(), route);
+}
