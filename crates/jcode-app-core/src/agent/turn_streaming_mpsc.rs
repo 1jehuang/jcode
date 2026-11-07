@@ -594,6 +594,10 @@ impl Agent {
                                     name,
                                     output,
                                     error: is_error.then(|| "Provider tool error".to_string()),
+                                    // Provider-native relay: no local wall-clock
+                                    // measurement exists for this execution; the
+                                    // authoritative duration arrives on history reload.
+                                    duration_ms: None,
                                 });
                             }
                             None => {}
@@ -739,6 +743,7 @@ impl Agent {
                             } else {
                                 None
                             },
+                            duration_ms: None,
                         });
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
@@ -1509,6 +1514,7 @@ impl Agent {
                         name: tc.name.clone(),
                         output: error_msg.clone(),
                         error: Some(error_msg.clone()),
+                        duration_ms: None,
                     });
                     self.add_message(
                         Role::User,
@@ -1660,6 +1666,7 @@ impl Agent {
                                 name: tc.name.clone(),
                                 output: output.output.clone(),
                                 error: None,
+                                duration_ms: Some(tool_elapsed.as_millis() as u64),
                             });
 
                             let side_pane_images =
@@ -1692,6 +1699,7 @@ impl Agent {
                                 name: tc.name.clone(),
                                 output: error_msg.clone(),
                                 error: Some(error_msg.clone()),
+                                duration_ms: Some(tool_elapsed.as_millis() as u64),
                             });
 
                             self.add_message_with_duration(
@@ -1730,6 +1738,7 @@ impl Agent {
                         } else {
                             None
                         },
+                        duration_ms: Some(tool_elapsed.as_millis() as u64),
                     });
 
                     self.add_message_with_duration(
@@ -1786,6 +1795,7 @@ impl Agent {
                         name: tc.name.clone(),
                         output: bg_msg.clone(),
                         error: None,
+                        duration_ms: Some(tool_elapsed.as_millis() as u64),
                     });
 
                     self.add_message_with_duration(

@@ -18,6 +18,7 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    show_tool_duration: bool,
     latex_rendering: LatexRenderingMode,
     show_link_urls: bool,
 }
@@ -83,6 +84,7 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    pub show_tool_duration: bool,
     pub latex_rendering: LatexRenderingMode,
     pub show_link_urls: bool,
 }
@@ -136,6 +138,7 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        show_tool_duration: context.show_tool_duration,
         latex_rendering: context.latex_rendering,
         show_link_urls: context.show_link_urls,
     };
@@ -171,6 +174,7 @@ mod tests {
             show_agentgrep_output: true,
             show_bash_output: true,
             tool_call_details: true,
+            show_tool_duration: false,
             latex_rendering: LatexRenderingMode::Image,
             show_link_urls: false,
         };
