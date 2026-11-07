@@ -64,6 +64,8 @@ impl GmailBackend {
 impl ComposioConfig {
     fn from_env() -> Option<Self> {
         let api_key = std::env::var("COMPOSIO_API_KEY")
+            // ponytail: user-exported; the app persists the Composio connection
+            // separately (ComposioConnection) and never writes an env file (#1389).
             .ok()
             .filter(|s| !s.is_empty())?;
         let base_url = std::env::var("COMPOSIO_BASE_URL")
