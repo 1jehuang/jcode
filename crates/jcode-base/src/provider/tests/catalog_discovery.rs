@@ -175,3 +175,47 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
         );
     });
 }
+
+/// Obscurify.ai picker routes come from a catalog cached for its own endpoint.
+/// Anything else falls back to the default model and counts as needing refresh.
+#[test]
+fn obscurify_ai_routes_only_use_a_catalog_cached_for_its_own_endpoint() {
+    with_clean_provider_test_env(|| {
+        let profile = crate::provider_catalog::OBSCURIFY_AI_PROFILE;
+        crate::env::set_var(profile.api_key_env, "sk-obs1_test");
+        let probe = "futurelab/catalog-probe";
+        let models = [jcode_provider_openrouter::ModelInfo {
+            id: probe.to_string(),
+            context_length: Some(524_288),
+            ..Default::default()
+        }];
+
+        jcode_provider_openrouter::save_disk_cache_with_source_for_namespace(
+            profile.id,
+            &models,
+            Some("https://other.example.test/v1"),
+        );
+        let routes = direct_openai_compatible_profile_routes(profile);
+        assert!(!routes.iter().any(|route| route.model == probe));
+        assert!(
+            routes
+                .iter()
+                .any(|route| Some(route.model.as_str()) == profile.default_model)
+        );
+        assert!(crate::provider::catalog_scheduler::profile_catalog_cache_needs_refresh(profile));
+
+        jcode_provider_openrouter::save_disk_cache_with_source_for_namespace(
+            profile.id,
+            &models,
+            Some(profile.api_base),
+        );
+        let routes = direct_openai_compatible_profile_routes(profile);
+        let route = routes
+            .iter()
+            .find(|route| route.model == probe)
+            .expect("live model is routable from the picker");
+        assert_eq!(route.api_method, "openai-compatible:obscurify-ai");
+        assert!(route.available);
+        assert!(!crate::provider::catalog_scheduler::profile_catalog_cache_needs_refresh(profile));
+    });
+}
