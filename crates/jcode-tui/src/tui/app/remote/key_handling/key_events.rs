@@ -361,7 +361,9 @@ pub(super) async fn handle_remote_key_internal(
     }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {
         app.record_keybinding_fast(crate::tui::app::shortcut_hints::LearnableAction::ModelSwitch);
-        remote.cycle_model(direction).await?;
+        // persist_default=true: user-initiated cycling must persist like the
+        // picker and /model (Greptile P2 on PR #1881).
+        remote.cycle_model(direction, true).await?;
         return Ok(());
     }
     if let Some(direction) = app.effort_switch_keys.direction_for(code, modifiers) {

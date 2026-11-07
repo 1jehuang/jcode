@@ -59,6 +59,7 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
         match app.provider.set_model(model_name) {
             Ok(()) => {
                 let active_model = app.finalize_model_switch(model_name);
+                app.persist_model_switch_to_config(model_name, None);
                 let auth_suffix = switched_model_account_suffix(
                     app.provider.active_auth_method_label(),
                     app.provider.active_oauth_account_email().as_deref(),

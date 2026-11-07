@@ -122,7 +122,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
     let mut client = wait_for_subscribed_server_client(&socket_path).await?;
-    let request_id = client.cycle_model(1).await?;
+    let request_id = client.cycle_model(1, true).await?;
 
     let mut saw_model_changed = false;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -732,7 +732,7 @@ async fn test_model_switch_resets_provider_session() -> Result<()> {
     }
     assert!(saw_done1, "Did not receive Done for first message");
 
-    let model_id = client.cycle_model(1).await?;
+    let model_id = client.cycle_model(1, true).await?;
     let mut saw_model = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -849,7 +849,7 @@ async fn test_model_switch_is_per_session() -> Result<()> {
     }
     assert!(done2, "Did not receive Done for client2 message");
 
-    let model_id = client1.cycle_model(1).await?;
+    let model_id = client1.cycle_model(1, true).await?;
     let mut saw_model = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
