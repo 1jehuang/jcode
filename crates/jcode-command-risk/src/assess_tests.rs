@@ -723,3 +723,88 @@ fn issue_1753_inert_text_stays_safe() {
         assert!(level(command).runs_immediately(), "{command:?}");
     }
 }
+
+#[test]
+fn issue_932_a_leading_cd_moves_where_relative_targets_resolve() {
+    // A relative delete after `cd` resolves against the directory the shell is
+    // actually in, not the tool call's working directory. Without the tracking
+    // these looked like ordinary deletes inside the workspace.
+    assert_eq!(level("cd /etc && rm -rf passwd"), RiskLevel::Catastrophic);
+    assert_eq!(level("cd /etc; rm -rf passwd"), RiskLevel::Catastrophic);
+    assert_eq!(
+        level("cd / && cd etc && rm -rf passwd"),
+        RiskLevel::Catastrophic
+    );
+    assert_eq!(level("cd ~/.ssh && rm -rf *"), RiskLevel::Catastrophic);
+    // `cd` with no operand goes home.
+    assert_eq!(level("cd && rm -rf Documents"), RiskLevel::Catastrophic);
+
+    // A temp-directory cleanup must not be attributed to the workspace.
+    let assessment = assess("cd /tmp && rm -rf build-xyz", &ctx());
+    assert!(
+        assessment
+            .findings
+            .iter()
+            .all(|finding| finding.target.as_deref() != Some("/home/u/proj/build-xyz")),
+        "{:?}",
+        assessment.findings
+    );
+    assert!(
+        assessment.level.runs_immediately(),
+        "{:?}",
+        assessment.findings
+    );
+
+    // A destination that cannot be resolved statically is not assumed to be
+    // the workspace either.
+    let assessment = assess("cd $UNKNOWN_DIR && rm -rf build-xyz", &ctx());
+    assert!(
+        assessment
+            .findings
+            .iter()
+            .all(|finding| finding.target.as_deref() != Some("/home/u/proj/build-xyz")),
+        "{:?}",
+        assessment.findings
+    );
+}
+
+#[test]
+fn issue_932_redirect_syntax_is_not_a_delete_target() {
+    let bare = assess("rm -rf build-xyz", &ctx());
+    for command in [
+        "rm -rf build-xyz 2>/dev/null",
+        "rm -rf build-xyz 2> /dev/null",
+        "rm -rf build-xyz >/dev/null 2>&1",
+        "rm -rf build-xyz 2>>/dev/null",
+        "rm -rf build-xyz &>/dev/null",
+        "rm -rf build-xyz < /dev/null",
+    ] {
+        let assessment = assess(command, &ctx());
+        assert_eq!(
+            assessment.level, bare.level,
+            "{command:?}: {:?}",
+            assessment.findings
+        );
+        // Neither the descriptor number nor the destination is an operand.
+        assert!(
+            assessment
+                .findings
+                .iter()
+                .all(|finding| finding.target.as_deref() != Some("/home/u/proj/2")),
+            "{command:?}: {:?}",
+            assessment.findings
+        );
+        assert!(
+            assessment.findings.len() <= bare.findings.len(),
+            "{command:?}: {:?}",
+            assessment.findings
+        );
+    }
+
+    // A space between the number and the operator makes it a real operand,
+    // which the shell would pass to the command.
+    assert_eq!(level("rm -rf build-xyz 2 >/dev/null"), RiskLevel::Low);
+
+    // Truncating a protected path through a redirect is still catastrophic.
+    assert_eq!(level("echo pwned > /etc/passwd"), RiskLevel::Catastrophic);
+}
