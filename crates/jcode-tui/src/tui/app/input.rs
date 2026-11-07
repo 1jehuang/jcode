@@ -4023,7 +4023,12 @@ impl App {
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
                 } else {
-                    return;
+                    // Bare /skill: instead of stopping, submit a turn so the active
+                    // skill's full body (SKILL.md) is injected into the next
+                    // run_turn_interactive system prompt (build_system_prompt_split)
+                    // and the agent is driven to execute the skill's first action.
+                    // A placeholder user message keeps the provider request well-formed.
+                    input = format!("/{} activated: proceed with this skill's first action.", skill_name);
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a
