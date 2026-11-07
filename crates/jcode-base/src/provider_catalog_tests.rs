@@ -77,12 +77,12 @@ fn conifer_context_limits_match_public_catalog_snapshot() {
     );
 }
 
-struct EnvGuard {
+pub(super) struct EnvGuard {
     vars: Vec<(String, Option<String>)>,
 }
 
 impl EnvGuard {
-    fn save(keys: &[&str]) -> Self {
+    pub(super) fn save(keys: &[&str]) -> Self {
         let vars = keys
             .iter()
             .map(|key| (key.to_string(), std::env::var(key).ok()))
