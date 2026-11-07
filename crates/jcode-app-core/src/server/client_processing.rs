@@ -146,7 +146,8 @@ pub(super) async fn append_context_message(
     let event = match result {
         Ok(notices) => {
             for notice in notices {
-                let _ = client_event_tx.send(crate::agent::hook_notice_event(client_session_id, &notice));
+                let _ = client_event_tx
+                    .send(crate::agent::hook_notice_event(client_session_id, &notice));
             }
             ServerEvent::ContextMessageAdded { id }
         }
