@@ -23,9 +23,7 @@ use crate::external_auth::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {
     Jcode,
-    /// Native Claude (Anthropic OAuth/API). `claude-subprocess` is kept as a
-    /// hidden alias for old scripts; the Claude Code CLI subprocess transport
-    /// has been removed.
+    /// Native Claude OAuth/API. `claude-subprocess` remains a hidden alias.
     #[value(alias = "claude-subprocess")]
     Claude,
     #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
@@ -107,15 +105,15 @@ pub enum ProviderChoice {
         alias = "meta-ai"
     )]
     MetaMuse,
-    /// Native Muse subscription (experimental opt-in device flow). Distinct
-    /// from `MetaMuse`, which is the pay-as-you-go Model API key path; no local
-    /// Muse installation is required.
+    /// Native Muse subscription device flow. Distinct from pay-as-you-go `MetaMuse`.
     #[value(name = "muse-subscription", alias = "muse-sub")]
     MuseSubscription,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
     #[value(alias = "venice-ai", alias = "veniceai", alias = "venice.ai")]
     Venice,
+    #[value(alias = "llmtr.com")]
+    Llmtr,
     YoloAuto,
     #[value(alias = "lm-studio")]
     Lmstudio,
@@ -196,6 +194,7 @@ impl ProviderChoice {
             Self::MuseSubscription => "muse-subscription",
             Self::Celeris => "celeris",
             Self::Venice => "venice",
+            Self::Llmtr => "llmtr",
             Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -383,6 +382,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::VENICE_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::Llmtr,
+        crate::provider_catalog::LLMTR_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::YoloAuto,
         crate::provider_catalog::YOLO_AUTO_LOGIN_PROVIDER,
     ),
@@ -448,11 +451,8 @@ pub fn login_provider_choice_mappings() -> &'static [(ProviderChoice, LoginProvi
     PROVIDER_CHOICE_LOGIN_PROVIDERS
 }
 
-/// `JCODE_OPENROUTER_MODEL` as set by the user when the process started.
-///
-/// Provider init clears and rewrites the `JCODE_OPENROUTER_*` env slots for
-/// whichever runtime it activates, so by the time the OpenRouter runtime reads
-/// the variable a user-supplied value is already gone. Snapshot it first.
+/// User's `JCODE_OPENROUTER_MODEL` from process start. Provider init rewrites
+/// that env slot, so snapshot the value before activation.
 static USER_OPENROUTER_MODEL: OnceLock<Option<String>> = OnceLock::new();
 
 /// Called once from `startup::run` before any provider init. Entry points
@@ -1307,10 +1307,8 @@ pub fn clear_initial_model_provider() {
     crate::provider::activation::clear_initial_runtime_provider();
 }
 
-/// A CLI provider choice for a dual-auth backend is also a credential choice.
-/// Pin it through the provider's credential-mode API
-/// so `--provider anthropic-api` cannot remain in Auto mode and prefer a stored
-/// Claude OAuth credential over `ANTHROPIC_API_KEY` (and likewise for OpenAI).
+/// A dual-auth CLI choice also pins the credential mode, so
+/// `--provider anthropic-api` prefers `ANTHROPIC_API_KEY` over stored OAuth.
 fn explicit_credential_mode(choice: &ProviderChoice) -> Option<provider::CredentialMode> {
     match choice {
         ProviderChoice::AnthropicApi | ProviderChoice::OpenaiApi => {
@@ -1690,6 +1688,7 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
         | ProviderChoice::Venice
+        | ProviderChoice::Llmtr
         | ProviderChoice::YoloAuto
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
