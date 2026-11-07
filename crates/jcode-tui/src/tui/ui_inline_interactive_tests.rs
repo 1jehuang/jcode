@@ -97,6 +97,7 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
             is_current: true,
             is_default: false,
             is_favorite: false,
+            is_memory_model: false,
             recommended: true,
             recommendation_rank: 0,
             usage_score: 0,
@@ -186,6 +187,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
         is_current: true,
         is_default: false,
         is_favorite: false,
+        is_memory_model: false,
         recommended: false,
         recommendation_rank: usize::MAX,
         usage_score: 0,
@@ -212,6 +214,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
             is_current: false,
             is_default: false,
             is_favorite: false,
+            is_memory_model: false,
             recommended: false,
             recommendation_rank: usize::MAX,
             usage_score: 0,
@@ -254,6 +257,7 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
             is_current: false,
             is_default: false,
             is_favorite: false,
+            is_memory_model: false,
             recommended: false,
             recommendation_rank: usize::MAX,
             usage_score: 0,
@@ -430,6 +434,22 @@ fn picker_entry_display_name_labels_recently_added_models_as_new() {
 }
 
 #[test]
+fn picker_entry_display_name_memory_mark_wins_over_recently_added_new_badge() {
+    let mut picker = sample_picker();
+    let entry = &mut picker.entries[0];
+    entry.is_current = false;
+    entry.is_memory_model = true;
+    entry.options[0].detail = "recently added · https://llm.comtegra.cloud/v1".to_string();
+
+    let name = picker_entry_display_name(entry);
+    assert!(name.contains(" 🧠"), "memory mark missing in {name:?}");
+    assert!(
+        !name.contains(" new"),
+        "new badge should not hide the memory mark in {name:?}"
+    );
+}
+
+#[test]
 fn picker_entry_display_name_labels_recommended_even_when_current() {
     let mut picker = sample_picker();
     let entry = &mut picker.entries[0];
@@ -462,6 +482,9 @@ fn model_picker_keybind_hint_mentions_default_and_favorites() {
 
     assert!(hint.contains("Ctrl+O set default"));
     assert!(hint.contains("Ctrl+N favorite"));
+    // The marking chord must advertise the verb so it reads as a toggle on
+    // the highlighted row, not as opening another picker.
+    assert!(hint.contains("Alt+M mark memory model"));
 }
 
 #[test]

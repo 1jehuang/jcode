@@ -130,6 +130,27 @@ controlled by `memory_sidecar_enabled` and `memory_model`. It is not needed to
 recall existing memories and can be disabled entirely. The old
 `memory_rerank_*` and `memory_embedding_*` settings do not affect Jev recall.
 
+### Extraction Sidecar Backend Selection
+
+Which LLM backend the extraction sidecar uses is configurable via
+`memory_sidecar_backend` under `[agents]` in `config.toml` (env override:
+`JCODE_MEMORY_SIDECAR_BACKEND`), with a `memory_sidecar_fallback` policy
+(env override: `JCODE_MEMORY_SIDECAR_FALLBACK`) for the unmarked case.
+
+| Value             | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `"auto"` (default) | Auto-select: OpenAI > Claude > active provider, based on which credentials exist. |
+| `"openai"`        | Force the OpenAI Responses API backend (requires Codex credentials).       |
+| `"claude"`        | Force the Claude Messages API backend (requires Claude credentials).        |
+| `"provider"`      | Dispatch through the active agent provider via `complete_simple`. Works with any provider (Copilot, Gemini, Cursor, Bedrock, OpenRouter, custom OpenAI-compatible, etc.). |
+
+When set to `"provider"`, the optional `memory_model` (under `[agents]`) is
+applied to the active provider via `set_model` before `complete_simple`, so the
+configured model is actually used. In `"auto"` mode `memory_model` only routes
+to OpenAI/Claude backends (other values fall back to auto-select). The TUI
+model picker can also mark a session-level memory model (Alt+M), which takes
+priority over the config value.
+
 ## Privacy
 
 Storage remains local, but Jev recall is remote inference: the focused query and
