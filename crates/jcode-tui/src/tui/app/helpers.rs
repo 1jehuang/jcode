@@ -163,6 +163,177 @@ pub(crate) fn clear_todos_cache_for_tests() {
     }
 }
 
+/// Compact TODO counts for the Overview row, through the same
+/// stale-while-revalidate `TODOS_CACHE` the todos view goals path uses, so a
+/// local todo write (invalidated on the `todo` tool call) reaches the row
+/// immediately and the frame thread never reads the todo store directly.
+/// Mirrors the status vocabulary of `build_todos_view_markdown`.
+pub(super) fn overview_todos_summary(
+    session_id: Option<&str>,
+) -> Option<crate::tui::info_widget::TodosSummary> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
+    let Some(session_id) = session_id else {
+        return None;
+    };
+    #[cfg(not(test))]
+    const TTL: Duration = Duration::from_secs(1);
+
+    fn summarize(todos: &[TodoItem]) -> Option<crate::tui::info_widget::TodosSummary> {
+        if todos.is_empty() {
+            return None;
+        }
+        let blocked = todos
+            .iter()
+            .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
+            .count();
+        Some(crate::tui::info_widget::TodosSummary {
+            total: todos.len(),
+            completed: todos
+                .iter()
+                .filter(|todo| todo.status == "completed")
+                .count(),
+            in_progress: todos
+                .iter()
+                .filter(|todo| todo.status == "in_progress")
+                .count(),
+            pending: todos
+                .iter()
+                .filter(|todo| todo.status == "pending")
+                .count(),
+            blocked,
+        })
+    }
+
+    // Test binaries never touch the frame-thread refresh path: background
+    // threads would make the suite parallel-unsafe (see
+    // `spawn_ambient_info_refresh`). Tests seed the cache explicitly.
+    #[cfg(test)]
+    {
+        return TODOS_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(session_id).cloned())
+            .map(|(_, todos, _, _)| todos)
+            .and_then(|todos| summarize(&todos));
+    }
+
+    #[cfg(not(test))]
+    {
+        use std::time::Instant;
+
+        // Refresh the whole entry (todos + goals), like the seeded gather, so
+        // the cache stays consistent for every consumer.
+        fn refresh_entry(session_id: &str) {
+            let todos = crate::todo::load_todos(session_id).unwrap_or_default();
+            let goals = crate::todo::load_goals(session_id).unwrap_or_default();
+            if let Ok(mut cache) = TODOS_CACHE.lock() {
+                cache.insert(
+                    session_id.to_string(),
+                    (Instant::now(), todos, goals, false),
+                );
+            }
+        }
+
+        if let Ok(mut cache) = TODOS_CACHE.lock()
+            && let Some((ts, todos, _goals, refreshing)) = cache.get_mut(session_id)
+        {
+            if ts.elapsed() < TTL || *refreshing {
+                return summarize(todos);
+            }
+            let stale = summarize(todos);
+            *refreshing = true;
+            let session_id = session_id.to_string();
+            std::thread::spawn(move || refresh_entry(&session_id));
+            return stale;
+        }
+        let session_id = session_id.to_string();
+        if let Ok(mut cache) = TODOS_CACHE.lock() {
+            cache.insert(
+                session_id.clone(),
+                (
+                    backdated_now(TTL + Duration::from_secs(1)),
+                    Vec::new(),
+                    Vec::new(),
+                    true,
+                ),
+            );
+        }
+        std::thread::spawn(move || refresh_entry(&session_id));
+        None
+    }
+}
+
+/// Memory counts for the Overview row, cached off the frame thread. Project
+/// counts read the same store the memory tool writes (issue #491), scoped to
+/// the session working dir like the removed `gather_memory_info` loader did.
+pub(super) fn overview_memory_counts_cached(
+    working_dir: Option<&str>,
+) -> Option<crate::tui::info_widget::MemoryCounts> {
+    use std::time::Instant;
+
+    static CACHE: Mutex<Option<(Instant, Option<crate::tui::info_widget::MemoryCounts>)>> =
+        Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(5);
+
+    fn fetch(working_dir: Option<&str>) -> Option<crate::tui::info_widget::MemoryCounts> {
+        let manager = match working_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
+            Some(dir) => crate::memory::MemoryManager::new().with_project_dir(dir),
+            None => crate::memory::MemoryManager::new(),
+        };
+        let project_count = manager
+            .load_project_graph()
+            .map(|graph| graph.memory_count())
+            .unwrap_or(0);
+        let global_count = manager
+            .load_global_graph()
+            .map(|graph| graph.memory_count())
+            .unwrap_or(0);
+        let total = project_count + global_count;
+        (total > 0).then_some(crate::tui::info_widget::MemoryCounts {
+            total_count: total,
+            project_count,
+            global_count,
+        })
+    }
+
+    #[cfg(test)]
+    {
+        // Tests never spawn refresh threads; they see the cached value only.
+        let _ = (TTL, fetch, working_dir);
+        return CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, cached)| cached.clone()))
+            .flatten();
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Ok(mut guard) = CACHE.lock() {
+            if let Some((ts, cached)) = guard.as_mut()
+                && ts.elapsed() < TTL
+            {
+                return cached.clone();
+            }
+            let stale = guard
+                .as_ref()
+                .map(|(_, cached)| cached.clone())
+                .unwrap_or_default();
+            let working_dir = working_dir.map(str::to_string);
+            std::thread::spawn(move || {
+                let result = fetch(working_dir.as_deref());
+                if let Ok(mut guard) = CACHE.lock() {
+                    *guard = Some((Instant::now(), result));
+                }
+            });
+            return stale;
+        }
+        None
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct CachedContextSnapshot {
     pub session_key: String,

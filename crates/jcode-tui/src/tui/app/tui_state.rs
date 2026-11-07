@@ -1781,6 +1781,26 @@ impl crate::tui::TuiState for App {
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
 
+        // Overview summary rows. The TODO list and memory counts come from
+        // disk-backed stores with their own refresh cadence (1s throttle, same
+        // as the pinned todo band), so the frame snapshot reads a cache, not the
+        // store. Swarm derives from the already-gathered `swarm_info`.
+        let todos_summary = self.overview_todos_summary();
+        let memory_counts = self.overview_memory_counts();
+        let swarm_summary = swarm_info.as_ref().map(|info| {
+            let active = info
+                .managed_members
+                .iter()
+                .filter(|member| {
+                    jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                })
+                .count();
+            crate::tui::info_widget::SwarmSummary {
+                agents: info.managed_members.len(),
+                active,
+            }
+        });
+
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
         } else {
@@ -1948,6 +1968,9 @@ impl crate::tui::TuiState for App {
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
             memory_info: None,
+            memory_counts,
+            todos_summary,
+            swarm_summary,
             swarm_info,
             background_info,
             usage_info,
@@ -2391,6 +2414,56 @@ pub(crate) enum SwarmPanelView {
 }
 
 impl App {
+    /// Compact TODO summary for the Overview row. Reuses the same session
+    /// todo state as the todos view/pinned band, but only the counts cross
+    /// into the widget data: the Overview row carries no item text.
+    pub(super) fn overview_todos_summary(&self) -> Option<crate::tui::info_widget::TodosSummary> {
+        let session_id = self.active_client_session_id();
+        if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
+            // Remote: count from the received payload, no disk reads.
+            let payload = self
+                .remote_todos_payload
+                .as_ref()
+                .filter(|(id, _)| Some(id.as_str()) == session_id)
+                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .unwrap_or_default();
+            let todos: Vec<crate::todo::TodoItem> = serde_json::from_value(payload["todos"].clone())
+                .unwrap_or_default();
+            if todos.is_empty() {
+                return None;
+            }
+            let blocked = todos
+                .iter()
+                .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
+                .count();
+            return Some(crate::tui::info_widget::TodosSummary {
+                total: todos.len(),
+                completed: todos
+                    .iter()
+                    .filter(|todo| todo.status == "completed")
+                    .count(),
+                in_progress: todos
+                    .iter()
+                    .filter(|todo| todo.status == "in_progress")
+                    .count(),
+                pending: todos
+                    .iter()
+                    .filter(|todo| todo.status == "pending")
+                    .count(),
+                blocked,
+            });
+        }
+        super::helpers::overview_todos_summary(session_id)
+    }
+
+    /// Memory counts for the Overview row, cached off the frame thread.
+    /// Mirrors the old `gather_memory_info` loader (issue #491): project
+    /// counts read the same store the memory tool writes, scoped to the
+    /// session working dir.
+    pub(super) fn overview_memory_counts(&self) -> Option<crate::tui::info_widget::MemoryCounts> {
+        super::helpers::overview_memory_counts_cached(self.session.working_dir.as_deref())
+    }
+
     /// Cycle chat → inline controls → full live swarm page → chat.
     pub(crate) fn cycle_swarm_panel_view(&mut self) -> SwarmPanelView {
         if !self.inline_swarm_gallery_active() {

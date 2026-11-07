@@ -1,14 +1,13 @@
 use super::info_widget::{
-    AuthMethod, InfoWidgetData, OVERVIEW_COMMITS_MAX_ROWS, changes_section_height,
-    commit_row_lines, commits_has_data_at, compact_usage_rows, is_traceworthy_memory_event,
-    model_info_height, now_secs,
+    AuthMethod, InfoWidgetData, MemoryCounts, OVERVIEW_COMMITS_MAX_ROWS, SwarmSummary,
+    TodosSummary, changes_section_height, commit_row_lines, commits_has_data_at,
+    compact_usage_rows, model_info_height, now_secs,
 };
 use ratatui::layout::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InfoPageKind {
     CompactOnly,
-    MemoryExpanded,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -25,20 +24,26 @@ pub(crate) struct PageLayout {
 }
 
 /// Which tail sections of the compact Overview page a placed rect can actually
-/// show. The compact page renders sections in a fixed order (Runtime → Memory
-/// → Background → Usage → KV cache → Compaction → Changes → Commits)
-/// and `render_overview_framed` truncates whatever the inner height cannot
-/// fit. A section that lands entirely in the truncated tail is *not* shown by
-/// that Overview, so its standalone fallback must stay available
-/// (greptile: a 10-row pocket whose front rows filled suppressed the Commits
-/// fallback while the placed Overview truncated the section away, hiding
-/// recent commits everywhere).
+/// show. The compact page renders sections in a fixed order (Runtime → Todos
+/// → Swarm → Background → Memory counts → Usage → Compaction → Changes
+/// → Commits) and `render_overview_framed` truncates whatever the inner
+/// height cannot fit. A section that lands entirely in the truncated tail is
+/// *not* shown by that Overview, so its standalone fallback must stay
+/// available (greptile: a 10-row pocket whose front rows filled suppressed the
+/// Commits fallback while the placed Overview truncated the section away,
+/// hiding recent commits everywhere).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SectionVisibility {
     /// The Runtime (model info) section fits fully in the rect.
     pub model_info: bool,
+    /// The Todos summary row fits fully in the rect.
+    pub todos: bool,
+    /// The Swarm summary row fits fully in the rect.
+    pub swarm: bool,
     /// The Background section fits fully in the rect.
     pub background: bool,
+    /// The Memory counts row fits fully in the rect.
+    pub memory_counts: bool,
     /// The Usage section fits fully in the rect.
     pub usage: bool,
     /// The Compaction section fits fully in the rect.
@@ -58,13 +63,15 @@ pub(crate) struct SectionVisibility {
 /// one page, so a section truncated on any page must keep its fallback.
 pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVisibility {
     // Mirror render_overview_framed: memory is the dedicated widget's content,
-    // so the Overview strips it before rendering (and the MemoryExpanded
-    // page therefore never exists here).
+    // so the Overview strips it before rendering.
     let mut overview = data.clone();
     overview.memory_info = None;
     let inner_height = rect.height.saturating_sub(2);
     let model_h = model_info_height(&overview, rect.width);
+    let todos_h = compact_todos_summary_height(&overview);
+    let swarm_h = compact_swarm_summary_height(&overview);
     let background_h = compact_background_height(&overview);
+    let memory_counts_h = compact_memory_counts_height(&overview);
     let usage_h = compact_usage_height(&overview);
     let compaction_h = compact_compaction_height(&overview);
     let changes_h = changes_section_height(&overview, rect.width);
@@ -81,12 +88,15 @@ pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVi
     // refuses overflow the same way the loop above does.
     let sections = [
         (model_h, model_h > 0),
+        (todos_h, todos_h > 0),
+        (swarm_h, swarm_h > 0),
         (background_h, background_h > 0),
+        (memory_counts_h, memory_counts_h > 0),
         (usage_h, usage_h > 0),
         (compaction_h, compaction_h > 0),
     ];
     let mut front = 0u16;
-    let mut flags = [false; 4];
+    let mut flags = [false; 7];
     for (idx, (height, present)) in sections.iter().enumerate() {
         flags[idx] = *present
             && front
@@ -94,11 +104,14 @@ pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVi
                 .is_some_and(|end| end <= inner_height);
         front = front.saturating_add(*height);
     }
-    let [model_info, background, usage, compaction] = flags;
+    let [model_info, todos, swarm, background, memory_counts, usage, compaction] = flags;
     let changes_end = front.saturating_add(changes_h);
     SectionVisibility {
         model_info,
+        todos,
+        swarm,
         background,
+        memory_counts,
         usage,
         compaction,
         changes: fits(front, changes_h),
@@ -120,20 +133,11 @@ pub(crate) fn compute_page_layout(
         };
     }
 
-    let mut candidates: Vec<InfoPage> = Vec::new();
-    let memory_compact = compact_memory_height(data);
-    let memory_expanded = expanded_memory_height(data);
-    if memory_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::MemoryExpanded,
-            height: compact_height - memory_compact + memory_expanded,
-        });
-    }
-
-    let mut pages: Vec<InfoPage> = candidates
-        .into_iter()
-        .filter(|page| page.height <= inner_height)
-        .collect();
+    // Memory content has no Overview page: the dedicated MemoryActivity widget
+    // owns the graph and activity, and callers strip `memory_info` before
+    // layout, so a MemoryExpanded offer here was never reachable in
+    // production. The counts row is a plain compact section.
+    let mut pages: Vec<InfoPage> = Vec::new();
 
     if pages.is_empty() {
         if compact_height <= inner_height {
@@ -160,13 +164,33 @@ pub(crate) fn compute_page_layout(
     }
 }
 
-fn compact_memory_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.memory_info
-        && info.should_render()
-    {
-        return 1;
-    }
-    0
+/// Overview rows used by the Todos summary section, mirroring
+/// [`render_todos_summary_row`].
+pub(super) fn compact_todos_summary_height(data: &InfoWidgetData) -> u16 {
+    u16::from(
+        data.todos_summary
+            .as_ref()
+            .is_some_and(TodosSummary::should_render),
+    )
+}
+
+/// Overview rows used by the Swarm summary section, mirroring
+/// [`render_swarm_summary_row`].
+pub(super) fn compact_swarm_summary_height(data: &InfoWidgetData) -> u16 {
+    u16::from(
+        data.swarm_summary
+            .as_ref()
+            .is_some_and(SwarmSummary::should_render),
+    )
+}
+
+/// Overview rows used by the Memory counts section, mirroring
+/// [`render_memory_counts_row`].
+pub(super) fn compact_memory_counts_height(data: &InfoWidgetData) -> u16 {
+    u16::from(
+        data.memory_counts
+            .is_some_and(|counts: MemoryCounts| counts.total_count > 0),
+    )
 }
 
 fn compact_background_height(data: &InfoWidgetData) -> u16 {
@@ -273,8 +297,10 @@ fn compact_commits_height(data: &InfoWidgetData, width: u16) -> u16 {
 /// because wrapped rows (runtime, changes, commits) occupy continuation lines.
 fn compact_overview_height(data: &InfoWidgetData, width: u16) -> u16 {
     model_info_height(data, width)
-        + compact_memory_height(data)
+        + compact_todos_summary_height(data)
+        + compact_swarm_summary_height(data)
         + compact_background_height(data)
+        + compact_memory_counts_height(data)
         + compact_usage_height(data)
         + compact_compaction_height(data)
         + changes_section_height(data, width)
@@ -282,31 +308,10 @@ fn compact_overview_height(data: &InfoWidgetData, width: u16) -> u16 {
         + u16::from(data.cloud_info.is_some())
 }
 
-fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.memory_info
-        && info.should_render()
-    {
-        let mut height = 1u16;
-        if info.should_show_activity() {
-            height += 1 + 4;
-            if let Some(activity) = &info.activity
-                && activity
-                    .recent_events
-                    .iter()
-                    .any(is_traceworthy_memory_event)
-            {
-                height += 1;
-            }
-        }
-        return height;
-    }
-    0
-}
-
 #[cfg(test)]
 mod tests {
     use super::{InfoPageKind, compute_page_layout};
-    use crate::tui::info_widget::{InfoWidgetData, MemoryInfo};
+    use crate::tui::info_widget::{InfoWidgetData, MemoryCounts, MemoryInfo};
     use std::collections::HashMap;
 
     #[test]
@@ -399,7 +404,11 @@ mod tests {
     }
 
     #[test]
-    fn compute_page_layout_only_offers_non_plan_pages() {
+    fn compute_page_layout_offers_no_memory_page() {
+        // Memory lives in the dedicated MemoryActivity widget plus the
+        // compact counts row (`memory_counts`), not a `memory_info` page.
+        // Every production caller strips `memory_info` before layout, so
+        // memory-only data must offer no Overview page at all.
         let data = InfoWidgetData {
             memory_info: Some(MemoryInfo {
                 total_count: 3,
@@ -414,13 +423,23 @@ mod tests {
 
         let layout = compute_page_layout(&data, 40, 8);
 
-        assert_eq!(layout.pages.len(), 1);
+        assert!(layout.pages.is_empty(), "memory-only data offers no page");
         assert!(!layout.show_dots);
-        assert!(
-            layout
-                .pages
-                .iter()
-                .any(|page| page.kind == InfoPageKind::MemoryExpanded)
-        );
+        assert_eq!(layout.max_page_height, 0);
+
+        // The stored-counts row is the Overview's only memory surface, and it
+        // comes from `memory_counts`, not `memory_info`.
+        let data = InfoWidgetData {
+            memory_counts: Some(MemoryCounts {
+                total_count: 3,
+                project_count: 2,
+                global_count: 1,
+            }),
+            ..Default::default()
+        };
+        let layout = compute_page_layout(&data, 40, 8);
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(layout.pages[0].kind, InfoPageKind::CompactOnly);
+        assert_eq!(layout.pages[0].height, 1, "counts row only");
     }
 }

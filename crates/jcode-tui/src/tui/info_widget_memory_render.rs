@@ -623,6 +623,9 @@ fn memory_pipeline_progress_summary(pipeline: &PipelineState) -> String {
     }
 }
 
+// Overview-only before the memory strip landed; kept for tests that pin the
+// compact row format.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<Line<'static>> {
     if !info.should_render() {
         return Vec::new();
@@ -658,30 +661,6 @@ pub(super) fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<
     vec![Line::from(spans)]
 }
 
-pub(super) fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
-    if !info.should_render() {
-        return Vec::new();
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    let max_width = inner.width.saturating_sub(2) as usize;
-    let show_activity = info.should_show_activity();
-
-    lines.push(render_memory_header_line(info, max_width));
-    if show_activity && let Some(activity) = &info.activity {
-        lines.push(render_memory_status_line(activity, max_width));
-        if memory_should_render_pipeline(activity) {
-            lines.extend(render_memory_pipeline_display_lines(activity, max_width));
-        }
-
-        if let Some(last_line) = render_memory_last_trace_line(activity, max_width) {
-            lines.push(last_line);
-        }
-    }
-
-    lines.truncate(inner.height as usize);
-    lines
-}
 fn format_age(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
     if secs < 2 {

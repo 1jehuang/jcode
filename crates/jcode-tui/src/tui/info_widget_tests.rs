@@ -3,9 +3,10 @@ use super::{
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
-    render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_usage_compact, render_usage_widget, truncate_smart,
+    render_kv_cache_widget, render_memory_widget, render_model_widget, render_usage_compact,
+    render_usage_widget, truncate_smart,
 };
+use super::memory_render::render_memory_compact;
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
@@ -206,7 +207,7 @@ fn assert_usage_limit_warning(usage: UsageInfo) {
         let expanded = render_usage_widget(&data, Rect::new(0, 0, 40, 4));
         let compact = render_usage_compact(&usage, 40, display_used);
         let overview =
-            super::render_sections(&data, Rect::new(0, 0, 40, 10), None, super::now_secs());
+            super::render_sections(&data, Rect::new(0, 0, 40, 10), super::now_secs());
         for text in [
             lines_text(&expanded.all_lines()),
             lines_text(&compact),
@@ -2484,4 +2485,136 @@ fn overview_truncated_tail_keeps_fallbacks_and_strip() {
         !placements.iter().any(|p| p.kind == WidgetKind::Commits),
         "single-pocket frame: no room for the commits dock, it must not phantom-place"
     );
+}
+
+#[test]
+fn overview_todos_summary_row_renders_counts_and_gates_on_content() {
+    use super::{MemoryCounts, TodosSummary};
+
+    let summary = |total, completed, in_progress, pending, blocked| TodosSummary {
+        total,
+        completed,
+        in_progress,
+        pending,
+        blocked,
+    };
+
+    // No todos: no row, no availability contribution.
+    let empty = InfoWidgetData {
+        queue_mode: Some(true),
+        todos_summary: None,
+        ..Default::default()
+    };
+    let vis =
+        crate::tui::info_widget_overview::section_visibility(&empty, Rect::new(0, 0, 40, 30));
+    assert!(!vis.todos);
+
+    // Full row through the real overview render path. Width 60 keeps the
+    // 48-char row from truncating before the blocked segment.
+    let data = InfoWidgetData {
+        queue_mode: Some(true),
+        todos_summary: Some(summary(7, 3, 2, 2, 1)),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::Overview));
+    let framed = super::render_overview_framed(&data, Rect::new(0, 0, 60, 30))
+        .expect("overview renders with todos + queue");
+    let text = lines_text(&framed.all_lines());
+    assert!(text.contains("3/7 done (43%)"), "{text}");
+    assert!(text.contains("2 doing"), "{text}");
+    assert!(text.contains("2 pending"), "{text}");
+    assert!(text.contains("1 blocked"), "{text}");
+
+    // Height mirror: exactly one row for the section.
+    let vis =
+        crate::tui::info_widget_overview::section_visibility(&data, Rect::new(0, 0, 40, 30));
+    assert!(vis.todos, "30-row rect must fit the single todos row");
+
+    // Memory counts row: total + scope split, hidden when zero.
+    let zero = InfoWidgetData {
+        queue_mode: Some(true),
+        memory_counts: Some(MemoryCounts {
+            total_count: 0,
+            project_count: 0,
+            global_count: 0,
+        }),
+        ..Default::default()
+    };
+    let vis = crate::tui::info_widget_overview::section_visibility(&zero, Rect::new(0, 0, 40, 30));
+    assert!(!vis.memory_counts);
+
+    let memory = InfoWidgetData {
+        queue_mode: Some(true),
+        memory_counts: Some(MemoryCounts {
+            total_count: 5,
+            project_count: 2,
+            global_count: 3,
+        }),
+        ..Default::default()
+    };
+    let framed = super::render_overview_framed(&memory, Rect::new(0, 0, 60, 30))
+        .expect("overview renders with memory counts");
+    let text = lines_text(&framed.all_lines());
+    assert!(text.contains("5 memories"), "{text}");
+    assert!(text.contains("2 project"), "{text}");
+    assert!(text.contains("3 global"), "{text}");
+
+    // Single scope: only that scope suffix renders.
+    let project_only = InfoWidgetData {
+        queue_mode: Some(true),
+        memory_counts: Some(MemoryCounts {
+            total_count: 4,
+            project_count: 4,
+            global_count: 0,
+        }),
+        ..Default::default()
+    };
+    let framed = super::render_overview_framed(&project_only, Rect::new(0, 0, 60, 30))
+        .expect("overview renders with project-only counts");
+    let text = lines_text(&framed.all_lines());
+    assert!(text.contains("4 memories · 4 project"), "{text}");
+    assert!(!text.contains("global"), "{text}");
+}
+
+#[test]
+fn overview_swarm_summary_row_renders_managed_agent_counts() {
+    use super::SwarmSummary;
+
+    let data = InfoWidgetData {
+        queue_mode: Some(true),
+        swarm_summary: Some(SwarmSummary {
+            agents: 3,
+            active: 2,
+        }),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::Overview));
+    let framed = super::render_overview_framed(&data, Rect::new(0, 0, 60, 30))
+        .expect("overview renders with swarm summary");
+    let text = lines_text(&framed.all_lines());
+    assert!(text.contains("3 agents · 2 active"), "{text}");
+
+    // All idle: count only, no active suffix.
+    let idle = InfoWidgetData {
+        queue_mode: Some(true),
+        swarm_summary: Some(SwarmSummary {
+            agents: 1,
+            active: 0,
+        }),
+        ..Default::default()
+    };
+    let framed = super::render_overview_framed(&idle, Rect::new(0, 0, 60, 30))
+        .expect("overview renders with idle swarm summary");
+    let text = lines_text(&framed.all_lines());
+    assert!(text.contains("1 agent"), "{text}");
+    assert!(!text.contains("active"), "{text}");
+
+    // Zero managed agents: no row, no availability contribution.
+    let none = InfoWidgetData {
+        queue_mode: Some(true),
+        swarm_summary: Some(SwarmSummary::default()),
+        ..Default::default()
+    };
+    let vis = crate::tui::info_widget_overview::section_visibility(&none, Rect::new(0, 0, 40, 30));
+    assert!(!vis.swarm);
 }
