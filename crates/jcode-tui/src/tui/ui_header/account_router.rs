@@ -64,12 +64,30 @@ fn load_inventory() -> Inventory {
     // Local auth files only. Retain metadata, never access/refresh tokens.
     let now = chrono::Utc::now().timestamp_millis();
     let mut expired = Vec::new();
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+    let claude_accounts = match crate::auth::claude::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Claude account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in claude_accounts {
         if account.expires <= now {
             expired.push(("claude", account.label));
         }
     }
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+    let codex_accounts = match crate::auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Codex account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in codex_accounts {
         if account.expires_at.is_some_and(|expires| expires <= now) {
             expired.push(("openai", account.label));
         }
@@ -264,9 +282,8 @@ fn inventory_lines(
                 Style::default().fg(dim_color()),
             ));
         }
-        if let Some(banked) =
-            header_account_banked_resets(usage_provider, &account.label)
-                .and_then(|banked| banked_resets_span(&banked))
+        if let Some(banked) = header_account_banked_resets(usage_provider, &account.label)
+            .and_then(|banked| banked_resets_span(&banked))
         {
             row.spans
                 .push(Span::styled(" · ", Style::default().fg(dim_color())));
@@ -400,7 +417,8 @@ fn header_account_banked_resets(
 
 /// Warmer colors mean less time to spend a reset. Unknown expiry stays blue.
 fn banked_expiry_color(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Color {
-    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else {
+    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    else {
         return Color::Rgb(120, 190, 255);
     };
     let remaining = expiry.signed_duration_since(now);

@@ -111,7 +111,15 @@ fn env_opted_out(value: Option<&str>) -> bool {
 }
 
 fn enabled() -> bool {
-    if env_opted_out(std::env::var(OPT_OUT_ENV).ok().as_deref()) {
+    let opt_out = match std::env::var(OPT_OUT_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            crate::logging::warn(&format!("invalid mobile push opt-out setting: {error}"));
+            return false;
+        }
+    };
+    if env_opted_out(opt_out.as_deref()) {
         return false;
     }
     crate::config::config().server.mobile_push != Some(false)
@@ -145,10 +153,11 @@ fn set_insert(set: &Mutex<Option<HashSet<String>>>, id: &str) {
 }
 
 fn set_remove(set: &Mutex<Option<HashSet<String>>>, id: &str) -> bool {
-    set.lock()
-        .ok()
-        .and_then(|mut g| g.as_mut().map(|s| s.remove(id)))
-        .unwrap_or(false)
+    let mut guard = set.lock().unwrap_or_else(|error| {
+        crate::logging::warn("recovering poisoned mobile push session state");
+        error.into_inner()
+    });
+    guard.as_mut().is_some_and(|sessions| sessions.remove(id))
 }
 
 /// Record that a client named `client_name` attached to `session_id`.
@@ -159,10 +168,13 @@ pub fn note_client_attached(session_id: &str, client_name: &str) {
 }
 
 fn is_ios_session(session_id: &str) -> bool {
-    IOS_SESSIONS
-        .lock()
-        .ok()
-        .is_some_and(|g| g.as_ref().is_some_and(|s| s.contains(session_id)))
+    let guard = IOS_SESSIONS.lock().unwrap_or_else(|error| {
+        crate::logging::warn("recovering poisoned mobile push iOS session state");
+        error.into_inner()
+    });
+    guard
+        .as_ref()
+        .is_some_and(|sessions| sessions.contains(session_id))
 }
 
 /// A user cancel was requested; the ending turn must not push.
@@ -190,10 +202,6 @@ fn threshold_for(ios_session: bool) -> Duration {
 /// Whether a finished turn of this session and duration should push.
 pub fn should_push_turn_done(session_id: &str, elapsed: Duration) -> bool {
     elapsed >= threshold_for(is_ios_session(session_id))
-}
-
-fn turn_long_enough(elapsed: Duration) -> bool {
-    elapsed >= threshold_for(false)
 }
 
 /// Queue a push. Returns immediately; never errors.
@@ -297,17 +305,20 @@ async fn send(key: &str, base: &str, payload: &PushPayload) {
         .await;
     match result {
         Ok(resp) if resp.status().is_success() => {
-            let reply = resp.json::<SendReply>().await.ok();
-            let devices = reply.as_ref().and_then(|r| r.devices);
+            let reply = match resp.json::<SendReply>().await {
+                Ok(reply) => reply,
+                Err(error) => {
+                    crate::logging::warn(&format!("invalid mobile push reply: {error}"));
+                    return;
+                }
+            };
+            let devices = reply.devices;
             if let Ok(mut s) = SUPPRESSION.lock() {
                 s.record_reply(devices, Instant::now());
             }
             crate::logging::debug(&format!(
                 "mobile push {:?} session={} sent={:?} devices={:?}",
-                payload.kind,
-                payload.session_id,
-                reply.as_ref().and_then(|r| r.sent),
-                devices
+                payload.kind, payload.session_id, reply.sent, devices
             ));
         }
         Ok(resp) => crate::logging::warn(&format!(
@@ -322,6 +333,18 @@ async fn send(key: &str, base: &str, payload: &PushPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_marker_survives_poisoned_state() {
+        let state = Mutex::new(Some(HashSet::from(["cancelled".to_string()])));
+        let result = std::panic::catch_unwind(|| {
+            let _guard = state.lock().unwrap();
+            panic!("simulate interrupted state update");
+        });
+        assert!(result.is_err());
+        assert!(set_remove(&state, "cancelled"));
+        assert!(!set_remove(&state, "cancelled"));
+    }
 
     #[tokio::test]
     async fn explicit_resume_reports_delivery_and_preserves_session_target() {
@@ -461,8 +484,13 @@ mod tests {
         assert!(env_opted_out(Some("false")));
         assert!(!env_opted_out(Some("1")));
         assert!(!env_opted_out(None));
-        assert!(!turn_long_enough(Duration::from_secs(19)));
-        assert!(turn_long_enough(MIN_TURN_DURATION_FOR_PUSH));
+        let sid = "session_mobile_push_test_threshold";
+        assert!(!should_push_turn_done(sid, Duration::ZERO));
+        assert!(!should_push_turn_done(
+            sid,
+            MIN_TURN_DURATION_FOR_PUSH - Duration::from_nanos(1)
+        ));
+        assert!(should_push_turn_done(sid, MIN_TURN_DURATION_FOR_PUSH));
         assert_eq!(threshold_for(true), Duration::ZERO);
     }
 

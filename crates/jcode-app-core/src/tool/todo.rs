@@ -1343,7 +1343,7 @@ impl Tool for TodoTool {
                             "confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence that the task can be completed correctly."
+                                "description": "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
                             },
                             "completion_confidence": {
                                 "type": "string",
@@ -1367,7 +1367,8 @@ impl Tool for TodoTool {
                         },
                         "understands_user_intent": {
                             "type": "string",
-                            "enum": ["uncertain", "partial", "clear", "complete"]
+                            "enum": ["uncertain", "partial", "clear", "complete"],
+                            "description": "How well the plan represents what the user wants. Be honest about what is understood and still uncertain when guessing."
                         }
                     }
                 },
@@ -1389,16 +1390,17 @@ impl Tool for TodoTool {
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Concrete check for each requirement."
+                                "description": "Requirement-to-check coverage: identify an explicit observation or check for each requirement."
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "indirect: inspection/proxy; synthetic: mocks/custom harness; representative: real interfaces, partial workflow; acceptance_blocked: real workflow attempted but externally blocked; acceptance_aligned: real build/test/user workflow passed, never substitutes only."
+                                "description": "indirect: inspection/proxy; synthetic: mocks or custom harnesses; representative: real public interfaces, partial workflow; acceptance_blocked: attempted workflow blocked by an external constraint; acceptance_aligned: full real build/test/user workflow passed. Substitute-only validation is never acceptance_aligned."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
-                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"]
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
+                                "description": "How much of the workflow the checks cover. Consider public interfaces, integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
@@ -1407,7 +1409,8 @@ impl Tool for TodoTool {
                             },
                             "delivery_state": {
                                 "type": "string",
-                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
+                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"],
+                                "description": "Progress toward the user's outcome, from a change made through to the outcome delivered."
                             },
                             "difficulty": {
                                 "type": "string",
@@ -1753,8 +1756,8 @@ mod tests {
         let item = json!({"id":"a","content":"A","status":"pending","priority":"high"});
         let lane = json!({"lane":"x","items":[item]});
         let phase = json!({"phase":1,"lanes":[lane]});
+        assert!(parse_todo_input(json!({"phases":null})).is_ok());
         for bad in [
-            json!(null),
             json!({}),
             json!([null]),
             json!([{"phase":0,"lanes":[lane]}]),
@@ -1902,7 +1905,7 @@ mod tests {
         assert!(plan_props.contains_key("understands_user_intent"));
         assert!(!plan_props.contains_key("alignment_score"));
         assert!(!plan_props.contains_key("user_intention_alignment"));
-        assert_eq!(plan_props.len(), 2);
+        assert_eq!(plan_props.len(), 3);
         let plan_required = props["plan"]["required"]
             .as_array()
             .expect("plan should advertise required fields");
@@ -3145,8 +3148,11 @@ mod tests {
     async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_review = std::env::var_os("JCODE_TODO_QUALITY_REVIEW");
         let dir = tempfile::TempDir::new().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("JCODE_TODO_QUALITY_REVIEW", "1");
+        crate::config::invalidate_config_cache();
         let session = "gate-deferral-execute";
 
         let output = TodoTool::new()
@@ -3268,6 +3274,11 @@ mod tests {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+        match previous_review {
+            Some(value) => crate::env::set_var("JCODE_TODO_QUALITY_REVIEW", value),
+            None => crate::env::remove_var("JCODE_TODO_QUALITY_REVIEW"),
+        }
+        crate::config::invalidate_config_cache();
     }
 
     #[tokio::test]

@@ -56,6 +56,14 @@ fn mobile_does_not_match_command_prefixes() {
 
 #[test]
 fn mobile_is_registered_once_and_visible_in_command_help() {
+    let app = crate::tui::app::tests::create_test_app();
+    for topic in ["mobile", "/mobile", " MOBILE "] {
+        let detailed = app
+            .command_help(topic)
+            .expect("mobile detailed help should exist");
+        assert!(detailed.contains("/mobile cancel"));
+        assert!(detailed.contains("push notification"));
+    }
     assert_eq!(
         crate::tui::app::registered_command_names()
             .filter(|name| *name == "/mobile")
@@ -67,6 +75,36 @@ fn mobile_is_registered_once_and_visible_in_command_help() {
         .expect("/mobile should be discoverable in command help");
     assert!(!help.is_empty());
     assert!(!crate::tui::app::registered_command_names().any(|name| name == "/mobilex"));
+}
+
+#[test]
+#[cfg(unix)]
+fn mobile_push_feedback_is_visible_without_failing_cloud_status() {
+    for result in [
+        Ok("Mobile notification sent".to_string()),
+        Err("No mobile devices registered".to_string()),
+    ] {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let tx = fake_job(&mut app, CloudCommand::Where);
+        app.cloud_job.as_mut().unwrap().trimmed = "/mobile".into();
+        let expected = result
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or_else(|error| error.as_str())
+            .to_string();
+        tx.send(CloudEvent::MobilePushResult(result)).unwrap();
+        tx.send(CloudEvent::Done(Ok(output(true, "session is on cloud"))))
+            .unwrap();
+        assert!(app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|message| message.content.contains(&expected))
+        );
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
 }
 
 #[test]

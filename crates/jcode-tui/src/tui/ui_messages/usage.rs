@@ -95,12 +95,94 @@ enum CardRow<'a> {
     Spacer,
 }
 
+fn parse_card_percent(text: &str) -> Option<f32> {
+    match text.parse::<f32>() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Invalid usage card percentage, rendering as text: {error}"
+            ));
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "usage_activity_pair_tests.rs"]
+mod activity_pair_tests;
+
+#[cfg(test)]
+mod card_parse_error_tests {
+    use super::*;
+
+    #[test]
+    fn activity_table_aligns_metrics_and_preserves_caveats() {
+        let lifetime = "10.923 Bil in · 30.130 Mil out · 10.562 Bil cached · $5296.96 est. + unknown cost (3,817 unpriced) · partial tokens · since 2026-09-06";
+        let lines = activity_summary_lines("No recorded usage", lifetime, 58);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Jcode usage"));
+        assert!(text.contains("Today"));
+        assert!(text.contains("Lifetime"));
+        for expected in [
+            "10.92B",
+            "10.56B",
+            "30.13M",
+            "$5,296.96*",
+            "3,817 unpriced",
+            "partial tokens",
+            "since 2026-09-06",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert_eq!(lines[2].spans[1].style.fg, usage_utilization_style(0.0).fg);
+        for width in 1..65 {
+            let card = ProviderCard::parse(&format!("*ok\tready\n: Today\tNo recorded usage\n: Lifetime\t{lifetime}\n: Tracking\told caveat")).unwrap().render("OpenAI", width);
+            assert!(
+                card.iter().all(|line| line.width() <= width),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_activity_stacks_periods_and_keeps_cache_creation() {
+        let lines = activity_summary_lines(
+            "No recorded usage",
+            "100 in · 20 out · 40 cache creation · cost unknown",
+            24,
+        );
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("No recorded usage"));
+        assert!(text.contains("Cache creation"));
+        assert!(text.contains("Unknown*"));
+        assert!(lines.iter().all(|line| line.width() <= 24));
+    }
+
+    #[test]
+    fn invalid_header_falls_back_and_invalid_gauge_remains_visible() {
+        assert!(ProviderCard::parse("*%\tnot-a-number").is_none());
+        let card = ProviderCard::parse("*ok\tReady\n= Window\tbad\tsoon").unwrap();
+        assert!(matches!(card.rows[0], CardRow::Note("Window\tbad\tsoon")));
+        let card = ProviderCard::parse("*%\t42.4\n= Window\t101%\tsoon").unwrap();
+        assert!(matches!(card.status, CardStatus::Peak(42)));
+        assert!(matches!(card.rows[0], CardRow::Gauge { used: 100, .. }));
+    }
+}
+
 impl<'a> ProviderCard<'a> {
     fn parse(content: &'a str) -> Option<Self> {
         let mut lines = content.lines();
         let (level, text) = lines.next()?.strip_prefix('*')?.split_once('\t')?;
         let status = if level == "%" {
-            CardStatus::Peak(text.parse::<f32>().ok()?.round().clamp(0.0, 100.0) as u8)
+            CardStatus::Peak(parse_card_percent(text)?.round().clamp(0.0, 100.0) as u8)
         } else {
             CardStatus::Level(level, text)
         };
@@ -118,10 +200,12 @@ impl<'a> ProviderCard<'a> {
                     CardRow::Spacer
                 } else if let Some(rest) = raw.strip_prefix("= ") {
                     let mut parts = rest.splitn(3, '\t');
-                    let label = parts.next().unwrap_or_default();
+                    let Some(label) = parts.next() else {
+                        return CardRow::Note(rest);
+                    };
                     match parts
                         .next()
-                        .and_then(|pct| pct.trim_end_matches('%').parse::<f32>().ok())
+                        .and_then(|pct| parse_card_percent(pct.trim_end_matches('%')))
                     {
                         Some(pct) => CardRow::Gauge {
                             label,
@@ -264,7 +348,30 @@ impl<'a> ProviderCard<'a> {
             _ => true,
         });
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let activity = |name: &str| {
+            self.rows.iter().find_map(|row| match row {
+                CardRow::Detail { key, value, .. } if *key == name => Some(*value),
+                _ => None,
+            })
+        };
+        let activity_pair = activity("Today").zip(activity("Lifetime"));
+        let mut activity_rendered = false;
         for row in &self.rows {
+            if let Some((today, lifetime)) = activity_pair
+                && matches!(
+                    row,
+                    CardRow::Detail {
+                        key: "Today" | "Lifetime" | "Tracking",
+                        ..
+                    }
+                )
+            {
+                if !activity_rendered {
+                    lines.extend(activity_summary_lines(today, lifetime, inner));
+                    activity_rendered = true;
+                }
+                continue;
+            }
             match *row {
                 CardRow::Gauge { label, used, reset } => {
                     let bar = |label: &str, label_column, countdown_column| {
@@ -286,7 +393,10 @@ impl<'a> ProviderCard<'a> {
                         // Label above the bar, wrapped rather than clipped, with
                         // the countdown right-aligned on the label's last line
                         // (or its own line when the card is very narrow).
-                        let tail = reset.map(countdown).unwrap_or_default();
+                        let tail = match reset {
+                            Some(reset) => countdown(reset),
+                            None => String::new(),
+                        };
                         let room = inner.saturating_sub(tail.width() + 2);
                         let (parts, tail_inline) = if tail.is_empty() {
                             (wrap_words(label, inner), true)
@@ -380,6 +490,180 @@ impl<'a> ProviderCard<'a> {
         }
         lines
     }
+}
+
+/// Adapt the recorded-usage summary without changing its plain-text consumers.
+fn activity_summary_lines(today: &str, lifetime: &str, width: usize) -> Vec<Line<'static>> {
+    let label = Style::default().fg(rgb(LABEL_STYLE.0, LABEL_STYLE.1, LABEL_STYLE.2));
+    let value = Style::default().fg(rgb(VALUE_STYLE.0, VALUE_STYLE.1, VALUE_STYLE.2));
+    let cached = usage_utilization_style(0.0);
+    let parse = |text: &str| {
+        let mut cells = vec!["—".to_string(); 5];
+        let mut notes = Vec::new();
+        for part in text.split(" · ") {
+            let field = [
+                (" in", 0),
+                (" cached", 1),
+                (" out", 2),
+                (" cache creation", 4),
+            ]
+            .into_iter()
+            .find_map(|(suffix, index)| part.strip_suffix(suffix).map(|s| (index, s)));
+            if let Some((index, number)) = field {
+                let compact = [
+                    ("Quint", "E"),
+                    ("Quad", "P"),
+                    ("Tril", "T"),
+                    ("Bil", "B"),
+                    ("Mil", "M"),
+                ]
+                .into_iter()
+                .find_map(|(suffix, unit)| {
+                    number.strip_suffix(suffix).map(|n| {
+                        n.trim()
+                            .parse::<f64>()
+                            .map(|n| format!("{n:.2}{unit}"))
+                            .unwrap_or_else(|_| number.to_string())
+                    })
+                })
+                .unwrap_or_else(|| number.to_string());
+                cells[index] = compact;
+            } else if part.contains("cost") || part.contains(" est.") {
+                let (estimate, rest) = part.split_once(" est.").unwrap_or(("Unknown", part));
+                let estimate = estimate
+                    .strip_prefix('$')
+                    .and_then(|s| s.split_once('.'))
+                    .filter(|(whole, _)| whole.bytes().all(|b| b.is_ascii_digit()))
+                    .map(|(whole, cents)| {
+                        let mut grouped = String::from("$");
+                        for (index, ch) in whole.chars().enumerate() {
+                            if index > 0 && (whole.len() - index) % 3 == 0 {
+                                grouped.push(',');
+                            }
+                            grouped.push(ch);
+                        }
+                        format!("{grouped}.{cents}")
+                    })
+                    .unwrap_or_else(|| estimate.to_string());
+                cells[3] = if rest.is_empty() {
+                    estimate
+                } else {
+                    format!("{estimate}*")
+                };
+                if !rest.is_empty() {
+                    notes.push(rest.trim_start_matches(" + ").to_string());
+                }
+            } else if part != "No recorded usage" {
+                notes.push(part.to_string());
+            }
+        }
+        (cells, notes)
+    };
+    let (today_cells, today_notes) = parse(today);
+    let (lifetime_cells, lifetime_notes) = parse(lifetime);
+    let labels = [
+        "Input",
+        "Cached",
+        "Output",
+        "Est. API value",
+        "Cache creation",
+    ];
+    let key_width = 14;
+    let today_width = today_cells
+        .iter()
+        .map(|s| s.width())
+        .max()
+        .unwrap_or(0)
+        .max(5);
+    let lifetime_width = lifetime_cells
+        .iter()
+        .map(|s| s.width())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let inline = key_width + 4 + today_width + lifetime_width <= width;
+    let mut lines = vec![Line::from(Span::styled("Jcode usage", value.bold()))];
+    if inline {
+        lines[0] = Line::from(vec![
+            Span::styled(format!("{:<key_width$}  ", "Jcode usage"), value.bold()),
+            Span::styled(
+                format!("{:>today_width$}  {:>lifetime_width$}", "Today", "Lifetime"),
+                label,
+            ),
+        ]);
+        for (index, name) in labels.iter().enumerate() {
+            if index == 4 && today_cells[index] == "—" && lifetime_cells[index] == "—" {
+                continue;
+            }
+            lines.push(Line::from(vec![
+                Span::styled(format!("{name:<key_width$}  "), label),
+                Span::styled(
+                    format!(
+                        "{:>today_width$}  {:>lifetime_width$}",
+                        today_cells[index], lifetime_cells[index]
+                    ),
+                    if index == 1 { cached } else { value },
+                ),
+            ]));
+        }
+    } else {
+        for (period, cells) in [("Today", &today_cells), ("Lifetime", &lifetime_cells)] {
+            lines.push(Line::from(Span::styled(period, label.bold())));
+            if cells.iter().all(|s| s == "—") {
+                lines.extend(
+                    wrap_words("No recorded usage", width)
+                        .into_iter()
+                        .map(|s| Line::from(Span::styled(s, label))),
+                );
+                continue;
+            }
+            for (index, name) in labels.iter().enumerate() {
+                if index == 4 && cells[index] == "—" {
+                    continue;
+                }
+                if name.width() + cells[index].width() + 2 <= width {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{name}{}",
+                                " ".repeat(width - name.width() - cells[index].width())
+                            ),
+                            label,
+                        ),
+                        Span::styled(
+                            cells[index].clone(),
+                            if index == 1 { cached } else { value },
+                        ),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::styled(clip_to_width(name, width), label)));
+                    lines.push(Line::from(Span::styled(
+                        clip_to_width(&cells[index], width),
+                        value,
+                    )));
+                }
+            }
+        }
+    }
+    let mut notes = Vec::new();
+    for (period, entries) in [("Today", today_notes), ("Lifetime", lifetime_notes)] {
+        for note in entries {
+            notes.push(if note.starts_with("since ") {
+                note
+            } else {
+                format!("{period}: {note}")
+            });
+        }
+    }
+    notes.push("Jcode only · API-equivalent value, not a bill · today from local midnight".into());
+    for note in notes {
+        lines.extend(
+            wrap_words(&note, width)
+                .into_iter()
+                .map(|s| Line::from(Span::styled(s, Style::default().fg(dim_color())))),
+        );
+    }
+    lines
 }
 
 /// Provider name in bold, with a qualifier such as "(ChatGPT)" or "- work"

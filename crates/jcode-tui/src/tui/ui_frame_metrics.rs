@@ -1462,8 +1462,8 @@ pub(crate) fn body_last_path_for_tests() -> (String, Option<usize>) {
     TEST_BODY_LAST.with(|last| last.borrow().clone())
 }
 
+#[cfg(test)]
 fn note_test_body_last(path: Option<&str>, base: Option<usize>) {
-    #[cfg(test)]
     TEST_BODY_LAST.with(|last| {
         let mut last = last.borrow_mut();
         if let Some(path) = path {
@@ -1473,6 +1473,7 @@ fn note_test_body_last(path: Option<&str>, base: Option<usize>) {
             last.1 = base;
         }
     });
-    #[cfg(not(test))]
-    let _ = (path, base);
 }
+
+#[cfg(not(test))]
+fn note_test_body_last(_path: Option<&str>, _base: Option<usize>) {}
