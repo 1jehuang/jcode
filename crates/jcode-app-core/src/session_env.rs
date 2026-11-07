@@ -65,8 +65,10 @@ pub fn inherit_session_env(parent: &str, child: &str) {
     crate::tool::session_http::prune(&entries);
 }
 
-/// Forget a destroyed session. Already-launched jobs retain their snapshots.
+/// Forget a destroyed session (including its swarm hook identity). Already-launched
+/// jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
+    crate::hooks::forget_swarm_identity(session_id);
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
     crate::tool::session_http::prune(&entries);

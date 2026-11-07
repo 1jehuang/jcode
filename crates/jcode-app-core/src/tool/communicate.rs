@@ -1423,6 +1423,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         // `agents.swarm_effort` (default "low").
         effort: None,
         label: None,
+        agent: None,
         lane_id: None,
     };
 
@@ -1779,6 +1780,8 @@ struct CommunicateInput {
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
     /// Phase (todo `stage`) a spawned worker's lane joins. Defaults to the
     /// active phase.
     #[serde(default, alias = "stage")]
@@ -1839,7 +1842,7 @@ fn canonical_swarm_action(action: &str) -> &str {
 
 #[path = "swarm_model_schema.rs"]
 mod swarm_model_schema;
-use swarm_model_schema::apply_swarm_model_policy;
+use swarm_model_schema::{apply_agent_definitions, apply_swarm_model_policy};
 #[async_trait]
 impl Tool for CommunicateTool {
     fn name(&self) -> &str {
@@ -2006,6 +2009,7 @@ impl Tool for CommunicateTool {
         ]);
 
         apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
+        apply_agent_definitions(&mut schema);
         schema
     }
 
@@ -2510,6 +2514,7 @@ impl Tool for CommunicateTool {
                     // `agents.swarm_effort` (default "low").
                     effort: None,
                     label: Some(label),
+                    agent: params.agent.clone(),
                     lane_id: Some(lane_id.clone()),
                 };
 
