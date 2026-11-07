@@ -128,6 +128,7 @@ mod tests {
                 wrapped_copy_offsets: Arc::new(Vec::new()),
                 raw_plain_lines: Arc::new(Vec::new()),
                 wrapped_line_map: Arc::new(Vec::new()),
+                literal_raw_lines: Vec::new(),
                 wrapped_user_indices: Vec::new(),
                 wrapped_user_prompt_starts: Vec::new(),
                 wrapped_user_prompt_ends: Vec::new(),
@@ -354,6 +355,7 @@ mod section_pos_tests {
                     })
                     .collect(),
             ),
+            literal_raw_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
             wrapped_user_prompt_ends: Vec::new(),

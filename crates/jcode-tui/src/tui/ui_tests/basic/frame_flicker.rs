@@ -275,6 +275,7 @@ fn make_prepared_messages_with_content_bytes(bytes: usize, marker: &str) -> Arc<
         wrapped_copy_offsets: Arc::new(vec![0]),
         raw_plain_lines: Arc::new(vec![content]),
         wrapped_line_map: Arc::new(Vec::new()),
+        literal_raw_lines: Vec::new(),
         wrapped_user_indices: Vec::new(),
         wrapped_user_prompt_starts: Vec::new(),
         wrapped_user_prompt_ends: Vec::new(),
