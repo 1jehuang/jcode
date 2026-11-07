@@ -325,7 +325,7 @@ impl Tool for SessionSearchTool {
                 },
                 "include_tools": {
                     "type": "boolean",
-                    "description": "Include raw tool calls and tool results. Defaults to false to reduce log noise. Tool intents and todo task names/descriptions are always searchable."
+                    "description": "Include raw calls/results. Defaults false; tool intents and todo names remain searchable."
                 },
                 "include_system": {
                     "type": "boolean",

@@ -748,7 +748,14 @@ mod identity_scope_tests {
         for (_, attach_rx) in &mut receivers {
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 loop {
-                    if matches!(attach_rx.recv().await, Some(ServerEvent::Done { id: 0 })) {
+                    let Some(event) = attach_rx.recv().await else {
+                        break;
+                    };
+                    let event = match event {
+                        ServerEvent::TurnEvent { event, .. } => *event,
+                        event => event,
+                    };
+                    if matches!(event, ServerEvent::Done { id: 0 }) {
                         break;
                     }
                 }

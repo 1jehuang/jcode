@@ -501,7 +501,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let repo = repo().await;
         let name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
-        std::fs::write(repo.path().join(name), b"contents").unwrap();
+        if std::fs::write(repo.path().join(name), b"contents").is_err() {
+            // Some Unix filesystems (including the default macOS filesystem)
+            // reject non-UTF-8 path bytes before Git can observe them.
+            return;
+        }
         assert!(
             snapshot(repo.path())
                 .await

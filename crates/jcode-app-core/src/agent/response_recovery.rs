@@ -882,12 +882,15 @@ mod malformed_tool_call_recovery_tests {
                     if let ServerEvent::TextDelta { text } = &event {
                         streamed.push_str(text);
                     }
-                    assert!(!matches!(
-                        event,
-                        ServerEvent::ToolStart { .. }
-                            | ServerEvent::ToolExec { .. }
-                            | ServerEvent::TextReplace { .. }
-                    ));
+                    assert!(
+                        !matches!(
+                            event,
+                            ServerEvent::ToolStart { .. }
+                                | ServerEvent::ToolExec { .. }
+                                | ServerEvent::TextReplace { .. }
+                        ),
+                        "unexpected event {event:?} for streaming={streaming}, example={text:?}"
+                    );
                 }
                 if streaming {
                     assert_eq!(streamed, text);

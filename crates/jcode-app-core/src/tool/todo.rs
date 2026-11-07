@@ -1307,7 +1307,7 @@ impl Tool for TodoTool {
                             "waiting_on": {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
-                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
+                                "description": "Background task or seat IDs to await. []/null clears."
                             },
                             "completely_blocked": {
                                 "type": ["object", "null"],
@@ -1368,7 +1368,7 @@ impl Tool for TodoTool {
                         "understands_user_intent": {
                             "type": "string",
                             "enum": ["uncertain", "partial", "clear", "complete"],
-                            "description": "How well the plan represents what the user wants. Be honest about what is understood and still uncertain when guessing."
+                            "description": "How well the plan reflects what the user wants; note uncertainty when guessing."
                         }
                     }
                 },
@@ -1400,7 +1400,7 @@ impl Tool for TodoTool {
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How much of the workflow the checks cover. Consider public interfaces, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Check public interfaces, integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
