@@ -782,6 +782,13 @@ swarm_stall_after_secs = 600
 # the tool result the model sees, so linters can report findings inline.
 # post_tool_feedback = "~/bin/jcode-vale"
 # post_tool_feedback_timeout_ms = 10000
+#
+# Observers in the coordinator's context when a swarm worker starts or ends.
+# They receive a Claude-shaped SubagentStart/SubagentStop JSON document on
+# stdin. Inside a worker every hook also gets JCODE_HOOK_SWARM_ID,
+# JCODE_HOOK_COORDINATOR_SESSION_ID, JCODE_HOOK_AGENT_ID and friends.
+# swarm_member_start = "~/bin/on-worker-start"
+# swarm_member_end = "~/bin/on-worker-end"
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
