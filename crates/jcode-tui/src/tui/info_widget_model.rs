@@ -283,6 +283,20 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
         });
     }
 
+    // Queue mode only changes behavior while it is on, so the row appears
+    // for Some(true) and not for the default Some(false): the panel carries
+    // active state, and `has_data_for` already counts the field toward
+    // availability either way.
+    if data.queue_mode == Some(true) {
+        rows.push(RuntimeRow {
+            icon: "⏳",
+            icon_color: rgb(255, 193, 7),
+            text: "queue mode on".to_string(),
+            text_color: muted,
+            wrap: true,
+        });
+    }
+
     if let Some(tps) = data.tokens_per_second
         && tps.is_finite()
         && tps > 0.1
@@ -634,5 +648,26 @@ mod tests {
         let mut d = data();
         d.service_tier = None;
         assert_eq!(runtime_height(&d), 1);
+    }
+
+    #[test]
+    fn queue_mode_row_renders_when_on_and_hides_when_off() {
+        // Queue mode only changes behavior while it is on, so the row must
+        // appear for Some(true) and stay absent for Some(false)/None (the
+        // panel carries active state, not the default).
+        let mut d = data();
+        d.queue_mode = Some(true);
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("⏳ queue mode on"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("⏳ queue mode on"), "{overview}");
+
+        for mode in [Some(false), None] {
+            let mut d = data();
+            d.queue_mode = mode;
+            let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+            assert!(!out.contains("queue mode"), "mode {mode:?}: {out}");
+        }
     }
 }

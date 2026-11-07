@@ -719,6 +719,9 @@ fn overview_requires_multiple_sections() {
     // Only a "join" of multiple detail sections places the overview. The
     // fork's Runtime panel owns the selected model + effort row (🏠), so
     // model data counts as a section; queue mode adds the second one here.
+    // Since the queue-mode runtime row landed, `queue_mode: Some(true)` also
+    // makes `runtime_has_data` true on its own, so it can no longer stand in
+    // for a lone section; `session_name` renders a runtime row only.
     let identity_only = InfoWidgetData {
         model: Some("gpt-test".to_string()),
         queue_mode: Some(true),
@@ -728,7 +731,7 @@ fn overview_requires_multiple_sections() {
 
     // A lone section still does not place the overview.
     let one_section = InfoWidgetData {
-        queue_mode: Some(true),
+        session_name: Some("sauropod".to_string()),
         ..Default::default()
     };
     assert!(!one_section.has_data_for(WidgetKind::Overview));
