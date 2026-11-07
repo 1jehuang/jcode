@@ -121,6 +121,45 @@ Fires after every tool call. Extra fields:
 tool was asked to read or write. It does not track files a `bash` command
 happened to modify.
 
+## Swarm identity and worker events
+
+Inside a swarm worker session every hook (observers, `pre_tool`,
+`post_tool_feedback`, and so on) receives extra fields, also present in
+`JCODE_HOOK_PAYLOAD`. They are absent in ordinary sessions.
+
+| Variable | Meaning |
+| --- | --- |
+| `JCODE_HOOK_SWARM_ID` | Swarm the worker belongs to |
+| `JCODE_HOOK_COORDINATOR_SESSION_ID` | Coordinator session that spawned it |
+| `JCODE_HOOK_PARENT_SESSION_ID` | Session that receives its report |
+| `JCODE_HOOK_SWARM_LABEL` | Spawn label, when given |
+| `JCODE_HOOK_AGENT_ID` | The worker's own session id |
+| `JCODE_HOOK_AGENT_TYPE` | Agent definition name, else the label |
+
+`JCODE_SPAWN_SWARM_LABEL` is also exported to the [spawn hook](SPAWN_HOOK.md).
+
+Two observers fire in the **coordinator's** context (`session_id` is the
+coordinator). Each receives a Claude-shaped JSON document on stdin.
+
+```toml
+[hooks]
+swarm_member_start = "~/bin/on-worker-start"   # hook_event_name "SubagentStart"
+swarm_member_end   = "~/bin/on-worker-end"     # hook_event_name "SubagentStop"
+```
+
+`swarm_member_end` fires once when a worker leaves the running state for
+`ready`, `completed`, `failed`, `stopped` or `crashed`. Its payload carries
+`agent_id`, `agent_type`, `last_assistant_message` (the completion report,
+truncated to 4000 chars with a marker) and `jcode.status`, `jcode.duration_ms`, `jcode.swarm`.
+Repeated updates of the same status do not refire.
+
+Known limits of worker identity: the swarm fields are registered when the
+worker is spawned, so a headless worker's own `session_start` hook (which runs
+while the agent is being constructed) carries no swarm fields, and identities
+are in memory only, so a worker revived after a daemon restart runs its hooks
+without them. Env overrides:
+`JCODE_HOOK_SWARM_MEMBER_START`, `JCODE_HOOK_SWARM_MEMBER_END`.
+
 ## Feedback hook: `post_tool_feedback`
 
 `post_tool_feedback` runs **synchronously after every successful tool call**

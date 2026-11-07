@@ -551,7 +551,7 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, true)
+        Self::new_with_initial_ownership(provider, registry, working_dir, None, true, true)
     }
 
     /// A connection may only be a viewer attaching to an existing Agent.
@@ -561,16 +561,35 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, false)
+        Self::new_with_initial_ownership(provider, registry, working_dir, None, false, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_parent_and_initial_working_dir(
         provider: Arc<dyn Provider>,
         registry: Registry,
         working_dir: Option<&str>,
         parent_id: Option<String>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
+        Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true, true)
+    }
+
+    /// Like [`Self::new_with_parent_and_initial_working_dir`], but leaves the
+    /// `session_start` hook to the caller. Swarm workers register their hook
+    /// identity after construction, so the caller fires the hook with
+    /// [`Self::fire_session_start_hook`] once the identity is in place.
+    pub(crate) fn new_with_parent_deferred_start_hook(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        parent_id: Option<String>,
+    ) -> Self {
+        Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true, false)
+    }
+
+    /// Fire the `session_start` hook deferred at construction.
+    pub(crate) fn fire_session_start_hook(&self) {
+        self.fire_session_lifecycle_hook("session_start", "create");
     }
 
     fn new_with_initial_ownership(
@@ -579,6 +598,7 @@ impl Agent {
         working_dir: Option<&str>,
         parent_id: Option<String>,
         track_concurrency: bool,
+        fire_start_hook: bool,
     ) -> Self {
         let start = Instant::now();
         let mut marks: Vec<(&'static str, u128)> = Vec::with_capacity(10);
@@ -621,7 +641,9 @@ impl Agent {
         mark("compaction", &mut lap);
         agent.log_env_snapshot("create");
         mark("env_snapshot", &mut lap);
-        agent.fire_session_lifecycle_hook("session_start", "create");
+        if fire_start_hook {
+            agent.fire_session_lifecycle_hook("session_start", "create");
+        }
         if track_concurrency {
             agent.activate_concurrency_tracking();
         }
@@ -662,11 +684,23 @@ impl Agent {
         } else {
             crate::config::config().tools.selection()
         };
+        // A restriction an agent definition put on this session survives a
+        // resume, and only ever narrows the selection.
+        let allowed_tools = match (&session.tool_allowlist, tool_selection.allowed_tools) {
+            (Some(restricted), Some(selected)) => Some(
+                selected
+                    .into_iter()
+                    .filter(|name| restricted.contains(name))
+                    .collect(),
+            ),
+            (Some(restricted), None) => Some(restricted.iter().cloned().collect()),
+            (None, selected) => selected,
+        };
         let mut agent = Self::build_base(
             provider,
             registry,
             session,
-            tool_selection.allowed_tools,
+            allowed_tools,
             tool_selection.disabled_tools,
         );
         // begin_concurrency_tracking below writes the presence markers.

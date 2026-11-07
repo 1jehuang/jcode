@@ -155,6 +155,11 @@ pub struct Session {
     /// Whether automatic end-of-turn judging is enabled for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autojudge_enabled: Option<bool>,
+    /// Tool names this session is restricted to by an agent definition. Set
+    /// once at spawn and restored whenever the session is resumed, so a revived
+    /// worker cannot regain tools its definition denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist: Option<Vec<String>>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
     pub is_canary: bool,
@@ -254,6 +259,8 @@ struct SessionStartupStub {
     autoreview_enabled: Option<bool>,
     #[serde(default)]
     autojudge_enabled: Option<bool>,
+    #[serde(default)]
+    tool_allowlist: Option<Vec<String>>,
     #[serde(default)]
     is_canary: bool,
     #[serde(default)]
@@ -369,6 +376,7 @@ impl Session {
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
+        session.tool_allowlist = stub.tool_allowlist;
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
@@ -410,6 +418,7 @@ impl Session {
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
+        session.tool_allowlist = snapshot.tool_allowlist;
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
@@ -555,6 +564,7 @@ impl Session {
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
+            tool_allowlist: self.tool_allowlist.clone(),
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
@@ -763,6 +773,7 @@ impl Session {
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
         self.autojudge_enabled = meta.autojudge_enabled;
+        self.tool_allowlist = meta.tool_allowlist;
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
@@ -808,6 +819,7 @@ impl Session {
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
+            tool_allowlist: None,
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
@@ -868,6 +880,7 @@ impl Session {
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
+            tool_allowlist: None,
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
@@ -1773,6 +1786,8 @@ struct RemoteStartupSessionSnapshot {
     autoreview_enabled: Option<bool>,
     #[serde(default)]
     autojudge_enabled: Option<bool>,
+    #[serde(default)]
+    tool_allowlist: Option<Vec<String>>,
     #[serde(default)]
     is_canary: bool,
     #[serde(default)]

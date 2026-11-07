@@ -44,6 +44,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,
     pub(super) autojudge_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tool_allowlist: Option<Vec<String>>,
     pub(super) is_canary: bool,
     pub(super) testing_build: Option<String>,
     pub(super) working_dir: Option<String>,
@@ -114,6 +116,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.improve_mode != current.improve_mode
         || prev.autoreview_enabled != current.autoreview_enabled
         || prev.autojudge_enabled != current.autojudge_enabled
+        || prev.tool_allowlist != current.tool_allowlist
         || prev.is_canary != current.is_canary
         || prev.testing_build != current.testing_build
         || prev.working_dir != current.working_dir

@@ -504,6 +504,10 @@ mod tests {
             r#"{"mcpServers":{"second":{"command":"second-server","shared":false}}}"#,
         )
         .expect("write second project config");
+        let review = crate::mcp::project_mcp_review(first_project.path())
+            .expect("review first project config")
+            .expect("first project MCP servers");
+        crate::mcp::trust_project_mcp(&review).expect("trust first project config");
 
         std::env::set_current_dir(first_project.path()).expect("set first project cwd");
         let pool = SharedMcpPool::from_default_config();
@@ -514,6 +518,10 @@ mod tests {
             r#"{"mcpServers":{"first-reloaded":{"command":"first-reloaded-server","shared":false}}}"#,
         )
         .expect("update first project config");
+        let review = crate::mcp::project_mcp_review(first_project.path())
+            .expect("review reloaded project config")
+            .expect("reloaded project MCP servers");
+        crate::mcp::trust_project_mcp(&review).expect("trust reloaded project config");
 
         std::env::set_current_dir(second_project.path()).expect("set second project cwd");
         let _ = pool.reload().await;

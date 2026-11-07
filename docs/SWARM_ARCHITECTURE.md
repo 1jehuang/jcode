@@ -327,3 +327,11 @@ This design emphasizes parallelism, explicit communication, and optional worktre
 isolation. The coordinator is responsible for planning and plan updates; worktree
 managers are responsible for integration; agents collaborate directly to resolve
 conflicts.
+
+## Agent definitions
+
+`spawn` accepts an optional `agent` naming a Markdown definition under
+`.jcode/agents` or `.claude/agents` (see [AGENT_DEFINITIONS.md](AGENT_DEFINITIONS.md)).
+The server resolves it from the coordinator's working directory at spawn time,
+delivers the persona to the worker as a hidden first message, and records the
+definition name as the worker's `agent_type` for hooks.

@@ -52,6 +52,7 @@ pub(super) async fn create_headless_session(
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
+    worker_identity: Option<crate::hooks::SwarmIdentity>,
 ) -> Result<String> {
     let _runtime_activity = crate::runtime_activity::global().try_enter()?;
     let memory_enabled = crate::config::config().features.memory;
@@ -91,7 +92,7 @@ pub(super) async fn create_headless_session(
     let working_dir_string = working_dir
         .as_ref()
         .map(|dir| dir.to_string_lossy().into_owned());
-    let mut new_agent = Agent::new_with_parent_and_initial_working_dir(
+    let mut new_agent = Agent::new_with_parent_deferred_start_hook(
         Arc::clone(&provider),
         registry,
         working_dir_string.as_deref(),
@@ -191,10 +192,21 @@ pub(super) async fn create_headless_session(
         }
     }
 
+    // The constructor deferred `session_start` so the hook sees the worker's
+    // swarm identity, which must be registered before the hook fires.
+    if let Some(identity) = worker_identity {
+        crate::hooks::register_swarm_identity(&client_session_id, identity);
+    }
+    new_agent.fire_session_start_hook();
+
     let agent = Arc::new(Mutex::new(new_agent));
-    sessions
+    if let Err(error) = sessions
         .register_new(client_session_id.clone(), Arc::clone(&agent))
-        .await?;
+        .await
+    {
+        crate::hooks::forget_swarm_identity(&client_session_id);
+        return Err(error);
+    }
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;
         register_session_interrupt_queue(
