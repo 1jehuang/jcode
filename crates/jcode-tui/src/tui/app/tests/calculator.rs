@@ -15,6 +15,11 @@ fn calculator_command_keypad_base_selection_and_invalid_input_work() {
     }
     let overlay = app.calculator_overlay.as_ref().unwrap();
     assert_eq!(overlay.result, Some(5.0));
+    assert_eq!(
+        overlay.theme,
+        super::CalculatorTheme::Light,
+        "calculator should open in a white theme"
+    );
 
     app.handle_calculator_key(crossterm::event::KeyCode::Tab)
         .unwrap();
@@ -30,7 +35,7 @@ fn calculator_command_keypad_base_selection_and_invalid_input_work() {
         .unwrap();
     assert_eq!(
         app.calculator_overlay.as_ref().unwrap().theme,
-        super::CalculatorTheme::Light
+        super::CalculatorTheme::Dark
     );
     app.handle_calculator_key(crossterm::event::KeyCode::Char('m'))
         .unwrap();
@@ -59,6 +64,22 @@ fn calculator_command_keypad_base_selection_and_invalid_input_work() {
         app.handle_calculator_key(key).unwrap();
     }
     assert!(app.calculator_overlay.as_ref().unwrap().error.is_some());
+
+    app.handle_calculator_key(crossterm::event::KeyCode::F(9))
+        .unwrap();
+    assert!(app.calculator_overlay.as_ref().unwrap().history_visible);
+    app.handle_calculator_key(crossterm::event::KeyCode::Char('2'))
+        .unwrap();
+    let overlay = app.calculator_overlay.as_ref().unwrap();
+    assert!(!overlay.filtered_history_indices().is_empty());
+    assert_eq!(
+        overlay.history[overlay.filtered_history_indices()[0]].expression,
+        "2+3"
+    );
+    app.handle_calculator_key(crossterm::event::KeyCode::Enter)
+        .unwrap();
+    assert_eq!(app.calculator_overlay.as_ref().unwrap().expression, "2+3");
+    assert!(!app.calculator_overlay.as_ref().unwrap().history_visible);
 
     app.handle_calculator_key(crossterm::event::KeyCode::Esc)
         .unwrap();

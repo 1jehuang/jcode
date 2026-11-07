@@ -14,8 +14,8 @@ pub(crate) enum CalculatorBase {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CalculatorTheme {
-    #[default]
     Dark,
+    #[default]
     Light,
 }
 
@@ -24,6 +24,12 @@ pub(crate) enum CalculatorMode {
     #[default]
     Scientific,
     Programmer,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CalculatorHistoryEntry {
+    pub(crate) expression: String,
+    pub(crate) result: String,
 }
 
 fn in_hex_literal(expression: &str) -> bool {
@@ -40,6 +46,10 @@ pub struct CalculatorOverlay {
     pub(crate) theme: CalculatorTheme,
     pub(crate) mode: CalculatorMode,
     pub(crate) degrees: bool,
+    pub(crate) history: Vec<CalculatorHistoryEntry>,
+    pub(crate) history_visible: bool,
+    pub(crate) history_query: String,
+    pub(crate) history_cursor: usize,
     just_evaluated: bool,
 }
 
@@ -66,6 +76,21 @@ impl CalculatorOverlay {
             integer,
             format_radix(integer, 16, "0x")
         ))
+    }
+
+    pub(crate) fn filtered_history_indices(&self) -> Vec<usize> {
+        let query = self.history_query.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| {
+                query.is_empty()
+                    || entry.expression.to_lowercase().contains(&query)
+                    || entry.result.to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 }
 
@@ -143,6 +168,48 @@ impl App {
         let Some(mut overlay) = self.calculator_overlay.take() else {
             return Ok(());
         };
+        if overlay.history_visible {
+            match code {
+                KeyCode::Esc | KeyCode::F(9) => {
+                    overlay.history_visible = false;
+                    overlay.history_query.clear();
+                    overlay.history_cursor = 0;
+                }
+                KeyCode::Backspace => {
+                    overlay.history_query.pop();
+                    overlay.history_cursor = 0;
+                }
+                KeyCode::Up => {
+                    overlay.history_cursor = overlay.history_cursor.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    let count = overlay.filtered_history_indices().len();
+                    if count > 0 {
+                        overlay.history_cursor = (overlay.history_cursor + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(index) = overlay
+                        .filtered_history_indices()
+                        .get(overlay.history_cursor)
+                    {
+                        overlay.expression = overlay.history[*index].expression.clone();
+                        overlay.history_visible = false;
+                        overlay.history_query.clear();
+                        overlay.history_cursor = 0;
+                        update_calculator_preview(&mut overlay);
+                        overlay.just_evaluated = true;
+                    }
+                }
+                KeyCode::Char(character) if !character.is_control() => {
+                    overlay.history_query.push(character);
+                    overlay.history_cursor = 0;
+                }
+                _ => {}
+            }
+            self.calculator_overlay = Some(overlay);
+            return Ok(());
+        }
         match code {
             KeyCode::Esc | KeyCode::F(10) => return Ok(()),
             KeyCode::Enter | KeyCode::Char('=') => evaluate_overlay(&mut overlay),
@@ -166,6 +233,11 @@ impl App {
             KeyCode::F(6) => append_calculator_text(&mut overlay, "cos("),
             KeyCode::F(7) => append_calculator_text(&mut overlay, "tan("),
             KeyCode::F(8) => append_calculator_text(&mut overlay, "sqrt("),
+            KeyCode::F(9) => {
+                overlay.history_visible = true;
+                overlay.history_query.clear();
+                overlay.history_cursor = 0;
+            }
             KeyCode::Tab => {
                 overlay.mode = match overlay.mode {
                     CalculatorMode::Scientific => CalculatorMode::Programmer,
@@ -286,6 +358,18 @@ fn evaluate_overlay(overlay: &mut CalculatorOverlay) {
             overlay.result = Some(value);
             overlay.error = None;
             overlay.just_evaluated = true;
+            if !overlay.expression.trim().is_empty() {
+                let result = overlay
+                    .formatted_result()
+                    .unwrap_or_else(|| format_float(value));
+                overlay.history.push(CalculatorHistoryEntry {
+                    expression: overlay.expression.clone(),
+                    result,
+                });
+                if overlay.history.len() > 100 {
+                    overlay.history.remove(0);
+                }
+            }
         }
         Err(error) => {
             overlay.result = None;

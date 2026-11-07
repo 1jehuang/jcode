@@ -252,14 +252,14 @@ impl CalculatorPalette {
                 warning: rgb(255, 173, 160),
             },
             CalculatorTheme::Light => Self {
-                background: rgb(247, 249, 253),
-                text: rgb(37, 47, 64),
-                muted: rgb(101, 116, 137),
-                border: rgb(190, 201, 218),
-                surface: rgb(232, 238, 247),
-                function: rgb(220, 234, 246),
-                action: rgb(251, 228, 228),
-                accent: rgb(61, 102, 210),
+                background: rgb(255, 255, 255),
+                text: rgb(31, 41, 55),
+                muted: rgb(94, 105, 121),
+                border: rgb(205, 213, 224),
+                surface: rgb(246, 248, 251),
+                function: rgb(238, 244, 250),
+                action: rgb(255, 237, 237),
+                accent: rgb(47, 93, 186),
                 accent_text: rgb(255, 255, 255),
                 warning: rgb(169, 54, 57),
             },
@@ -310,6 +310,89 @@ fn draw_calculator_buttons(
     }
 }
 
+fn draw_calculator_history(
+    frame: &mut Frame,
+    area: Rect,
+    overlay: &crate::tui::app::CalculatorOverlay,
+    palette: CalculatorPalette,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let query = if overlay.history_query.is_empty() {
+        "type an expression or result to search"
+    } else {
+        overlay.history_query.as_str()
+    };
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::styled("SEARCH  ", Style::default().fg(palette.accent)),
+                Span::styled(query.to_string(), Style::default().fg(palette.text)),
+            ]),
+            rows[0].width as usize,
+        ))
+        .style(Style::default().bg(palette.surface)),
+        rows[0],
+    );
+
+    let matches = overlay.filtered_history_indices();
+    let mut lines = Vec::new();
+    if matches.is_empty() {
+        let message = if overlay.history.is_empty() {
+            "No calculations yet. Evaluate an expression to start history."
+        } else {
+            "No matching calculations."
+        };
+        lines.push(Line::from(Span::styled(
+            message,
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        let visible = rows[2].height as usize;
+        let start = overlay
+            .history_cursor
+            .saturating_sub(visible.saturating_sub(1));
+        for (row, index) in matches.iter().skip(start).take(visible).enumerate() {
+            let entry = &overlay.history[*index];
+            let selected = start + row == overlay.history_cursor;
+            let line = Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(palette.accent),
+                ),
+                Span::styled(entry.expression.clone(), Style::default().fg(palette.text)),
+                Span::styled("  =  ", Style::default().fg(palette.muted)),
+                Span::styled(entry.result.clone(), Style::default().fg(palette.accent)),
+            ]);
+            lines.push(if selected {
+                line.style(Style::default().bg(palette.surface))
+            } else {
+                line
+            });
+        }
+    }
+    let lines = lines
+        .iter()
+        .map(|line| {
+            jcode_tui_render::truncate_line_with_ellipsis_to_width(line, rows[2].width as usize)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), rows[2]);
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &Line::from("Type to search · ↑/↓ select · Enter reuse · F9 back"),
+            rows[3].width as usize,
+        ))
+        .style(Style::default().fg(palette.muted)),
+        rows[3],
+    );
+}
+
 pub(super) fn draw_calculator_overlay(
     frame: &mut Frame,
     area: Rect,
@@ -343,13 +426,17 @@ pub(super) fn draw_calculator_overlay(
     let palette = CalculatorPalette::for_theme(overlay.theme);
     let theme_name = match overlay.theme {
         crate::tui::app::CalculatorTheme::Dark => "DARK",
-        crate::tui::app::CalculatorTheme::Light => "LIGHT",
+        crate::tui::app::CalculatorTheme::Light => "WHITE",
     };
     let mode_name = match mode {
         crate::tui::app::CalculatorMode::Scientific => "SCIENTIFIC",
         crate::tui::app::CalculatorMode::Programmer => "PROGRAMMER",
     };
-    let title = format!(" ◇ CALC  ·  {mode_name}  ·  {theme_name} [M] ");
+    let title = if overlay.history_visible {
+        format!(" ◇ CALC  ·  HISTORY / SEARCH  ·  {theme_name} [M] ")
+    } else {
+        format!(" ◇ CALC  ·  {mode_name}  ·  {theme_name} [M] ")
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -362,6 +449,10 @@ pub(super) fn draw_calculator_overlay(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if overlay.history_visible {
+        draw_calculator_history(frame, inner, overlay, palette);
         return;
     }
 
@@ -572,13 +663,17 @@ pub(super) fn draw_calculator_overlay(
     }
 
     let footer = match (width < 50, mode) {
-        (true, crate::tui::app::CalculatorMode::Scientific) => "Tab programmer · s/c/t trig",
-        (true, crate::tui::app::CalculatorMode::Programmer) => "Tab scientific · F1-F4 bases",
+        (true, crate::tui::app::CalculatorMode::Scientific) => {
+            "F9 history · Tab programmer · s/c/t trig"
+        }
+        (true, crate::tui::app::CalculatorMode::Programmer) => {
+            "F9 history · Tab scientific · F1-F4 bases"
+        }
         (false, crate::tui::app::CalculatorMode::Scientific) => {
-            "Tab programmer · s/c/t trig · m theme · Esc close"
+            "F9 history · Tab programmer · s/c/t trig · m theme · Esc close"
         }
         (false, crate::tui::app::CalculatorMode::Programmer) => {
-            "Tab scientific · F1-F4 bases · m theme · Esc close"
+            "F9 history · Tab scientific · F1-F4 bases · m theme · Esc close"
         }
     };
     let footer_row = match (expanded, mode) {
