@@ -2894,6 +2894,7 @@ async fn run_single_message_command_plain_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
@@ -3011,6 +3012,7 @@ async fn run_single_message_command_capture_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
@@ -3208,6 +3210,7 @@ async fn run_single_message_command_ndjson(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,

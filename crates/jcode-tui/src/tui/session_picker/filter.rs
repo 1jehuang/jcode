@@ -4,6 +4,8 @@ use super::*;
 pub(super) struct SearchSelection {
     query: String,
     follow_until: Option<std::time::Instant>,
+    last_publish: Option<std::time::Instant>,
+    unpublished_results: bool,
 }
 
 impl SearchSelection {
@@ -13,6 +15,8 @@ impl SearchSelection {
             self.follow_until = (!query.is_empty())
                 .then(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
             self.query = query;
+            self.last_publish = Some(std::time::Instant::now());
+            self.unpublished_results = false;
         }
     }
 
@@ -25,6 +29,29 @@ impl SearchSelection {
         self.follow_until = None;
     }
 
+    /// Coalesce worker batches into at most eight list/preview updates per
+    /// second. Completion always flushes, including a channel disconnect with
+    /// no new results in that poll.
+    fn publish_results(&mut self, changed: bool, pending: bool) -> bool {
+        self.unpublished_results |= changed;
+        let ready = !pending
+            || self
+                .last_publish
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(125));
+        if self.unpublished_results && ready {
+            self.unpublished_results = false;
+            self.last_publish = Some(std::time::Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_next_poll_for_test(&mut self) {
+        self.last_publish = None;
+    }
+
     #[cfg(test)]
     pub(super) fn expire_for_test(&mut self) {
         self.follow_until = Some(std::time::Instant::now());
@@ -34,6 +61,30 @@ impl SearchSelection {
 #[cfg(test)]
 mod search_selection_tests {
     use super::*;
+
+    #[test]
+    fn progressive_batches_wait_for_publish_interval_but_completion_flushes() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(!selection.publish_results(true, true));
+        assert!(!selection.publish_results(true, true));
+        selection.last_publish =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(126));
+        assert!(selection.publish_results(false, true));
+        assert!(!selection.publish_results(false, true));
+        assert!(!selection.publish_results(true, true));
+        assert!(selection.publish_results(false, false));
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn changing_query_discards_unpublished_results() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("old");
+        assert!(!selection.publish_results(true, true));
+        selection.update_query("new");
+        assert!(!selection.publish_results(false, false));
+    }
 
     #[test]
     fn follows_for_one_second_without_extending_on_rebuild() {
@@ -64,6 +115,26 @@ mod search_selection_tests {
 }
 
 impl SessionPicker {
+    /// Commit the best evidence available when queued Enter completes or its
+    /// time budget expires. This never restarts the auto-follow deadline.
+    pub(super) fn rebuild_items_following(&mut self) {
+        let selected = self.selected_session().map(|session| session.id.clone());
+        let scroll = self.scroll_offset;
+        let auto_scroll = self.auto_scroll_preview;
+        self.cached_search_query.clear();
+        self.cached_search_refs.clear();
+        self.rebuild_items();
+        self.list_state
+            .select(self.item_to_session.iter().position(Option::is_some));
+        if self.selected_session().map(|session| &session.id) == selected.as_ref() {
+            self.scroll_offset = scroll;
+            self.auto_scroll_preview = auto_scroll;
+        } else {
+            self.scroll_offset = 0;
+            self.auto_scroll_preview = true;
+        }
+    }
+
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
     }
@@ -135,7 +206,11 @@ impl SessionPicker {
     /// Called once per rendered frame, so completed scans update results even
     /// when the user is not typing. Never wait for the worker on the UI thread.
     pub(super) fn poll_transcript_search(&mut self) {
-        if self.transcript_search.poll() {
+        let changed = self.transcript_search.poll();
+        if self
+            .search_selection
+            .publish_results(changed, self.transcript_search.pending())
+        {
             let selected = self.selected_session().map(|session| session.id.clone());
             let preview_scroll = self.scroll_offset;
             let auto_scroll = self.auto_scroll_preview;

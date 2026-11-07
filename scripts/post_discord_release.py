@@ -42,48 +42,48 @@ def release_notes_for_discord(body: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
+COMMIT_LINE = re.compile(r"^- \[[0-9a-f]{4,40}\]\([^)]*\) (.+)$")
+
+
+def preview_commit_lines(notes: str) -> list[str]:
+    """Return `- subject` bullets from the generated `## Commits` section."""
+    section = re.search(r"^## Commits[^\S\n]*\n(.*?)(?=^## |\Z)", notes,
+                        flags=re.MULTILINE | re.DOTALL)
+    if not section:
+        return []
+    lines = []
+    for raw in section.group(1).splitlines():
+        match = COMMIT_LINE.match(raw.strip())
+        if match:
+            # Neutralize any stray URL so the release link stays the only one.
+            subject = re.sub(r"(?<!<)https?://[^\s<>()]+", r"<\g<0>>", match.group(1))
+            lines.append(f"- {subject}")
+    return lines
+
+
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
         # An arbitrary URL cannot both fit Discord and remain intact. Fall back
         # to the project's downloads page instead of emitting a broken link.
         download_url = url if len(url) <= 256 else "https://github.com/1jehuang/jcode/releases"
-        header = (
-            f"## v1 Preview · opt-in: {tag[:120]}\n"
-            "Experimental preview, not a stable release. Stable users are not upgraded automatically.\n"
-            f"Download binaries and notes: {download_url}\n"
-        )
-        setup = (
-            "First time: current stable has no `--channel` option. Download your OS/architecture "
-            "archive above, verify `SHA256SUMS`, extract the entire archive, and run the extracted "
-            "binary by its full path (keep Linux companion files together).\n"
-            "From that preview binary, opt in: `jcode update --channel preview` "
-            "(replace `jcode` with its full path).\n"
-            "Return to stable: `jcode update --channel stable`, or reinstall stable. "
-            "Preview publication ends at the stable `v1.0.0` tag."
-        )
-        # Keep generated categories and commits, but not repeated setup or
-        # arbitrary legacy prose outside the generated changes section.
-        changes = re.search(
-            r"^## What changed[^\S\n]*\n(.*?)(?=^## First-time preview setup[^\n]*(?:\n|\Z)|\Z)",
-            release_notes_for_discord(body),
-            flags=re.MULTILINE | re.DOTALL,
-        )
-        summary = changes.group(1).strip() if changes else ""
-        # Keep secondary links clickable without generating a card per commit.
-        # The release/download page in the header is the one useful preview.
-        summary = re.sub(r"(?<!<)https?://[^\s<>()]+", r"<\g<0>>", summary)
-        if summary:
-            prefix = "## What changed\n"
-            budget = DISCORD_LIMIT - len(header) - len(setup) - len(prefix) - 2
-            if len(summary) > budget:
-                suffix = f"\n… Full notes: <{download_url}>"
-                clipped = summary[: budget - len(suffix)].rstrip()
-                # Preserve whole linked commit bullets whenever a line fits.
-                if "\n" in clipped:
-                    clipped = clipped.rsplit("\n", 1)[0].rstrip()
-                summary = clipped + suffix
-            return f"{header}{prefix}{summary}\n\n{setup}"
-        return header + setup
+        # Minimal format: one header line with the single release link, then
+        # the bare commit titles. No setup prose, no per-commit links.
+        header = f"**jcode {tag[:120]}** (preview) {download_url}\n"
+        commits = preview_commit_lines(release_notes_for_discord(body))
+        if not commits:
+            return header.rstrip()
+        lines: list[str] = []
+        used = len(header)
+        for index, line in enumerate(commits):
+            more = f"… {len(commits) - index} more"
+            # Always reserve room for the overflow line unless this is the last.
+            reserve = 0 if index == len(commits) - 1 else len(more) + 1
+            if used + len(line) + 1 + reserve > DISCORD_LIMIT:
+                lines.append(more)
+                break
+            lines.append(line)
+            used += len(line) + 1
+        return header + "\n".join(lines)
     title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
     notes = release_notes_for_discord(body)
     message = title if not notes else f"{title}\n{notes}"

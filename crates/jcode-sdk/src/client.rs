@@ -1087,6 +1087,7 @@ impl JcodeClient {
                 model,
                 reasoning_effort,
                 auth_method,
+                account_label,
                 routes,
             } => {
                 let mut providers = Vec::new();
@@ -1108,6 +1109,7 @@ impl JcodeClient {
                     model,
                     reasoning_effort,
                     auth_method,
+                    account_label,
                     providers,
                     routes,
                 })

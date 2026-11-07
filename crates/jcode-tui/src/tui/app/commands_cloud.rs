@@ -46,6 +46,13 @@ pub(super) enum CloudCommand {
 pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
     let mut words = trimmed.split_whitespace();
     match words.next()? {
+        "/mobile" => Some(match words.next() {
+            None => CloudCommand::Move {
+                host: Some("jcode-cloud".into()),
+            },
+            Some("cancel") if words.next().is_none() => CloudCommand::Cancel,
+            _ => CloudCommand::MoveUsage,
+        }),
         "/cloud" => match words.next() {
             None => Some(CloudCommand::Move { host: None }),
             Some("cancel") => Some(CloudCommand::Cancel),
@@ -144,12 +151,32 @@ pub(super) fn check_cloud_handoff_input(app: &mut App, trimmed: &str) -> bool {
 
 /// Run a `/cloud` family command. Returns true when handled.
 pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &str) -> bool {
-    let Some(command) = parse_cloud_command(trimmed) else {
+    let Some(mut command) = parse_cloud_command(trimmed) else {
         return false;
     };
+    if trimmed == "/mobile" {
+        if crate::subscription_catalog::configured_api_key().is_none() {
+            app.push_display_message(DisplayMessage::error(
+                "Sign in first with `jcode account login`, then retry /mobile.",
+            ));
+            return true;
+        }
+        // A cloud-attached TUI runs locally, so also inspect its SSH target.
+        if crate::mobile_sync::session_source() == "cloud"
+            || std::env::var("JCODE_SSH_REMOTE").as_deref() == Ok("jcode-cloud")
+            || crate::storage::read_session_lease(session_id)
+                .is_some_and(|lease| lease.away_host.as_deref() == Some("jcode-cloud"))
+        {
+            command = CloudCommand::Where;
+        }
+    }
     if command == CloudCommand::MoveUsage {
         app.push_display_message(DisplayMessage::system(
-            "Usage: /cloud [host] [--include-session <id> ...] [--dry-run]. Your swarm moves together and shares one environment setup. Independent sessions require --include-session. Use --session-only to opt out of swarm migration.",
+            if trimmed.starts_with("/mobile") {
+                "Usage: /mobile or /mobile cancel. Moves this session and its swarm to Jcode Cloud, then sends a notification to your app."
+            } else {
+                "Usage: /cloud [host] [--include-session <id> ...] [--dry-run]. Your swarm moves together and shares one environment setup. Independent sessions require --include-session. Use --session-only to opt out of swarm migration."
+            },
         ));
         return true;
     }
@@ -308,9 +335,18 @@ fn start_cloud_command(
         }
         CloudCommand::Replace { host, yes, dry_run } => {
             let cwd = super::commands::active_working_dir(app).or_else(|| {
-                (!app.is_remote)
-                    .then(|| std::env::current_dir().ok())
-                    .flatten()
+                if app.is_remote {
+                    return None;
+                }
+                match std::env::current_dir() {
+                    Ok(cwd) => Some(cwd),
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot resolve local directory for cloud replacement: {error}"
+                        ));
+                        None
+                    }
+                }
             });
             let Some(cwd) = cwd.filter(|path| path.is_dir()) else {
                 app.push_display_message(DisplayMessage::error(
@@ -374,9 +410,41 @@ fn start_cloud_command(
         }
         let _ = progress_tx.send(CloudEvent::Stderr(collected));
     });
+    let mobile_resume = (trimmed == "/mobile" && !matches!(command, CloudCommand::Prepare { .. }))
+        .then(|| {
+            (
+                session_id.to_string(),
+                app.session.display_title().map(str::to_string),
+            )
+        });
+    let mobile_requires_move_report = matches!(command, CloudCommand::Move { .. });
     std::thread::spawn(move || {
         let output = child.wait_with_output();
         let _ = stderr_reader.join();
+        if let Some((session_id, title)) = mobile_resume
+            && let Ok(output) = &output
+            && output.status.success()
+            && (!mobile_requires_move_report
+                || serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .is_ok_and(|report| report["host"].as_str() == Some("jcode-cloud")))
+        {
+            // Wait before handing off/exec: otherwise the old process can exit
+            // before an asynchronous push request reaches the control plane.
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(crate::mobile_push::request_mobile_resume(
+                        &session_id,
+                        title.as_deref(),
+                    ))
+                });
+            let result = result.map_err(|error| format!(
+                    "Session is on cloud, but mobile push failed: {error}. Open the app and select this session, or retry /mobile."
+                ));
+            let _ = tx.send(CloudEvent::MobilePushResult(result));
+        }
         let _ = tx.send(CloudEvent::Done(output.map_err(|e| e.to_string())));
     });
     let carried = carried.filter(|(index, _)| *index < app.display_messages.len());
@@ -436,6 +504,7 @@ fn configure_replacement(
 pub(super) enum CloudEvent {
     Progress(String),
     Stderr(String),
+    MobilePushResult(Result<String, String>),
     Done(Result<std::process::Output, String>),
 }
 
@@ -666,6 +735,7 @@ impl App {
         };
         let mut redraw = false;
         let mut done = None;
+        let mut mobile_push_result = None;
         while let Ok(event) = job.rx.try_recv() {
             match event {
                 CloudEvent::Progress(text) => {
@@ -673,6 +743,10 @@ impl App {
                     redraw = true;
                 }
                 CloudEvent::Stderr(text) => job.stderr = text,
+                CloudEvent::MobilePushResult(result) => {
+                    mobile_push_result = Some(result);
+                    redraw = true;
+                }
                 CloudEvent::Done(result) => {
                     done = Some(result);
                     break;
@@ -701,6 +775,12 @@ impl App {
         let index = job.progress_message;
         if redraw || done.is_some() {
             self.replace_display_message_content(index, content);
+        }
+        if let Some(result) = mobile_push_result {
+            self.push_display_message(match result {
+                Ok(message) => DisplayMessage::system(message),
+                Err(error) => DisplayMessage::error(error),
+            });
         }
         let Some(result) = done else {
             return redraw;

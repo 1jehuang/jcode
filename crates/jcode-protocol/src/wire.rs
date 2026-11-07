@@ -182,13 +182,16 @@ pub enum Request {
         allow_session_takeover: bool,
         /// Legacy ownership hint, retained for wire compatibility. Disconnects
         /// only mark a session crashed when they interrupt unfinished processing,
-        /// regardless of this flag. Idle/completed sessions close normally.
+        /// regardless of this flag. Unless continuation is requested,
+        /// idle/completed sessions close normally.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         crash_on_disconnect: bool,
-        /// Keep an already-running turn alive when this transport disconnects.
-        /// Opt-in for remote clients only. Idle sessions still close normally,
-        /// and reattachment uses persisted history plus future live events, not
-        /// replay of missed deltas. This does not survive daemon termination.
+        /// Keep the live session and any running turn when this transport
+        /// disconnects.
+        /// Opt-in for remote clients only. Idle sessions remain available for
+        /// swarm reports and wake turns. Reattachment uses persisted history
+        /// plus future live events, not replay of missed deltas. This does not
+        /// survive daemon termination.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         continue_on_disconnect: bool,
         /// Terminal-identifying env vars (tmux/zellij/kitty/DISPLAY/...) captured
@@ -196,6 +199,9 @@ pub enum Request {
         /// to the client's terminal instead of its own stale startup env (#405).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_env: Vec<(String, String)>,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Declare that this client is intentionally detaching before its transport
@@ -257,6 +263,9 @@ pub enum Request {
         client_has_local_history: bool,
         #[serde(default)]
         allow_session_takeover: bool,
+        /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
     },
 
     /// Resume/continue every live session that was interrupted and would

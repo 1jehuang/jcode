@@ -3727,6 +3727,8 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let filter = rest.trim();
+    app.usage_provider_filter = (!filter.is_empty()).then(|| filter.to_string());
     app.open_usage_inline_loading();
     app.request_usage_report();
     true

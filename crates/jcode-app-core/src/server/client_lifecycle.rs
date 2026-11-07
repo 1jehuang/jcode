@@ -383,6 +383,8 @@ pub(super) async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
+    // App name from the API Hello, used to enable mobile push per session.
+    let mut connection_client_name: Option<String> = None;
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
@@ -1076,6 +1078,11 @@ pub(super) async fn handle_client(
             continue;
         }
         let sdk_session_before_request = client_session_id.clone();
+        if let Request::Subscribe { client_name: Some(name), .. }
+        | Request::ResumeSession { client_name: Some(name), .. } = &request
+        {
+            connection_client_name = Some(name.clone());
+        }
         match request {
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
@@ -1539,6 +1546,7 @@ pub(super) async fn handle_client(
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
+                client_name: _,
             } => {
                 if let Err(message) =
                     validated_subscribe_working_dir(
@@ -1856,6 +1864,7 @@ pub(super) async fn handle_client(
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
+                client_name: _,
             } => {
                 let pre_resume_session_id = client_session_id.clone();
                 let resume_working_dir = {
@@ -3203,6 +3212,9 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if let Some(name) = connection_client_name.as_deref() {
+            crate::mobile_push::note_client_attached(&client_session_id, name);
+        }
         if sdk_session_before_request != client_session_id {
             drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
         }
@@ -3248,6 +3260,7 @@ pub(super) async fn handle_client(
                 &sessions,
                 &client_session_id,
                 client_is_processing,
+                continue_on_disconnect,
                 &mut processing_task,
                 event_handle,
                 &swarm_members,
@@ -3353,6 +3366,7 @@ pub(super) async fn handle_client(
             &sessions,
             &client_session_id,
             client_is_processing,
+            continue_on_disconnect,
             &mut processing_task,
             event_handle,
             &swarm_members,

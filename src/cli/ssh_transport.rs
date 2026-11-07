@@ -328,16 +328,17 @@ impl SshConnection {
         } else {
             (STARTUP_TIMEOUT, 1)
         };
-        let mut last = None;
-        for _ in 0..attempts {
+        let mut last = match Self::spawn(options.command(), deadline).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => error,
+        };
+        for _ in 1..attempts {
             match Self::spawn(options.command(), deadline).await {
                 Ok(connection) => return Ok(connection),
-                Err(error) => last = Some(error),
+                Err(error) => last = error,
             }
         }
-        Err(last
-            .expect("at least one attempt")
-            .context(format!("connecting native Jcode on {}", options.host)))
+        Err(last.context(format!("connecting native Jcode on {}", options.host)))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {

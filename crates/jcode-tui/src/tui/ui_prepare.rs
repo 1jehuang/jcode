@@ -477,7 +477,7 @@ pub(super) fn prepare_messages(
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
     super::note_prep_restage(restage_start.elapsed());
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
 
@@ -531,7 +531,7 @@ pub(super) fn prepare_messages(
             }
         };
         let mut cache = cache;
-        if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+        if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
             // A completed deferred mermaid render does not bump
             // `messages_version`/`streaming_text_hash`, so an exact hit can
             // still bake in a stale "rendering..." placeholder. Fall through
@@ -541,7 +541,7 @@ pub(super) fn prepare_messages(
                 .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
             if !stale {
                 super::note_full_prep_cache_lookup(cache_lookup_start.elapsed());
-                super::note_full_prep_cache_hit(kind, prepared.as_ref());
+                super::note_full_prep_cache_hit(kind, prepared.as_ref(), prepared_bytes);
                 return prepared;
             }
         }
@@ -552,11 +552,13 @@ pub(super) fn prepare_messages(
 
     let build_start = Instant::now();
     let prepared = Arc::new(prepare_messages_inner(app, width, height));
-    super::note_full_prep_built(prepared.as_ref(), build_start.elapsed());
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_chat_frame_bytes(&prepared);
+    super::note_full_prep_built(prepared.as_ref(), prepared_bytes, build_elapsed);
 
     {
         if let Ok(mut cache) = full_prep_cache().lock() {
-            cache.insert(key, prepared.clone());
+            cache.insert_with_bytes(key, prepared.clone(), prepared_bytes);
         }
     }
 
@@ -936,7 +938,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return build();
     }
 
@@ -962,7 +964,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_body(app, width, false));
     }
 
@@ -1001,7 +1003,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     };
 
     let mut cache = cache;
-    if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+    if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
         // A deferred mermaid render completing does not bump
         // `messages_version`, so an exact hit can still be stale: it bakes in
         // a "rendering..." placeholder whose background render has since
@@ -1012,7 +1014,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
             .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
         if !stale {
             super::note_body_cache_lookup(cache_lookup_start.elapsed());
-            super::note_body_cache_hit(kind, prepared.as_ref());
+            super::note_body_cache_hit(kind, prepared.as_ref(), prepared_bytes);
             return prepared;
         }
     }
@@ -1024,6 +1026,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
 
     drop(cache);
 
+    if let Some((base, _, _)) = incremental_base.as_ref() {
+        super::release_frame_refs_to_body(base);
+    }
+
     let build_start = Instant::now();
     let (prepared, build_path) = match incremental_base {
         Some((prev, prev_count, prev_prompt_offset)) => {
@@ -1032,15 +1038,18 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         None => (Arc::new(prepare_body(app, width, false)), "full"),
     };
 
-    super::note_body_built(prepared.as_ref(), build_start.elapsed(), build_path);
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_messages_bytes(&prepared);
+    super::note_body_built(prepared.as_ref(), prepared_bytes, build_elapsed, build_path);
 
     let mut cache = match body_cache().lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.insert(
+    cache.insert_with_bytes(
         key,
         prepared.clone(),
+        prepared_bytes,
         msg_count,
         app.compacted_hidden_user_prompts(),
     );
@@ -2727,3 +2736,29 @@ fn wrap_lines_with_map(
 #[cfg(test)]
 #[path = "ui_prepare/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    // Thread-local so a probe that opts into the caches does not make tests
+    // running in parallel share (and clobber) its cache entries and metrics.
+    static ENABLE_PREP_CACHE_IN_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests bypass the prep caches by default for determinism. Perf probes opt in
+/// so they measure the production cached path.
+#[cfg(test)]
+pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
+    ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.set(enabled));
+}
+
+#[inline]
+fn prep_cache_bypassed() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
