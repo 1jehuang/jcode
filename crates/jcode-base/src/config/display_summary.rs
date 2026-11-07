@@ -42,6 +42,7 @@ impl Config {
 - Timeout: {}s
 
 **Display:**
+- Terminal status OSC9: {}
 - Diff mode: {}
 - Centered: {}
 - Markdown spacing: {}
@@ -173,6 +174,7 @@ impl Config {
             },
             self.dictation.key,
             self.dictation.timeout_secs,
+            self.terminal_status_osc9,
             self.display.diff_mode.label(),
             self.display.centered,
             self.display.markdown_spacing.label(),

@@ -83,3 +83,17 @@ Official references:
 - <https://herdr.dev/docs/socket-api/>
 - <https://herdr.dev/docs/agents/>
 - <https://herdr.dev/docs/session-state/>
+
+## OSC 9 progress sequences (agent status detection)
+
+Jcode now emits OSC 9 progress sequences to stdout carrying a structured agent-status payload, so terminal multiplexers and status-bar integrations like Herdr can detect jcode's working/idle/blocked state without screen-scraping.
+
+The payload format is `jcode:<state>`, emitted as the escape sequence `ESC ] 9 ; jcode:<state> BEL`. The `<state>` tag is version-independent and stable:
+
+| State | Meaning |
+|-------|---------|
+| `working` | The agent is processing a turn |
+| `idle` | The agent is waiting for input |
+| `blocked` | The agent is paused on a user decision (permission prompt) |
+
+The main TUI emits the sequence on every redraw, but only when the state changes, so it does not flood the terminal. Write failures (piped output, closed terminal) are silently ignored since the payload is advisory. This complements the existing lifecycle hooks and gives Herdr a structured side-channel for status detection.
