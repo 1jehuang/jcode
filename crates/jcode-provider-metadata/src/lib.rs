@@ -365,6 +365,21 @@ mod tests {
     }
 
     #[test]
+    fn opper_login_identifies_openai_compatible_endpoint() {
+        let provider = resolve_login_selection("opper", &cli_login_providers())
+            .expect("Opper CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Opper should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "opper");
+        assert_eq!(profile.api_base, "https://api.opper.ai/v3/compat");
+        assert_eq!(profile.api_key_env, "OPPER_API_KEY");
+        assert_eq!(profile.default_model, Some("claude-sonnet-4-6"));
+        assert!(profile.requires_api_key);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
