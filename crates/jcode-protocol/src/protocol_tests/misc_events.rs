@@ -763,7 +763,10 @@ fn context_cap_wire_roundtrip() -> Result<()> {
 #[test]
 fn test_message_request_skill_arguments_roundtrip_and_legacy_default() -> Result<()> {
     let legacy = parse_request_json(r#"{"type":"message","id":1,"content":"x"}"#)?;
-    let Request::Message { skill_arguments, .. } = legacy else {
+    let Request::Message {
+        skill_arguments, ..
+    } = legacy
+    else {
         return Err(anyhow!("expected Message"));
     };
     assert_eq!(skill_arguments, None);
@@ -778,7 +781,10 @@ fn test_message_request_skill_arguments_roundtrip_and_legacy_default() -> Result
         no_reply: false,
     })?;
     assert!(json.contains("\"skill_arguments\":\"42 jcode\""));
-    let Request::Message { skill_arguments, .. } = parse_request_json(&json)? else {
+    let Request::Message {
+        skill_arguments, ..
+    } = parse_request_json(&json)?
+    else {
         return Err(anyhow!("expected Message"));
     };
     assert_eq!(skill_arguments.as_deref(), Some("42 jcode"));
