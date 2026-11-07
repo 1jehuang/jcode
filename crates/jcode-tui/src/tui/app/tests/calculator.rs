@@ -16,6 +16,16 @@ fn calculator_command_keypad_base_selection_and_invalid_input_work() {
     let overlay = app.calculator_overlay.as_ref().unwrap();
     assert_eq!(overlay.result, Some(5.0));
 
+    app.handle_calculator_key(crossterm::event::KeyCode::Tab)
+        .unwrap();
+    assert_eq!(
+        app.calculator_overlay.as_ref().unwrap().mode,
+        super::CalculatorMode::Programmer
+    );
+    assert_eq!(app.calculator_overlay.as_ref().unwrap().expression, "2+3");
+    app.handle_calculator_key(crossterm::event::KeyCode::Tab)
+        .unwrap();
+
     app.handle_calculator_key(crossterm::event::KeyCode::Char('m'))
         .unwrap();
     assert_eq!(

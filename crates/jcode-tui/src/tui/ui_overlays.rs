@@ -316,7 +316,18 @@ pub(super) fn draw_calculator_overlay(
     overlay: &crate::tui::app::CalculatorOverlay,
 ) {
     let width = area.width.min(78);
-    let height = area.height.min(17);
+    let mode = overlay.mode;
+    let expanded = area.height
+        >= if mode == crate::tui::app::CalculatorMode::Scientific {
+            17
+        } else {
+            20
+        };
+    let height = area.height.min(match (expanded, mode) {
+        (true, crate::tui::app::CalculatorMode::Scientific) => 17,
+        (true, crate::tui::app::CalculatorMode::Programmer) => 20,
+        (false, _) => 17,
+    });
     if width < 20 || height < 8 {
         return;
     }
@@ -334,7 +345,11 @@ pub(super) fn draw_calculator_overlay(
         crate::tui::app::CalculatorTheme::Dark => "DARK",
         crate::tui::app::CalculatorTheme::Light => "LIGHT",
     };
-    let title = format!(" ◇ CALC  ·  SCIENTIFIC + PROGRAMMER  ·  {theme_name} [M] ");
+    let mode_name = match mode {
+        crate::tui::app::CalculatorMode::Scientific => "SCIENTIFIC",
+        crate::tui::app::CalculatorMode::Programmer => "PROGRAMMER",
+    };
+    let title = format!(" ◇ CALC  ·  {mode_name}  ·  {theme_name} [M] ");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -350,26 +365,70 @@ pub(super) fn draw_calculator_overlay(
         return;
     }
 
-    let rows = Layout::vertical([
+    let scientific_rows = [
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ];
+    let programmer_rows = [
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ];
+    let compact_rows = [
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(6),
         Constraint::Length(1),
-    ])
-    .split(inner);
+    ];
+    let rows = match (expanded, mode) {
+        (true, crate::tui::app::CalculatorMode::Scientific) => {
+            Layout::vertical(scientific_rows).split(inner)
+        }
+        (true, crate::tui::app::CalculatorMode::Programmer) => {
+            Layout::vertical(programmer_rows).split(inner)
+        }
+        (false, _) => Layout::vertical(compact_rows).split(inner),
+    };
 
     let angle = if overlay.degrees {
         "DEG · d"
     } else {
         "RAD · d"
     };
+    let mode_hint = match mode {
+        crate::tui::app::CalculatorMode::Scientific => "SCIENTIFIC · Tab: Programmer",
+        crate::tui::app::CalculatorMode::Programmer => "PROGRAMMER · Tab: Scientific",
+    };
     let header = Line::from(vec![
-        Span::styled("READY WHEN YOU ARE", Style::default().fg(palette.muted)),
-        Span::styled("                              ", Style::default()),
+        Span::styled(mode_hint, Style::default().fg(palette.muted)),
+        Span::styled("         ", Style::default()),
         Span::styled(angle, Style::default().fg(palette.muted)),
     ]);
     frame.render_widget(
@@ -464,42 +523,76 @@ pub(super) fn draw_calculator_overlay(
     ];
     let selected_base = bases.iter().position(|(_, base)| *base == overlay.base);
     let base_labels = bases.map(|(label, _)| label);
-    draw_calculator_buttons(frame, rows[4], &base_labels, palette, selected_base, true);
-
-    let keypad = [
-        [
-            "sin · s", "cos · c", "tan · t", "ln · l", "log · g", "√ · r",
-        ],
+    let scientific_keys = [
+        "sin · s", "cos · c", "tan · t", "ln · l", "log · g", "√ · r",
+    ];
+    let number_keys = [
         ["7", "8", "9", "÷ /", "(", "AC"],
         ["4", "5", "6", "× *", ")", "⌫"],
         ["1", "2", "3", "− -", "^", "π · p"],
         ["0", ".", "=", "+", "%", "e"],
-        ["&", "|", "xor · y", "NOT · ~", "<<", ">>"],
     ];
-    let keypad_rows = Layout::vertical([Constraint::Length(1); 6]).split(rows[6]);
-    for (row_index, (labels, row_area)) in keypad.iter().zip(keypad_rows.iter()).enumerate() {
-        draw_calculator_buttons(
-            frame,
-            *row_area,
-            labels,
-            palette,
-            None,
-            row_index == 0 || row_index == 5,
-        );
+    let programmer_keys = ["&", "|", "xor · y", "NOT · ~", "<<", ">>"];
+    if expanded && mode == crate::tui::app::CalculatorMode::Scientific {
+        let section_style = Style::default()
+            .fg(palette.muted)
+            .add_modifier(Modifier::BOLD);
+        for (index, label) in [(4, "SCIENTIFIC"), (7, "NUMBER KEYPAD")] {
+            frame.render_widget(Paragraph::new(label).style(section_style), rows[index]);
+        }
+        draw_calculator_buttons(frame, rows[5], &scientific_keys, palette, None, true);
+        for (labels, row_index) in number_keys.iter().zip(8..12) {
+            draw_calculator_buttons(frame, rows[row_index], labels, palette, None, false);
+        }
+    } else if expanded {
+        let section_style = Style::default()
+            .fg(palette.muted)
+            .add_modifier(Modifier::BOLD);
+        for (index, label) in [(4, "BASES"), (7, "NUMBER KEYPAD"), (13, "PROGRAMMER")] {
+            frame.render_widget(Paragraph::new(label).style(section_style), rows[index]);
+        }
+        draw_calculator_buttons(frame, rows[5], &base_labels, palette, selected_base, true);
+        for (labels, row_index) in number_keys.iter().zip(8..12) {
+            draw_calculator_buttons(frame, rows[row_index], labels, palette, None, false);
+        }
+        draw_calculator_buttons(frame, rows[14], &programmer_keys, palette, None, true);
+    } else if mode == crate::tui::app::CalculatorMode::Scientific {
+        draw_calculator_buttons(frame, rows[4], &scientific_keys, palette, None, true);
+        let keypad_rows = Layout::vertical([Constraint::Length(1); 6]).split(rows[5]);
+        for (labels, row_area) in number_keys.iter().zip(keypad_rows.iter()) {
+            draw_calculator_buttons(frame, *row_area, labels, palette, None, false);
+        }
+    } else {
+        draw_calculator_buttons(frame, rows[4], &base_labels, palette, selected_base, true);
+        let keypad_rows = Layout::vertical([Constraint::Length(1); 6]).split(rows[5]);
+        for (labels, row_area) in number_keys.iter().zip(keypad_rows.iter()) {
+            draw_calculator_buttons(frame, *row_area, labels, palette, None, false);
+        }
+        draw_calculator_buttons(frame, keypad_rows[5], &programmer_keys, palette, None, true);
     }
 
-    let footer = if width < 50 {
-        "b/o/h base · m theme · Esc close"
-    } else {
-        "LIVE PREVIEW · b/o/h prefixes · m theme · Esc close"
+    let footer = match (width < 50, mode) {
+        (true, crate::tui::app::CalculatorMode::Scientific) => "Tab programmer · s/c/t trig",
+        (true, crate::tui::app::CalculatorMode::Programmer) => "Tab scientific · F1-F4 bases",
+        (false, crate::tui::app::CalculatorMode::Scientific) => {
+            "Tab programmer · s/c/t trig · m theme · Esc close"
+        }
+        (false, crate::tui::app::CalculatorMode::Programmer) => {
+            "Tab scientific · F1-F4 bases · m theme · Esc close"
+        }
+    };
+    let footer_row = match (expanded, mode) {
+        (true, crate::tui::app::CalculatorMode::Scientific) => 12,
+        (true, crate::tui::app::CalculatorMode::Programmer) => 15,
+        (false, _) => 6,
     };
     frame.render_widget(
         Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
             &Line::from(footer),
-            rows[7].width as usize,
+            rows[footer_row].width as usize,
         ))
         .style(Style::default().fg(palette.muted)),
-        rows[7],
+        rows[footer_row],
     );
 }
 

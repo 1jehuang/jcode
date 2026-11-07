@@ -19,6 +19,13 @@ pub(crate) enum CalculatorTheme {
     Light,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CalculatorMode {
+    #[default]
+    Scientific,
+    Programmer,
+}
+
 fn in_hex_literal(expression: &str) -> bool {
     let tail = expression.rsplit_once("0x").map(|(_, tail)| tail);
     tail.is_some_and(|tail| tail.chars().all(|character| character.is_ascii_hexdigit()))
@@ -31,6 +38,7 @@ pub struct CalculatorOverlay {
     pub(crate) error: Option<String>,
     pub(crate) base: CalculatorBase,
     pub(crate) theme: CalculatorTheme,
+    pub(crate) mode: CalculatorMode,
     pub(crate) degrees: bool,
     just_evaluated: bool,
 }
@@ -158,6 +166,12 @@ impl App {
             KeyCode::F(6) => append_calculator_text(&mut overlay, "cos("),
             KeyCode::F(7) => append_calculator_text(&mut overlay, "tan("),
             KeyCode::F(8) => append_calculator_text(&mut overlay, "sqrt("),
+            KeyCode::Tab => {
+                overlay.mode = match overlay.mode {
+                    CalculatorMode::Scientific => CalculatorMode::Programmer,
+                    CalculatorMode::Programmer => CalculatorMode::Scientific,
+                };
+            }
             KeyCode::Char('m') => {
                 overlay.theme = match overlay.theme {
                     CalculatorTheme::Dark => CalculatorTheme::Light,
