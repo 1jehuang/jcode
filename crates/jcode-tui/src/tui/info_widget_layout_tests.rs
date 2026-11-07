@@ -690,3 +690,203 @@ fn overview_folded_sections_do_not_suppress_standalone_widgets() {
         "a section the Overview shows must keep its standalone widget suppressed"
     );
 }
+
+/// Pinned Overview HUD (`display.overview_pinned`, default true): the Overview
+/// takes a fixed right-flush top rect, independent of the transcript margins,
+/// while every other right-side widget docks left of the reserved column.
+mod pinned_overview {
+    use super::*;
+
+    fn pinned_data() -> InfoWidgetData {
+        let mut data = contended_data();
+        data.overview_pinned = true;
+        data
+    }
+
+    /// The pin rect: right-flush at the viewport top, width from the
+    /// `pinned_overview_width` helper, height from the widget's content.
+    #[test]
+    fn pinned_overview_places_top_right_flush() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("pinned fresh", area, &outcome.visible);
+        let overview = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pinned Overview must place even in full-width margins");
+        let expected_width = pinned_overview_width(area).unwrap();
+        assert_eq!(
+            overview.rect.x + overview.rect.width,
+            area.x + area.width,
+            "pin must be right-flush"
+        );
+        assert_eq!(overview.rect.y, area.y, "pin must sit at the viewport top");
+        assert_eq!(
+            overview.rect.width, expected_width,
+            "pin width must come from the reserve helper so wrap and placement agree"
+        );
+        assert_eq!(
+            overview.rect.height,
+            crate::tui::info_widget::calculate_widget_height(
+                WidgetKind::Overview,
+                &data,
+                expected_width,
+                area.height
+            ),
+            "pin height must follow the widget content"
+        );
+    }
+
+    /// The pin ignores margins and scrolling: identical rect even when the
+    /// margin profile and scroll top churn frame-to-frame.
+    #[test]
+    fn pinned_overview_rect_is_constant_across_margin_and_scroll_churn() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 40);
+        let first = calculate_placements_anchored(
+            area,
+            &margins_for(0, 40, false),
+            &data,
+            true,
+            &[],
+        );
+        let first_pin = first
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place against empty margins")
+            .rect;
+        let mut churned = margins_for(10, 40, false);
+        churned.scroll_top = 999;
+        churned.content_churning = true;
+        let second = calculate_placements_anchored(area, &churned, &data, true, &first.anchors);
+        let second_pin = second
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place against churned margins")
+            .rect;
+        assert_eq!(
+            first_pin, second_pin,
+            "pin rect must not move when margins or scroll churn"
+        );
+    }
+
+    /// A floating Overview anchor from the unpinned era (or a stale one) must be
+    /// superseded by the pin, never duplicated.
+    #[test]
+    fn pinned_overview_supersedes_floating_anchor_without_duplicates() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        let floating = WidgetAnchor {
+            placement: WidgetPlacement {
+                kind: WidgetKind::Overview,
+                rect: Rect::new(60, 30, 40, 20),
+                side: Side::Right,
+            },
+            hidden_frames: 0,
+            content_top: margins.scroll_top + 30,
+        };
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[floating]);
+        assert_placements_sane("pinned supersede", area, &outcome.visible);
+        let overviews: Vec<_> = outcome
+            .visible
+            .iter()
+            .filter(|p| p.kind == WidgetKind::Overview)
+            .collect();
+        assert_eq!(overviews.len(), 1, "exactly one Overview may exist");
+        assert_eq!(
+            overviews[0].rect.y, area.y,
+            "the surviving Overview must be the pin, not the floating anchor"
+        );
+    }
+
+    /// Other right-side widgets must dock left of the pin column, never under
+    /// it, even when the margin profile reports free space at the right edge.
+    #[test]
+    fn pinned_overview_keeps_other_right_widgets_left_of_the_reserve() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 120, 60);
+        // Wide-free margins everywhere would classically dock a big widget
+        // right-flush; with the pin, everything must stay left of the pin column.
+        let margins = margins_for(60, 60, false);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("pinned with peers", area, &outcome.visible);
+        let pin = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place");
+        for peer in outcome.visible.iter().filter(|p| p.kind != WidgetKind::Overview) {
+            if peer.side == Side::Right {
+                assert!(
+                    peer.rect.x + peer.rect.width <= pin.rect.x,
+                    "right-side peer must stay left of the pin: {:?} vs pin {:?}",
+                    peer,
+                    pin.rect
+                );
+            }
+        }
+    }
+
+    /// `pinned_overview_reserve` must agree with the engine's pin width so the
+    /// transcript wrap width and the rendered HUD never disagree. Narrow
+    /// viewports that would starve the transcript decline the pin instead of
+    /// clamping it over the whole column.
+    #[test]
+    fn pinned_reserve_matches_placement_and_clamps_to_viewport() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        assert_eq!(
+            pinned_overview_reserve(area, &data),
+            pinned_overview_width(area),
+            "reserve and placement width must agree"
+        );
+        // The smallest viewport that still hosts a pin: 80 columns keeps a
+        // 40-column transcript beside the 40-wide HUD.
+        let minimal = Rect::new(0, 0, 80, 40);
+        assert_eq!(pinned_overview_reserve(minimal, &data), Some(40));
+        // Narrower than that starves the transcript: no reserve, no pin.
+        let starved = Rect::new(0, 0, 79, 40);
+        assert_eq!(pinned_overview_reserve(starved, &data), None);
+        // Too narrow to host a widget at all: no reserve, no pin.
+        let tiny = Rect::new(0, 0, 20, 40);
+        assert_eq!(pinned_overview_reserve(tiny, &data), None);
+        // Same for too-short viewports.
+        let short = Rect::new(0, 0, 100, 4);
+        assert_eq!(pinned_overview_reserve(short, &data), None);
+        // No Overview data (single_overview=false): no reserve, no pin.
+        let mut unpinned = pinned_data();
+        unpinned.overview_pinned = false;
+        assert_eq!(pinned_overview_reserve(area, &unpinned), None);
+        unpinned.overview_pinned = true;
+        unpinned.overview_disabled = true;
+        assert_eq!(pinned_overview_reserve(area, &unpinned), None);
+    }
+
+    /// Unpinned (legacy) mode must keep floating behavior: the Overview places
+    /// somewhere in the margins, and nothing reserves a column.
+    #[test]
+    fn unpinned_overview_keeps_legacy_floating_behavior() {
+        let mut data = contended_data();
+        data.overview_pinned = false;
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        assert_eq!(pinned_overview_reserve(area, &data), None);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("legacy floating", area, &outcome.visible);
+        let overview = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("legacy Overview must still place in the margins");
+        assert_ne!(
+            overview.rect.y, area.y,
+            "legacy Overview must float (margin-driven), not pin to the top"
+        );
+    }
+}

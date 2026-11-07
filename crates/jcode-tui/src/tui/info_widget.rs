@@ -712,6 +712,14 @@ pub struct InfoWidgetData {
     /// built with `..Default::default()`. Snapshotted per frame, not read
     /// live in `has_data_for`, so placement stays pure in the data.
     pub overview_disabled: bool,
+    /// True when `display.overview_pinned` (default): the Overview takes a
+    /// fixed top-right HUD rect instead of floating in the transcript
+    /// margins, and the transcript reserves its column so no text renders
+    /// underneath. Snapshotted per frame like `overview_disabled` so
+    /// placement stays pure in the data. The derived default (false) keeps
+    /// legacy floating behavior for test fixtures built with
+    /// `..Default::default()`; live sessions set it from config.
+    pub overview_pinned: bool,
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,

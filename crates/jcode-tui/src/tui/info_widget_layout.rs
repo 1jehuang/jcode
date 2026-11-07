@@ -12,6 +12,78 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget.
 const MIN_WIDGET_HEIGHT: u16 = 5;
+/// Minimum transcript columns that must survive the pin's reserve.
+///
+/// A pin that starves the transcript is worse than no pin: at 60 columns a
+/// 40-wide HUD would leave ~20 columns of text. Below this floor the pinned
+/// mode declines and the Overview falls back to the legacy floating layout,
+/// which only ever docks in genuinely free space.
+const PINNED_MIN_TRANSCRIPT_WIDTH: u16 = 40;
+
+/// Column the pinned Overview reserves at the viewport's right edge.
+///
+/// Returns the widget width the transcript must wrap before reaching, or
+/// `None` when the pinned mode cannot run here: the Overview has no data, the
+/// viewport is too narrow to host it (`MIN_WIDGET_WIDTH`), or pinning is
+/// disabled. The transcript prepare pass and `draw_messages` both subtract
+/// this width so no line ever wraps into the HUD's column, and the placement
+/// engine places the Overview at exactly this width, right-flush.
+///
+/// Width-only by design: the HUD's height grows and shrinks with its content
+/// (its rect is clamped to the viewport height each frame), so the transcript
+/// keeps the full column for every row below the panel.
+pub(crate) fn pinned_overview_reserve(
+    messages_area: Rect,
+    data: &InfoWidgetData,
+) -> Option<u16> {
+    if !data.overview_pinned || !data.has_data_for(WidgetKind::Overview) {
+        return None;
+    }
+    let width = pinned_overview_width(messages_area)?;
+    Some(width)
+}
+
+/// Width the pinned Overview occupies in a viewport of this width, or `None`
+/// when the viewport cannot host it without starving the transcript.
+pub(crate) fn pinned_overview_width(messages_area: Rect) -> Option<u16> {
+    let width = MAX_WIDGET_WIDTH.min(messages_area.width);
+    let hostable = width >= MIN_WIDGET_WIDTH && messages_area.height >= MIN_WIDGET_HEIGHT;
+    let transcript_kept = messages_area.width.saturating_sub(width) >= PINNED_MIN_TRANSCRIPT_WIDTH;
+    (hostable && transcript_kept).then_some(width)
+}
+
+/// Rect the pinned Overview occupies this frame, or `None` when it has no
+/// data or the viewport cannot host it.
+///
+/// The rect is right-flush at the viewport top and its height follows the
+/// widget's content (clamped to the viewport height). Only the width is fixed
+/// per viewport: the transcript reserves a column, not a band, so rows below a
+/// short panel stay fully usable by the transcript and other widgets.
+fn pinned_overview_placement(
+    messages_area: Rect,
+    data: &InfoWidgetData,
+) -> Option<WidgetPlacement> {
+    let width = pinned_overview_width(messages_area)?;
+    let height = calculate_widget_height(
+        WidgetKind::Overview,
+        data,
+        width,
+        messages_area.height,
+    );
+    if height == 0 {
+        return None;
+    }
+    let x = messages_area
+        .x
+        .saturating_add(messages_area.width)
+        .saturating_sub(width);
+    Some(WidgetPlacement {
+        kind: WidgetKind::Overview,
+        rect: Rect::new(x, messages_area.y, width, height),
+        side: Side::Right,
+    })
+}
+
 /// How many consecutive frames a widget may stay hidden-in-place before its
 /// anchor is abandoned and Phase 2 is allowed to re-home it elsewhere.
 ///
@@ -197,6 +269,29 @@ fn calculate_placements_anchored_inner(
             anchors: Vec::new(),
         };
     }
+
+    // Pinned Overview HUD (`display.overview_pinned`): the Overview owns a
+    // fixed right-flush rect at the viewport top, independent of the
+    // transcript margins. The transcript reserves this column at prepare
+    // time (wrap width) and render time, so the HUD never overlaps text and
+    // no free-width row ever claims its band. Only one Overview may exist:
+    // an anchored Overview is superseded by the pin (its anchor is retired
+    // here, not fed through Phase 1), so the pin rect is the single source
+    // of truth from the first pinned frame on.
+    let pinned_overview_rect = data
+        .overview_pinned
+        .then(|| {
+            available
+                .contains(&WidgetKind::Overview)
+                .then(|| pinned_overview_placement(messages_area, data))
+                .flatten()
+        })
+        .flatten();
+
+    // Column width the pinned Overview claims at the viewport's right edge;
+    // every other right-side widget must stay left of it.
+    let pinned_reserve = pinned_overview_rect.as_ref().map(|p| p.rect.width).unwrap_or(0);
+
     let mut margin_spaces: Vec<MarginSpace> = Vec::new();
     if !margins.right_widths.is_empty() {
         // Phase 2 docks on the *reliable* (look-ahead) widths so a newly placed
@@ -211,10 +306,15 @@ fn calculate_placements_anchored_inner(
         // area (caller bug or stale data) must not let a widget escape the
         // viewport and draw over the input/status rows beneath it.
         dock.truncate(messages_area.height as usize);
+        // The pinned Overview owns the rightmost columns; every other
+        // right-side widget docks left of the HUD, never underneath it.
         margin_spaces.push(MarginSpace {
             side: Side::Right,
             widths: dock,
-            x_offset: messages_area.x + messages_area.width,
+            x_offset: messages_area
+                .x
+                .saturating_add(messages_area.width)
+                .saturating_sub(pinned_reserve),
         });
     }
     if margins.centered && !margins.left_widths.is_empty() {
@@ -281,6 +381,13 @@ fn calculate_placements_anchored_inner(
     for anchor in ordered_anchors {
         let prev = &anchor.placement;
         if !available.contains(&prev.kind) || prev.rect.height <= 2 {
+            continue;
+        }
+        // The pinned Overview owns a fixed rect this frame; any floating
+        // Overview anchor is superseded (retired, not re-homed) so exactly one
+        // Overview exists. Mergeable widgets stay eligible: while pinned, the
+        // Overview keeps merging them the same way a placed one does.
+        if pinned_overview_rect.is_some() && prev.kind == WidgetKind::Overview {
             continue;
         }
         if overview_active && is_overview_mergeable(prev.kind) {
@@ -449,6 +556,7 @@ fn calculate_placements_anchored_inner(
             Side::Right => messages_area
                 .x
                 .saturating_add(messages_area.width)
+                .saturating_sub(pinned_reserve)
                 .saturating_sub(kept_width),
             Side::Left => messages_area.x,
         };
@@ -470,6 +578,27 @@ fn calculate_placements_anchored_inner(
         }
 
         reserve_rows(&mut all_rects, prev.side, row_start, row_end);
+    }
+
+    // Pinned Overview placement: the fixed rect joins the placements now, after
+    // Phase 1 (so its band rows are already marked occupied by the residents
+    // left of it) and before Phase 2 (so nothing re-homes into it). The anchor
+    // carries the current `scroll_top` as `content_top`: the pin itself ignores
+    // scrolling, but that value is what a Phase 1 resident would have used, so
+    // if pinning is later turned off the Overview hands off to a resident at
+    // the top of the current view without teleporting from elsewhere.
+    if let Some(pin) = pinned_overview_rect {
+        let pin_height = pin.rect.height as usize;
+        placements.push(pin.clone());
+        next_anchors.push(WidgetAnchor {
+            placement: pin,
+            hidden_frames: 0,
+            content_top: margins.scroll_top,
+        });
+        kept.insert(WidgetKind::Overview);
+        anchored.insert(WidgetKind::Overview);
+        overview_active = true;
+        reserve_rows(&mut all_rects, Side::Right, 0, pin_height);
     }
 
     // Phase 2: greedily place remaining widgets.

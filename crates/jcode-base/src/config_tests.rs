@@ -1841,3 +1841,53 @@ fn single_overview_setting_and_env_override_load() {
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
 }
+
+/// `display.overview_pinned` must load from the config file, flip through
+/// `Config::set_overview_pinned`, and answer to `JCODE_OVERVIEW_PINNED`. The
+/// TUI's pinned Overview HUD gates on this flag at both wrap and render time,
+/// so a stale value would pin a panel the user unpinned (or float one they
+/// pinned).
+#[test]
+fn overview_pinned_setting_and_env_override_load() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_env = std::env::var_os("JCODE_OVERVIEW_PINNED");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::remove_var("JCODE_OVERVIEW_PINNED");
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+    std::fs::write(&path, "[display]\noverview_pinned = false\n").expect("write config");
+
+    assert!(
+        !crate::config::config().display.overview_pinned,
+        "config file value false must disable the pinned HUD"
+    );
+
+    // Round-trip through the setter the /overview command uses.
+    Config::set_overview_pinned(true).expect("set_overview_pinned");
+    assert!(
+        crate::config::config().display.overview_pinned,
+        "set_overview_pinned(true) must persist and refresh the cache"
+    );
+
+    crate::env::set_var("JCODE_OVERVIEW_PINNED", "0");
+    Config::invalidate_cache();
+    assert!(
+        !crate::config::config().display.overview_pinned,
+        "JCODE_OVERVIEW_PINNED=0 must override the file value"
+    );
+
+    crate::env::set_var("JCODE_OVERVIEW_PINNED", "1");
+    Config::invalidate_cache();
+    assert!(
+        crate::config::config().display.overview_pinned,
+        "JCODE_OVERVIEW_PINNED=1 must override the file value"
+    );
+
+    restore_env_var("JCODE_OVERVIEW_PINNED", prev_env);
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}

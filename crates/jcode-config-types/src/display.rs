@@ -139,6 +139,12 @@ pub struct DisplayConfig {
     /// Runtime, Usage, KV cache, Git and Commits each dock on their own.
     #[serde(default = "default_true")]
     pub single_overview: bool,
+    /// Pin the Overview panel to the top-right corner of the transcript as a
+    /// HUD that never moves with scroll, and wrap transcript lines so no text
+    /// renders underneath it (default: true). Set false to let the Overview
+    /// float in the transcript margins like the other info widgets.
+    #[serde(default = "default_true")]
+    pub overview_pinned: bool,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -182,6 +188,7 @@ impl Default for DisplayConfig {
             resume_recent_close_seconds: 30,
             usage_display: "left".to_string(),
             single_overview: true,
+            overview_pinned: true,
         }
     }
 }

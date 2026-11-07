@@ -219,6 +219,11 @@ impl Config {
                 self.display.single_overview = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_OVERVIEW_PINNED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.overview_pinned = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;

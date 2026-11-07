@@ -1578,6 +1578,10 @@ impl crate::tui::TuiState for App {
         self.has_newer_binary()
     }
 
+    fn info_widget_overlays_enabled(&self) -> bool {
+        !self.suppress_info_widget_overlays
+    }
+
     fn server_update_available(&self) -> Option<bool> {
         if self.is_remote {
             self.remote_server_has_update
@@ -1872,6 +1876,7 @@ impl crate::tui::TuiState for App {
                 crate::usage::remote_account_usage_received(),
             ),
             overview_disabled: !crate::config::config().display.single_overview,
+            overview_pinned: crate::config::config().display.overview_pinned,
             context_info,
             context_info_stale: !context_snapshot.fresh,
             historical_context: false,
