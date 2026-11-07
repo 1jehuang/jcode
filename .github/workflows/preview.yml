@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
 
 # A new master push cancels the sleep, CI wait, and any obsolete builds.
-# Manual retries use the same master-only gates and a fresh preview number.
+# Manual/recovery retries use the same gates and a fresh preview number, but
+# never cancel an active build if the Actions run-list API briefly lags.
 # No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
 concurrency:
   group: v1-preview-master
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read

@@ -915,5 +915,9 @@ mod tests;
 mod relevance_tests;
 
 #[cfg(test)]
+#[path = "queued_submission_tests.rs"]
+mod queued_submission_tests;
+
+#[cfg(test)]
 #[path = "search_speed_tests.rs"]
 mod search_speed_tests;

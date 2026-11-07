@@ -115,6 +115,7 @@ pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
     client_is_processing: bool,
+    continue_on_disconnect: bool,
     processing_task: &mut Option<tokio::task::JoinHandle<()>>,
     event_handle: tokio::task::JoinHandle<()>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -165,6 +166,18 @@ pub(super) async fn cleanup_client_connection(
         swarm_members,
     )
     .await;
+
+    if continue_on_disconnect {
+        // Remote continuation is a session lifetime policy, not merely a
+        // promise to finish the current turn. Idle coordinators must remain
+        // addressable for worker reports and future wake turns after EOF.
+        // Only transport-owned state was released above.
+        if processing_task.is_some() {
+            return Ok(Some(event_handle));
+        }
+        event_handle.abort();
+        return Ok(None);
+    }
 
     if allow_reconnect {
         // Empty roots intentionally have no snapshot. A replacement UI/SDK

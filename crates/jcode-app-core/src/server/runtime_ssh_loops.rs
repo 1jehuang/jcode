@@ -11,8 +11,6 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-const MAX_CONTINUATIONS_PER_TURN: usize = 32;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Workflow {
     kind: String,
@@ -386,7 +384,10 @@ pub(super) async fn run_reserved_followups(
     if !state_path(&session_id)?.exists() {
         return Ok(());
     }
-    for _ in 0..MAX_CONTINUATIONS_PER_TURN {
+    // Bound retries by unchanged todo state, not total productive turns. A long
+    // cloud campaign can legitimately make progress across hundreds of turns.
+    // The persisted policy still limits no-progress retries and quality gates.
+    loop {
         if agent.graceful_shutdown_signal().is_set() {
             return Ok(());
         }
@@ -404,6 +405,25 @@ pub(super) async fn run_reserved_followups(
         let decision = update_state(&session_id, |state| Ok(next_followup(state, &snapshot)))?;
         apply_effects(&session_id, &decision.effects)?;
         let Some(followup) = decision.follow_up else {
+            if let Some(notice) = decision.notice {
+                crate::logging::info(&format!(
+                    "Remote continuation paused for session {session_id}: {notice}"
+                ));
+                if let Err(error) = event_tx.send(ServerEvent::Notification {
+                    from_session: "runtime".into(),
+                    from_name: Some("cloud continuation".into()),
+                    notification_type: crate::protocol::NotificationType::Message {
+                        scope: Some("runtime".into()),
+                        channel: None,
+                        tldr: None,
+                    },
+                    message: notice,
+                }) {
+                    crate::logging::debug(&format!(
+                        "Could not broadcast remote continuation pause for {session_id}: {error}"
+                    ));
+                }
+            }
             return Ok(());
         };
         // Persisted budgets are committed before the request. A daemon restart
@@ -442,18 +462,6 @@ pub(super) async fn run_reserved_followups(
         }
         result?;
     }
-    update_state(&session_id, |state| {
-        state.policy.disable();
-        state.poke_enabled = false;
-        if let Some(workflow) = state.workflow.as_mut() {
-            workflow.active = false;
-        }
-        state.last_notice = Some(
-            "Paused at the server continuation safety limit. Inspect status before resuming."
-                .into(),
-        );
-        Ok(())
-    })
 }
 
 #[cfg(test)]

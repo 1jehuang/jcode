@@ -897,3 +897,33 @@ fn manual_navigation_or_preview_scroll_stops_early_best_match_following() {
         );
     }
 }
+
+#[test]
+fn pending_search_visually_distinguishes_auto_focus_from_user_control() {
+    let mut picker = picker_with_pending_better_match();
+    let (sender, receiver) = mpsc::channel();
+    picker.transcript_search.receiver = Some(receiver);
+    let backend = ratatui::backend::TestBackend::new(100, 12);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let mut render = |picker: &mut SessionPicker| {
+        terminal
+            .draw(|frame| picker.render_session_list_impl(frame, frame.area(), true))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    assert!(render(&mut picker).contains("finding best match"));
+    picker.pending_search_submission = Some(crossterm::event::KeyModifiers::empty());
+    assert!(render(&mut picker).contains("confirming best match"));
+    picker.previous();
+    assert!(render(&mut picker).contains("selection held"));
+    drop(sender);
+    let completed = render(&mut picker);
+    assert!(!completed.contains("finding best match"));
+    assert!(!completed.contains("searching in background"));
+}

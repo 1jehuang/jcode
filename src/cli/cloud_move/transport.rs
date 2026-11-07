@@ -57,6 +57,18 @@ pub(super) fn retry_ssh<T>(host: &str, what: &str, mut op: impl FnMut() -> Resul
     }
 }
 
+/// Preserve SSH diagnostics instead of reporting every failure as a drop.
+fn ssh_retry_message(host: &str, attempt: u32, stderr: &[u8]) -> String {
+    let reason = String::from_utf8_lossy(stderr);
+    let reason = reason.trim();
+    let message = format!("connection to `{host}` failed, retrying ({attempt}/{SSH_ATTEMPTS})");
+    if reason.is_empty() {
+        message
+    } else {
+        format!("{message}: {reason}")
+    }
+}
+
 /// Run an idempotent remote command, retrying connection-level SSH failures
 /// with a short backoff. Remote command failures are returned immediately.
 fn output_with_ssh_retry(
@@ -76,7 +88,7 @@ fn output_with_ssh_retry(
         }
         step(
             "prepare",
-            &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
+            &ssh_retry_message(host, attempt, &output.stderr),
         );
         std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
         attempt += 1;
@@ -389,7 +401,7 @@ impl Target {
             if ssh_connection_failed(&output.status) && attempt < SSH_ATTEMPTS {
                 step(
                     "prepare",
-                    &format!("connection to `{host}` dropped, retrying ({attempt}/{SSH_ATTEMPTS})"),
+                    &ssh_retry_message(host, attempt, &output.stderr),
                 );
                 std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
                 attempt += 1;

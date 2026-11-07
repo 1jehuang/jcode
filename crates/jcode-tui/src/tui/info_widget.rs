@@ -72,6 +72,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
+pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
