@@ -37,7 +37,7 @@ fn pin_full_tier() {
 /// guard *before* any render-state lock, matching the env-then-render order
 /// the app tests use.
 struct IdleAnimationEnvGuard {
-    _env: std::sync::MutexGuard<'static, ()>,
+    _env: crate::storage::TestEnvGuard,
 }
 
 impl IdleAnimationEnvGuard {
@@ -86,7 +86,10 @@ fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
     let area = crate::tui::ui::last_idle_animation_area()
         .expect("an idle screen must publish the animated rectangle");
     let frame_area = *terminal.backend().buffer().area();
-    assert!(area.width >= 4 && area.height >= 2, "degenerate area {area:?}");
+    assert!(
+        area.width >= 4 && area.height >= 2,
+        "degenerate area {area:?}"
+    );
     assert!(
         area.right() <= frame_area.right() && area.bottom() <= frame_area.bottom(),
         "animated rows {area:?} escaped the frame {frame_area:?}"
@@ -486,11 +489,7 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
                 // Call the real production helper, not a local reimplementation.
                 // A hand-rolled copy here would pass even if `copy_cells_in`
                 // were wrong, which defeats the point of the comparison.
-                crate::tui::app::idle_animation_repaint::copy_cells_in(
-                    &base,
-                    &mut optimized,
-                    area,
-                );
+                crate::tui::app::idle_animation_repaint::copy_cells_in(&base, &mut optimized, area);
             } else {
                 optimized = base.clone();
                 seeded = true;
@@ -510,18 +509,13 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
 
         // A degenerate rectangle must not panic or write outside the buffer.
         let mut edge = base.clone();
-        crate::tui::ui::render_idle_animation_into(
-            &mut edge,
-            Rect::new(area.x, area.y, 0, 0),
-            1.0,
-        );
+        crate::tui::ui::render_idle_animation_into(&mut edge, Rect::new(area.x, area.y, 0, 0), 1.0);
         assert_eq!(
             edge, base,
             "an empty animation rectangle must leave the frame untouched"
         );
     }
 }
-
 
 /// `copy_cells_in` is what makes the animation-only repaint cheap: it copies just
 /// the animated rectangle instead of cloning the whole screen. Its correctness
@@ -561,10 +555,16 @@ fn copy_cells_in_copies_exactly_the_rectangle_and_nothing_else() {
 
     for y in 0..full.height {
         for x in 0..full.width {
-            let inside = x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom();
-            let expected = if inside { &src[(x, y)] } else { &before[(x, y)] };
+            let inside =
+                x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom();
+            let expected = if inside {
+                &src[(x, y)]
+            } else {
+                &before[(x, y)]
+            };
             assert_eq!(
-                &dst[(x, y)], expected,
+                &dst[(x, y)],
+                expected,
                 "cell ({x},{y}) {} the copied rectangle {area:?} is wrong: the \
                  animation-only repaint relies on copying exactly this region",
                 if inside { "inside" } else { "outside" }

@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 struct BrowserFixture {
-    _env_guard: std::sync::MutexGuard<'static, ()>,
+    _env_guard: crate::storage::TestEnvGuard,
     temp: tempfile::TempDir,
     previous_home: Option<std::ffi::OsString>,
     previous_session: Option<std::ffi::OsString>,
@@ -16,7 +16,7 @@ impl BrowserFixture {
         Self::with_temp(guard, tempfile::tempdir().unwrap())
     }
 
-    fn with_temp(guard: std::sync::MutexGuard<'static, ()>, temp: tempfile::TempDir) -> Self {
+    fn with_temp(guard: crate::storage::TestEnvGuard, temp: tempfile::TempDir) -> Self {
         let previous_home = std::env::var_os("JCODE_HOME");
         let previous_session = std::env::var_os("BROWSER_SESSION");
         // macOS temp paths can start with /var, a symlink to /private/var.
