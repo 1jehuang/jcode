@@ -10,12 +10,22 @@ fn calculator_command_keypad_base_selection_and_invalid_input_work() {
         crossterm::event::KeyCode::Char('2'),
         crossterm::event::KeyCode::Char('+'),
         crossterm::event::KeyCode::Char('3'),
-        crossterm::event::KeyCode::Enter,
     ] {
         app.handle_calculator_key(key).unwrap();
     }
     let overlay = app.calculator_overlay.as_ref().unwrap();
     assert_eq!(overlay.result, Some(5.0));
+
+    app.handle_calculator_key(crossterm::event::KeyCode::Char('m'))
+        .unwrap();
+    assert_eq!(
+        app.calculator_overlay.as_ref().unwrap().theme,
+        super::CalculatorTheme::Light
+    );
+    app.handle_calculator_key(crossterm::event::KeyCode::Char('m'))
+        .unwrap();
+    app.handle_calculator_key(crossterm::event::KeyCode::Enter)
+        .unwrap();
 
     app.handle_calculator_key(crossterm::event::KeyCode::F(4))
         .unwrap();

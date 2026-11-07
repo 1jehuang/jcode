@@ -61,7 +61,7 @@ mod auth_remote;
 mod cache_diagnostics;
 mod calculator;
 mod catchup;
-pub(crate) use calculator::{CalculatorBase, CalculatorOverlay};
+pub(crate) use calculator::{CalculatorBase, CalculatorOverlay, CalculatorTheme};
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;

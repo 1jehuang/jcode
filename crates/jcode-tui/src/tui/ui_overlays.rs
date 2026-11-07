@@ -220,14 +220,104 @@ pub(super) fn draw_commit_log_overlay(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+#[derive(Clone, Copy)]
+struct CalculatorPalette {
+    background: Color,
+    text: Color,
+    muted: Color,
+    border: Color,
+    surface: Color,
+    function: Color,
+    action: Color,
+    accent: Color,
+    accent_text: Color,
+    warning: Color,
+}
+
+impl CalculatorPalette {
+    fn for_theme(theme: crate::tui::app::CalculatorTheme) -> Self {
+        use crate::tui::app::CalculatorTheme;
+
+        match theme {
+            CalculatorTheme::Dark => Self {
+                background: rgb(18, 22, 31),
+                text: rgb(231, 236, 245),
+                muted: rgb(137, 151, 170),
+                border: rgb(74, 91, 116),
+                surface: rgb(37, 46, 61),
+                function: rgb(38, 55, 69),
+                action: rgb(73, 48, 57),
+                accent: rgb(100, 91, 225),
+                accent_text: rgb(255, 255, 255),
+                warning: rgb(255, 173, 160),
+            },
+            CalculatorTheme::Light => Self {
+                background: rgb(247, 249, 253),
+                text: rgb(37, 47, 64),
+                muted: rgb(101, 116, 137),
+                border: rgb(190, 201, 218),
+                surface: rgb(232, 238, 247),
+                function: rgb(220, 234, 246),
+                action: rgb(251, 228, 228),
+                accent: rgb(61, 102, 210),
+                accent_text: rgb(255, 255, 255),
+                warning: rgb(169, 54, 57),
+            },
+        }
+    }
+}
+
+fn draw_calculator_buttons(
+    frame: &mut Frame,
+    area: Rect,
+    labels: &[&str],
+    palette: CalculatorPalette,
+    selected: Option<usize>,
+    function_row: bool,
+) {
+    if labels.is_empty() || area.height == 0 {
+        return;
+    }
+    let columns = Layout::horizontal(vec![
+        Constraint::Ratio(1, labels.len() as u32);
+        labels.len()
+    ])
+    .split(area);
+
+    for (index, (label, cell)) in labels.iter().zip(columns.iter()).enumerate() {
+        let is_selected = selected == Some(index);
+        let (foreground, background) = if is_selected || *label == "=" {
+            (palette.accent_text, palette.accent)
+        } else if matches!(*label, "AC" | "⌫") {
+            (palette.warning, palette.action)
+        } else if function_row {
+            (palette.text, palette.function)
+        } else {
+            (palette.text, palette.surface)
+        };
+        let button = Rect::new(
+            cell.x.saturating_add(1),
+            cell.y,
+            cell.width.saturating_sub(2),
+            cell.height,
+        );
+        frame.render_widget(
+            Paragraph::new(*label)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(foreground).bg(background)),
+            button,
+        );
+    }
+}
+
 pub(super) fn draw_calculator_overlay(
     frame: &mut Frame,
     area: Rect,
     overlay: &crate::tui::app::CalculatorOverlay,
 ) {
-    let width = area.width.min(74);
+    let width = area.width.min(78);
     let height = area.height.min(17);
-    if width == 0 || height == 0 {
+    if width < 20 || height < 8 {
         return;
     }
 
@@ -239,102 +329,178 @@ pub(super) fn draw_calculator_overlay(
     );
     clear_area(frame, popup);
 
-    let base = match overlay.base {
-        crate::tui::app::CalculatorBase::Binary => "BIN",
-        crate::tui::app::CalculatorBase::Octal => "OCT",
-        crate::tui::app::CalculatorBase::Decimal => "DEC",
-        crate::tui::app::CalculatorBase::Hexadecimal => "HEX",
+    let palette = CalculatorPalette::for_theme(overlay.theme);
+    let theme_name = match overlay.theme {
+        crate::tui::app::CalculatorTheme::Dark => "DARK",
+        crate::tui::app::CalculatorTheme::Light => "LIGHT",
     };
-    let angle = if overlay.degrees { "DEG" } else { "RAD" };
-    let result_text = overlay
-        .formatted_result()
-        .unwrap_or_else(|| "—".to_string());
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Expression  ", Style::default().fg(dim_color())),
-            Span::styled(
-                if overlay.expression.is_empty() {
-                    "Type or choose keys below"
-                } else {
-                    overlay.expression.as_str()
-                }
-                .to_string(),
-                Style::default().fg(rgb(230, 230, 240)),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Result      ", Style::default().fg(dim_color())),
-            Span::styled(
-                result_text,
-                Style::default()
-                    .fg(accent_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("   {base} · {angle}"),
-                Style::default().fg(dim_color()),
-            ),
-        ]),
-    ];
-    if let Some(summary) = overlay.conversion_summary() {
-        lines.push(Line::from(Span::styled(
-            summary,
-            Style::default().fg(rgb(145, 165, 190)),
-        )));
-    }
-    if let Some(error) = &overlay.error {
-        lines.push(Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(rgb(240, 110, 110)),
-        )));
-    }
-    lines.push(Line::from(""));
-    for row in [
-        " 7   8   9   /   C",
-        " 4   5   6   *   (",
-        " 1   2   3   -   )",
-        " 0   .   =   +   Del",
-        " sin(s)   cos(c)   tan(t)   ln(l)   log(g)   sqrt(r)",
-        " pi(p)   e   ^   &   |   xor(y)",
-        " ~   <<   >>   %",
-        " b:0b   o:0o   h:0x   x:*",
-    ] {
-        lines.push(Line::from(Span::styled(
-            row,
-            Style::default().fg(rgb(180, 195, 215)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
-        if width < 42 {
-            "Esc close · F1-F4 base"
-        } else {
-            "Esc close · F1-F4 base · d toggles DEG/RAD · Enter evaluates"
-        },
-        Style::default().fg(dim_color()),
-    )));
-
-    let visible_rows = height.saturating_sub(2) as usize;
-    if lines.len() > visible_rows {
-        let footer = lines.pop();
-        lines.truncate(visible_rows.saturating_sub(1));
-        if let Some(footer) = footer.filter(|_| visible_rows > 0) {
-            lines.push(footer);
-        }
-    }
-
+    let title = format!(" ◇ CALC  ·  SCIENTIFIC + PROGRAMMER  ·  {theme_name} [M] ");
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(palette.border))
+        .style(Style::default().bg(palette.background))
         .title(jcode_tui_render::truncate_line_with_ellipsis_to_width(
-            &Line::from(" Calculator · Scientific + Programmer "),
+            &Line::from(title),
             width.saturating_sub(2) as usize,
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(6),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let angle = if overlay.degrees {
+        "DEG · d"
+    } else {
+        "RAD · d"
+    };
+    let header = Line::from(vec![
+        Span::styled("READY WHEN YOU ARE", Style::default().fg(palette.muted)),
+        Span::styled("                              ", Style::default()),
+        Span::styled(angle, Style::default().fg(palette.muted)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &header,
+            rows[0].width as usize,
+        )),
+        rows[0],
+    );
+
+    let expression = if overlay.expression.is_empty() {
+        "Try 2^8, sqrt(81), or sin(30)"
+    } else {
+        &overlay.expression
+    };
+    let expression_line = Line::from(vec![
+        Span::styled("fx  ", Style::default().fg(palette.accent)),
+        Span::styled(expression.to_string(), Style::default().fg(palette.text)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &expression_line,
+            rows[1].width as usize,
         ))
-        .border_style(Style::default().fg(accent_color()));
-    let inner_width = block.inner(popup).width as usize;
-    let lines = lines
-        .iter()
-        .map(|line| jcode_tui_render::truncate_line_with_ellipsis_to_width(line, inner_width))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+        .style(Style::default().bg(palette.surface)),
+        rows[1],
+    );
+
+    let result_text = overlay.formatted_result().unwrap_or_else(|| {
+        if overlay.error.is_some() {
+            "Error".to_string()
+        } else if overlay.expression.is_empty() {
+            "0".to_string()
+        } else {
+            "…".to_string()
+        }
+    });
+    let result_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(palette.border))
+        .title(Span::styled(" RESULT ", Style::default().fg(palette.muted)))
+        .style(Style::default().bg(palette.background));
+    let result_inner = result_block.inner(rows[2]);
+    frame.render_widget(result_block, rows[2]);
+    let result_line = Line::from(vec![
+        Span::styled("=  ", Style::default().fg(palette.muted)),
+        Span::styled(
+            result_text,
+            Style::default()
+                .fg(if overlay.error.is_some() {
+                    palette.warning
+                } else {
+                    palette.accent
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &result_line,
+            result_inner.width as usize,
+        ))
+        .style(Style::default().bg(palette.background)),
+        result_inner,
+    );
+
+    let conversion = overlay
+        .error
+        .clone()
+        .or_else(|| overlay.conversion_summary());
+    if let Some(conversion) = conversion {
+        frame.render_widget(
+            Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &Line::from(conversion),
+                rows[3].width as usize,
+            ))
+            .style(Style::default().fg(if overlay.error.is_some() {
+                palette.warning
+            } else {
+                palette.muted
+            })),
+            rows[3],
+        );
+    }
+
+    let bases = [
+        ("BIN · F1", crate::tui::app::CalculatorBase::Binary),
+        ("OCT · F2", crate::tui::app::CalculatorBase::Octal),
+        ("DEC · F3", crate::tui::app::CalculatorBase::Decimal),
+        ("HEX · F4", crate::tui::app::CalculatorBase::Hexadecimal),
+    ];
+    let selected_base = bases.iter().position(|(_, base)| *base == overlay.base);
+    let base_labels = bases.map(|(label, _)| label);
+    draw_calculator_buttons(frame, rows[4], &base_labels, palette, selected_base, true);
+
+    let keypad = [
+        [
+            "sin · s", "cos · c", "tan · t", "ln · l", "log · g", "√ · r",
+        ],
+        ["7", "8", "9", "÷ /", "(", "AC"],
+        ["4", "5", "6", "× *", ")", "⌫"],
+        ["1", "2", "3", "− -", "^", "π · p"],
+        ["0", ".", "=", "+", "%", "e"],
+        ["&", "|", "xor · y", "NOT · ~", "<<", ">>"],
+    ];
+    let keypad_rows = Layout::vertical([Constraint::Length(1); 6]).split(rows[6]);
+    for (row_index, (labels, row_area)) in keypad.iter().zip(keypad_rows.iter()).enumerate() {
+        draw_calculator_buttons(
+            frame,
+            *row_area,
+            labels,
+            palette,
+            None,
+            row_index == 0 || row_index == 5,
+        );
+    }
+
+    let footer = if width < 50 {
+        "b/o/h base · m theme · Esc close"
+    } else {
+        "LIVE PREVIEW · b/o/h prefixes · m theme · Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &Line::from(footer),
+            rows[7].width as usize,
+        ))
+        .style(Style::default().fg(palette.muted)),
+        rows[7],
+    );
 }
 
 pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, app: &dyn TuiState) {

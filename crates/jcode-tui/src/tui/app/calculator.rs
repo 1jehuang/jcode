@@ -12,6 +12,13 @@ pub(crate) enum CalculatorBase {
     Hexadecimal,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CalculatorTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
 fn in_hex_literal(expression: &str) -> bool {
     let tail = expression.rsplit_once("0x").map(|(_, tail)| tail);
     tail.is_some_and(|tail| tail.chars().all(|character| character.is_ascii_hexdigit()))
@@ -23,6 +30,7 @@ pub struct CalculatorOverlay {
     pub(crate) result: Option<f64>,
     pub(crate) error: Option<String>,
     pub(crate) base: CalculatorBase,
+    pub(crate) theme: CalculatorTheme,
     pub(crate) degrees: bool,
     just_evaluated: bool,
 }
@@ -135,6 +143,7 @@ impl App {
                 overlay.result = None;
                 overlay.error = None;
                 overlay.just_evaluated = false;
+                update_calculator_preview(&mut overlay);
             }
             KeyCode::Delete => clear_calculator(&mut overlay),
             KeyCode::Char('C') if in_hex_literal(&overlay.expression) => {
@@ -149,6 +158,12 @@ impl App {
             KeyCode::F(6) => append_calculator_text(&mut overlay, "cos("),
             KeyCode::F(7) => append_calculator_text(&mut overlay, "tan("),
             KeyCode::F(8) => append_calculator_text(&mut overlay, "sqrt("),
+            KeyCode::Char('m') => {
+                overlay.theme = match overlay.theme {
+                    CalculatorTheme::Dark => CalculatorTheme::Light,
+                    CalculatorTheme::Light => CalculatorTheme::Dark,
+                };
+            }
             KeyCode::Char('s') => append_calculator_text(&mut overlay, "sin("),
             KeyCode::Char('c') if in_hex_literal(&overlay.expression) => {
                 append_calculator_text(&mut overlay, "c");
@@ -174,7 +189,10 @@ impl App {
             KeyCode::Char('d') if in_hex_literal(&overlay.expression) => {
                 append_calculator_text(&mut overlay, "d");
             }
-            KeyCode::Char('d') => overlay.degrees = !overlay.degrees,
+            KeyCode::Char('d') => {
+                overlay.degrees = !overlay.degrees;
+                update_calculator_preview(&mut overlay);
+            }
             KeyCode::Char('a') if in_hex_literal(&overlay.expression) => {
                 append_calculator_text(&mut overlay, "a");
             }
@@ -236,6 +254,16 @@ fn append_calculator_text(overlay: &mut CalculatorOverlay, text: &str) {
     overlay.result = None;
     overlay.error = None;
     overlay.just_evaluated = false;
+    update_calculator_preview(overlay);
+}
+
+fn update_calculator_preview(overlay: &mut CalculatorOverlay) {
+    if overlay.expression.trim().is_empty() {
+        overlay.result = None;
+        return;
+    }
+    overlay.result = evaluate_expression(&overlay.expression, overlay.degrees).ok();
+    overlay.error = None;
 }
 
 fn evaluate_overlay(overlay: &mut CalculatorOverlay) {
