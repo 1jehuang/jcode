@@ -205,6 +205,9 @@ impl App {
             "latex" => {
                 "/latex\nShow the current LaTeX math rendering mode.\n\n/latex status\nShow the current mode.\n\n/latex on|off\nEnable image rendering or disable it in favor of Unicode text.\n\n/latex none|unicode|image\nnone keeps the raw $...$ source. unicode converts supported notation to terminal-friendly text math. image typesets each formula to a PNG and shows it with the terminal image protocol (needs latex+dvipng or pdflatex+pdftocairo installed).\n\nAliases: raw for none, text/terminal for unicode, png/images for image. The choice is saved to config.toml and applies to the session immediately. JCODE_LATEX_RENDERING overrides it when set."
             }
+            "calc" => {
+                "/calc\nOpen the scientific and programmer calculator.\n\n/calc <expression>\nOpen the calculator with an expression and evaluate it immediately.\n\nSupports sin/cos/tan, inverse trig, ln/log/log2, powers, roots, pi, e, parentheses, and binary/octal/hex literals (0b, 0o, 0x). Programmer operators: &, |, xor, ~, <<, >>. Bitwise values are limited to exactly representable signed 53-bit integers. F1-F4 select the result display base; press d to switch degrees/radians. Shortcut keys: s/c/t, l/g/r for functions; p for pi; b/o/h for base prefixes; y for xor."
+            }
             "tool-call-details" => {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }

@@ -1146,6 +1146,10 @@ pub trait TuiState {
     fn commit_log_overlay(&self) -> Option<&app::CommitLogOverlay> {
         None
     }
+    /// Scientific and programmer calculator overlay.
+    fn calculator_overlay(&self) -> Option<&app::CalculatorOverlay> {
+        None
+    }
     /// Session picker overlay for /resume command
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
     /// Login picker overlay for /login command

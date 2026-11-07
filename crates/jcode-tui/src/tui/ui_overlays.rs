@@ -220,6 +220,123 @@ pub(super) fn draw_commit_log_overlay(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+pub(super) fn draw_calculator_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    overlay: &crate::tui::app::CalculatorOverlay,
+) {
+    let width = area.width.min(74);
+    let height = area.height.min(17);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    clear_area(frame, popup);
+
+    let base = match overlay.base {
+        crate::tui::app::CalculatorBase::Binary => "BIN",
+        crate::tui::app::CalculatorBase::Octal => "OCT",
+        crate::tui::app::CalculatorBase::Decimal => "DEC",
+        crate::tui::app::CalculatorBase::Hexadecimal => "HEX",
+    };
+    let angle = if overlay.degrees { "DEG" } else { "RAD" };
+    let result_text = overlay
+        .formatted_result()
+        .unwrap_or_else(|| "—".to_string());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Expression  ", Style::default().fg(dim_color())),
+            Span::styled(
+                if overlay.expression.is_empty() {
+                    "Type or choose keys below"
+                } else {
+                    overlay.expression.as_str()
+                }
+                .to_string(),
+                Style::default().fg(rgb(230, 230, 240)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Result      ", Style::default().fg(dim_color())),
+            Span::styled(
+                result_text,
+                Style::default()
+                    .fg(accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   {base} · {angle}"),
+                Style::default().fg(dim_color()),
+            ),
+        ]),
+    ];
+    if let Some(summary) = overlay.conversion_summary() {
+        lines.push(Line::from(Span::styled(
+            summary,
+            Style::default().fg(rgb(145, 165, 190)),
+        )));
+    }
+    if let Some(error) = &overlay.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(rgb(240, 110, 110)),
+        )));
+    }
+    lines.push(Line::from(""));
+    for row in [
+        " 7   8   9   /   C",
+        " 4   5   6   *   (",
+        " 1   2   3   -   )",
+        " 0   .   =   +   Del",
+        " sin(s)   cos(c)   tan(t)   ln(l)   log(g)   sqrt(r)",
+        " pi(p)   e   ^   &   |   xor(y)",
+        " ~   <<   >>   %",
+        " b:0b   o:0o   h:0x   x:*",
+    ] {
+        lines.push(Line::from(Span::styled(
+            row,
+            Style::default().fg(rgb(180, 195, 215)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        if width < 42 {
+            "Esc close · F1-F4 base"
+        } else {
+            "Esc close · F1-F4 base · d toggles DEG/RAD · Enter evaluates"
+        },
+        Style::default().fg(dim_color()),
+    )));
+
+    let visible_rows = height.saturating_sub(2) as usize;
+    if lines.len() > visible_rows {
+        let footer = lines.pop();
+        lines.truncate(visible_rows.saturating_sub(1));
+        if let Some(footer) = footer.filter(|_| visible_rows > 0) {
+            lines.push(footer);
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+            &Line::from(" Calculator · Scientific + Programmer "),
+            width.saturating_sub(2) as usize,
+        ))
+        .border_style(Style::default().fg(accent_color()));
+    let inner_width = block.inner(popup).width as usize;
+    let lines = lines
+        .iter()
+        .map(|line| jcode_tui_render::truncate_line_with_ellipsis_to_width(line, inner_width))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, app: &dyn TuiState) {
     clear_area(frame, area);
 
