@@ -198,13 +198,16 @@ fn build_available_skills_section(available_skills: &[SkillInfo]) -> Option<Stri
         return None;
     }
 
-    let mut section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+    let mut section = "# Available Skills\n\nSkills are packaged instructions for specific kinds of tasks. When a task matches one, load it first with the `skill_manage` tool (`name`, optional `args`; called `Skill` on some providers) and follow it. The user can also run one with `/skillname`:\n".to_string();
     for skill in available_skills {
-        section.push_str(&format!(
-            "\n- `/{} ` - {}",
-            skill.name,
-            clip_skill_description(&skill.description)
-        ));
+        section.push_str(&format!("\n- `/{} `", skill.name));
+        // Empty for skills set to name-only in `/skills`.
+        if !skill.description.trim().is_empty() {
+            section.push_str(&format!(
+                " - {}",
+                clip_skill_description(&skill.description)
+            ));
+        }
     }
     section.push_str(
         "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
@@ -515,6 +518,45 @@ pub fn build_system_prompt_split_with_agents_md(
     )
 }
 
+/// Build the normal harness prompt using only explicitly selected instruction
+/// snapshots. An empty slice keeps the built-in base and no user file guidance.
+pub fn build_system_prompt_split_with_instruction_sources(
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    sources: &[crate::instruction_sources::InstructionSourceSnapshot],
+) -> (SplitSystemPrompt, ContextInfo) {
+    use crate::instruction_sources::{InstructionSourceKind, formatted_content};
+    let mut info = ContextInfo::default();
+    for source in sources
+        .iter()
+        .filter(|source| source.kind == InstructionSourceKind::AgentsMd)
+    {
+        if source.priority == 0 {
+            info.has_project_agents_md = true;
+            info.project_agents_md_chars += source.content.len();
+        } else {
+            info.has_global_agents_md = true;
+            info.global_agents_md_chars += source.content.len();
+        }
+    }
+    let agents_md = (
+        formatted_content(sources, InstructionSourceKind::AgentsMd).0,
+        info,
+    );
+    build_system_prompt_split_from_sources(
+        None,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        PromptCapabilities::current(),
+        agents_md,
+        Some(sources),
+    )
+}
+
 fn build_system_prompt_split_with_capabilities_and_agents_md(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -524,7 +566,47 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     capabilities: PromptCapabilities,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    build_system_prompt_split_from_sources(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+        agents_md,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the prompt sources passed by the public builder"
+)]
+fn build_system_prompt_split_from_sources(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+    agents_md: (Option<String>, ContextInfo),
+    sources: Option<&[crate::instruction_sources::InstructionSourceSnapshot]>,
+) -> (SplitSystemPrompt, ContextInfo) {
+    use crate::instruction_sources::{InstructionSourceKind, first_content, formatted_content};
+    let mut static_parts = match sources {
+        None => base_system_prompt_parts(capabilities, working_dir),
+        Some(sources) => {
+            let base = first_content(sources, InstructionSourceKind::SystemPrompt)
+                .unwrap_or(DEFAULT_SYSTEM_PROMPT)
+                .trim()
+                .to_owned();
+            let mut parts = vec![base];
+            if capabilities.mermaid {
+                parts.push(MERMAID_PROMPT.to_string());
+            }
+            parts
+        }
+    };
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -554,15 +636,20 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = match sources {
+        Some(sources) => formatted_content(sources, InstructionSourceKind::PromptOverlay),
+        None => load_prompt_overlay_files_from_dir(working_dir),
+    };
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
         static_parts.push(content);
     }
 
     // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+    let (preferred_tools_content, preferred_tools_chars) = match sources {
+        Some(sources) => formatted_content(sources, InstructionSourceKind::PreferredTools),
+        None => load_preferred_tools_files_from_dir(working_dir),
+    };
     if let Some(content) = preferred_tools_content {
         info.preferred_tools_chars = preferred_tools_chars;
         static_parts.push(content);
@@ -653,9 +740,18 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
     SELFDEV_MODE_PROMPT.replace("__SELFDEV_PRODUCT_FOCUS__", context.prompt_block())
 }
 
+/// First line of the session context.
+pub const SESSION_CONTEXT_HEADING: &str = "# Session Context";
+
+/// Session context for providers that keep their own system prompt
+/// (`Provider::uses_own_system_prompt`). They only need the working directory.
+pub fn own_prompt_session_context(working_dir: &str) -> String {
+    format!("{SESSION_CONTEXT_HEADING}\nWorking directory: {working_dir}")
+}
+
 /// Build immutable session context captured once per session.
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
-    let mut lines = vec!["# Session Context".to_string()];
+    let mut lines = vec![SESSION_CONTEXT_HEADING.to_string()];
 
     if is_desktop_working_dir(working_dir) {
         lines.push("Self-development mode: desktop".to_string());
@@ -921,6 +1017,7 @@ fn load_agents_md_files_from_dirs(
 ) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
     let mut info = ContextInfo::default();
+    let mut seen = std::collections::HashSet::new();
 
     // Helper to load a file if it exists, returns (formatted_content, raw_size)
     let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
@@ -935,22 +1032,38 @@ fn load_agents_md_files_from_dirs(
         }
     };
 
-    let project_agents_md = project_dir.join("AGENTS.md");
-    if let Some((content, size)) = load_file(&project_agents_md, "Project Instructions (AGENTS.md)")
-    {
-        info.has_project_agents_md = true;
-        info.project_agents_md_chars = size;
-        contents.push(content);
+    // Load the nearest instructions first, then walk outward. This makes
+    // working-directory guidance the most local while preserving all parents.
+    for (index, directory) in project_dir.ancestors().enumerate() {
+        let path = directory.join("AGENTS.md");
+        if let Ok(canonical) = std::fs::canonicalize(&path)
+            && !seen.insert(canonical)
+        {
+            continue;
+        }
+        if let Some((content, size)) = load_file(
+            &path,
+            if index == 0 {
+                "Project Instructions (AGENTS.md)"
+            } else {
+                "Ancestor Instructions (AGENTS.md)"
+            },
+        ) {
+            if index == 0 {
+                info.has_project_agents_md = true;
+                info.project_agents_md_chars = size;
+            }
+            contents.push(content);
+        }
     }
 
     // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
     // If either file is absent or cannot be resolved, loading below remains the
     // source of truth and simply skips unreadable files.
-    let global_duplicates_project = global_agents_md
-        .is_some_and(|global_agents_md| same_canonical_path(&project_agents_md, global_agents_md));
-
-    if !global_duplicates_project
-        && let Some(global_agents_md) = global_agents_md
+    if let Some(global_agents_md) = global_agents_md
+        && std::fs::canonicalize(global_agents_md)
+            .map(|canonical| seen.insert(canonical))
+            .unwrap_or(true)
         && let Some((content, size)) =
             load_file(global_agents_md, "Global Instructions (~/AGENTS.md)")
     {

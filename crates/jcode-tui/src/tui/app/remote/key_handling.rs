@@ -1,12 +1,13 @@
+mod accounts;
 #[path = "key_handling/rewind.rs"]
 mod rewind;
 mod update;
-use rewind::*;
 
 use super::*;
 use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
+use rewind::*;
 
 /// Canonical runtime commands never run the similarly named laptop handler.
 /// Keep argument validation and destructive-action confirmation on the daemon.
@@ -145,7 +146,7 @@ async fn request_remote_service_tier(
     remote.set_service_tier(tier).await
 }
 
-async fn apply_remote_effort_direction(
+pub(super) async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
     direction: i8,
@@ -163,21 +164,8 @@ async fn apply_remote_effort_direction(
     }
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
+    let next_index = app_mod::helpers::cycled_effort_index(&efforts, current, direction)
+        .expect("nonempty effort ladder");
     let next_effort = efforts[next_index];
     if Some(next_effort) == current {
         let label = app_mod::effort_display_label(next_effort);
@@ -187,51 +175,20 @@ async fn apply_remote_effort_direction(
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
+        app.remember_remote_effort_before_request();
         app.remote_reasoning_effort = Some(next_effort.to_string());
         app.invalidate_model_picker_cache();
         app.set_status_notice(format!(
             "Effort: {} (will apply to next request)",
             app_mod::effort_display_label(next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        if let Err(error) = remote.set_reasoning_effort(next_effort).await {
+            app.restore_rejected_remote_effort();
+            app.set_status_notice("Effort switch failed");
+            return Err(error);
+        }
     }
     Ok(())
-}
-
-impl App {
-    pub(super) async fn handle_account_picker_command_remote(
-        &mut self,
-        remote: &mut RemoteConnection,
-        command: crate::tui::account_picker::AccountPickerCommand,
-    ) -> Result<()> {
-        match command {
-            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
-                provider_filter,
-            } => self.open_account_center(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
-                provider_filter,
-            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
-                crate::tui::app::auth::handle_account_command_remote(self, &input, remote).await?;
-            }
-            crate::tui::account_picker::AccountPickerCommand::PromptValue {
-                prompt,
-                command_prefix,
-                empty_value,
-                status_notice,
-            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
-            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
-                self.prompt_new_account_label(provider)
-            }
-            other => {
-                if let Some(command) = crate::tui::app::auth::account_command_from_picker(&other) {
-                    crate::tui::app::auth::execute_account_command_remote(self, command, remote)
-                        .await?;
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 pub(in crate::tui::app) async fn handle_remote_key(
@@ -254,6 +211,18 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    // Account names and settings belong to the local credential manager, not
+    // the model. Consume them before slash routing, preview activation or the
+    // nonempty-input guard, so empty values and /cancel work here too.
+    if let Some(pending) = app.pending_account_input.take() {
+        let input = std::mem::take(&mut app.input);
+        let value = app.expand_paste_placeholders(&input);
+        app.cursor_pos = 0;
+        app.pasted_contents.clear();
+        app.clear_input_undo_history();
+        app.handle_pending_account_input(pending, value);
+        return Ok(());
+    }
     if app.activate_picker_from_preview() {
         return Ok(());
     }
@@ -288,7 +257,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
     {
         if !prepared.images.is_empty()
             && matches!(
-                app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()),
+                app_mod::commands_cloud::parse_cloud_command(prepared.routing_input().trim()),
                 Some(
                     app_mod::commands_cloud::CloudCommand::Move { .. }
                         | app_mod::commands_cloud::CloudCommand::MoveSelected { .. }
@@ -304,12 +273,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             ));
             return Ok(());
         }
-        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.expanded.trim()) {
+        if !app_mod::commands_cloud::check_cloud_handoff_input(app, prepared.routing_input().trim())
+        {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
             return Ok(());
         }
         if app.cloud_handoff_blocks_work()
-            && app_mod::commands_cloud::parse_cloud_command(prepared.expanded.trim()).is_none()
+            && app_mod::commands_cloud::parse_cloud_command(prepared.routing_input().trim())
+                .is_none()
         {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
             app.set_status_notice(
@@ -317,7 +288,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             );
             return Ok(());
         }
-        let trimmed = prepared.expanded.trim();
+        let trimmed = prepared.routing_input().trim();
 
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
@@ -358,6 +329,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed.split_whitespace().next() == Some("/agents") {
+            app_mod::commands::handle_agents_command(app, trimmed);
+            return Ok(());
+        }
         if app_mod::auth::handle_ssh_usage_command_remote(app, trimmed, remote).await? {
             return Ok(());
         }
@@ -495,6 +470,29 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         if trimmed == "/server-reload" {
             app.append_reload_message("Reloading server...");
             remote.reload().await?;
+            return Ok(());
+        }
+
+        if trimmed.split_whitespace().next() == Some("/plugin") {
+            app_mod::state_ui::handle_info_command(app, trimmed);
+            return Ok(());
+        }
+
+        if trimmed == "/mcp" || trimmed.starts_with("/mcp ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(str::to_string)
+                .collect();
+            if args.is_empty() {
+                app.dialog = Some(crate::tui::dialog::Dialog::mcp_loading());
+            }
+            app_mod::dialog_actions::send_mcp_command(app, remote, args).await;
+            return Ok(());
+        }
+
+        if let Some(args) = app_mod::agent_profiles::agent_profile_args(trimmed) {
+            app_mod::agent_profiles::send_agent_profile_command(app, remote, args).await;
             return Ok(());
         }
 
@@ -723,6 +721,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 provider_model.as_deref(),
             );
             if efforts.contains(&level) {
+                app.remember_remote_effort_before_request();
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();
                 app.set_status_notice(format!(
@@ -730,7 +729,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            if let Err(error) = remote.set_reasoning_effort(level).await {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -927,7 +930,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autoreview");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autoreview".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -984,7 +987,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autojudge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autojudge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1019,7 +1022,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Review");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("review".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1054,7 +1057,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Judge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("judge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1162,9 +1165,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/clear" {
             remote.clear().await?;
+            app.suspend_prompt_history_for_switch();
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();
+            app.queued_message_images.clear();
             app.queued_commands.clear();
             app.pasted_contents.clear();
             app.pending_images.clear();
@@ -1207,6 +1212,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             // parent's next message.
             let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
+                image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,
@@ -1215,6 +1223,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if app.handle_side_command(trimmed) {
+            return Ok(());
+        }
         if trimmed == "/todo" || trimmed == "/todos" || trimmed.starts_with("/todos ") {
             app_mod::todos_view::handle_todos_view_command(app, trimmed);
             if crate::tui::is_ssh_remote() {

@@ -269,7 +269,9 @@ async fn remote_management_connect_discover_call_disconnect_over_real_http() {
             .call_tool("remote", "echo", json!({"text": "round trip"}))
             .await
             .unwrap();
-        assert!(matches!(&result.content[0], ContentBlock::Text { text } if text == "round trip"));
+        assert!(
+            matches!(&result.content[0], crate::mcp::ContentBlock::Text { text } if text == "round trip")
+        );
         let output = tool
             .execute(
                 json!({"action": "disconnect", "server": "remote"}),

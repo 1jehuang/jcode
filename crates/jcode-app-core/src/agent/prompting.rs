@@ -2,7 +2,36 @@ use super::Agent;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
+#[cfg(test)]
+#[path = "prompting_recovery_tests.rs"]
+mod recovery_tests;
+
 impl Agent {
+    /// Select a snapshotted profile without changing the full system prompt override.
+    pub fn set_agent_profile(
+        &mut self,
+        profile: Option<crate::agent_profile::AgentProfile>,
+    ) -> anyhow::Result<()> {
+        let previous = std::mem::replace(&mut self.session.agent_profile, profile);
+        let previous_provider_session_id = self.session.provider_session_id.take();
+        if let Err(error) = self.session.save() {
+            self.session.agent_profile = previous;
+            self.session.provider_session_id = previous_provider_session_id;
+            return Err(error);
+        }
+        // Native runtimes and response cursors may retain the old system text.
+        // Commit first, then gate the next provider request on a full reset.
+        self.provider_session_id = None;
+        if !self.provider_conversation_reset_pending {
+            self.preserve_compaction_on_provider_reset = true;
+        }
+        self.provider_conversation_reset_pending = true;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        Ok(())
+    }
+
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
         let registry = self.current_skills_snapshot();
         let mut loaded = registry.list();
@@ -134,17 +163,108 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        if let Some(profile) = &self.session.agent_profile {
+            return self.build_profile_system_prompt_split(profile, memory_prompt);
+        }
+        let mut split = self.build_jcode_system_prompt_split(memory_prompt);
+        if self.provider.uses_own_system_prompt() {
+            // The provider brings its own prompt, tools and instruction files.
+            // Send only where the session runs and its custom prompt.
+            split.static_part = [
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(crate::prompt::own_prompt_session_context),
+                self.session.system_prompt.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        }
+        split
+    }
+
+    fn build_profile_system_prompt_split(
+        &self,
+        profile: &crate::agent_profile::AgentProfile,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
+        use crate::instruction_sources::{InstructionSourceKind, formatted_content};
+        let working_dir = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        let sources = &profile.instruction_sources;
+        let mut split = crate::prompt::build_system_prompt_split_with_instruction_sources(
+            &self.prompt_skills_snapshot,
+            self.session.is_canary,
+            memory_prompt,
+            working_dir,
+            sources,
+        )
+        .0;
+        if self.provider.uses_own_system_prompt() {
+            // These providers still manage their own native instruction files.
+            // Only Jcode-controlled sources are governed by this allowlist.
+            split.static_part = self
+                .session
+                .working_dir
+                .as_deref()
+                .map(crate::prompt::own_prompt_session_context)
+                .unwrap_or_default();
+            for kind in [
+                InstructionSourceKind::AgentsMd,
+                InstructionSourceKind::SystemPrompt,
+                InstructionSourceKind::PromptOverlay,
+                InstructionSourceKind::PreferredTools,
+            ] {
+                let content = if kind == InstructionSourceKind::SystemPrompt {
+                    crate::instruction_sources::first_content(sources, kind).map(str::to_owned)
+                } else {
+                    formatted_content(sources, kind).0
+                };
+                if let Some(content) = content {
+                    if !split.static_part.is_empty() {
+                        split.static_part.push_str("\n\n");
+                    }
+                    split.static_part.push_str(&content);
+                }
+            }
+        }
+        // While profiled, the old full override is an optional additive source.
+        // Turning the profile off restores its original full-override semantics.
+        if let Some(content) =
+            formatted_content(sources, InstructionSourceKind::SessionSystemPrompt).0
+        {
+            if !split.static_part.is_empty() {
+                split.static_part.push_str("\n\n");
+            }
+            split.static_part.push_str(&content);
+        }
+        if !split.static_part.is_empty() {
+            split.static_part.push_str("\n\n");
+        }
+        split.static_part.push_str(&profile.instructions);
+        split
+    }
+
+    fn build_jcode_system_prompt_split(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
-            return crate::prompt::SplitSystemPrompt {
+            let split = crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
                 dynamic_part: String::new(),
             };
+            return split;
         }
 
-        // The active skill prompt is announced once in the transcript when the
-        // skill is activated (see `announce_active_skill`). Keeping it out of
-        // the system prompt means switching skills never invalidates the cache.
-        let skill_prompt: Option<String> = None;
+        // The active skill is not rendered here: its body enters the
+        // transcript once (`inject_active_skill`), so toggling a skill never
+        // rewrites the system prompt.
 
         // Frozen per session so skill installs never rewrite the cached
         // system prefix. Later installs are announced in the transcript.
@@ -157,7 +277,7 @@ impl Agent {
             .map(std::path::PathBuf::from);
 
         let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
-            skill_prompt.as_deref(),
+            None,
             available_skills,
             self.session.is_canary,
             memory_prompt,

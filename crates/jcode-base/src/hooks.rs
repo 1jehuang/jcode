@@ -25,6 +25,8 @@
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
+mod plugin_hooks;
+
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -52,7 +54,13 @@ const GATE_CONTEXT_LIMIT: usize = 8 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     Allow,
-    Block { reason: String },
+    Block {
+        reason: String,
+    },
+    /// A plugin supplied replacement tool input; native policy gates still run.
+    Rewrite {
+        input: Value,
+    },
 }
 
 /// Full result of running every configured `pre_tool` gate.
@@ -183,6 +191,8 @@ pub struct HookEvent {
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
     /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
+    /// Full plugin stdin data, kept out of size-limited native hook env vars.
+    plugin_tool_payload: Option<(Value, Value)>,
 }
 
 impl HookEvent {
@@ -192,6 +202,7 @@ impl HookEvent {
             session_id: None,
             cwd: None,
             fields: Vec::new(),
+            plugin_tool_payload: None,
         }
     }
 
@@ -207,6 +218,11 @@ impl HookEvent {
 
     pub fn field(mut self, key: &'static str, value: impl Into<String>) -> Self {
         self.fields.push((key, value.into()));
+        self
+    }
+
+    pub fn plugin_tool_payload(mut self, input: Value, response: Value) -> Self {
+        self.plugin_tool_payload = Some((input, response));
         self
     }
 }
@@ -255,6 +271,12 @@ pub fn hook_command(event: &str) -> Option<String> {
 /// skip payload construction entirely when no hook is set.
 pub fn hook_configured(event: &str) -> bool {
     !hook_commands(event).is_empty()
+}
+
+/// Scope-aware fast path for lifecycle callers. Plugin discovery never executes commands.
+pub fn hook_configured_for_dir(event: &str, cwd: Option<&str>) -> bool {
+    hook_configured(event)
+        || (!hooks_suppressed() && cwd.is_some_and(|cwd| plugin_hooks::configured(event, cwd)))
 }
 
 /// Run configured tool-input transformers in declaration order. Transformers
@@ -464,6 +486,7 @@ fn build_hook_process(
 /// Detached and fire-and-forget: failures are logged, never propagated, and
 /// the hook process cannot block the agent.
 pub fn dispatch_observer(event: HookEvent) {
+    plugin_hooks::observe(&event);
     let command_lines = hook_commands(event.event);
     if command_lines.is_empty() {
         return;
@@ -512,11 +535,29 @@ pub async fn run_pre_tool_gate(
 ) -> GateOutcome {
     let command_lines = hook_commands("pre_tool");
     let mut outcome = GateOutcome::allow();
-    if command_lines.is_empty() {
-        return outcome;
+    let mut event = HookEvent::new("pre_tool")
+        .session_id(session_id)
+        .field("TOOL_NAME", tool_name)
+        .field(
+            "TOOL_INPUT",
+            truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT),
+        );
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
     }
 
-    let mut current_input = tool_input_json.to_string();
+    let decision = plugin_hooks::gate(&event, tool_input_json).await;
+    match decision {
+        GateDecision::Rewrite { input } => outcome.updated_input = Some(input),
+        GateDecision::Block { reason } => outcome.decision = GateDecision::Block { reason },
+        GateDecision::Allow => {}
+    }
+
+    let mut current_input = outcome
+        .updated_input
+        .as_ref()
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| tool_input_json.to_string());
     for command_line in command_lines {
         let mut event = HookEvent::new("pre_tool")
             .session_id(session_id)

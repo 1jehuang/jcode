@@ -165,6 +165,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // loop back into the companion socket.
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
+    #[cfg(windows)]
+    let mut listener = bind(&options.socket)?;
+    #[cfg(not(windows))]
     let listener = bind(&options.socket)?;
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]

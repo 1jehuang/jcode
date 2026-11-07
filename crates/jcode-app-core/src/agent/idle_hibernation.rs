@@ -147,8 +147,6 @@ mod tests {
         agent.provider_session_id = Some("upstream-live-session".into());
         agent.rewind_undo_snapshot = Some(RewindUndoSnapshot {
             messages: agent.session.messages.clone(),
-            provider_session_id: Some("undo-provider".into()),
-            session_provider_session_id: None,
             visible_message_count: 2,
         });
         let released = agent.hibernate_idle_caches().unwrap();

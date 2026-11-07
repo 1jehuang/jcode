@@ -1265,6 +1265,7 @@ async fn run_relay_turn(
     let terminal = match &result {
         Ok(()) => crate::protocol::ServerEvent::Done { id: 0 },
         Err(error) => crate::protocol::ServerEvent::Error {
+            server_resumes: false,
             id: 0,
             message: crate::util::format_error_chain(error),
             retry_after_secs: None,

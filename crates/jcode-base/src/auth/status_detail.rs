@@ -78,6 +78,13 @@ impl AuthStatus {
                     "not configured (run `jcode login --provider grok-build`)".to_string()
                 }
             }
+            crate::provider_catalog::LoginProviderTarget::ClaudeCode => {
+                if self.claude_code == AuthState::Available {
+                    "Claude Code CLI installed; its own login is used at request time".to_string()
+                } else {
+                    "Claude Code CLI (`claude`) not found; install it or set [provider.claude_code].binary".to_string()
+                }
+            }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 if self.state_for_provider(provider) == AuthState::Available {

@@ -161,3 +161,9 @@ OAuth test. It does not consume a real account reset, remove an actual account,
 exercise microphone hardware, perform installation/rebuilds, or validate
 cross-machine platform/network differences. Those limits remain explicit rather
 than claiming universal slash-command parity.
+
+`/agent` uses the remote runtime to select this session’s instruction profile and rejects local fallback while disconnected.
+
+`/plugin` and `/mcp` have no audited SSH implementation and reject local fallback.
+
+`/side` changes the client’s side panel visibility without reading local session files.

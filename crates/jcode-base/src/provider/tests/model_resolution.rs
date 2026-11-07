@@ -6,6 +6,219 @@ fn test_provider_for_model_claude() {
 }
 
 #[test]
+fn session_route_catalog_alias_selects_final_runtime_from_openrouter() {
+    with_clean_provider_test_env(|| {
+        crate::config::invalidate_config_cache();
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        crate::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+        crate::env::set_var("ZHIPU_API_KEY", "test-zai-key");
+        let provider = test_multi_provider_with_openai();
+        provider.set_model("openrouter:z-ai/glm-4.7").unwrap();
+
+        let request = MultiProvider::model_switch_request_for_session_route(
+            "z-ai:glm-4.7",
+            Some("openrouter"),
+            Some("openrouter"),
+        );
+        provider.set_model(&request).unwrap();
+
+        assert_eq!(
+            (
+                ProviderRegistry::new(&provider).active_compatible_profile_id(),
+                provider
+                    .active_openrouter_execution_provider()
+                    .unwrap()
+                    .direct_openai_compatible_route_parts()
+                    .unwrap()
+                    .1,
+                provider.model()
+            ),
+            (
+                Some("zai".to_string()),
+                "openai-compatible:zai".to_string(),
+                "glm-4.7".to_string()
+            ),
+        );
+    });
+}
+
+#[test]
+fn session_route_catalog_alias_replaces_existing_direct_runtime() {
+    with_clean_provider_test_env(|| {
+        crate::config::invalidate_config_cache();
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        crate::env::set_var("DEEPSEEK_API_KEY", "test-deepseek-key");
+        crate::env::set_var("ZHIPU_API_KEY", "test-zai-key");
+        let provider = test_multi_provider_with_openai();
+        provider.set_model("deepseek:deepseek-chat").unwrap();
+
+        let request = MultiProvider::model_switch_request_for_session_route(
+            "z-ai:glm-4.7",
+            Some("deepseek"),
+            Some("openai-compatible:deepseek"),
+        );
+        provider.set_model(&request).unwrap();
+
+        assert_eq!(
+            (
+                ProviderRegistry::new(&provider).active_compatible_profile_id(),
+                provider
+                    .active_openrouter_execution_provider()
+                    .unwrap()
+                    .direct_openai_compatible_route_parts()
+                    .unwrap()
+                    .1,
+                provider.model()
+            ),
+            (
+                Some("zai".to_string()),
+                "openai-compatible:zai".to_string(),
+                "glm-4.7".to_string()
+            ),
+        );
+    });
+}
+
+#[test]
+fn session_route_named_profile_keeps_catalog_alias_precedence() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let home = std::env::var_os("JCODE_HOME").unwrap();
+        std::fs::write(
+            std::path::PathBuf::from(home).join("config.toml"),
+            r#"
+[providers.z-ai]
+type = "openai-compatible"
+base_url = "https://named-provider.invalid/v1"
+auth = "none"
+default_model = "glm-4.7"
+"#,
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        let provider = test_multi_provider_with_openai();
+
+        let request = MultiProvider::model_switch_request_for_session_route(
+            "z-ai:glm-4.7",
+            Some("openrouter"),
+            Some("openrouter"),
+        );
+        provider.set_model(&request).unwrap();
+
+        assert_eq!(
+            (
+                ProviderRegistry::new(&provider).active_compatible_profile_id(),
+                provider
+                    .active_openrouter_execution_provider()
+                    .unwrap()
+                    .direct_openai_compatible_route_parts()
+                    .unwrap()
+                    .1,
+                provider.model()
+            ),
+            (
+                Some("z-ai".to_string()),
+                "openai-compatible:z-ai".to_string(),
+                "glm-4.7".to_string()
+            ),
+        );
+    });
+}
+
+#[test]
+fn session_model_catalog_alias_restores_canonical_runtime_identity() {
+    with_clean_provider_test_env(|| {
+        crate::config::invalidate_config_cache();
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model(
+                "z-ai:glm-4.7",
+                Some("openrouter")
+            ),
+            "zai:glm-4.7",
+        );
+    });
+}
+
+#[test]
+fn session_provider_catalog_alias_restores_canonical_runtime_identity() {
+    with_clean_provider_test_env(|| {
+        crate::config::invalidate_config_cache();
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model("glm-4.7", Some("z-ai")),
+            "zai:glm-4.7",
+        );
+    });
+}
+
+#[test]
+fn session_route_catalog_alias_variants_use_canonical_prefix() {
+    with_clean_provider_test_env(|| {
+        crate::config::invalidate_config_cache();
+        for alias in ["z-ai", "z.ai", "zhipu", "zai-coding", "Z-AI"] {
+            assert_eq!(
+                MultiProvider::model_switch_request_for_session_route(
+                    &format!("{alias}:glm-4.7"),
+                    Some("openrouter"),
+                    Some("openrouter"),
+                ),
+                "zai:glm-4.7",
+                "{alias}",
+            );
+        }
+    });
+}
+
+#[test]
+fn session_model_named_profile_keeps_catalog_alias_precedence() {
+    with_clean_provider_test_env(|| {
+        let home = std::env::var_os("JCODE_HOME").unwrap();
+        std::fs::write(
+            std::path::PathBuf::from(home).join("config.toml"),
+            r#"
+[providers.z-ai]
+type = "openai-compatible"
+base_url = "https://named-provider.invalid/v1"
+auth = "none"
+"#,
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model(
+                "z-ai:glm-4.7",
+                Some("openrouter")
+            ),
+            "z-ai:glm-4.7",
+        );
+    });
+}
+
+#[test]
+fn session_provider_named_profile_keeps_catalog_alias_precedence() {
+    with_clean_provider_test_env(|| {
+        let home = std::env::var_os("JCODE_HOME").unwrap();
+        std::fs::write(
+            std::path::PathBuf::from(home).join("config.toml"),
+            r#"
+[providers.z-ai]
+type = "openai-compatible"
+base_url = "https://named-provider.invalid/v1"
+auth = "none"
+"#,
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_model("glm-4.7", Some("z-ai")),
+            "z-ai:glm-4.7",
+        );
+    });
+}
+
+#[test]
 fn test_provider_for_model_openai() {
     assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.5"), Some("openai"));
@@ -90,6 +303,7 @@ fn test_available_models_display_uses_route_models_and_filters_placeholder_rows(
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -101,6 +315,7 @@ fn test_available_models_display_uses_route_models_and_filters_placeholder_rows(
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         let models = provider.available_models_display();
@@ -139,6 +354,7 @@ fn test_cerebras_model_routes_are_profile_scoped_and_unique() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(Some(openrouter)),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -150,6 +366,7 @@ fn test_cerebras_model_routes_are_profile_scoped_and_unique() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             let routes = provider.model_routes();
@@ -236,6 +453,7 @@ fn test_direct_chutes_ignores_legacy_openrouter_catalog_cache() {
                     antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
+                    claude_code: RwLock::new(None),
                     bedrock: RwLock::new(None),
                     openrouter: RwLock::new(Some(openrouter)),
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -247,6 +465,7 @@ fn test_direct_chutes_ignores_legacy_openrouter_catalog_cache() {
                     catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    account_failover: Default::default(),
                 };
 
                 let routes = provider.model_routes();
@@ -295,6 +514,7 @@ fn test_auth_changed_preserves_existing_direct_profile_session() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(Some(openrouter)),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -306,6 +526,7 @@ fn test_auth_changed_preserves_existing_direct_profile_session() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::env::set_var("GROQ_API_KEY", "test-groq-key");
@@ -356,6 +577,7 @@ fn test_auth_changed_replaces_template_direct_profile_for_new_logins() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(Some(openrouter)),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -367,6 +589,7 @@ fn test_auth_changed_replaces_template_direct_profile_for_new_logins() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::env::set_var("GROQ_API_KEY", "test-groq-key");
@@ -409,6 +632,7 @@ fn test_state_space_openrouter_default_survives_switch_to_nvidia_nim() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(Some(openrouter)),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -420,6 +644,7 @@ fn test_state_space_openrouter_default_survives_switch_to_nvidia_nim() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::env::set_var(nvidia.api_key_env, "test-nvidia-key");
@@ -596,6 +821,7 @@ fn test_openrouter_and_compatible_profile_transition_invariants() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(Some(openrouter.clone())),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -607,6 +833,7 @@ fn test_openrouter_and_compatible_profile_transition_invariants() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider
@@ -669,6 +896,7 @@ fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available()
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(Some(openrouter)),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -680,6 +908,7 @@ fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available()
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider
@@ -710,6 +939,7 @@ fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local(
                             antigravity: RwLock::new(None),
                             gemini: RwLock::new(None),
                             cursor: RwLock::new(None),
+                            claude_code: RwLock::new(None),
                             bedrock: RwLock::new(None),
                             openrouter: RwLock::new(Some(openrouter)),
                             openai_compatible_profiles: RwLock::new(
@@ -725,6 +955,7 @@ fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local(
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
                             ),
+                            account_failover: Default::default(),
                         };
 
                         provider.set_model("claude-opus4.6-thinking").expect(
@@ -748,6 +979,7 @@ fn test_multi_provider_with_openrouter(openrouter: Arc<dyn Provider>) -> MultiPr
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(Some(openrouter)),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -759,6 +991,7 @@ fn test_multi_provider_with_openrouter(openrouter: Arc<dyn Provider>) -> MultiPr
         catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     }
 }
 
@@ -843,6 +1076,7 @@ fn test_active_compatible_route_preserves_custom_at_sign_model_ids() {
                             antigravity: RwLock::new(None),
                             gemini: RwLock::new(None),
                             cursor: RwLock::new(None),
+                            claude_code: RwLock::new(None),
                             bedrock: RwLock::new(None),
                             openrouter: RwLock::new(Some(openrouter)),
                             openai_compatible_profiles: RwLock::new(
@@ -858,6 +1092,7 @@ fn test_active_compatible_route_preserves_custom_at_sign_model_ids() {
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
                             ),
+                            account_failover: Default::default(),
                         };
 
                         provider
@@ -894,6 +1129,7 @@ fn test_config_default_provider_openai_compatible_keeps_gpt_model_provider_local
                             antigravity: RwLock::new(None),
                             gemini: RwLock::new(None),
                             cursor: RwLock::new(None),
+                            claude_code: RwLock::new(None),
                             bedrock: RwLock::new(None),
                             openrouter: RwLock::new(Some(openrouter)),
                             openai_compatible_profiles: RwLock::new(
@@ -909,6 +1145,7 @@ fn test_config_default_provider_openai_compatible_keeps_gpt_model_provider_local
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
                             ),
+                            account_failover: Default::default(),
                         };
 
                         provider
@@ -948,6 +1185,7 @@ fn test_custom_compatible_model_routes_do_not_request_openrouter_rewrite() {
                             antigravity: RwLock::new(None),
                             gemini: RwLock::new(None),
                             cursor: RwLock::new(None),
+                            claude_code: RwLock::new(None),
                             bedrock: RwLock::new(None),
                             openrouter: RwLock::new(Some(openrouter)),
                             openai_compatible_profiles: RwLock::new(
@@ -963,6 +1201,7 @@ fn test_custom_compatible_model_routes_do_not_request_openrouter_rewrite() {
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
                             ),
+                            account_failover: Default::default(),
                         };
 
                         provider.set_model("claude-opus4.6-thinking").expect(
@@ -999,6 +1238,7 @@ fn test_configured_direct_compatible_profiles_are_listed_without_openrouter_key(
                     antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
+                    claude_code: RwLock::new(None),
                     bedrock: RwLock::new(None),
                     openrouter: RwLock::new(None),
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1010,6 +1250,7 @@ fn test_configured_direct_compatible_profiles_are_listed_without_openrouter_key(
                     catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    account_failover: Default::default(),
                 };
 
                 let routes = provider.model_routes();
@@ -1082,6 +1323,7 @@ input = ["image"]
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1093,6 +1335,7 @@ input = ["image"]
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         // The picker must offer the text-capable configured model with a
@@ -1130,6 +1373,7 @@ input = ["image"]
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1141,6 +1385,7 @@ input = ["image"]
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
         provider2
             .set_config_default_model("vendor/my-model", Some("my-gateway"))
@@ -1166,6 +1411,7 @@ fn test_config_default_provider_deepseek_applies_without_openrouter_key() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1177,6 +1423,7 @@ fn test_config_default_provider_deepseek_applies_without_openrouter_key() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider
@@ -1201,6 +1448,7 @@ fn test_profile_prefixed_model_switch_reinitializes_direct_compatible_runtime() 
                     antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
+                    claude_code: RwLock::new(None),
                     bedrock: RwLock::new(None),
                     openrouter: RwLock::new(None),
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1212,6 +1460,7 @@ fn test_profile_prefixed_model_switch_reinitializes_direct_compatible_runtime() 
                     catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    account_failover: Default::default(),
                 };
 
                 provider
@@ -1258,6 +1507,7 @@ fn test_openai_auth_mode_prefixed_model_switch_changes_credentials() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1269,6 +1519,7 @@ fn test_openai_auth_mode_prefixed_model_switch_changes_credentials() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
         let rt = enter_test_runtime();
         let _runtime_guard = rt.enter();
@@ -1328,6 +1579,7 @@ fn test_initial_openai_provider_can_switch_to_anthropic_auth_routes() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1339,6 +1591,7 @@ fn test_initial_openai_provider_can_switch_to_anthropic_auth_routes() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
         let rt = enter_test_runtime();
         let _runtime_guard = rt.enter();
@@ -1404,6 +1657,7 @@ fn test_config_default_provider_anthropic_api_pins_api_credential() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1415,6 +1669,7 @@ fn test_config_default_provider_anthropic_api_pins_api_credential() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
             let rt = enter_test_runtime();
             let _runtime_guard = rt.enter();
@@ -1483,6 +1738,7 @@ fn test_config_default_model_with_credential_prefix_applies_model_and_pin() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1494,6 +1750,7 @@ fn test_config_default_model_with_credential_prefix_applies_model_and_pin() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
             let rt = enter_test_runtime();
             let _runtime_guard = rt.enter();
@@ -1557,6 +1814,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1568,6 +1826,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         let generation_before = crate::provider::pricing::auth_pricing_generation();
@@ -1630,6 +1889,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1641,6 +1901,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider
@@ -1670,6 +1931,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1681,6 +1943,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
         provider
             .set_model("cerebras:qwen-3-235b-a22b-instruct-2507")
@@ -1704,6 +1967,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(Some(openrouter)),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1715,6 +1979,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider
@@ -1739,6 +2004,7 @@ fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1750,6 +2016,7 @@ fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider
@@ -1786,6 +2053,7 @@ fn test_explicit_copilot_prefix_treats_claude_like_model_as_provider_local() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1797,6 +2065,7 @@ fn test_explicit_copilot_prefix_treats_claude_like_model_as_provider_local() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider
@@ -1821,6 +2090,7 @@ fn test_initial_provider_does_not_block_provider_specific_model_switch() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(Some(test_cursor_runtime())),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(Some(openrouter)),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1832,6 +2102,7 @@ fn test_initial_provider_does_not_block_provider_specific_model_switch() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider
@@ -1846,6 +2117,9 @@ fn test_initial_provider_does_not_block_provider_specific_model_switch() {
 
 #[path = "model_metadata.rs"]
 mod model_metadata;
+
+// --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
+// --- routing/identity with a real OpenRouter runtime via the registry.
 
 struct OrEnvVarGuard {
     key: &'static str,
@@ -2208,6 +2482,7 @@ fn bare_openai_compatible_model_ids_route_to_their_profile_not_the_active_provid
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -2221,6 +2496,7 @@ fn bare_openai_compatible_model_ids_route_to_their_profile_not_the_active_provid
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider

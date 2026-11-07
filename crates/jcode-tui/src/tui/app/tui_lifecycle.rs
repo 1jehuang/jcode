@@ -1,11 +1,27 @@
 #[path = "tui_lifecycle_keybindings.rs"]
 mod keybindings;
 #[path = "tui_lifecycle_reload_input.rs"]
-mod reload_input;
+pub(super) mod reload_input;
 
-use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
+
+/// Hot-exec resumes must not turn a client-only handoff into a shared daemon
+/// reload. Older clients already export these markers, so this also protects
+/// handoffs from binaries that predate this policy. Ordinary `--resume` and
+/// fresh launches retain the configured behavior. Manual `/reload` is separate.
+pub(super) fn remote_auto_server_reload(
+    configured: bool,
+    has_resume_target: bool,
+    resuming_handoff: bool,
+    reload_fast_start: bool,
+) -> bool {
+    configured && !(has_resume_target && (resuming_handoff || reload_fast_start))
+}
+
+#[cfg(test)]
+#[path = "tui_lifecycle_reload_policy_tests.rs"]
+mod reload_policy_tests;
 
 impl App {
     pub(super) async fn begin_remote_send(
@@ -24,6 +40,65 @@ impl App {
 
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
+    }
+
+    /// Hold the in-flight remote turn after the provider reported it is
+    /// overloaded (5xx, 529, "heavy usage, try again in a moment"), then
+    /// resend it. Unlike ordinary failures this also covers turns the user
+    /// typed: the provider will likely take the same request a moment later,
+    /// so making the user resend it by hand is only friction. Bounded by
+    /// [`Self::OVERLOAD_RETRY_MAX_ATTEMPTS`] with a growing delay; after that
+    /// the turn fails as before and the prompt is restored.
+    ///
+    /// When the turn already streamed output or ran tools, a full resend would
+    /// redo that work and append a second answer. The server saved every
+    /// completed step, so the held turn becomes a hidden continuation instead
+    /// and the model resumes where it stopped.
+    pub(super) fn schedule_pending_remote_overload_retry(&mut self, reason: &str) -> bool {
+        let continues_turn = self.remote_turn_streamed_output;
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if pending.overload_attempts >= Self::OVERLOAD_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        if continues_turn {
+            pending.content = String::new();
+            pending.images.clear();
+            pending.is_system = true;
+            pending.system_reminder = Some(Self::PROVIDER_ERROR_CONTINUATION.to_string());
+        }
+        pending.auto_retry = true;
+        pending.overload_attempts += 1;
+        let attempt = pending.overload_attempts;
+        let delay_secs = Self::OVERLOAD_RETRY_DELAYS_SECS
+            .get(usize::from(attempt - 1))
+            .copied()
+            .unwrap_or(60);
+        let retry_at = Instant::now() + Duration::from_secs(delay_secs);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.status_detail = Some(format!(
+            "provider overloaded; retrying in {delay_secs}s ({attempt}/{})",
+            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+        ));
+        let first_line = reason.lines().next().unwrap_or(reason).trim();
+        if continues_turn {
+            // The model never saw the reply it was writing when the provider
+            // failed, so it writes it again. Drop the partial copy on screen.
+            self.rollback_streaming_attempt();
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider failed mid-turn. Continuing from the last saved step in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        }
+        self.set_status_notice(format!("Provider overloaded; retrying in {delay_secs}s"));
+        true
     }
 
     /// Hold the in-flight remote turn until the network recovers, then resume it.
@@ -69,10 +144,10 @@ impl App {
         self.status = ProcessingStatus::WaitingForNetwork {
             listener: plan.listener_summary.clone(),
         };
-        self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.status_detail = Some("connection failed; waiting before retry".to_string());
 
         let content = format!(
-            "📡 Network appears offline - waiting to retry automatically. {} - {}",
+            "📡 Network appears offline or the provider is unreachable - waiting to retry automatically. {} - {}",
             plan.listener_summary,
             reason.trim().trim_end_matches('.')
         );
@@ -176,6 +251,89 @@ impl App {
                 }
                 true
             }
+        }
+    }
+
+    /// Notice shown when a held turn is resent because credentials changed.
+    pub(super) const ACCOUNT_CHANGED_RESEND_NOTICE: &'static str =
+        "🔑 Account changed. Resending your message";
+
+    /// Credentials changed (login, account switch, credential file edit).
+    ///
+    /// A turn held on a rate/usage limit (or an overload/connection backoff)
+    /// is waiting for the previous account's reset time, which can be hours
+    /// away. Pull that hold forward so the next tick resends the turn on the
+    /// new credentials. Returns true when a hold was released.
+    ///
+    /// Idempotent: once released the hold is due now (or already resent), so
+    /// repeated auth broadcasts neither add notices nor resend twice. Offline
+    /// holds are left alone because the network, not the account, blocks them.
+    ///
+    /// `changed_provider` scopes the change: an OpenAI login must not resend a
+    /// turn held on an exhausted Claude account (or the reverse). `None` means
+    /// the change may affect any provider.
+    pub(super) fn release_rate_limit_hold_after_credentials_changed(
+        &mut self,
+        changed_provider: Option<&str>,
+    ) -> bool {
+        let held_provider = self.held_turn_provider_name();
+        if !credential_change_applies_to(changed_provider, held_provider.as_deref()) {
+            crate::logging::info(&format!(
+                "Credentials changed for {:?}; keeping hold on {:?}",
+                changed_provider, held_provider
+            ));
+            return false;
+        }
+        let now = Instant::now();
+        self.credentials_changed_at = Some(now);
+        self.local_usage_limit_resume_attempts = 0;
+        if self.is_processing
+            || (self.is_remote && self.rate_limit_pending_message.is_none())
+            || matches!(self.status, ProcessingStatus::WaitingForNetwork { .. })
+        {
+            return false;
+        }
+        let Some(reset) = self.rate_limit_reset else {
+            return false;
+        };
+        if reset <= now {
+            return false;
+        }
+        self.arm_account_change_resend(now);
+        true
+    }
+
+    /// Provider the current (possibly held) turn runs on.
+    fn held_turn_provider_name(&self) -> Option<String> {
+        if let Some(name) = self.remote_provider_name.clone() {
+            return Some(name);
+        }
+        if self.is_remote || self.uses_server_or_replay_metadata() {
+            return self.remote_effort_identity().0;
+        }
+        Some(self.provider.name().to_string())
+    }
+
+    /// Hold the pending turn for an immediate resend on the new account.
+    pub(super) fn arm_account_change_resend(&mut self, at: Instant) {
+        if let Some(pending) = self.rate_limit_pending_message.as_mut() {
+            pending.retry_at = Some(at);
+        }
+        self.rate_limit_reset = Some(at);
+        self.account_change_resend_at = Some(at);
+        self.consecutive_credential_failures = 0;
+        self.push_display_message(DisplayMessage::system(
+            Self::ACCOUNT_CHANGED_RESEND_NOTICE.to_string(),
+        ));
+        self.set_status_notice("Account changed; resending");
+    }
+
+    /// True when a limit error belongs to a turn that was sent before the
+    /// latest credential change, i.e. it reports the previous account's limit.
+    pub(super) fn turn_predates_credentials_change(&self) -> bool {
+        match (self.credentials_changed_at, self.processing_started) {
+            (Some(changed), Some(started)) => started <= changed,
+            _ => false,
         }
     }
 
@@ -307,7 +465,6 @@ impl App {
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
             crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
         });
-
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
         crate::telemetry::begin_session_with_parent(
             provider.name(),
@@ -315,7 +472,6 @@ impl App {
             session.parent_id.clone(),
             false,
         );
-
         let mut app = Self {
             provider,
             registry,
@@ -348,6 +504,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -402,8 +559,10 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
+            rewind_ui: Default::default(),
             cancel_requested: false,
             quit_pending: None,
             last_resize_redraw: None,
@@ -437,6 +596,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -480,6 +640,7 @@ impl App {
             advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
+            remote_reasoning_effort_before_request: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
             remote_reported_service_tier: None,
@@ -489,6 +650,7 @@ impl App {
             remote_available_entries: Vec::new(),
             remote_model_options: Vec::new(),
             pending_remote_model_refresh_snapshot: None,
+            remote_model_routes_stale: false,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
@@ -543,6 +705,7 @@ impl App {
             swarm_panel_selected: 0,
             swarm_panel_focused: false,
             swarm_panel_full_page: false,
+            swarm_parent_session_id: None,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -622,6 +785,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             pending_account_switch_target: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -646,7 +812,12 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_undo_image_counts: Vec::new(),
+            cleared_draft_images: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
+            terminal_reply_filter: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -692,6 +863,9 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -724,6 +898,12 @@ impl App {
             in_flight_catchup_resume: None,
             login_picker_overlay: None,
             account_picker_overlay: None,
+            dialog: None,
+            mcp_request_id: None,
+            agent_profile_request_ids: Default::default(),
+            agent_profile_picker_request_id: None,
+            agent_profile_ui: Default::default(),
+            mcp_approval_checked: false,
             usage_overlay: None,
             usage_report_refreshing: false,
             usage_provider_filter: None,
@@ -733,6 +913,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -791,14 +972,7 @@ impl App {
         }
 
         // Pre-compute context info so it shows on startup
-        let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
+        let available_skills = crate::skill_overrides::model_skill_infos(&skills);
         let (_, context_info) = crate::prompt::build_system_prompt_with_context(
             None,
             &available_skills,
@@ -852,6 +1026,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -906,8 +1081,10 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
+            rewind_ui: Default::default(),
             cancel_requested: false,
             quit_pending: None,
             last_resize_redraw: None,
@@ -941,6 +1118,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -984,6 +1162,7 @@ impl App {
             advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
+            remote_reasoning_effort_before_request: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
             remote_reported_service_tier: None,
@@ -993,6 +1172,7 @@ impl App {
             remote_available_entries: Vec::new(),
             remote_model_options: Vec::new(),
             pending_remote_model_refresh_snapshot: None,
+            remote_model_routes_stale: false,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
@@ -1047,6 +1227,7 @@ impl App {
             swarm_panel_selected: 0,
             swarm_panel_focused: false,
             swarm_panel_full_page: false,
+            swarm_parent_session_id: None,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -1126,6 +1307,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             pending_account_switch_target: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -1150,7 +1334,12 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_undo_image_counts: Vec::new(),
+            cleared_draft_images: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
+            terminal_reply_filter: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1196,6 +1385,9 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -1228,6 +1420,12 @@ impl App {
             in_flight_catchup_resume: None,
             login_picker_overlay: None,
             account_picker_overlay: None,
+            dialog: None,
+            mcp_request_id: None,
+            agent_profile_request_ids: Default::default(),
+            agent_profile_picker_request_id: None,
+            agent_profile_ui: Default::default(),
+            mcp_approval_checked: false,
             usage_overlay: None,
             usage_report_refreshing: false,
             usage_provider_filter: None,
@@ -1237,6 +1435,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1402,6 +1601,7 @@ impl App {
         let Ok(mut session) = Session::load_for_remote_startup(session_id) else {
             return;
         };
+        self.set_remote_prompt_history_session(session_id);
 
         let render_start = Instant::now();
         // Narrow scope so render intermediates (rendered messages, display
@@ -1421,6 +1621,7 @@ impl App {
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );
+        self.invalidate_rewind_ui();
         if self.remote_session_id.as_deref() != Some(session_id) {
             self.remote_available_service_tiers = None;
         }
@@ -1537,6 +1738,15 @@ impl App {
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // Capture the inherited handoff before consuming its one-shot marker.
+        // Keep the effective policy for this client's lifetime, including
+        // reconnects, rather than consulting an already-consumed environment.
+        app.auto_server_reload = remote_auto_server_reload(
+            app.auto_server_reload,
+            resume_session.is_some(),
+            std::env::var_os("JCODE_RESUMING").is_some(),
+            reload_fast_start,
+        );
         // One-shot handoff flag. A later ordinary resume in the same process
         // must retain the existing eager local-history behavior.
         crate::env::remove_var("JCODE_RELOAD_FAST_START");
@@ -1641,5 +1851,64 @@ impl App {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+}
+
+/// Credential family a provider id or display name belongs to. Claude login,
+/// Claude API keys, and the Anthropic provider share one account; the same
+/// holds for OpenAI OAuth (Codex) and API keys.
+fn credential_family(provider: &str) -> String {
+    let normalized = provider.trim().to_ascii_lowercase();
+    // Login labels vary ("claude", "claude-api", "Anthropic API").
+    if normalized.starts_with("anthropic") || normalized.starts_with("claude") {
+        return "anthropic".to_string();
+    }
+    match normalized.as_str() {
+        "openai" | "openai-api" | "openai-oauth" | "openai api" | "codex" | "chatgpt" => {
+            "openai".to_string()
+        }
+        _ => normalized,
+    }
+}
+
+/// Whether a credential change for `changed` can unblock a turn held on
+/// `held`. An unscoped change (`None` or a catch-all such as an auto-import)
+/// applies to every provider, as does a change when the held provider is
+/// unknown.
+fn credential_change_applies_to(changed: Option<&str>, held: Option<&str>) -> bool {
+    let (Some(changed), Some(held)) = (changed, held) else {
+        return true;
+    };
+    let changed = credential_family(changed);
+    if changed.is_empty() || matches!(changed.as_str(), "all" | "auth" | "auto-import") {
+        return true;
+    }
+    let held = credential_family(held);
+    // Only Claude and OpenAI names are reliably comparable. Other ids (e.g. an
+    // OpenAI-compatible profile id vs its "OpenRouter" slot name) may not
+    // match textually, so keep releasing for them rather than strand a hold.
+    let known = |family: &str| matches!(family, "anthropic" | "openai");
+    changed == held || (!known(&changed) && !known(&held))
+}
+
+#[cfg(test)]
+mod credential_scope_tests {
+    use super::credential_change_applies_to as applies;
+
+    #[test]
+    fn credentials_changed_scope_matches_provider_families() {
+        assert!(applies(None, Some("Claude")));
+        assert!(applies(Some("anthropic"), None));
+        assert!(applies(Some("anthropic"), Some("Claude")));
+        assert!(applies(Some("Anthropic API"), Some("claude")));
+        assert!(applies(Some("claude-api"), Some("anthropic")));
+        assert!(applies(Some("openai-api"), Some("OpenAI")));
+        assert!(applies(Some("auto-import"), Some("Claude")));
+        assert!(!applies(Some("openai"), Some("Claude")));
+        assert!(!applies(Some("claude"), Some("OpenAI")));
+        assert!(!applies(Some("gemini"), Some("Claude")));
+        assert!(!applies(Some("anthropic"), Some("OpenRouter")));
+        // Unknown ids are not reliably comparable, so they still release.
+        assert!(applies(Some("deepseek"), Some("OpenRouter")));
     }
 }

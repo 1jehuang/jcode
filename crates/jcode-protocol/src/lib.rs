@@ -39,7 +39,9 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
-pub use jcode_session_types::TurnStopReason;
+pub use jcode_session_types::{
+    RewindCheckpoint, RewindMode, RewindResult, RewindTargetKind, TurnStopReason,
+};
 pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;
@@ -352,7 +354,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::{AccountUsageSnapshot, Request, ServerEvent, TurnIdentity};
-pub use wire::{SessionToolConfig, SessionToolDefinition};
+pub use wire::{SessionAccountInfo, SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -807,6 +809,7 @@ impl Request {
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
+            Request::ListRewindCheckpoints { id } | Request::RewindCheckpoint { id, .. } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
@@ -843,13 +846,17 @@ impl Request {
             Request::SetSessionEnv { id, .. } => *id,
             Request::SetSessionSaved { id, .. } => *id,
             Request::PersistSession { id } => *id,
-            Request::Split { id } => *id,
+            Request::Split { id, .. } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,
+            Request::SetSessionAccount { id, .. } => *id,
+            Request::SetDefaultAccount { id, .. } => *id,
+            Request::SetAccountFailover { id, .. } => *id,
+            Request::ReplaceSessionAccountIdentity { id, .. } => *id,
             Request::AccountUsage { id } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
@@ -898,6 +905,11 @@ impl Request {
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                // `jcode login` and the SDK login flow send a lone auth-change
+                // notice on a fresh socket. The process-wide refresh needs no
+                // session; on a subscribed connection it keeps its full
+                // session-aware handling.
+                | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }

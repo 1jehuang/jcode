@@ -5,6 +5,7 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         name: name.to_string(),
         description: description.to_string(),
         allowed_tools: None,
+        disable_model_invocation: false,
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         search_text: std::sync::OnceLock::from(build_skill_search_text(name, description, content)),
@@ -332,6 +333,82 @@ fn load_for_working_dir_reads_project_local_agents_skills() {
 }
 
 #[test]
+fn claude_code_frontmatter_and_invocation_text() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    // No `name:` (defaults to the folder), a `---` inside the description,
+    // and the user-only flag.
+    write_skill_file(
+        &skills_dir,
+        "deploy",
+        "---\ndescription: Ship it --- carefully\ndisable-model-invocation: true\n---\n\nDeploy $ARGUMENTS using ${CLAUDE_SKILL_DIR}/run.sh\n",
+    );
+
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(&skills_dir).expect("load skills");
+    let skill = registry.get("deploy").expect("named after its folder");
+    assert_eq!(skill.description, "Ship it --- carefully");
+    assert!(skill.disable_model_invocation);
+
+    let dir = skills_dir.join("deploy").display().to_string();
+    assert_eq!(
+        skill.invocation_text("staging"),
+        format!("Base directory for this skill: {dir}\n\nDeploy staging using {dir}/run.sh")
+    );
+}
+
+#[test]
+fn missing_description_comes_from_the_body_like_claude_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    write_skill_file(
+        &skills_dir,
+        "notes",
+        "---\nname: notes\n---\n\n# Take meeting notes\n\nBody.\n",
+    );
+    write_skill_file(
+        &skills_dir,
+        "blank",
+        "---\ndescription: \"\"\n---\n\nPlain first line\n",
+    );
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(&skills_dir).expect("load skills");
+    assert_eq!(
+        registry.get("notes").unwrap().description,
+        "Take meeting notes"
+    );
+    assert_eq!(
+        registry.get("blank").unwrap().description,
+        "Plain first line"
+    );
+    assert_eq!(description_from_body(&"x".repeat(150)).chars().count(), 100);
+}
+
+#[test]
+fn loose_frontmatter_values_load_like_claude_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    write_skill_file(
+        &skills_dir,
+        "graph",
+        "---\nname: graph\ndescription: Use the graph. Triggers on: explore, \"who calls\" #tag\nallowed-tools: [Read, Grep]\n---\n\nBody.\n",
+    );
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(&skills_dir).expect("load skills");
+    let skill = registry
+        .get("graph")
+        .expect("loose description still parses");
+    assert_eq!(
+        skill.description,
+        "Use the graph. Triggers on: explore, \"who calls\" #tag"
+    );
+    assert_eq!(
+        skill.allowed_tools.as_deref(),
+        Some(&["Read".to_string(), "Grep".to_string()][..])
+    );
+}
+
+#[test]
 fn malformed_skill_does_not_block_directory_loaders() {
     let temp = tempfile::tempdir().expect("tempdir");
     let skills_dir = temp.path().join("skills");
@@ -343,7 +420,7 @@ fn malformed_skill_does_not_block_directory_loaders() {
     write_skill_file(
         &skills_dir,
         "malformed",
-        "---\nname: malformed\ndescription: Triggers: invalid yaml\n---\n\nBroken.\n",
+        "---\nname: malformed\ndescription: Never closed\n\nBroken.\n",
     );
 
     let mut registry = SkillRegistry::default();
@@ -559,16 +636,84 @@ fn plugin_skills_load_from_installed_plugins_manifest() {
     // cache/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md
     let install = plugins_root.join("cache/test-marketplace/vercel/0.40.1");
     write_plugin_skill(&install, "ai-gateway");
-    // Nested `.claude/skills` variant inside the same install.
+    // Nested skill trees (templates a plugin installs into projects) are
+    // not the plugin's own skills; Claude Code loads only `<root>/skills`.
     write_plugin_skill(&install.join(".claude"), "benchmark-agents");
+    write_plugin_skill(&install.join("template"), "template-skill");
     write_installed_plugins_manifest(plugins_root, &[&install]);
 
     let mut registry = SkillRegistry::default();
     let count = registry.load_plugin_skills_from_root(plugins_root);
 
-    assert_eq!(count, 2);
-    assert!(registry.contains("ai-gateway"));
-    assert!(registry.contains("benchmark-agents"));
+    assert_eq!(count, 1);
+    assert!(
+        registry.get("vercel:ai-gateway").is_some(),
+        "namespaced like Claude Code"
+    );
+    assert!(registry.contains("ai-gateway"), "bare name still resolves");
+    assert!(!registry.contains("benchmark-agents"));
+    // Reloading (by either name) keeps the plugin namespace.
+    assert!(registry.reload("ai-gateway").expect("reload"));
+    assert!(registry.get("vercel:ai-gateway").is_some());
+    assert_eq!(registry.list().len(), 1, "no un-namespaced duplicate");
+    assert!(!registry.contains("template-skill"));
+}
+
+#[test]
+fn plugin_disabled_in_claude_settings_loads_no_skills() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let settings = temp.path().join("external/.claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"enabledPlugins":{"off@enabled-test":false,"on@enabled-test":true}}"#,
+    )
+    .unwrap();
+    let plugins_root = temp.path().join("plugins");
+    let off = plugins_root.join("cache/test-marketplace/off/1.0.0");
+    let on = plugins_root.join("cache/test-marketplace/on/1.0.0");
+    write_plugin_skill(&off, "off-skill");
+    write_plugin_skill(&on, "on-skill");
+    // Own manifest keys: other plugin tests share `plugin-N@test-marketplace`
+    // and run without the env lock, so these settings must not touch them.
+    std::fs::create_dir_all(&plugins_root).unwrap();
+    std::fs::write(
+        plugins_root.join("installed_plugins.json"),
+        serde_json::json!({"version": 2, "plugins": {
+            "off@enabled-test": [{"installPath": off}],
+            "on@enabled-test": [{"installPath": on}],
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut registry = SkillRegistry::default();
+    registry.load_plugin_skills_from_root(&plugins_root);
+    // Every plugin off: the cache must not be scanned as a fallback.
+    std::fs::write(
+        &settings,
+        r#"{"enabledPlugins":{"off@enabled-test":false,"on@enabled-test":false}}"#,
+    )
+    .unwrap();
+    let mut all_off = SkillRegistry::default();
+    all_off.load_plugin_skills_from_root(&plugins_root);
+    match previous {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+
+    assert!(
+        !registry.contains("off-skill"),
+        "enabledPlugins false turns it off"
+    );
+    assert!(registry.get("on:on-skill").is_some());
+    assert!(
+        all_off.list().is_empty(),
+        "all plugins off loads no plugin skills"
+    );
 }
 
 #[test]

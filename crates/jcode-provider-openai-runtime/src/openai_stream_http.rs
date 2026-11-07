@@ -3,7 +3,7 @@ use super::*;
 pub(crate) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
-    account_label: Option<String>,
+    account_pin: AccountPinSlot,
     request: Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -32,7 +32,7 @@ pub(crate) async fn stream_response(
     if tx.is_closed() {
         return Ok(());
     }
-    let access_token = openai_access_token(account_label.clone(), &credentials).await?;
+    let access_token = openai_access_token(&credentials, &account_pin).await?;
     if tx.is_closed() {
         return Ok(());
     }
@@ -178,9 +178,7 @@ pub(crate) async fn stream_response(
                 )));
             }
 
-            match force_refresh_openai_token(&credentials, &refresh_token, account_label.clone())
-                .await
-            {
+            match force_refresh_openai_token(&credentials, &account_pin, &refresh_token).await {
                 Ok(_) => {
                     jcode_base::logging::info(
                         "OpenAI access token rejected; refreshed credentials and will retry",

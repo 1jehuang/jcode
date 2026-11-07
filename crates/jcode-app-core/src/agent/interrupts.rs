@@ -405,6 +405,19 @@ impl Agent {
             }
             let content = parts.join("\n\n");
             parts.clear();
+            let checkpoint = match agent.checkpoint_user_input(
+                &content,
+                !images.is_empty(),
+                source != SoftInterruptSource::User,
+            ) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    // Keep delivered human input even when its optional file
+                    // snapshot fails. Transcript-based rewind remains usable.
+                    logging::warn(&format!("Steering checkpoint capture failed: {error:#}"));
+                    None
+                }
+            };
             let mut blocks: Vec<ContentBlock> = std::mem::take(images)
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -420,6 +433,9 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
+            if let Err(error) = agent.bind_user_checkpoint(checkpoint) {
+                logging::warn(&format!("Steering checkpoint binding failed: {error:#}"));
+            }
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,
@@ -429,7 +445,7 @@ impl Agent {
 
         for message in messages {
             match current_source {
-                Some(source) if source != message.source => {
+                Some(source) if source != message.source || source == SoftInterruptSource::User => {
                     flush_group(
                         self,
                         &mut injected,

@@ -25,6 +25,38 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+/// Provider handle of each shared agent, readable without the agent lock.
+/// An agent's provider is fixed at construction, so this never goes stale.
+/// Keyed by the agent's `Arc` address, checked against a `Weak` so a reused
+/// address never matches a dead agent. The provider is held weakly too: the
+/// agent owns it, so a closed session's provider is freed with the agent.
+type AgentProviderEntry = (std::sync::Weak<Mutex<Agent>>, std::sync::Weak<dyn Provider>);
+static AGENT_PROVIDERS: LazyLock<StdMutex<HashMap<usize, AgentProviderEntry>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn prune_agent_providers(map: &mut HashMap<usize, AgentProviderEntry>) {
+    map.retain(|_, (agent, provider)| agent.strong_count() > 0 && provider.strong_count() > 0);
+}
+
+/// Record the provider an agent streams with. Call wherever a shared agent is built.
+pub(crate) fn register_agent_provider(agent: &Arc<Mutex<Agent>>, provider: Arc<dyn Provider>) {
+    let mut map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    prune_agent_providers(&mut map);
+    map.insert(
+        Arc::as_ptr(agent) as usize,
+        (Arc::downgrade(agent), Arc::downgrade(&provider)),
+    );
+}
+
+/// The provider `agent` streams with, without taking the agent lock.
+pub(crate) fn agent_provider(agent: &Arc<Mutex<Agent>>) -> Option<Arc<dyn Provider>> {
+    let mut map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    prune_agent_providers(&mut map);
+    map.get(&(Arc::as_ptr(agent) as usize))
+        .filter(|(weak, _)| weak.upgrade().is_some_and(|live| Arc::ptr_eq(&live, agent)))
+        .and_then(|(_, provider)| provider.upgrade())
+}
+
 /// Do not probe any identity until telemetry is enabled. Only the provider
 /// may identify its effective OAuth credential. An API-key route must not expose the email
 /// of an unrelated saved subscription account.
@@ -274,6 +306,10 @@ async fn build_model_catalog(
             provider.reasoning_effort(),
             provider_oauth_email(provider.as_ref()),
             provider.serving_oauth_account_label(),
+            crate::session_accounts::account_infos_with_pins(
+                provider.as_ref(),
+                agent_guard.account_pins(),
+            ),
         )
     })
     .await?;
@@ -286,12 +322,16 @@ async fn build_model_catalog(
         service_tier,
         available_service_tiers,
         reasoning_effort,
+        account_labels,
         source,
         provider_oauth_email,
         provider_oauth_account_label,
     ) = {
         match live {
-            Some((catalog, (credential, tier, tiers, effort, email, account_label))) => {
+            Some((
+                catalog,
+                (credential, tier, tiers, effort, email, account_label, account_labels),
+            )) => {
                 let catalog = catalog.snapshot();
                 (
                     catalog.provider_name,
@@ -302,6 +342,7 @@ async fn build_model_catalog(
                     tier,
                     tiers,
                     effort,
+                    account_labels,
                     "live",
                     email,
                     account_label,
@@ -313,6 +354,7 @@ async fn build_model_catalog(
                     session_id
                 ));
                 let session_id = session_id.to_string();
+                let agent = Arc::clone(agent);
                 let provider = Arc::clone(provider);
                 tokio::task::spawn_blocking(move || {
                     let persisted = Session::load_for_remote_startup(&session_id)
@@ -320,6 +362,11 @@ async fn build_model_catalog(
                         .ok();
                     let persisted_model =
                         persisted.as_ref().and_then(|session| session.model.clone());
+                    // The connection's `provider` belongs to its FIRST agent. After a
+                    // live attach `agent` is another connection's agent with its own
+                    // provider, so read that one. Fall back to the connection's handle
+                    // only for an agent that was never registered.
+                    let provider = &agent_provider(&agent).unwrap_or_else(|| Arc::clone(&provider));
                     let mut model_routes = provider.model_routes();
                     crate::model_usage::enrich_routes(&mut model_routes);
                     (
@@ -338,10 +385,28 @@ async fn build_model_catalog(
                             provider
                                 .available_service_tiers()
                                 .into_iter()
-                                .map(str::to_string)
+                                .map(str::to_owned)
                                 .collect(),
                         ),
                         provider.reasoning_effort(),
+                        // A brand-new session may not be on disk yet. Its pins are
+                        // then empty, but stored accounts still apply. An empty list
+                        // here would erase the window's account badge (#1613 flake).
+                        // `provider` is the reported agent's own streaming handle
+                        // (see above), so its live pins win: a window pinned with
+                        // `--account` before its first save has none on disk.
+                        crate::session_accounts::account_infos_from_pins(&{
+                            let mut pins = persisted
+                                .as_ref()
+                                .map(|session| session.account_pins.clone())
+                                .unwrap_or_default();
+                            for kind in crate::provider::AccountProviderKind::ALL {
+                                if let Some(pin) = provider.account_pin(kind) {
+                                    pins.insert(kind.key().to_string(), pin);
+                                }
+                            }
+                            pins
+                        }),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
@@ -390,6 +455,7 @@ async fn build_model_catalog(
         service_tier,
         subagent_model: None,
         agent_model_overrides: Default::default(),
+        account_labels,
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -421,6 +487,7 @@ pub(super) async fn handle_get_model_catalog(
             return super::client_writer::write_direct_event(
                 writer,
                 &ServerEvent::Error {
+                    server_resumes: false,
                     id,
                     message: format!("Could not refresh model catalog: {error}"),
                     retry_after_secs: None,
@@ -780,6 +847,7 @@ async fn send_history_from_persisted_session(
         .reasoning_effort
         .clone()
         .or_else(|| provider.reasoning_effort());
+    let account_labels = crate::session_accounts::account_infos_from_pins(&session.account_pins);
     let agent_model_overrides = session.agent_model_overrides.clone();
     let inferred_interrupted = was_interrupted
         .is_none()
@@ -855,6 +923,7 @@ async fn send_history_from_persisted_session(
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
         service_tier: provider.service_tier(),
+        account_labels,
         compaction_mode: crate::config::config().compaction.mode.clone(),
         activity,
         side_panel,
@@ -924,6 +993,10 @@ async fn send_history_with_guard(
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
+    let account_labels = crate::session_accounts::account_infos_with_pins(
+        agent_guard.provider_handle().as_ref(),
+        agent_guard.account_pins(),
+    );
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
         messages,
@@ -1139,6 +1212,7 @@ async fn send_history_with_guard(
         provider_model: Some(provider_model),
         subagent_model,
         agent_model_overrides,
+        account_labels,
         autoreview_enabled,
         autojudge_enabled,
         available_models,
@@ -1296,7 +1370,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         // Let each provider apply its own freshness policy rather than making
         // static defaults permanently suppress discovery for the whole picker.
 
-        if should_debounce_attach_model_prefetch(&provider_name) {
+        if !needs_capability_refresh && should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
                 "Skipping attach-time model prefetch for {} because a recent refresh already ran",
                 provider_name

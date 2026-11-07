@@ -3,6 +3,7 @@ fn reload_replay_history(
     directive: crate::protocol::ReloadRecoverySnapshot,
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
+account_labels: Vec::new(),
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![crate::protocol::HistoryMessage {

@@ -58,18 +58,9 @@ impl Drop for EnvVarGuard {
 }
 
 fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        temp.path().join("Library").join("Application Support")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        temp.path().join("AppData").join("Roaming")
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        temp.path().to_path_buf()
-    }
+    // These fixtures set JCODE_HOME, which takes precedence over platform
+    // HOME/XDG/APPDATA locations in app_config_dir().
+    temp.path().join("config")
 }
 
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
@@ -1056,6 +1047,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1081,6 +1073,7 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1114,6 +1107,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1177,6 +1171,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1211,6 +1206,7 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1315,7 +1311,11 @@ fn make_provider() -> OpenRouterProvider {
         static_reasoning_config: HashMap::new(),
         max_tokens: None,
         extra_body: None,
+        thinking_prefill_seed: None,
+        thinking_prefill_name: None,
+        thinking_prefill_non_kimi: false,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
@@ -1350,7 +1350,11 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         static_reasoning_config: HashMap::new(),
         max_tokens: None,
         extra_body: None,
+        thinking_prefill_seed: None,
+        thinking_prefill_name: None,
+        thinking_prefill_non_kimi: false,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
@@ -1477,6 +1481,125 @@ fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch
     };
     provider.set_model("glm-5.3-flash").unwrap();
     assert_eq!(provider.reasoning_effort(), configured);
+}
+
+#[test]
+fn a6api_named_profile_applies_model_specific_efforts_across_model_switches() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("grok-4.7".into()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "grok-4.7".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                ],
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "claude-haiku-4-5".into(),
+                reasoning: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API-style named profile");
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "swarm"]
+    );
+    provider
+        .set_reasoning_effort("xhigh")
+        .expect("configured Grok effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+    assert!(provider.set_reasoning_effort("max").is_err());
+
+    provider
+        .set_model("claude-haiku-4-5")
+        .expect("switch to configured reasoning-only model");
+    assert!(provider.available_efforts().is_empty());
+    assert!(provider.set_reasoning_effort("high").is_err());
+
+    provider
+        .set_model("grok-4.7")
+        .expect("switch back to effort-capable model");
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "swarm"]
+    );
+    assert_eq!(provider.reasoning_effort(), None);
+}
+
+#[test]
+fn a6api_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("glm-5.3".into()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "glm-5.3".into(),
+            reasoning: Some(true),
+            reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API GLM profile");
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "high", "max", "swarm"]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("GLM max effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+    assert!(provider.set_reasoning_effort("xhigh").is_err());
+}
+
+#[test]
+fn a6api_gpt_terra_profile_exposes_openai_efforts() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
+        base_url: "https://example.invalid/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("gpt-5.6-terra".into()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "gpt-5.6-terra".into(),
+            reasoning: Some(true),
+            reasoning_efforts: vec![
+                "none".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("a6api", &profile)
+        .expect("construct A6API GPT Terra profile");
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["none", "low", "medium", "high", "xhigh", "max", "swarm",]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("GPT Terra max effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
 }
 
 #[test]
@@ -2236,6 +2359,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -2265,6 +2389,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -2289,6 +2414,7 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
@@ -3392,6 +3518,64 @@ fn named_profile_model_reasoning_overrides_capability_and_default_effort() {
     assert_eq!(provider.reasoning_effort(), Some("low".to_string()));
 }
 
+#[test]
+fn named_profile_model_uses_explicit_reasoning_effort_ladder() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("kimi-k3".to_string()),
+        disable_reasoning_heuristics: true,
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "kimi-k3".to_string(),
+            reasoning_efforts: vec!["low".to_string(), "high".to_string(), "max".to_string()],
+            reasoning_effort: Some("max".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "high", "max", "swarm"]
+    );
+    assert_eq!(provider.reasoning_effort(), Some("max".to_string()));
+}
+
+#[test]
+fn named_profile_excludes_generation_only_from_chat_and_rejects_switch() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("chat-model".to_string()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "chat-model".to_string(),
+                input: vec!["text".to_string()],
+                supports_chat: Some(true),
+                output: vec!["text".to_string()],
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "video-model".to_string(),
+                input: vec!["text".to_string()],
+                output: vec!["video".to_string()],
+                supports_chat: Some(false),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
+    let models = provider.available_models_display();
+    assert!(models.contains(&"chat-model".to_string()));
+    assert!(!models.contains(&"video-model".to_string()));
+    assert!(provider.set_model("video-model").is_err());
+}
+
 /// Regression: when the shared interactive server boots an `OpenRouterProvider`
 /// without binding `profile_id` (the deferred-auth bootstrap path used by the
 /// TUI server), a session-routing `<name>:` prefix for a *user-defined* named
@@ -3519,6 +3703,23 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
     assert_eq!(Provider::display_name(&provider), "example-compat");
 }
 
+#[test]
+fn vsllm_uses_conservative_context_when_catalog_omits_limits() {
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://vsllm.cc/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        model_catalog: true,
+        default_model: Some("gpt-6.1-sol".to_string()),
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("vsllm-api", &profile)
+        .expect("VSLLM profile should initialize");
+    provider
+        .set_model("gpt-6.1-sol")
+        .expect("VSLLM accepts catalog model ids");
+    assert_eq!(provider.context_window(), 32_768);
+}
+
 #[path = "openrouter_wire_tests.rs"]
 mod wire_tests;
 
@@ -3542,3 +3743,25 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
 
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
+
+#[test]
+fn credential_failure_is_returned_instead_of_a_silently_closed_stream() {
+    let provider = OpenRouterProvider {
+        supports_model_catalog: false,
+        auth: Arc::new(|| Err(anyhow::anyhow!("external key approval revoked"))),
+        ..make_custom_compatible_provider()
+    };
+    let messages = vec![Message::user("hello")];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let error = match rt.block_on(provider.complete(&messages, &[], "", None)) {
+        Ok(_) => panic!("a credential failure must not start a stream"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("external key approval revoked"),
+        "{error:#}"
+    );
+}

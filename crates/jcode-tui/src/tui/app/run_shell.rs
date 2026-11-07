@@ -733,6 +733,14 @@ impl App {
                 break;
             }
 
+            // Dialog keys are synchronous; filesystem rewind acquires async
+            // path locks here, before any queued model turn can start.
+            if self.rewind_ui.local_restore.is_some() {
+                self.process_local_rewind().await;
+                needs_redraw = true;
+                continue;
+            }
+
             // Process pending turn OR wait for input/redraw
             if self.pending_turn {
                 self.pending_turn = false;
@@ -818,6 +826,7 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
+        agent_profile_name: Option<String>,
     ) -> Result<RunResult> {
         if crate::tui::is_ssh_remote() {
             self.session.working_dir = remote_working_dir.clone();
@@ -887,6 +896,9 @@ impl App {
                 &mut remote_state,
                 session_to_resume.as_deref(),
                 remote_working_dir.as_deref(),
+                agent_profile_name
+                    .as_deref()
+                    .filter(|_| session_to_resume.is_none()),
             )
             .await?
             {

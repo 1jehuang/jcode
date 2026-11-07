@@ -61,6 +61,10 @@ async fn agent(session_id: &str) -> AgentHandle {
     )))
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn concurrent_get_or_start_runs_only_one_factory() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -83,6 +87,10 @@ async fn concurrent_get_or_start_runs_only_one_factory() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn failed_or_cancelled_factory_releases_reservation() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -122,6 +130,10 @@ async fn failed_or_cancelled_factory_releases_reservation() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn publication_never_overwrites_even_after_removal() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -165,6 +177,10 @@ async fn publication_never_overwrites_even_after_removal() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn reservations_are_per_manager_and_target() {
     let manager = SessionManager::new();
@@ -179,6 +195,10 @@ async fn reservations_are_per_manager_and_target() {
     assert!(futures::poll!(&mut same).is_ready());
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn rejected_rekey_keeps_both_original_owners() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -234,6 +254,10 @@ async fn rejected_rekey_keeps_both_original_owners() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn publication_rejects_wrong_session_identity() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -250,6 +274,10 @@ async fn publication_rejects_wrong_session_identity() -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn observer_is_available_while_runtime_is_busy_and_retires_with_entry() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -280,6 +308,10 @@ async fn observer_is_available_while_runtime_is_busy_and_retires_with_entry() ->
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn accepted_turn_blocks_restore_even_before_worker_locks_agent() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
@@ -305,6 +337,10 @@ async fn accepted_turn_blocks_restore_even_before_worker_locks_agent() -> Result
     Ok(())
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test environment guard serializes process globals across async assertions"
+)]
 #[tokio::test]
 async fn failed_cold_restore_keeps_published_and_retiring_sources_unchanged() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();

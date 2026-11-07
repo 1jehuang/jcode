@@ -561,8 +561,19 @@ mod tests {
     #[cfg(unix)]
     fn concurrent_workspace_receives_publish_once() {
         let _guard = storage::lock_test_env();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
+        struct Home(Option<std::ffi::OsString>);
+        impl Drop for Home {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _home = Home(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", root.join("private-state"));
         std::fs::create_dir(root.join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(8);
         let statuses = std::thread::scope(|scope| {
@@ -606,7 +617,7 @@ mod tests {
 
     #[test]
     fn rejects_payload_before_writing() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
         let good = Resource::ProjectFile {
@@ -640,7 +651,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn rejects_private_key_environment_before_publishing_project_files() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
         let file = Resource::ProjectFile {

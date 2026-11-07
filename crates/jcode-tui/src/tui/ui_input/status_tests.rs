@@ -277,6 +277,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
     let text =
         |spans: &[Span<'static>]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
     let facts = OverscrollFacts {
+        account: None,
         machine: Some("jcode-cloud".into()),
         dir: Some("~/jcode".into()),
         branch: None,
@@ -305,6 +306,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
 #[test]
 fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
     let facts = OverscrollFacts {
+        account: None,
         machine: None,
         dir: Some("~/jcode".into()),
         branch: None,

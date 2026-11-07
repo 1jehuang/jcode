@@ -777,6 +777,172 @@ fn resolve_optional_target_session_defaults_to_current() {
     );
 }
 
+#[test]
+fn schema_still_requires_action() {
+    let schema = CommunicateTool::new().parameters_schema();
+    assert_eq!(schema["required"], json!(["action"]));
+}
+
+#[test]
+fn schema_branches_only_require_properties_they_declare() {
+    // Gemini rejects the entire request when a `required` entry names a property
+    // the same object does not define, which made every tool-enabled Gemini call
+    // fail on this tool's spawn branch (issue #655).
+    let schema = CommunicateTool::new().parameters_schema();
+    for branch in schema["anyOf"].as_array().expect("schema branches") {
+        let declared = branch["properties"]
+            .as_object()
+            .expect("branch properties")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for required in branch["required"].as_array().expect("branch required") {
+            let name = required.as_str().expect("required name");
+            assert!(
+                declared.iter().any(|known| known == name),
+                "branch requires '{name}' without declaring it: {branch}"
+            );
+        }
+    }
+}
+
+#[test]
+fn spawn_label_validation_rejects_missing_or_blank_labels() {
+    let missing: CommunicateInput =
+        serde_json::from_value(json!({"action": "spawn"})).expect("spawn input");
+    assert_eq!(
+        missing
+            .required_spawn_label()
+            .expect_err("missing label must fail")
+            .to_string(),
+        "'label' is required for spawn action"
+    );
+
+    let blank: CommunicateInput = serde_json::from_value(json!({
+        "action": "spawn",
+        "label": "  \n\t "
+    }))
+    .expect("spawn input");
+    assert_eq!(
+        blank
+            .required_spawn_label()
+            .expect_err("blank label must fail")
+            .to_string(),
+        "'label' must not be blank for spawn action"
+    );
+}
+
+#[test]
+fn spawn_label_validation_trims_valid_labels() {
+    let params: CommunicateInput = serde_json::from_value(json!({
+        "action": "spawn",
+        "label": "  api reviewer  "
+    }))
+    .expect("spawn input");
+    assert_eq!(
+        params.required_spawn_label().expect("valid label"),
+        "api reviewer"
+    );
+}
+
+#[tokio::test]
+async fn spawn_execute_rejects_missing_label_before_sending_request() {
+    let working_dir = tempfile::tempdir().expect("working dir");
+    let error = CommunicateTool::new()
+        .execute(
+            json!({"action": "spawn", "prompt": "review the API"}),
+            test_ctx("session-parent", working_dir.path()),
+        )
+        .await
+        .expect_err("missing spawn label must fail locally");
+
+    assert_eq!(error.to_string(), "'label' is required for spawn action");
+}
+
+#[test]
+fn description_includes_swarm_prompt_guidance() {
+    let tool = CommunicateTool::new();
+    let description = tool.description();
+    assert!(
+        description.starts_with("Coordinate agents"),
+        "description should lead with the short coordination summary"
+    );
+    assert!(
+        description.contains("Swarm prompt"),
+        "description should embed the swarm prompt section"
+    );
+}
+
+#[test]
+fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
+    let project = tempfile::tempdir().unwrap();
+    let prompt_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    let prompt_path = prompt_dir.join("swarm-prompt.md");
+    std::fs::write(&prompt_path, "first routing version").unwrap();
+
+    let existing = CommunicateTool::new_for_working_dir(Some(project.path()));
+    std::fs::write(&prompt_path, "second routing version").unwrap();
+    let newly_created = CommunicateTool::new_for_working_dir(Some(project.path()));
+
+    assert!(existing.description().contains("first routing version"));
+    assert!(!existing.description().contains("second routing version"));
+    assert!(
+        newly_created
+            .description()
+            .contains("second routing version")
+    );
+}
+
+#[test]
+fn spawning_action_inputs_preserve_requested_model() {
+    for action in [
+        "spawn",
+        "assign_task",
+        "assign_next",
+        "fill_slots",
+        "run_plan",
+    ] {
+        for model in [
+            "z-ai/glm-5.2:free",
+            "openai-api:gpt-5.5",
+            "inherit",
+            "coordinator",
+            "  ",
+        ] {
+            let input: CommunicateInput = serde_json::from_value(json!({
+                "action": action,
+                "label": "reviewer",
+                "model": model
+            }))
+            .unwrap();
+            assert_eq!(input.model.as_deref(), Some(model));
+        }
+    }
+}
+
+#[test]
+fn spawning_action_inputs_allow_omitted_or_null_model() {
+    for action in [
+        "spawn",
+        "assign_task",
+        "assign_next",
+        "fill_slots",
+        "run_plan",
+    ] {
+        let without_model: CommunicateInput =
+            serde_json::from_value(json!({"action": action, "label": "reviewer"})).unwrap();
+        assert!(without_model.model.is_none());
+        let null_model: CommunicateInput = serde_json::from_value(json!({
+            "action": action,
+            "label": "reviewer",
+            "model": null
+        }))
+        .unwrap();
+        assert!(null_model.model.is_none());
+    }
+}
+
 #[path = "communicate_schema_tests.rs"]
 mod schema;
 
@@ -893,6 +1059,7 @@ impl RawClient {
         let id = self.next_id;
         self.next_id += 1;
         self.send_request(Request::Subscribe {
+            agent_profile_name: None,
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
@@ -909,6 +1076,8 @@ impl RawClient {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
             client_name: None,
         })
         .await?;

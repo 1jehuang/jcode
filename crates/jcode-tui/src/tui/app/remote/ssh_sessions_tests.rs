@@ -97,7 +97,8 @@ fn ssh_session_wire_controls_and_navigation() {
             Request::ResumeSession { id, session_id, .. } => { assert_eq!(session_id, "remote-parent"); id },
             other => panic!("unexpected {other:?}"),
         };
-        handle_event(&mut app, &mut remote, &ServerEvent::Error { id: back_id,
+        handle_event(&mut app, &mut remote, &ServerEvent::Error {
+server_resumes: false, id: back_id,
             message: "still attached elsewhere".into(), retry_after_secs: None }).await.unwrap();
         assert_eq!(app.ssh_sessions.back, ["remote-parent"], "failed back must be retryable");
         assert!(matches!(read_request(&mut reader).await, Request::GetHistory { .. }));
@@ -110,7 +111,7 @@ fn ssh_session_wire_controls_and_navigation() {
         assert!(app.ssh_sessions.back.is_empty());
 
         handle_command(&mut app, &mut remote, "/btw a remote side question").await.unwrap();
-        let split_id = match read_request(&mut reader).await { Request::Split { id } => id, other => panic!("{other:?}") };
+        let split_id = match read_request(&mut reader).await { Request::Split { id, .. } => id, other => panic!("{other:?}") };
         let response = ServerEvent::SplitResponse { id: split_id, new_session_id: "remote-fork".into(), new_session_name: "fork".into() };
         assert!(handle_event(&mut app, &mut remote, &response).await.unwrap());
         assert!(matches!(read_request(&mut reader).await, Request::ResumeSession { session_id, .. } if session_id == "remote-fork"));
@@ -124,7 +125,8 @@ fn ssh_session_wire_controls_and_navigation() {
 
         handle_command(&mut app, &mut remote, "/transfer").await.unwrap();
         let transfer_id = match read_request(&mut reader).await { Request::Transfer { id } => id, other => panic!("{other:?}") };
-        handle_event(&mut app, &mut remote, &ServerEvent::Error { id: transfer_id,
+        handle_event(&mut app, &mut remote, &ServerEvent::Error {
+server_resumes: false, id: transfer_id,
             message: "compaction failed".into(), retry_after_secs: None }).await.unwrap();
         assert!(app.ssh_sessions.child.is_none());
         handle_command(&mut app, &mut remote, "/catchup current").await.unwrap();

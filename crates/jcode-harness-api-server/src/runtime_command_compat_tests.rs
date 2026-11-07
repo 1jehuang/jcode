@@ -27,7 +27,7 @@ async fn reply_to(reader: &mut (impl AsyncBufRead + Unpin), id: u64) -> Value {
 
 async fn runtime_capability_case(initial_timeout: bool, refreshed_support: Option<bool>) {
     let root = std::env::temp_dir().join(format!(
-        "jcode-runtime-capability-{}-{}",
+        "jc-rc-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

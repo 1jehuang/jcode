@@ -322,6 +322,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.swarm_plan_version = None;
     app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
+    app.queued_message_images.clear();
     app.queued_commands.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();
@@ -335,7 +336,10 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.autoreview_enabled = Some(app.autoreview_enabled);
     session.autojudge_enabled = Some(app.autojudge_enabled);
     session.ensure_initial_session_context_message();
+    app.invalidate_rewind_ui();
+    app.activate_prompt_history(&session.id);
     app.session = session;
+    app.adopt_prompt_history_display();
     clear_side_panel_for_new_session(app);
     app.provider_session_id = None;
 }
@@ -674,6 +678,7 @@ fn clone_session_for_review(
     let mut child = Session::create(Some(parent_session_id), Some(session_title.to_string()));
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
+    child.agent_profile = app.session.agent_profile.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = Some(initial_model);
     child.provider_key = provider_key_override.or_else(|| app.session.provider_key.clone());
@@ -691,6 +696,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
     child.system_prompt = app.session.system_prompt.clone();
+    child.agent_profile = app.session.agent_profile.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
     child.provider_key = app.session.provider_key.clone();
@@ -904,8 +910,14 @@ pub(super) fn queue_review_spawn_remote(
 ) {
     app.pending_split_parent_session_id = Some(parent_session_id);
     app.pending_split_startup_message = Some(startup_message);
-    app.pending_split_model_override = model_override;
-    app.pending_split_provider_key_override = provider_key_override;
+    // The server resolves feedback roles from its own defaults and credentials.
+    // Do not overwrite its selection with this host's config after the split.
+    app.pending_split_model_override = if app.is_remote { None } else { model_override };
+    app.pending_split_provider_key_override = if app.is_remote {
+        None
+    } else {
+        provider_key_override
+    };
     app.pending_split_label = Some(label.to_string());
     app.pending_split_started_at = Some(Instant::now());
     app.pending_split_request = true;

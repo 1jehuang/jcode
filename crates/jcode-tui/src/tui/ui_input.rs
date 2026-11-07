@@ -124,6 +124,9 @@ fn command_suggestions_overlay_rect(
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
+        // Interactive pickers own this surface. Models render their choices in
+        // the overlay pass, while other pickers already have an inline panel.
+        && app.inline_interactive_state().is_none()
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
@@ -223,7 +226,15 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
         // Keep it above the composer and size the window before building rows
         // so the selected model remains visible even on short terminals.
         let height = area.y.saturating_sub(frame.area().y);
-        let lines = super::inline_interactive_ui::model_suggestion_lines(picker, height as usize);
+        let lines = if picker.is_agent_profile_sources() {
+            super::inline_interactive_ui::agent_profile_source_lines(
+                picker,
+                height as usize,
+                area.width as usize,
+            )
+        } else {
+            super::inline_interactive_ui::model_suggestion_lines(picker, height as usize)
+        };
         if !lines.is_empty() && area.width > 0 {
             let rect = Rect::new(
                 area.x,
@@ -1203,6 +1214,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             .as_deref()
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
+        account: data
+            .window_account
+            .as_ref()
+            .map(|account| account.display()),
     };
 
     let alignment = if app.centered_mode() {
@@ -1235,6 +1250,7 @@ pub(crate) fn preview_overscroll_line_for_host(
     host: Option<&str>,
 ) -> Line<'static> {
     let facts = OverscrollFacts {
+        account: None,
         machine: host
             .filter(|host| !host.trim().is_empty())
             .map(str::to_owned),
@@ -1292,6 +1308,8 @@ struct OverscrollFacts {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// Account this window uses (`claude-fox`, `claude-otter (default)`).
+    account: Option<String>,
 }
 
 /// Per-fact detail level. 0 is the fullest form. Higher levels are more
@@ -1308,6 +1326,7 @@ struct OverscrollLevels {
     auth: u8,
     provider: u8,
     model: u8,
+    account: u8,
 }
 
 /// Compaction ladder, applied one step at a time until the line fits.
@@ -1327,9 +1346,10 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.context = 1,     // "74k/256k 29%" -> "29%"
     |l| l.git = 2,         // hide git status
     |l| l.branch = 2,      // hide branch
-    |l| l.model = 1,       // drop reasoning effort
-    |l| l.machine = 1,     // "☁ jcode-cloud:" -> "☁ "
-    |l| l.dir = 1,         // "~/…/jcode" -> "jcode"
+    |l| l.account = 1,
+    |l| l.model = 1,   // drop reasoning effort
+    |l| l.machine = 1, // "☁ jcode-cloud:" -> "☁ "
+    |l| l.dir = 1,     // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -1455,6 +1475,11 @@ fn overscroll_fact_spans(
             && let Some(effort) = &facts.effort
         {
             group.push(Span::styled(format!(" {effort}"), muted));
+        }
+        if levels.account == 0
+            && let Some(account) = &facts.account
+        {
+            group.push(Span::styled(format!(" · {account}"), muted));
         }
         out.push(group);
     }
@@ -1963,11 +1988,39 @@ pub(super) fn draw_input(
         );
     }
 
+    // Highlight the editable composer selection (double/triple click, drag,
+    // Shift+arrows). It is a byte range into the input, mapped onto each
+    // wrapped row so it follows soft wraps and multi-line drafts.
+    let input_selection = app.input_selection_range();
+    if let Some((sel_start, sel_end)) = input_selection {
+        let sel_start = crate::tui::core::byte_offset_to_char_index(input_text, sel_start);
+        let sel_end = crate::tui::core::byte_offset_to_char_index(input_text, sel_end);
+        let segments = wrap_input_segments(input_text, line_width);
+        for rel in 0..visible_input_rows {
+            let Some(segment) = segments.get(scroll_offset + rel) else {
+                continue;
+            };
+            let lo = sel_start.max(segment.start_char);
+            let hi = sel_end.min(segment.end_char);
+            if lo >= hi {
+                continue;
+            }
+            if let Some(line) = lines.get_mut(suggestions_offset + rel) {
+                let start_col = prompt_len + cursor_col_for_segment(segment, lo);
+                let end_col = prompt_len + cursor_col_for_segment(segment, hi);
+                *line = highlight_line_selection(line, start_col, end_col);
+            }
+        }
+    }
+
     // Highlight an active copy selection over the composer text, mirroring the
     // chat/side-pane selection rendering. Columns are selection-space (typed
-    // text only), so shift them right by the prompt width for display.
+    // text only), so shift them right by the prompt width for display. While a
+    // mouse drag is mirrored into the editable selection above, that one wins
+    // so the composer never shows two competing highlights.
     if let Some(range) = app.copy_selection_range().filter(|range| {
-        range.start.pane == crate::tui::CopySelectionPane::Input
+        input_selection.is_none()
+            && range.start.pane == crate::tui::CopySelectionPane::Input
             && range.end.pane == crate::tui::CopySelectionPane::Input
     }) {
         let (start, end) = if (range.start.abs_line, range.start.column)

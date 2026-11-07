@@ -7,6 +7,11 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $installScript = Join-Path $repoRoot 'scripts\install.ps1'
 $uninstallScript = Join-Path $repoRoot 'scripts\uninstall.ps1'
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("jcode-windows-setup-eval-{0}" -f ([guid]::NewGuid().ToString('N')))
+# Resolve the real compiler before USERPROFILE changes, so rustup does not
+# search for toolchains inside the deliberately empty test profile.
+$fixtureSysroot = (& rustc --print sysroot).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not locate installer fixture compiler' }
+$fixtureCompiler = Join-Path $fixtureSysroot 'bin\rustc.exe'
 
 $envNames = @(
     'LOCALAPPDATA',
@@ -26,6 +31,19 @@ $envNames = @(
 $originalEnv = @{}
 foreach ($name in $envNames) {
     $originalEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+
+function New-InstallerFixture([string]$Path, [switch]$SecondVersion) {
+    $fixtureSource = Join-Path $repoRoot 'tests\fixtures\installer_binary.rs'
+    $compileArgs = @('--edition=2021', $fixtureSource, '-o', $Path)
+    if ($SecondVersion) { $compileArgs += @('--cfg', 'fixture_v2') }
+    & $fixtureCompiler @compileArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Could not compile executable installer fixture' }
+}
+
+function Assert-SameFile([string]$Expected, [string]$Actual, [string]$Message) {
+    Assert-Equal (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash `
+        (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash $Message
 }
 
 function Restore-TestEnvironment {
@@ -254,7 +272,7 @@ try {
         $profile = New-IsolatedWindowsProfile 'clean-install'
         Set-InstallScriptProfileGlobals $profile
         $source = Join-Path $profile.Root 'jcode-v1.exe'
-        Set-Content -Path $source -Value 'version-one' -NoNewline
+        New-InstallerFixture $source
         $script:mockUserPath = 'C:\Tools'
         $script:pathWrites = 0
         $script:pathBroadcasts = 0
@@ -268,7 +286,7 @@ try {
         Invoke-JcodeInstall
 
         Assert-PathExists $profile.LauncherPath 'clean install should create the launcher in the isolated LOCALAPPDATA tree'
-        Assert-Equal 'version-one' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'launcher should contain the local artifact contents'
+        Assert-SameFile $source $profile.LauncherPath 'launcher should contain the local executable artifact'
         Assert-PathExists (Join-Path $profile.BuildsDir 'stable\jcode.exe') 'clean install should populate the stable build channel'
         Assert-PathExists (Join-Path $profile.BuildsDir 'versions\0.0.1-eval\jcode.exe') 'clean install should populate the immutable versioned build'
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'clean install should persist exactly one launcher PATH entry in the mocked user PATH'
@@ -288,8 +306,8 @@ try {
         Set-InstallScriptProfileGlobals $profile
         $sourceV1 = Join-Path $profile.Root 'jcode-v1.exe'
         $sourceV2 = Join-Path $profile.Root 'jcode-v2.exe'
-        Set-Content -Path $sourceV1 -Value 'version-one' -NoNewline
-        Set-Content -Path $sourceV2 -Value 'version-two' -NoNewline
+        New-InstallerFixture $sourceV1
+        New-InstallerFixture $sourceV2 -SecondVersion
         $script:mockUserPath = 'C:\Tools'
         $script:pathWrites = 0
         $script:pathBroadcasts = 0
@@ -306,7 +324,7 @@ try {
         $script:Version = 'v1.0.1-eval'
         $script:ArtifactExePath = $sourceV2
         Invoke-JcodeInstall
-        Assert-Equal 'version-two' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'upgrade should replace launcher contents with the new build'
+        Assert-SameFile $sourceV2 $profile.LauncherPath 'upgrade should replace launcher with the new executable build'
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'upgrade should preserve exactly one launcher PATH entry'
         Assert-Equal $writesAfterFirstInstall $script:pathWrites 'upgrade should not rewrite PATH when it is already correct'
         Assert-Equal $broadcastsAfterFirstInstall $script:pathBroadcasts 'upgrade should not rebroadcast when PATH is unchanged'

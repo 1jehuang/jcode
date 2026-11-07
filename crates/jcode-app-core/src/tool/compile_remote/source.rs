@@ -501,7 +501,12 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let repo = repo().await;
         let name = std::ffi::OsStr::from_bytes(b"non-utf8-\xff");
-        std::fs::write(repo.path().join(name), b"contents").unwrap();
+        // APFS refuses non-UTF-8 names (EILSEQ), so such a path cannot exist
+        // there and there is nothing to reject.
+        if let Err(error) = std::fs::write(repo.path().join(name), b"contents") {
+            assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "{error}");
+            return;
+        }
         assert!(
             snapshot(repo.path())
                 .await
@@ -579,8 +584,11 @@ mod tests {
             assert!(relative_path(path).is_err(), "{path:?}");
         }
         let dir = tempfile::tempdir().unwrap();
-        put(dir.path(), "file", "contents");
-        assert_eq!(collect(dir.path(), b"file\0file\0").unwrap().files.len(), 1);
-        assert!(collect(dir.path(), b"file").is_err());
+        // collect() expects the canonical root its caller resolves; on macOS the
+        // temp dir sits under the /var -> /private/var symlink.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        put(&root, "file", "contents");
+        assert_eq!(collect(&root, b"file\0file\0").unwrap().files.len(), 1);
+        assert!(collect(&root, b"file").is_err());
     }
 }

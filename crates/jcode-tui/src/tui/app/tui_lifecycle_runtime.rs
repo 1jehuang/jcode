@@ -330,6 +330,7 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
+            self.invalidate_rewind_ui();
             self.session = session;
             crate::memory::sync_injected_memories(
                 &self.session.id,
@@ -369,6 +370,9 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
+            // Per-window accounts and the failover toggle live on the
+            // session, but only the provider acts on them.
+            self.restore_local_window_accounts();
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();

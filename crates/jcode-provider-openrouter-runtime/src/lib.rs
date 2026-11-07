@@ -833,14 +833,32 @@ pub struct OpenRouterProvider {
     reasoning_effort_support: Option<bool>,
     disable_reasoning_heuristics: bool,
     /// Per-model `(supports effort, default effort)` overrides from a named profile.
-    static_reasoning_config: HashMap<String, (Option<bool>, Option<String>)>,
+    #[allow(
+        clippy::type_complexity,
+        reason = "compact stored config tuple, not a new public model"
+    )]
+    static_reasoning_config: HashMap<String, (Option<bool>, Option<String>, Vec<String>)>,
     max_tokens: Option<u32>,
     /// Extra top-level JSON object fields merged into every chat/completions
     /// request body (e.g. NVIDIA NIM DeepSeek-V4 `chat_template_kwargs`).
     /// Resolved once at construction from named-profile config or the
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
+    /// Kimi partial-mode thinking prefill seed, resolved once at construction
+    /// from named-profile config or the `JCODE_KIMI_THINKING_PREFILL`
+    /// env/env-file value. Sent only for Kimi-family models on non-strict
+    /// OpenAI-schema endpoints (appended in `complete()`).
+    thinking_prefill_seed: Option<String>,
+    /// Optional character-anchor `name` for the partial-mode prefill message,
+    /// resolved from named-profile config or `JCODE_KIMI_PREFILL_NAME`.
+    thinking_prefill_name: Option<String>,
+    /// Whether the profile's `thinking_prefill` should also be sent for
+    /// non-Kimi models (explicit opt-in via named-profile config), so gateways
+    /// that accept partial-mode prefills beyond Moonshot (e.g. GLM proxies)
+    /// can seed their thinking too.
+    thinking_prefill_non_kimi: bool,
     static_models: Vec<String>,
+    static_model_config: HashMap<String, jcode_base::config::NamedProviderModelConfig>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
     /// Missing entries mean unspecified and preserve the provider-level fallback.
@@ -912,7 +930,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_supports_openai_reasoning_effort(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("vsllm"))
     }
 
     /// DeepSeek-family models accept the DeepSeek-style top-level
@@ -928,6 +946,17 @@ impl OpenRouterProvider {
     /// deepseek profile, then the active model family for direct compat
     /// endpoints (never for real OpenRouter, which uses unified reasoning).
     pub(crate) fn supports_deepseek_reasoning_effort(&self) -> bool {
+        if self.configured_reasoning_efforts().is_some() {
+            return false;
+        }
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
+            && self.model_config(&self.model_snapshot()).is_some()
+        {
+            return false;
+        }
         if self.model_reasoning_support() == Some(false) {
             return false;
         }
@@ -965,6 +994,17 @@ impl OpenRouterProvider {
     /// reasoning models, and only when no explicit config override or
     /// DeepSeek-style support already applies.
     pub(crate) fn supports_openai_reasoning_effort(&self) -> bool {
+        if self.configured_reasoning_efforts().is_some() {
+            return true;
+        }
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("a6api"))
+            && self.model_config(&self.model_snapshot()).is_some()
+        {
+            return false;
+        }
         if let Some(explicit) = self.model_reasoning_support() {
             return explicit;
         }
@@ -991,13 +1031,30 @@ impl OpenRouterProvider {
             .unwrap_or_default()
     }
 
-    fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>)> {
+    fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>, Vec<String>)> {
         let model = self.model_snapshot().trim().to_ascii_lowercase();
         self.static_reasoning_config.get(&model)
     }
 
     fn model_reasoning_support(&self) -> Option<bool> {
         self.model_reasoning_config().and_then(|config| config.0)
+    }
+
+    fn model_config(&self, model: &str) -> Option<&jcode_base::config::NamedProviderModelConfig> {
+        self.profile_id.as_ref()?;
+        self.static_model_config
+            .get(&model.trim().to_ascii_lowercase())
+    }
+
+    fn model_supports_chat(&self, model: &str) -> bool {
+        self.model_config(model)
+            .is_none_or(jcode_base::provider::named_provider_model_supports_chat)
+    }
+
+    fn configured_reasoning_efforts(&self) -> Option<Vec<String>> {
+        self.model_reasoning_config()
+            .map(|config| config.2.clone())
+            .filter(|efforts| !efforts.is_empty())
     }
 
     fn configured_effort_for_model(&self) -> Option<String> {
@@ -1063,7 +1120,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("vsllm"))
     }
 
     fn profile_supports_unified_reasoning(
@@ -1209,6 +1266,41 @@ impl OpenRouterProvider {
         } else {
             Some(merged)
         }
+    }
+
+    /// Resolve the Kimi partial-mode thinking prefill for an
+    /// OpenAI-compatible/OpenRouter provider.
+    ///
+    /// Sources, in precedence order:
+    /// 1. Optional named-profile `thinking_prefill` / `prefill_name` config.
+    /// 2. The `JCODE_KIMI_THINKING_PREFILL` / `JCODE_KIMI_PREFILL_NAME` env
+    ///    vars (or the same keys inside the profile's `.env` file).
+    ///
+    /// Returns `(seed, name)`; both `None` when nothing is configured.
+    fn resolve_thinking_prefill(
+        seed_config: Option<&str>,
+        name_config: Option<&str>,
+        env_file: &str,
+    ) -> (Option<String>, Option<String>) {
+        let seed = seed_config
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                load_env_value_from_env_or_config("JCODE_KIMI_THINKING_PREFILL", env_file)
+                    .map(|raw| raw.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+        let name = name_config
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                load_env_value_from_env_or_config("JCODE_KIMI_PREFILL_NAME", env_file)
+                    .map(|raw| raw.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+        (seed, name)
     }
 
     /// Provider-specific request fields that built-in profiles need by default.
@@ -1421,7 +1513,7 @@ impl OpenRouterProvider {
             .iter()
             .filter_map(|model| {
                 let id = model.id.trim();
-                if id.is_empty() || model.input.is_empty() {
+                if id.is_empty() || (model.input.is_empty() && model.supports_chat != Some(false)) {
                     return None;
                 }
                 let supports_images = model
@@ -1436,16 +1528,32 @@ impl OpenRouterProvider {
             .iter()
             .filter_map(|model| {
                 let id = model.id.trim();
-                if id.is_empty() || (model.reasoning.is_none() && model.reasoning_effort.is_none())
+                if id.is_empty()
+                    || (model.reasoning.is_none()
+                        && model.reasoning_effort.is_none()
+                        && model.reasoning_efforts.is_empty())
                 {
                     return None;
                 }
                 Some((
                     id.to_ascii_lowercase(),
-                    (model.reasoning, model.reasoning_effort.clone()),
+                    (
+                        model.reasoning,
+                        model.reasoning_effort.clone(),
+                        model.reasoning_efforts.clone(),
+                    ),
                 ))
             })
             .collect::<HashMap<_, _>>();
+        let (thinking_prefill_seed, thinking_prefill_name) = Self::resolve_thinking_prefill(
+            profile.thinking_prefill.as_deref(),
+            profile.prefill_name.as_deref(),
+            profile
+                .env_file
+                .as_deref()
+                .filter(|name| is_safe_env_file_name(name))
+                .unwrap_or(DEFAULT_ENV_FILE),
+        );
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
@@ -1476,7 +1584,16 @@ impl OpenRouterProvider {
                     .filter(|name| is_safe_env_file_name(name))
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
+            thinking_prefill_seed,
+            thinking_prefill_name,
+            thinking_prefill_non_kimi: profile.thinking_prefill_non_kimi,
             static_models,
+            static_model_config: profile
+                .models
+                .iter()
+                .filter(|model| !model.id.trim().is_empty())
+                .map(|model| (model.id.trim().to_ascii_lowercase(), model.clone()))
+                .collect(),
             static_context_limits,
             static_image_input_support,
             send_openrouter_headers: false,
@@ -1696,6 +1813,8 @@ impl OpenRouterProvider {
             "[TIMING] openrouter_new: pre_struct={}ms",
             new_start.elapsed().as_millis()
         ));
+        let (thinking_prefill_seed, thinking_prefill_name) =
+            Self::resolve_thinking_prefill(None, None, &configured_env_file_name());
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
@@ -1718,7 +1837,11 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens,
             extra_body,
+            thinking_prefill_seed,
+            thinking_prefill_name,
+            thinking_prefill_non_kimi: false,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
@@ -1775,7 +1898,11 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(None),
             extra_body: None,
+            thinking_prefill_seed: None,
+            thinking_prefill_name: None,
+            thinking_prefill_non_kimi: false,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
@@ -1824,7 +1951,11 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
+            thinking_prefill_seed: Self::resolve_thinking_prefill(None, None, DEFAULT_ENV_FILE).0,
+            thinking_prefill_name: Self::resolve_thinking_prefill(None, None, DEFAULT_ENV_FILE).1,
+            thinking_prefill_non_kimi: false,
             static_models: Vec::new(),
+            static_model_config: HashMap::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
@@ -1862,17 +1993,13 @@ impl OpenRouterProvider {
     }
 
     pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
-        let Some(profile_id) = self.profile_id.as_deref() else {
+        if self.profile_id.is_none() {
             return models;
-        };
+        }
 
         models
             .into_iter()
-            .filter(|model| {
-                jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                    profile_id, model,
-                )
-            })
+            .filter(|model| self.model_supports_chat(model))
             .collect()
     }
 
@@ -2031,7 +2158,11 @@ impl OpenRouterProvider {
                 static_reasoning_config: HashMap::new(),
                 max_tokens: None,
                 extra_body: None,
+                thinking_prefill_seed: None,
+                thinking_prefill_name: None,
+                thinking_prefill_non_kimi: false,
                 static_models: Vec::new(),
+                static_model_config: HashMap::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,

@@ -133,6 +133,24 @@ pub struct DisplayConfig {
     pub resume_recent_close_seconds: u64,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Where the info box (model, context, usage, KV cache, git, ...) lives:
+    /// "dock" (default) gives it a fixed column on the right of the chat that
+    /// never moves while you scroll or while a reply streams; "float" uses the
+    /// older behaviour of fitting boxes into gaps between chat lines.
+    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub info_widget_layout: InfoWidgetLayout,
+}
+
+/// Where the info box is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InfoWidgetLayout {
+    /// A fixed column on the right of the chat. The transcript wraps beside
+    /// it, so the box never covers text and never moves.
+    #[default]
+    Dock,
+    /// Boxes placed into free gaps next to the chat text (they move with it).
+    Float,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -175,6 +193,7 @@ impl Default for DisplayConfig {
             resume_project_scope: false,
             resume_recent_close_seconds: 30,
             usage_display: "left".to_string(),
+            info_widget_layout: InfoWidgetLayout::default(),
         }
     }
 }

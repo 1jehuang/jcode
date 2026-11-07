@@ -27,12 +27,17 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
-    // Credential import and explicit MCP management do not need normal agent
-    // startup hardening, migrations, telemetry, or provider discovery.
+    // Credential import, installer publication, and explicit MCP management
+    // must run without normal agent startup hardening, migrations, telemetry,
+    // or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }) | Command::Mcp { .. })
+            Some(
+                Command::Auth(super::args::AuthCommand::Import { .. })
+                    | Command::PublishBuild(_)
+                    | Command::Mcp { .. }
+            )
         )
     {
         if let Some(cwd) = &args.cwd {
@@ -223,6 +228,31 @@ pub fn register_external_provider_runtimes() {
         crate::provider::external::GROK_BUILD_RUNTIME,
         || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
     );
+    crate::provider::external::register_external_provider(
+        crate::provider::external::CLAUDE_CODE_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_claude_code_runtime::ClaudeCodeProvider::new()),
+    );
+    crate::usage::register_claude_code_usage_probe(|instance| async move {
+        let settings = crate::auth::claude_code::settings();
+        let identity =
+            jcode_provider_claude_code_runtime::probe_instance(&settings, &instance).await?;
+        // An older CLI without `get_usage` still yields identity, just no windows.
+        let usage = identity.usage;
+        Ok(crate::usage::ClaudeCodeUsageProbe {
+            email: identity.email,
+            plan: identity.subscription,
+            limits_unavailable: usage.unavailable,
+            windows: usage
+                .windows
+                .into_iter()
+                .map(|w| crate::usage::ClaudeCodeUsageWindow {
+                    name: w.name,
+                    percent: w.percent,
+                    resets_at: w.resets_at,
+                })
+                .collect(),
+        })
+    });
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new()),
@@ -477,9 +507,9 @@ fn source_update_check_status(result: anyhow::Result<Option<bool>>) -> crate::bu
         },
         Ok(Some(false)) => UpdateStatus::UpToDate,
         Ok(None) => UpdateStatus::Skipped {
-            reason:
-                "no upstream configured for the source checkout (local branch or detached HEAD)"
-                    .to_string(),
+            reason: "source checkout not found or has no upstream configured; \
+                     set JCODE_REPO_DIR to a checkout with a tracking branch to enable source updates"
+                .to_string(),
         },
         Err(error) => UpdateStatus::Error(format!("Source update check failed: {error:#}")),
     }
@@ -500,6 +530,8 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
         && !matches!(
             args.command,
             Some(Command::Update { .. })
+                | Some(Command::PruneBuilds { .. })
+                | Some(Command::PublishBuild(_))
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
@@ -534,6 +566,36 @@ mod tests {
     }
 
     #[test]
+    fn build_store_maintenance_never_starts_background_update_check() {
+        for argv in [
+            vec!["jcode", "prune-builds"],
+            vec!["jcode", "prune-builds", "--keep", "0"],
+            vec!["jcode", "prune-builds", "--dry-run"],
+            vec![
+                "jcode",
+                "publish-build",
+                "--source",
+                "prepared",
+                "--version",
+                "test",
+                "--launcher",
+                "launcher",
+                "--channel",
+                "stable",
+            ],
+        ] {
+            let args = parse_args(&argv);
+            assert!(!should_spawn_background_update_check_with_config(
+                &args, true
+            ));
+        }
+        let args = parse_args(&["jcode"]);
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
+    }
+
+    #[test]
     fn source_update_check_preserves_git_error() {
         let crate::bus::UpdateStatus::Error(message) =
             source_update_check_status(Err(anyhow::anyhow!("git fetch: offline")))
@@ -560,6 +622,19 @@ mod tests {
         };
         assert_eq!(current, jcode_build_meta::version());
         assert_eq!(latest, "latest source");
+    }
+
+    #[test]
+    fn source_update_check_missing_checkout_is_skipped() {
+        let result = hot_exec::check_for_updates_in(None, || {
+            panic!("missing checkouts must not fetch or claim the fetch slot")
+        });
+        let crate::bus::UpdateStatus::Skipped { reason } = source_update_check_status(result)
+        else {
+            panic!("missing source checkouts must skip the background update check");
+        };
+        assert!(reason.contains("source checkout not found"));
+        assert!(reason.contains("JCODE_REPO_DIR"));
     }
 
     #[test]
@@ -591,7 +666,7 @@ mod tests {
         git(&["commit", "--allow-empty", "-m", "initial"]);
 
         // A local branch without tracking is skipped before claiming a fetch slot.
-        let result = hot_exec::check_for_updates_in(repo.path(), || {
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || {
             panic!("untracked checkouts must not fetch or claim the fetch slot")
         });
         assert_eq!(*result.as_ref().unwrap(), None);
@@ -603,7 +678,7 @@ mod tests {
         // Local branches supply tracking controls without fetching or networking.
         git(&["branch", "upstream"]);
         git(&["branch", "--set-upstream-to=upstream", "source"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || false);
         assert_eq!(*result.as_ref().unwrap(), Some(false));
         assert!(matches!(
             source_update_check_status(result),
@@ -613,7 +688,7 @@ mod tests {
         git(&["checkout", "upstream"]);
         git(&["commit", "--allow-empty", "-m", "upstream update"]);
         git(&["checkout", "source"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || false);
         assert_eq!(*result.as_ref().unwrap(), Some(true));
         assert!(matches!(
             source_update_check_status(result),
@@ -623,11 +698,11 @@ mod tests {
         // Local commits alone are not updates.
         git(&["checkout", "upstream"]);
         git(&["branch", "--set-upstream-to=source", "upstream"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || false);
         assert_eq!(result.unwrap(), Some(false));
 
         git(&["checkout", "--detach"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || {
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || {
             panic!("detached checkouts must not fetch")
         });
         assert!(matches!(
@@ -638,7 +713,7 @@ mod tests {
         // A configured but missing upstream must still report an error.
         git(&["checkout", "source"]);
         git(&["branch", "-D", "upstream"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || false);
         assert!(matches!(
             source_update_check_status(result),
             crate::bus::UpdateStatus::Error(_)
@@ -649,7 +724,7 @@ mod tests {
         git(&["update-ref", "refs/remotes/origin/source", "HEAD"]);
         git(&["config", "branch.source.remote", "origin"]);
         git(&["config", "branch.source.merge", "refs/heads/source"]);
-        let result = hot_exec::check_for_updates_in(repo.path(), || true);
+        let result = hot_exec::check_for_updates_in(Some(repo.path()), || true);
         let crate::bus::UpdateStatus::Error(message) = source_update_check_status(result) else {
             panic!("failed fetch must report an error");
         };
@@ -659,7 +734,7 @@ mod tests {
     #[test]
     fn source_update_check_invalid_checkout_reports_error() {
         let directory = tempfile::tempdir().unwrap();
-        let result = hot_exec::check_for_updates_in(directory.path(), || {
+        let result = hot_exec::check_for_updates_in(Some(directory.path()), || {
             panic!("invalid checkouts must not fetch")
         });
         assert!(matches!(

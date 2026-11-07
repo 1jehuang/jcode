@@ -11,10 +11,75 @@ use tool_handoff::{
     wait_for_tool_handoff,
 };
 impl Agent {
+    /// Detect a provider route change made during the request (a transparent
+    /// model fallback such as Anthropic's retired `claude-fable-5` ->
+    /// `claude-opus-4-8`, or a switch to another OpenAI-compatible profile
+    /// serving the same model) and resync the session and clients with a
+    /// `ModelChanged`, so the header, picker, and context budget reflect the
+    /// route the provider will use next. Runs on success and on every stream
+    /// error exit, because a failed turn still leaves the provider on the new
+    /// route.
+    fn sync_route_change_after_stream(
+        &mut self,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+        model_at_request_start: &str,
+        provider_at_request_start: &str,
+        credential_at_request_start: &Option<jcode_provider_core::ResolvedCredential>,
+        oauth_email_at_request_start: &Option<crate::protocol::ProviderOAuthEmail>,
+        oauth_account_label_at_request_start: &Option<String>,
+    ) {
+        // Same-provider account failover can move this session's pin during
+        // the request. Persist and announce it on every exit path too.
+        self.sync_account_pins_after_stream(Some(event_tx));
+        let model_after_stream = self.provider.model();
+        let provider_after_stream = self.provider.display_name();
+        let route_changed = model_after_stream != model_at_request_start
+            || provider_after_stream != provider_at_request_start;
+        if route_changed {
+            logging::warn(&format!(
+                "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+                model_at_request_start,
+                provider_at_request_start,
+                model_after_stream,
+                provider_after_stream
+            ));
+            self.session.model = Some(self.provider_model());
+            self.provider_runtime_state.apply(
+                crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                    model: model_after_stream.clone(),
+                },
+            );
+            self.persist_session_best_effort("model fallback");
+        }
+        // Refresh authoritative credential identity after every upstream
+        // request, including auto credential resolution and OAuth failover.
+        let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
+        let credential_after_stream = self.provider.active_resolved_credential();
+        let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
+        if route_changed
+            || credential_after_stream != *credential_at_request_start
+            || oauth_email_after_stream != *oauth_email_at_request_start
+            || oauth_account_label_after_stream != *oauth_account_label_at_request_start
+        {
+            let _ = event_tx.send(ServerEvent::ModelChanged {
+                id: 0,
+                model: model_after_stream,
+                provider_name: Some(provider_after_stream),
+                context_window: Some(self.provider.context_window() as u64),
+                error: None,
+                resolved_credential: credential_after_stream,
+                provider_oauth_email: oauth_email_after_stream,
+                provider_oauth_account_label: oauth_account_label_after_stream,
+                reasoning_effort: self.provider.reasoning_effort(),
+            });
+        }
+    }
+
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        self.ensure_provider_conversation_reset().await?;
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
@@ -37,8 +102,14 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        // Pins restore dropped (account removed or relabeled) not yet announced.
+        for notice in self.take_account_notices() {
+            let _ = event_tx.send(notice);
+        }
+        // Return to the preferred account after its reset, at turn start only.
+        self.return_account_home_at_turn_start(Some(&event_tx));
 
-        loop {
+        'turn: loop {
             // Never open a new provider request after a cancel. Several paths
             // `continue` this loop (compaction retry, incomplete/stranded
             // continuation, empty-response recovery, soft-interrupt injection),
@@ -194,6 +265,10 @@ impl Agent {
             // model. Compare against this after the stream so we can emit a
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
+            // Out-of-credit failover can move the turn to another
+            // OpenAI-compatible profile serving the same model id, so the
+            // model alone does not reveal the switch.
+            let provider_at_request_start = provider.display_name();
             let credential_at_request_start = provider.active_resolved_credential();
             let oauth_account_label_at_request_start = provider.serving_oauth_account_label();
             let oauth_email_at_request_start =
@@ -229,6 +304,8 @@ impl Agent {
             drop(cache_signature_messages);
             drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
+            provider.set_host_tool_executor_available(true);
+            provider.bind_session(&self.session.id);
             let mut stream = {
                 provider.set_session_id(&self.session.id);
                 let mut complete_future = std::pin::pin!(provider.complete_split(
@@ -272,8 +349,16 @@ impl Agent {
                                             ));
                                         }
                                         let _ = event_tx.send(self.take_recovery_compaction_event());
-                                        continue;
+                                        continue 'turn;
                                     }
+                                    self.sync_route_change_after_stream(
+                                        &event_tx,
+                                        &model_at_request_start,
+                                        &provider_at_request_start,
+                                        &credential_at_request_start,
+                                        &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
+                                    );
                                     return Err(e);
                                 }
                             }
@@ -455,6 +540,18 @@ impl Agent {
                             "stream_error",
                             api_start,
                             vec![("mode", "mpsc".to_string()), ("error", err_str)],
+                        );
+                        // Out-of-credit failover may have moved the provider to
+                        // another profile before this stream failed. Tell
+                        // clients and persist it, or they keep showing the old
+                        // route while the next turn goes to the new one.
+                        self.sync_route_change_after_stream(
+                            &event_tx,
+                            &model_at_request_start,
+                            &provider_at_request_start,
+                            &credential_at_request_start,
+                            &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
                         );
                         return Err(e);
                     }
@@ -895,6 +992,11 @@ impl Agent {
                         provider_native_items.clear();
                         provider_native_tracker.clear();
                         openai_native_compaction = None;
+                        // Usage belongs to the discarded attempt, not its replacement.
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         saw_message_end = false;
                         stop_reason = None;
                         let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
@@ -1071,6 +1173,14 @@ impl Agent {
                                 ),
                             ],
                         );
+                        self.sync_route_change_after_stream(
+                            &event_tx,
+                            &model_at_request_start,
+                            &provider_at_request_start,
+                            &credential_at_request_start,
+                            &oauth_email_at_request_start,
+                            &oauth_account_label_at_request_start,
+                        );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
@@ -1194,43 +1304,14 @@ impl Agent {
             // requested model with a stale context-limit. Resync the session and
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
-            let model_after_stream = self.provider.model();
-            if model_after_stream != model_at_request_start {
-                logging::warn(&format!(
-                    "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
-                    model_at_request_start, model_after_stream
-                ));
-                self.session.model = Some(self.provider_model());
-                self.provider_runtime_state.apply(
-                    crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                        model: model_after_stream.clone(),
-                    },
-                );
-                self.persist_session_best_effort("model fallback");
-            }
-            // Refresh authoritative credential identity after every upstream
-            // request, including auto credential resolution and OAuth failover.
-            let oauth_email_after_stream =
-                crate::server::provider_oauth_email(self.provider.as_ref());
-            let credential_after_stream = self.provider.active_resolved_credential();
-            let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
-            if model_after_stream != model_at_request_start
-                || credential_after_stream != credential_at_request_start
-                || oauth_email_after_stream != oauth_email_at_request_start
-                || oauth_account_label_after_stream != oauth_account_label_at_request_start
-            {
-                let _ = event_tx.send(ServerEvent::ModelChanged {
-                    id: 0,
-                    model: model_after_stream,
-                    provider_name: Some(self.provider.display_name()),
-                    context_window: Some(self.provider.context_window() as u64),
-                    error: None,
-                    resolved_credential: credential_after_stream,
-                    provider_oauth_email: oauth_email_after_stream,
-                    provider_oauth_account_label: oauth_account_label_after_stream,
-                    reasoning_effort: self.provider.reasoning_effort(),
-                });
-            }
+            self.sync_route_change_after_stream(
+                &event_tx,
+                &model_at_request_start,
+                &provider_at_request_start,
+                &credential_at_request_start,
+                &oauth_email_at_request_start,
+                &oauth_account_label_at_request_start,
+            );
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();

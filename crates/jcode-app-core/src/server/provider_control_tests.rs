@@ -36,6 +36,98 @@ async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<Server
     .expect("expected final auth catalog notification")
 }
 
+#[tokio::test]
+async fn account_switch_clears_only_selected_login_failure_even_when_agent_is_busy() {
+    let _guard = EnvGuard::save(&[]);
+    let previous_claude = crate::auth::claude::get_active_account_override();
+    let previous_openai = crate::auth::codex::get_active_account_override();
+    let target = "switch-failure-target";
+    let other = "switch-failure-other";
+    for (kind, provider_id) in [("anthropic", "claude"), ("openai", "openai")] {
+        crate::auth::claude::set_active_account_override(Some(target.to_string()));
+        crate::auth::codex::set_active_account_override(Some(target.to_string()));
+        for id in ["claude", "openai"] {
+            crate::provider::record_provider_unavailable_for_account(id, "old credential rejected");
+        }
+        crate::auth::claude::set_active_account_override(Some(other.to_string()));
+        crate::auth::codex::set_active_account_override(Some(other.to_string()));
+        crate::provider::record_provider_unavailable_for_account(
+            provider_id,
+            "other login rejected",
+        );
+
+        let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+        let agent = Arc::new(Mutex::new(Agent::new(provider, Registry::empty())));
+        let busy = agent.lock().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_account_switch_refresh(71, kind, Some(target.to_string()), Arc::clone(&agent), tx);
+        assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_some());
+        crate::auth::claude::set_active_account_override(Some(target.to_string()));
+        crate::auth::codex::set_active_account_override(Some(target.to_string()));
+        assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_none());
+        let unrelated = if provider_id == "claude" {
+            "openai"
+        } else {
+            "claude"
+        };
+        assert!(crate::provider::provider_unavailability_detail_for_account(unrelated).is_some());
+        drop(busy);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ServerEvent::Done { id: 71 }) {
+                    return;
+                }
+            }
+            panic!("account switch must acknowledge completion");
+        })
+        .await
+        .expect("account switch must finish after the agent becomes idle");
+        for id in ["claude", "openai"] {
+            crate::provider::clear_provider_unavailable_for_account(id);
+        }
+        crate::auth::claude::set_active_account_override(Some(other.to_string()));
+        crate::auth::codex::set_active_account_override(Some(other.to_string()));
+        crate::provider::clear_provider_unavailable_for_account(provider_id);
+    }
+    crate::auth::claude::set_active_account_override(previous_claude);
+    crate::auth::codex::set_active_account_override(previous_openai);
+}
+
+#[tokio::test]
+async fn notify_auth_changed_clears_renewed_claude_login_failure() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]);
+    let previous = crate::auth::claude::get_active_account_override();
+    crate::auth::claude::set_active_account_override(Some("renewed-login".to_string()));
+    crate::provider::record_provider_unavailable_for_account(
+        "claude",
+        "old refresh token rejected",
+    );
+    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::new());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    handle_notify_auth_changed(
+        72,
+        Some("claude".to_string()),
+        None,
+        false,
+        &provider,
+        &provider,
+        &sessions,
+        &session_id,
+        &agent,
+        &tx,
+    )
+    .await;
+    recv_final_catalog_notification(&mut rx).await;
+    assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_none());
+    crate::auth::claude::set_active_account_override(previous);
+}
 #[path = "provider_control_tests/account_invalidation.rs"]
 mod account_invalidation;
 
@@ -161,7 +253,14 @@ async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_ident
     let agent = Arc::new(Mutex::new(session_agent));
     let (tx, mut rx) = mpsc::unbounded_channel();
     for label in ["second", "third", "first"] {
-        spawn_account_switch_refresh(81, "openai", label.into(), Arc::clone(&agent), tx.clone());
+        apply_account_switch(81, "openai", label, &mut *agent.lock().await, &tx);
+        spawn_account_switch_refresh(
+            81,
+            "openai",
+            Some(label.into()),
+            Arc::clone(&agent),
+            tx.clone(),
+        );
         let mut acknowledged = false;
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Some(event) = rx.recv().await {
@@ -226,6 +325,7 @@ async fn account_switch_cross_provider_uses_target_oauth_catalog() {
     let _guard = EnvGuard::save(&[]);
     let provider = Arc::new(AuthChangeMockProvider::new());
     *provider.state.routes_override.write().unwrap() = Some(vec![ModelRoute {
+        catalog_metadata: Default::default(),
         model: "future-target-model".into(),
         provider: "Claude".into(),
         api_method: "claude-oauth@work".into(),
@@ -344,6 +444,7 @@ impl Provider for AuthChangeMockProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: provider.clone(),
                 api_method: api_method.clone(),
@@ -1025,6 +1126,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     let provider = Arc::new(AuthChangeMockProvider::new());
     *provider.state.routes_override.write().unwrap() = Some(vec![
         ModelRoute {
+            catalog_metadata: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-oauth".to_string(),
@@ -1034,6 +1136,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1043,6 +1146,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.6-sol".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1306,5 +1410,159 @@ async fn notify_auth_changed_switches_only_current_session_model() {
     );
 }
 
+#[tokio::test]
+async fn refresh_models_emits_available_models_updated_after_prefetch() {
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let registry = Registry::empty();
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_refresh_models(7, &provider, &agent, &client_event_tx).await;
+
+    let mut saw_done = false;
+    let mut saw_models = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, client_event_rx.recv())
+            .await
+            .expect("receive server event before timeout");
+        match event.expect("channel open") {
+            ServerEvent::Done { id } => {
+                assert_eq!(id, 7);
+                saw_done = true;
+            }
+            ServerEvent::AvailableModelsUpdated {
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+            } => {
+                saw_models = Some((
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    available_model_routes,
+                ));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_done, "expected immediate Done ack");
+    let (provider_name, provider_model, available_models, available_model_routes) =
+        saw_models.expect("expected AvailableModelsUpdated event");
+    assert_eq!(provider_name.as_deref(), Some("mock-auth"));
+    assert_eq!(provider_model.as_deref(), Some("logged-out-model"));
+    assert_eq!(available_models, vec!["logged-out-model".to_string()]);
+    assert!(available_model_routes.iter().any(|route| {
+        route.model == "logged-out-model"
+            && route.provider == "MockAuth"
+            && route.api_method == "mock-auth"
+    }));
+}
+
+#[tokio::test]
+async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    // Subscribe before the request: every connected client's bus forwarder
+    // turns this into ServerEvent::CredentialsChanged (client_lifecycle.rs).
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents =
+        Arc::new(crate::server::session_manager::SessionManager::from_agents(
+            HashMap::from([("test-session".to_string(), Arc::clone(&agent))]),
+        ));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed(
+        7,
+        Some("anthropic".to_string()),
+        None,
+        false,
+        &provider,
+        &provider,
+        &sessions,
+        session_id.as_str(),
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, bus_rx.recv())
+            .await
+            .expect("CredentialsChanged must be published after an auth change");
+        if let Ok(crate::bus::BusEvent::CredentialsChanged { .. }) = event {
+            break;
+        }
+    }
+}
+
+/// The one-shot path (`jcode login` on a fresh socket) has no requesting
+/// session. It must still refresh every idle session now and every busy one
+/// once idle, and must not auto-switch any session's model.
+#[tokio::test]
+async fn one_shot_auth_change_refreshes_every_session_without_model_switch() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let template: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let idle_provider = Arc::new(AuthChangeMockProvider::new());
+    let idle_state = Arc::clone(&idle_provider.state);
+    *idle_state.selected_model.write().unwrap() = Some("pinned-model".to_string());
+    let busy_provider = Arc::new(AuthChangeMockProvider::new());
+    let busy_state = Arc::clone(&busy_provider.state);
+    let idle_agent = Arc::new(Mutex::new(Agent::new(idle_provider, Registry::empty())));
+    let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, Registry::empty())));
+    let busy_guard = busy_agent.lock().await;
+    let sessions: SessionAgents = Arc::new(
+        crate::server::session_manager::SessionManager::from_agents(HashMap::from([
+            ("idle".to_string(), Arc::clone(&idle_agent)),
+            ("busy".to_string(), Arc::clone(&busy_agent)),
+        ])),
+    );
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed_process_wide(
+        11,
+        Some("claude".to_string()),
+        None,
+        &template,
+        &sessions,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::Done { id: 11 })
+    ));
+    assert!(
+        *idle_state.logged_in.read().unwrap(),
+        "idle session refreshed"
+    );
+    assert_eq!(
+        idle_state.selected_model.read().unwrap().as_deref(),
+        Some("pinned-model"),
+        "one-shot notice must not switch a session's model"
+    );
+    assert!(!*busy_state.logged_in.read().unwrap());
+    drop(busy_guard);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !*busy_state.logged_in.read().unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "busy session was not refreshed once idle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
 #[path = "provider_control_tests/model_catalog.rs"]
 mod model_catalog;

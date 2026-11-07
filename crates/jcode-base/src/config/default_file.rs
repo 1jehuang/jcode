@@ -66,6 +66,10 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Jump to the bottom of the chat and resume auto-follow (also: click the
+# "Jump to bottom" pill shown while scrolled up). Comma-separate aliases.
+scroll_to_bottom = "ctrl+end, alt+q"
+
 # Auto-poke toggle. Set "" to disable.
 auto_poke_toggle = "ctrl+p"
 
@@ -170,6 +174,12 @@ pin_images = true
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
+
+# Where the info box (model, context, limits, KV cache, git) lives:
+# "dock" (default) keeps it in a fixed column on the right of the chat that
+# never moves while you scroll or a reply streams; the chat wraps beside it.
+# "float" fits it into gaps between chat lines instead (it moves with the text).
+# info_widget_layout = "dock"
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -516,12 +526,21 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
-# Try another account on the same provider before switching providers (default: true)
+# Try another account on the same provider before switching providers (default: true).
+# Only the window that ran out moves. `/accounts failover off` turns it off per window.
 # same_provider_account_failover = false
+# After failover, go back to the preferred account at the start of a turn once
+# its usage limit has reset (default: true)
+# account_failover_return_home = false
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
 # copilot_premium = "zero"
+# Enterprise hostname for Copilot login, token exchange, models, and inference.
+# copilot_enterprise_url = "example.ghe.com"
+# Browser for ChatGPT [web] models. Defaults to Google Chrome/Chromium.
+# Set it to the browser your ChatGPT account is signed into (e.g. Brave).
+# chatgpt_web_browser = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
 # Only list these providers in the /model picker (issue #460). Entries match
 # provider labels ("openai", "anthropic", "copilot", "openrouter", ...), route
 # api methods ("claude-oauth", "openai-compatible:myprofile"), or bare
@@ -551,6 +570,31 @@ cross_provider_failover = "countdown"
 # WebSocket permessage-deflate for ChatGPT/OpenAI Responses sockets.
 # Env override: JCODE_REQUEST_COMPRESSION.
 # request_compression = "auto"
+
+# Claude Code mode: run Claude through the official `claude` CLI (your Claude
+# subscription, used by Claude Code itself) instead of jcode's native Anthropic
+# transport. Opt in per session with `--provider claude-code` or models like
+# `claude-code:claude-opus-4-8`. Native Claude stays unchanged.
+# With no instances listed, one implicit "default" instance uses the CLI's
+# default login (~/.claude). Each extra instance is a separate login isolated by
+# its own CLAUDE_CONFIG_DIR (`home`); log in with
+# `jcode login --provider claude-code --account <id>`.
+# Env override for the binary: JCODE_CLAUDE_CODE_BIN.
+# [provider.claude_code]
+# binary = "claude"
+# permission_mode = "bypassPermissions"   # bypassPermissions | default | acceptEdits | plan | auto | dontAsk
+# setting_sources = ["user", "project", "local"]
+# expose_jcode_tools = true
+# default_instance = "default"
+#
+# [[provider.claude_code.instances]]
+# id = "default"
+# display_name = "Claude (Max)"
+#
+# [[provider.claude_code.instances]]
+# id = "personal"
+# display_name = "Claude Personal"
+# home = "~/.claude_personal"
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,
@@ -931,6 +975,11 @@ mod tests {
         let template = Config::default_config_file_contents();
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert_eq!(
+            config.keybindings.scroll_to_bottom,
+            jcode_config_types::KeybindingsConfig::default().scroll_to_bottom,
+            "the template must list the scroll_to_bottom default"
+        );
         assert!(config.tools.codemode);
         assert_eq!(config.compaction.reactive_threshold, 0.80);
         assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);

@@ -108,7 +108,7 @@ fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
             app.server_display_name().as_deref(),
             Some("SSH test-remote")
         );
-        assert!(super::prompt_history::history_file_path().is_none());
+        assert!(super::prompt_history::history_file_path("ssh-session").is_none());
         let error = super::helpers::open_path_or_url_detached("/remote/file.md").unwrap_err();
         assert!(
             error
@@ -263,6 +263,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,

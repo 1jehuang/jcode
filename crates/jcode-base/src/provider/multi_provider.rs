@@ -1,7 +1,196 @@
+//! Per-session same-provider account failover.
+//!
+//! When the active Claude or OpenAI account of *this session* runs out of
+//! subscription usage, move only this session to the next stored account and
+//! resend the same request. Other sessions (their pins) and the stored
+//! default account are never touched: the move is `set_account_pin` on this
+//! provider instance.
+//!
+//! The runtimes report the usage-limit 429 inside the stream, so the stream
+//! is peeked before anything reaches the consumer. A resend only happens when
+//! the request failed before any output.
+
+use super::account_failover::{
+    account_exhausted, account_failover_return_home_config, account_kind, account_kind_display,
+    account_label_prefix, account_resets_at, default_account_label, format_reset_clock,
+    pin_for_label, record_account_exhausted, same_provider_account_failover_config,
+    stored_accounts,
+};
 use super::*;
-use anyhow::Result;
+use jcode_provider_core::{AccountPin, AccountProviderKind};
 
 impl MultiProvider {
+    pub(super) async fn revalidate_marked_openai_account(
+        &self,
+        provider: ActiveProvider,
+        label: Option<&str>,
+    ) {
+        if provider == ActiveProvider::OpenAI
+            && let Some(label) = label
+            && (models::provider_unavailability_detail_for_account_label("openai", Some(label))
+                .is_some()
+                || account_exhausted(AccountProviderKind::OpenAi, label).is_some())
+        {
+            crate::usage::revalidate_openai_account_exhaustion(label).await;
+        }
+    }
+
+    pub(super) async fn try_same_provider_account_failover(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+        initial_reason: &str,
+        _notes: &mut Vec<String>,
+    ) -> Result<Option<EventStream>> {
+        if !self.provider_uses_oauth_accounts(provider) {
+            return Ok(None);
+        }
+        let current = self
+            .selected_account_for_provider(provider)
+            .or_else(|| active_account_label_for_provider(provider));
+        if let (Some(label), Some(kind), Some(limit)) = (
+            current.as_deref(),
+            account_kind(provider),
+            jcode_provider_core::classify_account_usage_limit(initial_reason),
+        ) {
+            record_account_exhausted(kind, label, limit.resets_at);
+        }
+        if provider == ActiveProvider::OpenAI
+            && self.account_failover_enabled()
+            && let Some(current) = current.as_deref()
+        {
+            let labels = saved_account_labels("openai");
+            let pool = crate::auth::account_pool::AccountPool::load();
+            let current_key = crate::auth::account_pool::account_key("openai", Some(current));
+            if labels.iter().any(|label| label == current)
+                && !pool.excluded.contains(&current_key)
+                && pool.is_member(&current_key, true)
+            {
+                let model = self.model();
+                for label in labels.iter().filter(|label| label.as_str() != current) {
+                    let key = crate::auth::account_pool::account_key("openai", Some(label));
+                    if !pool.excluded.contains(&key)
+                        && pool.is_member(&key, true)
+                        && models::is_agent_model_for_failover(&model, "openai")
+                        && saved_account_can_serve_model("openai", label, &model)
+                        && (account_exhausted(AccountProviderKind::OpenAi, label).is_some()
+                            || models::provider_unavailability_detail_for_account_label(
+                                "openai",
+                                Some(label),
+                            )
+                            .is_some())
+                    {
+                        // Usage-only revalidation may clear an early-reset mark.
+                        // Never select a runtime or issue an alternate completion
+                        // until the caller accepts the exact target prompt below.
+                        crate::usage::revalidate_openai_account_exhaustion(label).await;
+                    }
+                }
+            }
+        }
+        let exhausted_reason = account_kind(provider).and_then(|kind| {
+            let labels: Vec<_> = stored_accounts(kind)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect();
+            (!labels.is_empty()
+                && labels
+                    .iter()
+                    .all(|label| account_exhausted(kind, label).is_some()))
+            .then(|| account_failover::all_accounts_exhausted_reason(kind, &labels))
+        });
+        let initial_reason = exhausted_reason.as_deref().unwrap_or(initial_reason);
+        if let Some(prompt) = current.as_deref().and_then(|current| {
+            self.account_failover_prompt(provider, current, initial_reason, messages, tools, mode)
+        }) {
+            // No alternate request, runtime mutation or global override before
+            // the caller's cancellable countdown has accepted this exact route.
+            return Err(anyhow!(prompt.to_error_message()));
+        }
+        if let Some(current) = self.selected_account_for_provider(provider) {
+            let key = Self::provider_key(provider);
+            let pool = crate::auth::account_pool::AccountPool::load();
+            if saved_account_labels(key).contains(&current)
+                && pool.is_member(
+                    &crate::auth::account_pool::account_key(key, Some(&current)),
+                    true,
+                )
+            {
+                let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+                for target in Self::fallback_sequence(provider)
+                    .into_iter()
+                    .filter(|target| *target != provider)
+                {
+                    if let Some(prompt) = self.cross_provider_pool_prompt(
+                        provider,
+                        target,
+                        initial_reason.to_owned(),
+                        chars,
+                        tokens,
+                    ) {
+                        return Err(anyhow!(prompt.to_error_message()));
+                    }
+                }
+            }
+        }
+        if let Some(reason) = exhausted_reason {
+            return Err(anyhow!(reason));
+        }
+        Ok(None)
+    }
+
+    pub(super) fn approved_account_switch_origin(
+        &self,
+        provider: ActiveProvider,
+    ) -> Option<(AccountProviderKind, Option<AccountPin>, String)> {
+        let kind = account_kind(provider)?;
+        let from = self.session_account_label(kind)?;
+        if self.account_failover.home(kind).is_none() && account_exhausted(kind, &from).is_none() {
+            return None;
+        }
+        Some((kind, self.account_pin(kind), from))
+    }
+
+    pub(super) fn record_approved_account_switch(
+        &self,
+        origin: Option<(AccountProviderKind, Option<AccountPin>, String)>,
+        to: &str,
+    ) {
+        if let Some((kind, pin, from)) = origin
+            && from != to
+        {
+            self.record_account_move(kind, pin.as_ref(), &from, to);
+        }
+    }
+
+    fn account_failover_prompt(
+        &self,
+        provider: ActiveProvider,
+        current: &str,
+        reason: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+    ) -> Option<ProviderFailoverPrompt> {
+        let key = Self::provider_key(provider);
+        let labels = saved_account_labels(key);
+        // Missing pins cannot heal to a different account. Neither may an
+        // explicitly manual account silently enroll itself in the pool.
+        let pool = crate::auth::account_pool::AccountPool::load();
+        if !labels.iter().any(|label| label == current)
+            || !pool.is_member(
+                &crate::auth::account_pool::account_key(key, Some(current)),
+                true,
+            )
+        {
+            return None;
+        }
+        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
+    }
+
     /// Check the exact billing identity again when a countdown expires. A
     /// removed login or a newly excluded account must never be selected.
     pub fn is_failover_route_pool_approved(route: &str) -> bool {
@@ -25,7 +214,13 @@ impl MultiProvider {
                 _ => return false,
             };
             let labels = saved_account_labels(provider);
+            let kind = if provider == "openai" {
+                AccountProviderKind::OpenAi
+            } else {
+                AccountProviderKind::Claude
+            };
             if !labels.iter().any(|saved| saved == label)
+                || account_exhausted(kind, label).is_some()
                 || !saved_account_can_serve_model(provider, label, model)
                 || models::provider_unavailability_detail_for_account_label(provider, Some(label))
                     .is_some()
@@ -76,32 +271,6 @@ impl MultiProvider {
         !pool.excluded.contains(&key) && pool.is_member(&key, default)
     }
 
-    fn account_failover_prompt(
-        &self,
-        provider: ActiveProvider,
-        current: &str,
-        reason: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        mode: CompletionMode<'_>,
-    ) -> Option<ProviderFailoverPrompt> {
-        let key = Self::provider_key(provider);
-        let labels = saved_account_labels(key);
-        // Missing pins cannot heal to a different account. Neither may an
-        // explicitly manual account silently enroll itself in the pool.
-        let pool = crate::auth::account_pool::AccountPool::load();
-        if !labels.iter().any(|label| label == current)
-            || !pool.is_member(
-                &crate::auth::account_pool::account_key(key, Some(current)),
-                true,
-            )
-        {
-            return None;
-        }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
-        self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
-    }
-
     pub(super) fn cross_provider_pool_prompt(
         &self,
         from: ActiveProvider,
@@ -111,9 +280,10 @@ impl MultiProvider {
         tokens: usize,
     ) -> Option<ProviderFailoverPrompt> {
         let from_provider = Self::provider_key(from);
+        // This window's account (its pin, else the login it resolved to).
         let from_label = self.selected_account_for_provider(from).or_else(|| {
             self.provider_uses_oauth_accounts(from)
-                .then(|| active_account_label_for_provider(from))
+                .then(|| account_kind(from).and_then(|kind| self.session_account_label(kind)))
                 .flatten()
         });
         let source_key = match from {
@@ -138,7 +308,7 @@ impl MultiProvider {
         };
         if let Some(current) = from_label
             .as_deref()
-            .filter(|_| !context_only && same_provider_account_failover_enabled())
+            .filter(|_| !context_only && self.account_failover_enabled())
         {
             let method = if from == ActiveProvider::OpenAI {
                 "openai-oauth"
@@ -194,9 +364,7 @@ impl MultiProvider {
             {
                 continue;
             }
-            if target_provider == from
-                && (context_only || !same_provider_account_failover_enabled())
-            {
+            if target_provider == from && (context_only || !self.account_failover_enabled()) {
                 continue;
             }
             let label = jcode_provider_core::oauth_account_label(&route.api_method);
@@ -297,55 +465,128 @@ impl MultiProvider {
         Some(prompt)
     }
 
-    pub(super) async fn try_same_provider_account_failover(
+    /// Effective failover setting: the session toggle, else config.
+    pub(super) fn account_failover_enabled(&self) -> bool {
+        self.account_failover
+            .enabled()
+            .unwrap_or_else(same_provider_account_failover_config)
+    }
+
+    /// Label this session uses for `kind`: its pin, else the label the last
+    /// request resolved to, else the stored default.
+    pub(super) fn session_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        let explicit = match kind {
+            AccountProviderKind::Claude => {
+                self.selected_account_for_provider(ActiveProvider::Claude)
+            }
+            AccountProviderKind::OpenAi => {
+                self.selected_account_for_provider(ActiveProvider::OpenAI)
+            }
+            AccountProviderKind::ClaudeCode => None,
+        };
+        explicit
+            .or_else(|| self.account_pin(kind).map(|pin| pin.label))
+            .or_else(|| self.resolved_account_label(kind))
+            .or_else(|| default_account_label(kind))
+    }
+
+    /// True when this session's account for `provider` is known to be out of
+    /// usage: recorded by a usage-limit response (any session), or, for an
+    /// unpinned Claude session, the default account's usage probe.
+    pub(super) fn session_account_exhausted(&self, provider: ActiveProvider) -> Option<String> {
+        let kind = account_kind(provider)?;
+        let label = self.session_account_label(kind)?;
+        if account_exhausted(kind, &label).is_none()
+            && let Some(usage_kind) = super::account_failover::multi_account_provider_kind(provider)
+            && let Some(resets_at) =
+                crate::usage::account_label_usage_exhausted_sync(usage_kind, &label)
+        {
+            // The label's cached usage (5h and weekly windows spent) says it
+            // is out: remember it like a usage-limit response would.
+            record_account_exhausted(kind, &label, resets_at);
+        }
+        if let Some(until) = account_exhausted(kind, &label) {
+            return Some(format!(
+                "{label} is out of usage (resets {})",
+                format_reset_clock(until)
+            ));
+        }
+        if provider == ActiveProvider::Claude
+            && self.account_pin(kind).is_none()
+            && self.is_claude_usage_exhausted()
+        {
+            return Some(super::account_failover::usage_exhausted_reason(provider));
+        }
+        None
+    }
+
+    /// After a successful move: remember where to return, and tell the user.
+    fn record_account_move(
         &self,
-        provider: ActiveProvider,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        mode: CompletionMode<'_>,
-        initial_reason: &str,
-        _notes: &mut Vec<String>,
-    ) -> Result<Option<EventStream>> {
-        if !self.provider_uses_oauth_accounts(provider) {
-            return Ok(None);
+        kind: AccountProviderKind,
+        original_pin: Option<&AccountPin>,
+        from: &str,
+        to: &str,
+    ) {
+        if self.account_failover.home(kind).is_none() {
+            let home = original_pin
+                .cloned()
+                .unwrap_or_else(|| pin_for_label(kind, from));
+            self.account_failover.set_home(kind, Some(home));
         }
-        let current = self
-            .selected_account_for_provider(provider)
-            .or_else(|| active_account_label_for_provider(provider));
-        if let Some(prompt) = current.as_deref().and_then(|current| {
-            self.account_failover_prompt(provider, current, initial_reason, messages, tools, mode)
-        }) {
-            // No alternate request, runtime mutation or global override before
-            // the caller's cancellable countdown has accepted this exact route.
-            return Err(anyhow!(prompt.to_error_message()));
+        let reset = match account_resets_at(kind, from) {
+            Some(at) => format!("{from} resets {}", format_reset_clock(at)),
+            None => format!("{from} is out of usage"),
+        };
+        self.startup_notices
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(format!(
+                "⚡ This window moved from {from} to {to} ({reset})"
+            ));
+    }
+
+    /// Turn-start check: re-pin the preferred account once its recorded
+    /// usage limit has reset. Never runs mid-turn (the agent calls it).
+    pub(super) fn return_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        if !account_failover_return_home_config() {
+            return Vec::new();
         }
-        if let Some(current) = current {
-            let key = Self::provider_key(provider);
-            let pool = crate::auth::account_pool::AccountPool::load();
-            if saved_account_labels(key).contains(&current)
-                && pool.is_member(
-                    &crate::auth::account_pool::account_key(key, Some(&current)),
-                    true,
-                )
-            {
-                let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
-                for target in Self::fallback_sequence(provider)
-                    .into_iter()
-                    .filter(|target| *target != provider)
-                {
-                    if let Some(prompt) = self.cross_provider_pool_prompt(
-                        provider,
-                        target,
-                        initial_reason.to_owned(),
-                        chars,
-                        tokens,
-                    ) {
-                        return Err(anyhow!(prompt.to_error_message()));
-                    }
+        let mut moved = Vec::new();
+        for kind in AccountProviderKind::ALL {
+            let Some(home) = self.account_failover.home(kind) else {
+                continue;
+            };
+            if self.session_account_label(kind).as_deref() == Some(home.label.as_str()) {
+                self.account_failover.set_home(kind, None);
+                continue;
+            }
+            if account_exhausted(kind, &home.label).is_some() {
+                continue;
+            }
+            let reset_observed = std::time::Instant::now();
+            match self.set_account_pin(kind, Some(home.clone())) {
+                Ok(()) => {
+                    self.account_failover.set_home(kind, None);
+                    models::clear_quota_unavailability_observed_before(
+                        account_label_prefix(kind),
+                        &home.label,
+                        reset_observed,
+                    );
+                    crate::logging::info(&format!(
+                        "{} account {} reset; this session is back on it",
+                        account_kind_display(kind),
+                        home.label
+                    ));
+                    moved.push(kind);
                 }
+                Err(err) => crate::logging::warn(&format!(
+                    "Failed to return to preferred account {}: {err}",
+                    home.label
+                )),
             }
         }
-        Ok(None)
+        moved
     }
 }
 

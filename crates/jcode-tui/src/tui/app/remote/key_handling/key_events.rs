@@ -5,6 +5,9 @@ pub(in crate::tui::app) async fn handle_remote_key_event(
     event: KeyEvent,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    if event.code == KeyCode::Esc && event.kind != crossterm::event::KeyEventKind::Press {
+        return Ok(());
+    }
     handle_remote_key_internal(
         app,
         event.code,
@@ -26,6 +29,8 @@ pub(super) async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    // Modal Esc and intervening keys cannot arm the composer rewind chord.
+    let previous_empty_escape = app.rewind_ui.last_empty_escape.take();
 
     if app.handle_key_during_provider_failover(code) {
         return Ok(());
@@ -71,6 +76,22 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.dialog.is_some() {
+        match app.handle_dialog_key(code, modifiers) {
+            Some(crate::tui::dialog::DialogKey::Mcp(args)) => {
+                app_mod::dialog_actions::send_mcp_command(app, remote, args).await;
+            }
+            Some(crate::tui::dialog::DialogKey::Rewind {
+                checkpoint_id,
+                mode,
+            }) => {
+                app_mod::rewind::restore_remote(app, remote, checkpoint_id, mode).await;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     if input::handle_scroll_overlay_key(app, code)? {
         return Ok(());
     }
@@ -113,10 +134,47 @@ pub(super) async fn handle_remote_key_internal(
         }
     }
 
+    if app.showing_agent_profile_sources() {
+        return app
+            .handle_agent_profile_sources_key(code, modifiers, remote)
+            .await;
+    }
+
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {
         if code == KeyCode::Enter {
+            if app.agent_profile_picker_request_id.is_some() && app.showing_agent_profiles() {
+                return Ok(());
+            }
+            let action = picker
+                .filtered
+                .get(picker.selected)
+                .and_then(|index| picker.entries.get(*index))
+                .filter(|entry| entry.active_option().is_some_and(|option| option.available))
+                .map(|entry| entry.action.clone());
+            match action {
+                Some(crate::tui::PickerAction::AgentProfiles) => {
+                    app_mod::agent_profiles::open_agent_profiles(app, remote).await;
+                    return Ok(());
+                }
+                Some(crate::tui::PickerAction::AgentProfileChoice(name)) => {
+                    app.agent_profile_picker_request_id = None;
+                    if let Some(name) = name {
+                        app.open_agent_profile_sources(name);
+                        return Ok(());
+                    }
+                    app.inline_interactive_state = None;
+                    app_mod::agent_profiles::send_agent_profile_command(
+                        app,
+                        remote,
+                        vec!["off".into()],
+                    )
+                    .await;
+                    return Ok(());
+                }
+                _ => {}
+            }
             let subagent_model = picker
                 .filtered
                 .get(picker.selected)
@@ -160,7 +218,11 @@ pub(super) async fn handle_remote_key_internal(
                     Some(remote.set_agent_model(target, model, global).await?);
             }
         }
-        return app.handle_inline_interactive_key(code, modifiers);
+        let result = app.handle_inline_interactive_key(code, modifiers);
+        if !app.showing_agent_profiles() {
+            app.agent_profile_picker_request_id = None;
+        }
+        return result;
     }
 
     if app.handle_inline_interactive_preview_key(&code, modifiers)? {
@@ -173,6 +235,13 @@ pub(super) async fn handle_remote_key_internal(
     // can claim them. This mirrors the local path in `input.rs`
     // `handle_key_core`.
     if app.model_picker_preview_hotkey(code, modifiers)? {
+        return Ok(());
+    }
+
+    // Composer text selection (copy/cut/delete/extend) takes priority over
+    // the whole-line Ctrl+X, the Ctrl+C interrupt/quit, and plain arrow moves.
+    // Mirrors the local path in `input.rs` `handle_key_core`.
+    if crate::tui::app::input_selection::handle_input_selection_key(app, code, modifiers) {
         return Ok(());
     }
 
@@ -435,7 +504,7 @@ pub(super) async fn handle_remote_key_internal(
                 if app.cursor_pos < end {
                     app.remember_input_undo_state();
                 }
-                app.input.drain(app.cursor_pos..end);
+                app.remove_input_range(app.cursor_pos, end);
                 return Ok(());
             }
             KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
@@ -536,6 +605,11 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.scroll_keys.is_to_bottom(code, modifiers) {
+        app.jump_to_chat_bottom();
+        return Ok(());
+    }
+
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return Ok(());
@@ -590,7 +664,7 @@ pub(super) async fn handle_remote_key_internal(
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice("Interrupting...");
                 } else {
-                    app.handle_quit_request();
+                    input::clear_draft_or_request_quit(app);
                 }
                 return Ok(());
             }
@@ -694,6 +768,10 @@ pub(super) async fn handle_remote_key_internal(
         }
     }
 
+    if input::is_alternate_enter(code, modifiers) && app.pending_account_input.is_some() {
+        return submit_remote_enter_input(app, remote).await;
+    }
+
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {
         return Ok(());
     }
@@ -773,8 +851,7 @@ pub(super) async fn handle_remote_key_internal(
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -783,7 +860,7 @@ pub(super) async fn handle_remote_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -831,6 +908,11 @@ pub(super) async fn handle_remote_key_internal(
             {
                 app.inline_interactive_state = None;
                 input::clear_input_for_escape(app);
+            } else if !app.input.is_empty() {
+                // A restored prompt is still a visible draft, not a reason to
+                // cancel the resumed run. Clear it before considering Esc a
+                // turn interrupt.
+                input::clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
                 // Esc: stop this turn and run the new prompt next. The server
@@ -857,6 +939,12 @@ pub(super) async fn handle_remote_key_internal(
                     app.set_status_notice("Interrupting...");
                 }
             } else {
+                if modifiers.is_empty()
+                    && app.rewind_empty_escape(previous_empty_escape, Instant::now())
+                {
+                    app_mod::rewind::open_remote(app, remote).await;
+                    return Ok(());
+                }
                 app.follow_chat_bottom();
                 input::clear_input_for_escape(app);
             }

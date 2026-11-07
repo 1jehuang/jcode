@@ -5,7 +5,11 @@ mod word_boundaries;
 
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
+pub(super) mod terminal_replies;
+use super::input_images::attach_image;
+pub(super) use super::input_images::take_prepared_input;
 use shell_commands::*;
+pub(super) use terminal_replies::strip_osc_color_replies;
 
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
@@ -97,8 +101,14 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
 
 pub(super) struct PreparedInput {
     pub raw_input: String,
+    // Expanded transport text excludes only explicitly owned image markers.
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    pub image_markers: super::input_images::InputImageMarkers,
+    // Normal preparation saves expanded raw text for command classification.
+    // Legacy synthetic drafts fall back to raw_input, never transport text.
+    pub routing_input: Option<String>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -235,19 +245,131 @@ fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
 }
 
 fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
-    read_clipboard_for_paste_with(
-        kind,
-        read_clipboard_text,
-        super::clipboard_image,
-        download_image_url_content,
-    )
+    match kind {
+        ClipboardPasteKind::Smart => {
+            // Native-only reader first, so copied web text whose HTML carries
+            // an <img> stays text. Only when the clipboard offers nothing else
+            // fall back to the HTML <img> URL path (e.g. Discord on Wayland).
+            match read_clipboard_for_paste_with_files(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image_native,
+                download_image_url_content,
+                read_clipboard_file_list,
+            ) {
+                // The HTML <img> fallback downloads a URL; never do that
+                // implicitly over SSH (direct image-URL paste has the same rule).
+                ClipboardPasteContent::Empty if !crate::tui::is_ssh_remote() => {
+                    super::clipboard_image()
+                        .map(|(media_type, base64_data)| image_content(media_type, base64_data))
+                        .unwrap_or(ClipboardPasteContent::Empty)
+                }
+                content => content,
+            }
+        }
+        _ => {
+            // ImageOnly and ImageUrl can use full clipboard_image with HTML fallback
+            read_clipboard_for_paste_with_files(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image,
+                download_image_url_content,
+                read_clipboard_file_list,
+            )
+        }
+    }
 }
 
+/// True when clipboard text is just a reference to a picture: a single line
+/// that is a local path, `file://` URL, or bare file name with an image
+/// extension. Copying an image commonly leaves exactly this on the text
+/// target alongside the image bytes. Web URLs are excluded: those go through
+/// the explicit image-URL download path instead.
+fn text_names_an_image(text: &str, copied_files: impl FnOnce() -> Vec<std::path::PathBuf>) -> bool {
+    let text = text.trim();
+    if text.contains('\n') || text.len() > 4096 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return false;
+    }
+    let unquoted = text.trim_matches(['\'', '"']);
+    let quoted = unquoted.len() != text.len();
+    let path = unquoted
+        .strip_prefix("file://")
+        .or_else(|| unquoted.strip_prefix("FILE://"))
+        .unwrap_or(unquoted);
+    if !paste_guard::has_image_extension(std::path::Path::new(path)) {
+        return false;
+    }
+    if !path.chars().any(char::is_whitespace) {
+        return true;
+    }
+    if quoted && (path.starts_with('/') || path.starts_with("~/")) {
+        return true;
+    }
+    if names_existing_file(path, dirs::home_dir(), std::env::current_dir().ok()) {
+        return true;
+    }
+    copied_files()
+        .iter()
+        .any(|file| file.as_os_str() == path || file.file_name().is_some_and(|name| name == path))
+}
+
+fn names_existing_file(
+    path: &str,
+    home: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+) -> bool {
+    let candidate = if let Some(rest) = path.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+    } else if std::path::Path::new(path).is_absolute() {
+        Some(std::path::PathBuf::from(path))
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    candidate.is_some_and(|candidate| candidate.is_file())
+}
+
+fn read_clipboard_file_list() -> Vec<std::path::PathBuf> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard unavailable for file list: {error}"));
+            return Vec::new();
+        }
+    };
+    match clipboard.get().file_list() {
+        Ok(files) => files,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard has no file list: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
 fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
+    kind: &ClipboardPasteKind,
+    read_text: ReadText,
+    read_image: ReadImage,
+    download_image_url: DownloadImageUrl,
+) -> ClipboardPasteContent
+where
+    ReadText: FnMut() -> Option<String>,
+    ReadImage: FnMut() -> Option<(String, String)>,
+    DownloadImageUrl: FnMut(&str) -> Option<ClipboardPasteContent>,
+{
+    read_clipboard_for_paste_with_files(kind, read_text, read_image, download_image_url, Vec::new)
+}
+
+fn read_clipboard_for_paste_with_files<ReadText, ReadImage, DownloadImageUrl>(
     kind: &ClipboardPasteKind,
     mut read_text: ReadText,
     mut read_image: ReadImage,
     mut download_image_url: DownloadImageUrl,
+    copied_files: impl FnOnce() -> Vec<std::path::PathBuf>,
 ) -> ClipboardPasteContent
 where
     ReadText: FnMut() -> Option<String>,
@@ -256,20 +378,31 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
-            // Only treat the clipboard as text when it has *non-empty* text.
-            // Image-only clipboards (especially on Wayland/arboard) frequently
-            // expose an empty text target, which previously short-circuited the
-            // image path and produced a silent "0 char" paste.
-            if let Some(text) = read_text().filter(|t| !t.trim().is_empty()) {
+            // Read text first: it is cheap, and ordinary text pastes must not
+            // wait on an image probe or be replaced by an image.
+            let text = read_text().filter(|t| !t.trim().is_empty());
+            // Copying a picture (Finder, Preview, screenshots, browsers) often
+            // also puts its file name, path or file:// URL on the text target.
+            // Only then, or when there is no text at all, probe for native
+            // image bytes and prefer them. Image-only clipboards (especially
+            // on Wayland/arboard) frequently expose an empty text target.
+            // Native image targets are local even for an SSH-attached TUI.
+            // Remote paths with no native bytes still fall back to text.
+            let text_is_image_name = text
+                .as_deref()
+                .is_some_and(|text| text_names_an_image(text, copied_files));
+            if (text.is_none() || text_is_image_name)
+                && let Some((media_type, base64_data)) = read_image()
+            {
+                return image_content(media_type, base64_data);
+            }
+            if let Some(text) = text {
                 if let Some(url) = super::extract_image_url(&text)
                     && let Some(content) = download_image_url(&url)
                 {
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
-            }
-            if let Some((media_type, base64_data)) = read_image() {
-                return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
@@ -328,86 +461,14 @@ where
 }
 
 pub(in crate::tui::app) mod newline;
+mod paste_dispatch;
 mod paste_guard;
+pub(super) use paste_dispatch::handle_paste;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
 #[cfg(test)]
 pub(crate) use paste_guard::tiny_png_bytes_for_test;
-
-pub(super) fn handle_paste(app: &mut App, text: String) {
-    if app.append_ssh_login_input(&text) {
-        return;
-    }
-    paste_guard::note_paste();
-    if crate::tui::is_ssh_remote() {
-        // Text paths refer to the remote machine. Do not stat/read laptop
-        // files or download image URLs automatically while attached over SSH.
-        handle_text_paste(app, text);
-        app.set_status_notice("SSH paste: text only. File paths refer to the remote host; paste image bytes from the clipboard to attach an image.");
-        return;
-    }
-    // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
-    // terminal always deliver text. Checking clipboard_image() here caused a bug where
-    // text pastes were misidentified as images when the clipboard also had image data
-    // (common on Wayland where apps advertise multiple MIME types). Image pasting is
-    // handled by explicit clipboard shortcuts instead (Ctrl+V/Alt+V/Cmd+V smart-paste).
-    if let Some(paths) = parse_dropped_paths(&text) {
-        let item_count = paths.len();
-        let mut image_count = 0;
-        let mut file_count = 0;
-
-        for (index, path) in paths.into_iter().enumerate() {
-            if index > 0 {
-                insert_input_text(app, " ");
-            }
-
-            if let Some((media_type, data)) = load_dropped_image(&path) {
-                attach_image(
-                    app,
-                    media_type,
-                    base64::engine::general_purpose::STANDARD.encode(data),
-                );
-                image_count += 1;
-            } else {
-                insert_input_text(app, &format_dropped_path(&path, item_count > 1));
-                file_count += 1;
-            }
-        }
-
-        let notice = match (image_count, file_count) {
-            (images, 0) => format!(
-                "Dropped {images} image{}",
-                if images == 1 { "" } else { "s" }
-            ),
-            (0, files) => format!("Dropped {files} file{}", if files == 1 { "" } else { "s" }),
-            (images, files) => format!(
-                "Dropped {images} image{} and {files} file{}",
-                if images == 1 { "" } else { "s" },
-                if files == 1 { "" } else { "s" }
-            ),
-        };
-        app.set_status_notice(notice);
-    } else if let Some(url) = super::extract_image_url(&text) {
-        crate::logging::info(&format!("Downloading image from pasted URL: {}", url));
-        app.set_status_notice("Downloading image...");
-        let session_id = active_clipboard_session_id(app);
-        spawn_blocking_or_thread(move || {
-            let content = download_image_url_content(&url).unwrap_or_else(|| {
-                ClipboardPasteContent::Error("Failed to download image".to_string())
-            });
-            publish_clipboard_result(
-                session_id,
-                ClipboardPasteKind::ImageUrl {
-                    fallback_text: Some(text),
-                },
-                content,
-            );
-        });
-    } else {
-        handle_text_paste(app, text);
-    }
-}
 
 fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String {
     let value = path.to_string_lossy();
@@ -547,7 +608,11 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
         insert_input_text(app, &text);
         return;
     }
-    if expand_matching_paste(app, &text) {
+    // Pasting over a selection replaces it (in `insert_input_text` below).
+    // Re-pasting identical text normally expands its earlier placeholder, but
+    // that edits text elsewhere in the draft and would leave the selection
+    // live, so a selection always takes the plain placeholder path.
+    if app.input_selection().is_none() && expand_matching_paste(app, &text) {
         return;
     }
 
@@ -584,10 +649,9 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
 
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
-    app.input.replace_range(
-        placeholder_start..placeholder_start + placeholder.len(),
-        text,
-    );
+    app.remove_input_range(placeholder_start, placeholder_start + placeholder.len());
+    app.input.insert_str(placeholder_start, text);
+    app.input_images_inserted(placeholder_start, text.len(), None);
     app.cursor_pos = placeholder_start + text.len();
     app.pasted_contents.remove(content_index);
     app.reset_tab_completion();
@@ -652,113 +716,6 @@ impl App {
 
 pub(super) use terminal_reports::strip_terminal_control_sequences;
 
-/// Remove late OSC 10/11 color replies that the terminal delivered as keys.
-///
-/// Some terminals (Orca's Electron terminal, #970) answer the startup
-/// background query after the query has timed out. crossterm then decodes the
-/// reply one character at a time: the `ESC ]` introducer and `ESC \`
-/// terminator become Alt chords that never reach the composer, but the body
-/// `11;rgb:3030/3434/4646` lands in the draft character by character. No single
-/// insertion contains the whole sequence, so it has to be recognized in the
-/// accumulated buffer instead.
-fn scrub_osc_color_replies(app: &mut App) {
-    if !app.input.contains("rgb") {
-        return;
-    }
-    let Some((cleaned, cursor)) = strip_osc_color_replies(&app.input, app.cursor_pos) else {
-        return;
-    };
-    app.input = cleaned;
-    app.cursor_pos = cursor;
-}
-
-/// Strip complete OSC color reply bodies from `input`, returning the cleaned
-/// text and the cursor remapped onto it, or `None` when nothing matched.
-///
-/// A body only matches once it is complete: `1N;rgb:` (or `rgba:`) followed by
-/// three (or four for `rgba`) `/`-separated hex components that all share the
-/// first component's width. Requiring equal widths keeps a half-arrived reply
-/// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
-/// introducer and string terminator) is removed with it.
-pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
-    let bytes = input.as_bytes();
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut search = 0usize;
-    while let Some(found) = input[search..].find(";rgb") {
-        let semi = search + found;
-        search = semi + 1;
-        // `1` then one digit before the `;`: OSC 10..=19 color reports.
-        if semi < 2 || bytes[semi - 2] != b'1' || !bytes[semi - 1].is_ascii_digit() {
-            continue;
-        }
-        let mut start = semi - 2;
-        // A third leading digit means this is some other number, not `1N`,
-        // unless it is the tail of a reply we just matched.
-        let follows_reply = ranges.last().is_some_and(|&(_, end)| end == start);
-        if start > 0 && bytes[start - 1].is_ascii_digit() && !follows_reply {
-            continue;
-        }
-        let mut pos = semi + 4;
-        let mut wanted = 3;
-        if bytes.get(pos) == Some(&b'a') {
-            pos += 1;
-            wanted = 4;
-        }
-        if bytes.get(pos) != Some(&b':') {
-            continue;
-        }
-        pos += 1;
-        let hex_run = |from: usize| {
-            bytes[from..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_hexdigit())
-                .count()
-        };
-        let width = hex_run(pos);
-        if !(1..=4).contains(&width) {
-            continue;
-        }
-        pos += width;
-        // Later components take exactly `width` digits, so a second reply
-        // glued onto the last one (`f4f411;rgb:...`) still splits cleanly,
-        // while a component that is still arriving is too short to match.
-        let mut components = 1;
-        while components < wanted && bytes.get(pos) == Some(&b'/') && hex_run(pos + 1) >= width {
-            pos += 1 + width;
-            components += 1;
-        }
-        if components < wanted {
-            continue;
-        }
-        if start > 0 && bytes[start - 1] == b']' {
-            start -= 1;
-        }
-        if bytes.get(pos) == Some(&b'\\') {
-            pos += 1;
-        }
-        ranges.push((start, pos));
-        search = pos;
-    }
-    if ranges.is_empty() {
-        return None;
-    }
-
-    let mut cleaned = String::with_capacity(input.len());
-    let mut new_cursor = cursor;
-    let mut last = 0usize;
-    for (start, end) in ranges {
-        cleaned.push_str(&input[last..start]);
-        if cursor >= end {
-            new_cursor -= end - start;
-        } else if cursor > start {
-            new_cursor -= cursor - start;
-        }
-        last = end;
-    }
-    cleaned.push_str(&input[last..]);
-    Some((cleaned, new_cursor))
-}
-
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
     insert_input_text_with_undo(app, text, false);
 }
@@ -768,8 +725,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         return;
     }
 
-    // Drop terminal escape remnants before they can land in the draft (#540).
-    let sanitized = strip_terminal_control_sequences(text);
+    // Filter framed replies before any composer, marker, undo or render state
+    // can observe them. Incomplete frames live only in the bounded parser.
+    let filtered = app.terminal_reply_filter.filter(text);
+    let sanitized = strip_terminal_control_sequences(&filtered);
     let text: &str = &sanitized;
     if text.is_empty() {
         return;
@@ -782,13 +741,21 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
     app.follow_chat_bottom_for_typing();
+    app.ensure_input_image_markers();
+
+    // Typing or pasting over a composer selection replaces it. Record a single
+    // undo step for the whole replacement so one Ctrl+Z restores the original.
+    let replaced_selection = app.replace_input_selection_for_insert();
 
     let at_end = app.cursor_pos == app.input.len();
 
     // A habitual space typed after an auto-inserted picker separator would
     // only add noise. Swallow it so command + space + filter still produces
     // a single separator.
-    if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
+    if !replaced_selection
+        && text == " "
+        && at_end
+        && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
         app.input_typing_undo = None;
         return;
@@ -799,7 +766,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         && app.input_typing_undo.is_some_and(|(last, end)| {
             end == app.cursor_pos && last.elapsed() < Duration::from_secs(1)
         });
-    if !same_burst {
+    if !replaced_selection && !same_burst {
         app.remember_input_undo_state();
     }
 
@@ -814,9 +781,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         app.cursor_pos = app.input.len();
     }
 
-    app.input.insert_str(app.cursor_pos, text);
+    let at = app.cursor_pos;
+    app.input.insert_str(at, text);
     app.cursor_pos += text.len();
-    scrub_osc_color_replies(app);
+    app.input_images_inserted(at, text.len(), None);
 
     // Typing the final command character immediately arms picker filtering.
     // Without this, users can keep typing the command token or press Enter
@@ -842,6 +810,11 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
+    if app.terminal_reply_filter.is_pending() || text.contains(['\x1b', '\u{9d}']) {
+        // Terminal digits must not activate empty-composer suggestion hotkeys.
+        insert_input_text_with_undo(app, text, true);
+        return true;
+    }
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
         Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
@@ -1032,8 +1005,7 @@ pub(super) fn handle_prompt_history_navigation(
                     .last()
                     .map(|prompt| {
                         app.remember_input_undo_state();
-                        app.history_draft =
-                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
+                        app.history_draft = Some(app.take_input_draft());
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1047,9 +1019,8 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                if let Some((draft, cursor_pos)) = app.history_draft.take() {
-                    app.input = draft;
-                    app.cursor_pos = cursor_pos;
+                if let Some(draft) = app.history_draft.take() {
+                    app.restore_input_draft(draft);
                 } else {
                     app.input.clear();
                     app.cursor_pos = 0;
@@ -1136,6 +1107,8 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
         app.remember_input_undo_state();
     }
     app.input.clear();
+    app.pending_images.clear();
+    app.input_image_markers = Default::default();
     app.cursor_pos = 0;
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
@@ -1186,6 +1159,7 @@ pub(super) struct ComposerDraft {
     input: String,
     cursor_pos: usize,
     pending_images: Vec<(String, String)>,
+    image_markers: super::input_images::InputImageMarkers,
     pasted_contents: Vec<String>,
 }
 
@@ -1197,6 +1171,7 @@ pub(super) fn swap_in_queued_command(app: &mut App, command: String) -> Composer
         input: std::mem::replace(&mut app.input, command),
         cursor_pos: app.cursor_pos,
         pending_images: std::mem::take(&mut app.pending_images),
+        image_markers: std::mem::take(&mut app.input_image_markers),
         pasted_contents: std::mem::take(&mut app.pasted_contents),
     };
     app.cursor_pos = app.input.len();
@@ -1214,16 +1189,19 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
         app.input = draft.input;
         app.cursor_pos = draft.cursor_pos.min(app.input.len());
         app.pending_images = draft.pending_images;
+        app.input_image_markers = draft.image_markers;
+        app.ensure_input_image_markers();
         app.pasted_contents = draft.pasted_contents;
         app.sync_model_picker_preview_from_input();
     } else {
         let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
         app.record_prompt_history(&expanded);
         app.pending_images.extend(draft.pending_images);
+        app.ensure_input_image_markers();
     }
 }
 
-fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
+pub(super) fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
     for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
@@ -1272,6 +1250,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     }
     if !app.queued_messages.is_empty() {
         parts.extend(std::mem::take(&mut app.queued_messages));
+        app.pending_images.append(&mut app.queued_message_images);
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -1281,6 +1260,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
         app.cursor_pos = app.input.len();
+        app.ensure_input_image_markers();
         let count = parts.len();
         app.set_status_notice(format!(
             "Retrieved {} pending message{} for editing",
@@ -1920,12 +1900,15 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     let prepared = take_prepared_input(app);
     let restored_raw = prepared.raw_input.clone();
     let restored_images = prepared.images.clone();
+    let restored_markers = prepared.image_markers.clone();
     match commands::launch_prompt_in_new_session_local(app, prepared.expanded, prepared.images) {
         Ok(_) => true,
         Err(error) => {
             app.input = restored_raw;
             app.cursor_pos = app.input.len();
             app.pending_images = restored_images;
+            app.input_image_markers = restored_markers;
+            app.ensure_input_image_markers();
             app.set_status_notice("Prompt launch failed");
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to launch prompt in a new session: {}",
@@ -2051,8 +2034,7 @@ pub(super) fn delete_input_to_start(app: &mut App) {
     if app.cursor_pos > 0 {
         app.remember_input_undo_state();
     }
-    app.input.drain(..app.cursor_pos);
-    app.cursor_pos = 0;
+    app.remove_input_range(0, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2060,7 +2042,7 @@ pub(super) fn delete_input_to_end(app: &mut App) {
     if app.cursor_pos < app.input.len() {
         app.remember_input_undo_state();
     }
-    app.input.truncate(app.cursor_pos);
+    app.remove_input_range(app.cursor_pos, app.input.len());
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2127,7 +2109,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
     }
     let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
     app.remember_input_undo_state();
-    app.input.drain(app.cursor_pos..next);
+    app.remove_input_range(app.cursor_pos, next);
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
     true
@@ -2138,8 +2120,7 @@ pub(super) fn delete_input_word_back(app: &mut App) {
     if start < app.cursor_pos {
         app.remember_input_undo_state();
     }
-    app.input.drain(start..app.cursor_pos);
-    app.cursor_pos = start;
+    app.remove_input_range(start, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2159,7 +2140,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < end {
                 app.remember_input_undo_state();
             }
-            app.input.drain(app.cursor_pos..end);
+            app.remove_input_range(app.cursor_pos, end);
             app.sync_model_picker_preview_from_input();
             true
         }
@@ -2240,6 +2221,11 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
+    if app.scroll_keys.is_to_bottom(code, modifiers) {
+        app.jump_to_chat_bottom();
+        return true;
+    }
+
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return true;
@@ -2277,6 +2263,9 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
+        || app.scroll_keys.is_to_bottom(code, modifiers)
+        || (modifiers.contains(KeyModifiers::ALT)
+            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
         || app.toggle_keys.diff_mode_cycle.matches(code, modifiers)
     {
         return true;
@@ -2655,6 +2644,11 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.dialog.is_some() {
+        app.handle_dialog_key_offline(code, modifiers);
+        return Ok(true);
+    }
+
     if handle_scroll_overlay_key(app, code)? {
         return Ok(true);
     }
@@ -2740,6 +2734,39 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
     Ok(true)
 }
 
+/// Idle Ctrl+C/Ctrl+D: discard a pending draft (text and/or attached images)
+/// first and arm quit, so the next press exits. With nothing drafted, fall
+/// through to the normal quit confirmation. Shared by the local, remote and
+/// disconnected key handlers so every mode behaves the same.
+pub(super) fn clear_draft_or_request_quit(app: &mut App) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        app.handle_quit_request();
+        return;
+    }
+    // Always push a snapshot (even for an image-only draft that matches the
+    // previous entry) so the stashed images have their own undo step.
+    app.ensure_input_image_markers();
+    app.push_input_undo_snapshot((
+        app.input.clone(),
+        app.cursor_pos.min(app.input.len()),
+        std::sync::Arc::new(app.pending_images.clone()),
+        app.input_image_markers.clone(),
+        std::sync::Arc::new(app.pasted_contents.clone()),
+    ));
+    if !app.pending_images.is_empty() {
+        let depth = app.input_undo_stack.len();
+        app.cleared_draft_images
+            .push((depth, std::mem::take(&mut app.pending_images)));
+    }
+    app.input.clear();
+    app.input_image_markers = Default::default();
+    app.cursor_pos = 0;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    app.quit_pending = Some(Instant::now());
+    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+}
+
 pub(super) fn handle_global_control_shortcuts(
     app: &mut App,
     code: KeyCode,
@@ -2763,27 +2790,8 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
-            } else if !app.input.is_empty() {
-                // First Ctrl+C: clear the input box
-                app.input.clear();
-                let detached = app
-                    .pending_images
-                    .iter()
-                    .filter(|(_, data)| !data.is_empty())
-                    .count();
-                app.pending_images.clear();
-                app.cursor_pos = 0;
-                if detached > 0 {
-                    app.set_status_notice(format!(
-                        "Input cleared · Detached {detached} image{} · 0 attached. Press Ctrl+C again to quit",
-                        if detached == 1 { "" } else { "s" }
-                    ));
-                } else {
-                    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
-                }
             } else {
-                // Second Ctrl+C (input already empty): proceed with quit
-                app.handle_quit_request();
+                clear_draft_or_request_quit(app);
             }
             true
         }
@@ -2841,8 +2849,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2852,7 +2859,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2909,6 +2916,8 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             } else if app.inline_view_state.is_some() {
                 app.inline_view_state = None;
                 clear_input_for_escape(app);
+            } else if !app.input.is_empty() {
+                clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
                 // Esc: stop this turn and run the new prompt next. Keep it in
@@ -2922,9 +2931,8 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     && !interleave.trim().is_empty()
                 {
                     followups.push(interleave);
-                    // Queued follow-ups are text-only, so carry staged images
-                    // back to the composer instead of dropping them silently.
-                    app.pending_images.append(&mut app.interleave_images);
+                    // Keep attachments with this queued turn, not a later draft.
+                    app.queued_message_images.append(&mut app.interleave_images);
                 }
                 app.interleave_images.clear();
                 followups.append(&mut app.queued_messages);
@@ -2964,22 +2972,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     }
 }
 
-pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
-    promote_dropped_images(app);
-    let raw_input = std::mem::take(&mut app.input);
-    app.record_prompt_history(&raw_input);
-    let expanded = expand_paste_placeholders(app, &raw_input);
-    app.pasted_contents.clear();
-    let images = app.take_pending_image_payloads();
-    app.cursor_pos = 0;
-    app.clear_input_undo_history();
-    PreparedInput {
-        raw_input,
-        expanded,
-        images,
-    }
-}
-
 pub(super) fn stage_local_interleave(
     app: &mut App,
     content: String,
@@ -2988,51 +2980,6 @@ pub(super) fn stage_local_interleave(
     app.interleave_message = Some(content);
     app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
-}
-
-fn attach_image(app: &mut App, media_type: String, base64_data: String) {
-    let size_kb = base64_data.len() / 1024;
-    app.pending_images.push((media_type.clone(), base64_data));
-    let placeholder = format!("[image {}]", app.pending_images.len());
-    app.remember_input_undo_state();
-    app.input.insert_str(app.cursor_pos, &placeholder);
-    app.cursor_pos += placeholder.len();
-    app.sync_model_picker_preview_from_input();
-    app.set_status_notice(format!("Pasted {} ({} KB)", media_type, size_kb));
-}
-
-impl App {
-    /// Removing an attachment marker detaches its payload. Keep empty slots so
-    /// surviving image numbers remain stable and restored text cannot silently
-    /// refer to a different image.
-    pub(super) fn sync_input_image_attachments(&mut self) {
-        let mut removed = 0;
-        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
-            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
-                media_type.clear();
-                data.clear();
-                removed += 1;
-            }
-        }
-        if removed > 0 {
-            let remaining = self
-                .pending_images
-                .iter()
-                .filter(|(_, data)| !data.is_empty())
-                .count();
-            self.set_status_notice(format!(
-                "Detached {removed} image{} · {remaining} attached",
-                if removed == 1 { "" } else { "s" }
-            ));
-        }
-    }
-
-    pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.pending_images)
-            .into_iter()
-            .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
-            .collect()
-    }
 }
 
 fn paste_placeholder(content: &str) -> String {
@@ -3045,6 +2992,11 @@ fn paste_placeholder(content: &str) -> String {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn handle_paste_image_for_test(&mut self, media_type: &str, base64_data: &str) {
+        attach_image(self, media_type.to_string(), base64_data.to_string());
+    }
+
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
             if matches!(
@@ -3092,6 +3044,9 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        if event.code == KeyCode::Esc && event.kind != crossterm::event::KeyEventKind::Press {
+            return Ok(());
+        }
         self.wake_idle_hibernation();
         // Pick up config.toml keybinding edits before this key is matched.
         // The idle tick refreshes too, but it can run as slowly as the 5s
@@ -3116,9 +3071,45 @@ impl App {
         modifiers: KeyModifiers,
         text_input: Option<String>,
     ) -> Result<()> {
+        if modifiers == KeyModifiers::ALT && code == KeyCode::Char(']') {
+            self.terminal_reply_filter.reset();
+            insert_input_text(self, "\x1b]");
+            return Ok(());
+        }
+        if self.terminal_reply_filter.is_pending() {
+            let terminator = match (code, modifiers) {
+                (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\"),
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07"),
+                (KeyCode::Char('\x07'), KeyModifiers::NONE) => Some("\x07"),
+                _ => None,
+            };
+            if let Some(terminator) = terminator {
+                insert_input_text(self, terminator);
+                return Ok(());
+            }
+            if !modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                && let Some(text) = text_input
+                    .clone()
+                    .or_else(|| text_input_for_key(code, modifiers))
+            {
+                // Consume response characters before modal/suggestion routing.
+                insert_input_text_with_undo(self, &text, true);
+                return Ok(());
+            }
+        }
+        // Editing/navigation/submit shortcuts end a response burst. Printable
+        // keys may still complete a frame, but controls cannot preserve stale
+        // parser state across a user action such as undo or history movement.
+        if !matches!(code, KeyCode::Char(_))
+            || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            self.terminal_reply_filter.reset();
+        }
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+        let previous_empty_escape = self.rewind_ui.last_empty_escape.take();
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());
@@ -3147,6 +3138,12 @@ impl App {
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        // Composer text selection (copy/cut/delete/extend) takes priority over
+        // the whole-line Ctrl+X, the Ctrl+C clear/quit, and plain arrow moves.
+        if super::input_selection::handle_input_selection_key(self, code, modifiers) {
             return Ok(());
         }
 
@@ -3307,6 +3304,15 @@ impl App {
         // inserting a surprise character.
         self.note_unrecognized_hotkey(code, modifiers, false);
 
+        if code == KeyCode::Esc
+            && modifiers.is_empty()
+            && self.inline_interactive_state.is_none()
+            && self.inline_view_state.is_none()
+            && self.rewind_empty_escape(previous_empty_escape, Instant::now())
+        {
+            self.open_rewind_dialog_local();
+            return Ok(());
+        }
         if handle_basic_key(self, code) {
             return Ok(());
         }
@@ -3500,6 +3506,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
+        self.rewind_ui.last_empty_escape = None;
         self.wake_idle_hibernation();
         handle_paste(self, text);
     }
@@ -3867,6 +3874,12 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        let routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        self.submit_input_with_routing(routing_input);
+    }
+
+    pub(super) fn submit_input_with_routing(&mut self, mut routing_input: String) {
+        self.terminal_reply_filter.reset();
         let command = expand_paste_placeholders(self, &self.input)
             .trim()
             .to_string();
@@ -3896,16 +3909,20 @@ impl App {
             }
             return;
         }
-        promote_dropped_images(self);
+        if promote_dropped_images(self) {
+            routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        }
         if self.activate_picker_from_preview() {
             return;
         }
 
+        self.ensure_input_image_markers();
+        let transport_text = self.input_without_owned_image_markers();
         let raw_input = std::mem::take(&mut self.input);
-        // Persist to cross-session prompt history (no-op for slash/shell
-        // commands, secret-intercept inputs, and oversized pastes).
+        // Persist to this session's prompt journal (no-op for slash/shell
+        // commands and secret-intercept inputs).
         self.record_prompt_history(&raw_input);
-        let mut input = self.expand_paste_placeholders(&raw_input);
+        let mut input = self.expand_paste_placeholders(&transport_text);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
             self.cursor_pos = self.input.len();
@@ -3939,7 +3956,7 @@ impl App {
             return;
         }
 
-        let trimmed = input.trim();
+        let trimmed = routing_input.trim();
         let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
             let embedded = super::commands_dispatch::contains_registered_slash_command(trimmed);
@@ -3949,7 +3966,7 @@ impl App {
             return;
         }
 
-        if let Some(command) = extract_input_shell_command(&input) {
+        if let Some(command) = extract_input_shell_command(&routing_input) {
             self.push_display_message(DisplayMessage::user(raw_input));
 
             if command.is_empty() {
@@ -3980,18 +3997,22 @@ impl App {
             return;
         }
 
+        let original_prompt = input.clone();
         // File drops remain ordinary input. Registry-aware resolution supports
         // multi-word skill names without weakening that guard.
         let initial_snapshot = self.current_skills_snapshot();
-        let skill_invocation = parse_dropped_paths(&input)
+        let skill_invocation = parse_dropped_paths(&routing_input)
             .is_none()
-            .then(|| initial_snapshot.resolve_invocation(&input))
+            .then(|| initial_snapshot.resolve_invocation(&routing_input))
             .flatten();
 
         // Check for skill invocation.
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
-            let trailing_prompt = invocation.prompt.map(str::to_string);
+            let trailing_prompt = initial_snapshot
+                .resolve_invocation(&input)
+                .and_then(|invocation| invocation.prompt)
+                .map(str::to_string);
             let mut skill = initial_snapshot.get(&skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
@@ -4004,6 +4025,16 @@ impl App {
                 skill = self.current_skills_snapshot().get(&skill_name).cloned();
             }
 
+            if skill.is_some()
+                && crate::skill_overrides::mode(&crate::skill_overrides::load(), &skill_name)
+                    == crate::skill_overrides::SkillMode::Off
+            {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Skill /{} is turned off. Turn it back on in /skills.",
+                    skill_name
+                )));
+                return;
+            }
             if let Some(skill) = skill {
                 self.active_skill = Some(skill_name.clone());
                 if !self.is_remote {
@@ -4020,10 +4051,10 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
-                if let Some(prompt) = trailing_prompt {
-                    input = prompt;
-                } else {
-                    return;
+                match trailing_prompt {
+                    Some(prompt) => input = prompt,
+                    None if self.pending_images.is_empty() => return,
+                    None => input.clear(),
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a
@@ -4058,10 +4089,8 @@ impl App {
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
-        // Add the expanded user message to the transcript. The composer remains compact
-        // while editing, but sent turns should show the actual pasted content.
-        // Remember the typed prompt so we can restore it to the input box if this
-        // turn fails (e.g. "token refresh needed"), instead of dropping it.
+        // Keep the raw draft for failure recovery. Transport expands pastes
+        // and excludes only explicitly owned attachment marker text.
         self.last_submitted_input = Some(raw_input.clone());
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
@@ -4069,6 +4098,24 @@ impl App {
         if super::remote::stage_turn_for_remote_tick_loop(self, &input) {
             return;
         }
+        let rewind_checkpoint_id =
+            match crate::session::is_authentic_user_input(&input, !self.pending_images.is_empty())
+                .then(|| self.session.create_rewind_checkpoint(&original_prompt))
+                .transpose()
+            {
+                Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.id),
+                Err(error) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Could not create rewind checkpoint: {error}"
+                    )));
+                    None
+                }
+            };
+        // A new prompt supersedes a local turn held on a usage limit; that
+        // held turn's context is sent with this one.
+        self.rate_limit_reset = None;
+        self.local_usage_limit_resume_attempts = 0;
+        self.account_change_resend_at = None;
 
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
@@ -4119,6 +4166,7 @@ impl App {
             });
             self.session.add_message(Role::User, blocks);
         }
+        self.bind_local_rewind_checkpoint(rewind_checkpoint_id);
         let reminder = merge_turn_reminders(
             mission_turn_reminder(&self.session.id),
             self.take_cloud_recovery_reminder(),
@@ -4163,6 +4211,70 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Commit the combined queued user turn at the real provider/session boundary.
+    /// Taking attachments here keeps them out of unrelated composer submissions.
+    pub(super) fn append_queued_user_payload(&mut self, combined: &str) {
+        let rewind_checkpoint_id = match crate::session::is_authentic_user_input(
+            combined,
+            !self.queued_message_images.is_empty(),
+        )
+        .then(|| self.session.create_rewind_checkpoint(combined))
+        .transpose()
+        {
+            Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.id),
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not create rewind checkpoint: {error}"
+                )));
+                None
+            }
+        };
+        let images = std::mem::take(&mut self.queued_message_images);
+        self.add_provider_message(Message::user_with_images(combined, images.clone()));
+        let mut blocks: Vec<ContentBlock> = images
+            .into_iter()
+            .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+            .collect();
+        blocks.push(ContentBlock::Text {
+            text: combined.to_string(),
+            cache_control: None,
+        });
+        self.session.add_message(Role::User, blocks);
+        self.bind_local_rewind_checkpoint(rewind_checkpoint_id);
+    }
+
+    /// Prepare the next queued turn without entering the terminal/provider loop.
+    pub(super) fn prepare_queued_local_turn(&mut self) -> (bool, bool) {
+        let queued_messages = std::mem::take(&mut self.queued_messages);
+        let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
+        let (messages, reminder, display_system_messages) =
+            super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        let combined = messages.join("\n\n");
+        let has_combined = !combined.is_empty();
+        let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        self.commit_pending_streaming_assistant_message();
+        for msg in display_system_messages {
+            self.push_display_message(DisplayMessage::system(msg));
+        }
+        for msg in &messages {
+            if !super::commands::is_poke_message(msg) {
+                self.push_display_message(DisplayMessage::user(msg.clone()));
+            }
+        }
+        let turn_reminder = merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+        let turn_reminder =
+            merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
+        if has_combined {
+            self.append_queued_user_payload(&combined);
+        } else {
+            // A discarded user queue must not attach stale images to a later turn.
+            self.queued_message_images.clear();
+        }
+        self.append_turn_system_reminder(turn_reminder);
+        self.session_save_pending = true;
+        (has_combined, preserve_visible_turn)
+    }
+
     /// Process all queued messages (combined into a single request)
     /// Loops until queue is empty (in case more messages are queued during processing)
     pub(super) async fn process_queued_messages(
@@ -4175,49 +4287,7 @@ impl App {
                 || !self.hidden_queued_system_messages.is_empty()
                 || self.has_pending_cloud_recovery())
         {
-            // Combine all currently queued messages into one, treating [SYSTEM: ...]
-            // startup continuations as system reminders rather than user turns.
-            let queued_messages = std::mem::take(&mut self.queued_messages);
-            let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
-            let (messages, reminder, display_system_messages) =
-                super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-            let combined = messages.join("\n\n");
-            let has_combined = !combined.is_empty();
-            let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
-
-            self.commit_pending_streaming_assistant_message();
-
-            for msg in display_system_messages {
-                self.push_display_message(DisplayMessage::system(msg));
-            }
-
-            for msg in &messages {
-                if !super::commands::is_poke_message(msg) {
-                    self.push_display_message(DisplayMessage::user(msg.clone()));
-                }
-            }
-
-            let turn_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
-            let turn_reminder =
-                merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
-
-            if has_combined {
-                let combined = crate::prompt::with_swarm_user_message_reminder(
-                    &combined,
-                    self.provider.reasoning_effort().as_deref(),
-                );
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: combined.clone(),
-                        cache_control: None,
-                    }],
-                );
-            }
-            self.append_turn_system_reminder(turn_reminder);
-            self.session_save_pending = true;
+            let (has_combined, preserve_visible_turn) = self.prepare_queued_local_turn();
             self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.thought_line_inserted = false;
@@ -4254,6 +4324,7 @@ impl App {
             {
                 Ok(()) => {
                     self.last_stream_error = None;
+                    self.local_usage_limit_resume_attempts = 0;
                     self.last_submitted_input = None;
                 }
                 Err(e) => {
@@ -4278,6 +4349,9 @@ impl App {
                         self.handle_turn_error(err_str);
                     }
                 }
+            }
+            if self.local_usage_limit_resume_attempts > 0 {
+                break;
             }
             // Loop will check if more messages were queued during this turn
         }

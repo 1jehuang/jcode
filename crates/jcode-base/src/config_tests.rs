@@ -1254,6 +1254,7 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
                 reasoning_effort: None,
                 context_window: Some(1_000_000),
                 input: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         },
@@ -1290,6 +1291,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
                 NamedProviderModelConfig {
                     id: "/opt/models/issue421-ornith-35b-q4.gguf".to_string(),
@@ -1297,6 +1299,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -1518,13 +1521,12 @@ fn sponsors_optout_survives_config_save_and_reload() {
             );
             let saved = std::fs::read_to_string(&path).expect("read saved config");
             let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
-            assert_eq!(
-                saved
+            assert!(
+                !saved
                     .get("sponsors")
                     .and_then(|s| s.get("enabled"))
                     .and_then(toml::Value::as_bool)
-                    .unwrap_or(false),
-                false
+                    .unwrap_or(false)
             );
         }
     }

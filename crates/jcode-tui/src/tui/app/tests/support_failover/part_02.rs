@@ -323,6 +323,7 @@ impl Provider for AuthRefreshingMockProvider {
         if *self.logged_in.lock().unwrap() {
             vec![
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -332,6 +333,7 @@ impl Provider for AuthRefreshingMockProvider {
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -343,6 +345,7 @@ impl Provider for AuthRefreshingMockProvider {
             ]
         } else {
             vec![crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -450,6 +453,7 @@ impl Provider for AntigravityMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4-6".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -459,6 +463,7 @@ impl Provider for AntigravityMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-oss-120b-medium".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -524,6 +529,7 @@ impl Provider for LoginSmokeModelProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -533,6 +539,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api-key".to_string(),
@@ -542,6 +549,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "openai/gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openrouter".to_string(),
@@ -551,6 +559,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "glm-51-nvfp4".to_string(),
                 provider: "Comtegra GPU Cloud".to_string(),
                 api_method: "openai-compatible:comtegra".to_string(),
@@ -560,6 +569,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -569,6 +579,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -578,6 +589,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "DeepSeek".to_string(),
                 api_method: "openrouter".to_string(),
@@ -587,6 +599,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "moonshotai/kimi-k2.5".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -642,6 +655,7 @@ impl Provider for FailingModelSwitchProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4.6".to_string(),
             provider: "Copilot".to_string(),
             api_method: "copilot".to_string(),
@@ -775,6 +789,7 @@ impl Provider for DualMethodMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-api".to_string(),
@@ -784,6 +799,7 @@ impl Provider for DualMethodMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -909,6 +925,7 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
         app.remote_model_options = ["openai-api", "openai-oauth"]
             .into_iter()
             .map(|method| crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-6-astra".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: method.to_string(),
@@ -985,6 +1002,139 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
 
         app.session.route_api_method = None;
         assert_eq!(app.current_route_api_method(), None);
+    });
+}
+
+fn remote_profile_failover_prompt() -> crate::provider::ProviderFailoverPrompt {
+    crate::provider::ProviderFailoverPrompt {
+        from_provider: "prof-a:glm-5.3".to_string(),
+        from_label: "prof-a".to_string(),
+        to_provider: "prof-b:glm-5.3".to_string(),
+        to_label: "prof-b (glm-5.3)".to_string(),
+        target_route: Some("prof-b:glm-5.3".to_string()),
+        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+        estimated_input_chars: 400,
+        estimated_input_tokens: 100,
+    }
+}
+
+fn remote_app_with_failed_turn() -> App {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.last_submitted_input = Some("say hi".to_string());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "say hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        overload_attempts: 0,
+    });
+    app
+}
+
+#[test]
+fn remote_out_of_credit_prompt_runs_countdown_then_switches_and_resends() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app
+            .pending_provider_failover
+            .as_ref()
+            .expect("remote session must arm the countdown");
+        assert_eq!(pending.prompt.to_provider, "prof-b:glm-5.3");
+        assert!(app.pending_model_switch.is_none(), "nothing sent before the deadline");
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(
+            app.rate_limit_pending_message.is_none(),
+            "no blind retry to the out-of-credit profile"
+        );
+
+        if let Some(pending) = app.pending_provider_failover.as_mut() {
+            pending.deadline = Instant::now() - Duration::from_secs(1);
+        }
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_provider_failover.is_none());
+        assert_eq!(app.pending_model_switch.as_deref(), Some("prof-b:glm-5.3"));
+        let resend = app
+            .pending_fallback_resend
+            .as_ref()
+            .expect("failed turn staged for resend after the switch");
+        assert_eq!(resend.content, "say hi");
+    });
+}
+
+#[test]
+fn remote_out_of_credit_countdown_esc_cancels_without_sending() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        assert!(app.pending_provider_failover.is_some());
+        rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::NONE, &mut remote))
+            .expect("esc");
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_model_switch.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert_eq!(app.input, "say hi", "the prompt goes back to the input box");
+        let last = app.display_messages.last().expect("message");
+        assert!(last.content.contains("Auto-switch canceled"), "{}", last.content);
+
+        // The deadline passing later must not switch anything.
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_model_switch.is_none());
+    });
+}
+
+#[test]
+fn remote_out_of_credit_prompt_in_manual_mode_only_explains() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_model_switch.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        let last = app.display_messages.last().expect("message");
+        assert!(last.content.contains("Use /model to switch"), "{}", last.content);
     });
 }
 

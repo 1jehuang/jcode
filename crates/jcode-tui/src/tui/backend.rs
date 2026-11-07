@@ -322,6 +322,27 @@ pub(crate) struct ReplayRemoteState {
     call_output_tokens_seen: u64,
 }
 
+/// `--account` pins for this TUI's first Subscribe, as (provider, label).
+static STARTUP_ACCOUNT_PINS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Record `jcode --account` pins. They are sent once, with the first
+/// Subscribe, so a reconnect does not undo a later `/accounts switch`.
+pub fn set_startup_account_pins(pins: Vec<(String, String)>) {
+    *STARTUP_ACCOUNT_PINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = pins;
+}
+
+/// Subscribe's `account_pins` (taken once) and `supports_session_accounts`.
+pub(crate) fn take_subscribe_account_fields() -> (Vec<(String, String)>, bool) {
+    let pins = std::mem::take(
+        &mut *STARTUP_ACCOUNT_PINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    (pins, true)
+}
 #[path = "backend_auth.rs"]
 mod auth;
 #[path = "backend_cloud.rs"]
@@ -382,6 +403,30 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::connect_with_session_and_profile(
+            resume_session,
+            client_instance_id,
+            client_has_local_history,
+            history_base,
+            allow_session_takeover,
+            remote_working_dir,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_with_session_and_profile(
+        resume_session: Option<&str>,
+        client_instance_id: Option<&str>,
+        client_has_local_history: bool,
+        history_base: Option<crate::protocol::HistoryBase>,
+        allow_session_takeover: bool,
+        remote_working_dir: Option<&str>,
+        agent_profile_name: Option<&str>,
+    ) -> Result<Self> {
+        if resume_session.is_some() && agent_profile_name.is_some() {
+            anyhow::bail!("--agent cannot be used when resuming or attaching to a session");
+        }
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let stream = Stream::connect(server::socket_path()).await?;
@@ -432,7 +477,9 @@ impl RemoteConnection {
                 super::is_ssh_remote() || crate::session::session_exists(session_id)
             })
             .map(|session_id| session_id.to_string());
+        let (account_pins, supports_session_accounts) = take_subscribe_account_fields();
         conn.send_request(Request::Subscribe {
+            agent_profile_name: agent_profile_name.map(str::to_owned),
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
@@ -453,6 +500,10 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
+            // Filled once from `--account`; the TUI handles
+            // `session_account_changed`.
+            account_pins,
+            supports_session_accounts,
             client_name: None,
         })
         .await?;
@@ -865,6 +916,34 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    pub async fn list_rewind_checkpoints(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListRewindCheckpoints { id })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn rewind_checkpoint(
+        &mut self,
+        checkpoint_id: String,
+        mode: crate::protocol::RewindMode,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RewindCheckpoint {
+            id,
+            checkpoint_id,
+            mode,
+        })
+        .await?;
+        // Conversation restores redeliver History before their completion.
+        if mode.restores_conversation() {
+            self.has_loaded_history = false;
+        }
+        Ok(id)
+    }
+
     /// Ask the server to truncate the active session to a 1-based message index.
     pub async fn rewind(&mut self, message_index: usize) -> Result<u64> {
         let id = self.next_request_id;
@@ -1033,7 +1112,7 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set connection transport on the server (for OpenAI models)
+    /// Set connection transport on the server (for OpenAI models).
     pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
         let request = Request::SetTransport {
             id: self.next_request_id,
@@ -1187,8 +1266,12 @@ impl RemoteConnection {
 
     /// Split the current session - ask server to clone conversation into a new session
     pub async fn split(&mut self) -> Result<u64> {
+        self.split_feedback(None).await
+    }
+
+    pub async fn split_feedback(&mut self, feedback_role: Option<String>) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::Split { id };
+        let request = Request::Split { id, feedback_role };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
@@ -1555,6 +1638,9 @@ impl RemoteConnection {
 
 #[path = "backend/event_state.rs"]
 mod event_state;
+
+#[path = "backend_accounts.rs"]
+mod accounts;
 
 #[cfg(test)]
 #[path = "backend_tests.rs"]

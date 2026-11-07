@@ -1,6 +1,54 @@
 use super::*;
 use std::ffi::OsString;
 
+#[test]
+fn rename_saved_account_preserves_identity_default_and_other_accounts() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+    for label in ["work", "personal"] {
+        let saved_label = upsert_account(AnthropicAccount {
+            label: label.into(),
+            access: format!("access-{label}"),
+            refresh: format!("refresh-{label}"),
+            expires: 1234,
+            email: Some(format!("{label}@example.com")),
+            scopes: vec!["user:profile".into()],
+            subscription_type: Some("max".into()),
+        })
+        .unwrap();
+        rename_account(&saved_label, label).unwrap();
+    }
+    set_active_account("work").unwrap();
+    let pin = pin_for_label("work").unwrap();
+    rename_account("work", "  Research team  ").unwrap();
+    assert_eq!(default_account_label().as_deref(), Some("Research team"));
+    assert_eq!(
+        get_active_account_override().as_deref(),
+        Some("Research team")
+    );
+    assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
+    let accounts = list_accounts().unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(accounts[0].label, "Research team");
+    assert_eq!(accounts[0].access, "access-work");
+    assert_eq!(accounts[1].label, "personal");
+    update_account_tokens("Research team", "renewed-access", "renewed-refresh", 5678).unwrap();
+    assert_eq!(default_account_label().as_deref(), Some("Research team"));
+    assert_eq!(resolve_pin(&pin).as_deref(), Some("Research team"));
+    assert_eq!(list_accounts().unwrap()[1].access, "access-personal");
+    for invalid in ["", "main", "default", "claude-2", "personal"] {
+        assert!(rename_account("Research team", invalid).is_err());
+    }
+    assert!(rename_account("missing", "missing").is_err());
+    assert_eq!(list_accounts().unwrap()[0].label, "Research team");
+    remove_account("Research team").unwrap();
+    assert!(update_account_tokens("Research team", "late-access", "late-refresh", 9999).is_err());
+    assert_eq!(list_accounts().unwrap().len(), 1);
+    set_active_account_override(None);
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -79,6 +127,66 @@ fn jcode_path_respects_jcode_home() {
             .join("opencode")
             .join("auth.json")
     );
+}
+
+#[test]
+fn claude_config_dir_selects_external_file_without_inheriting_other_path_consent() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let first = temp.path().join("first-claude-config");
+    let second = temp.path().join("second-claude-config");
+    let _config = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &first);
+    let first_path = first.join(".credentials.json");
+    assert_eq!(claude_code_path().unwrap(), first_path);
+    assert_eq!(jcode_path().unwrap(), temp.path().join("auth.json"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(&first_path, "synthetic fixture").unwrap();
+
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &first_path,
+    )
+    .unwrap();
+    assert!(
+        crate::config::Config::external_auth_source_allowed_for_path(
+            CLAUDE_CODE_AUTH_SOURCE_ID,
+            &first_path,
+        )
+    );
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &second);
+    let second_path = second.join(".credentials.json");
+    assert_eq!(claude_code_path().unwrap(), second_path);
+    assert!(
+        !crate::config::Config::external_auth_source_allowed_for_path(
+            CLAUDE_CODE_AUTH_SOURCE_ID,
+            &second_path,
+        )
+    );
+}
+
+#[test]
+fn trusted_config_dir_file_precedes_consented_native_env_token() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    let _config = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &config_dir);
+    let _native = EnvVarGuard::set(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        std::path::Path::new("native-test-token"),
+    );
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join(".credentials.json");
+    std::fs::write(
+        &path,
+        r#"{"claudeAiOauth":{"accessToken":"file-test-token","refreshToken":"file-refresh","expiresAt":4102444800000}}"#,
+    ).unwrap();
+
+    crate::config::Config::allow_external_auth_source_for_path(CLAUDE_CODE_AUTH_SOURCE_ID, &path)
+        .unwrap();
+    crate::config::Config::allow_external_auth_source(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID).unwrap();
+    assert_eq!(load_credentials().unwrap().access_token, "file-test-token");
 }
 
 #[test]

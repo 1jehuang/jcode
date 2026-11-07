@@ -13,6 +13,8 @@ pub use super::cloud_status::{
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
+#[path = "info_widget_dock.rs"]
+mod dock;
 #[path = "info_widget_frame.rs"]
 pub(crate) mod frame;
 #[path = "info_widget_git.rs"]
@@ -44,6 +46,9 @@ pub use crate::memory_types::{
 };
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
+#[cfg(test)]
+pub use dock::set_dock_disabled_for_test;
+pub use dock::{dock_height, dock_rect, dock_text_lines, dock_width, render_dock};
 use memory_render::{render_memory_compact, render_memory_expanded, render_memory_widget};
 use ratatui::{
     prelude::*,
@@ -436,6 +441,9 @@ pub struct CacheHitInfo {
     pub creation_tokens: u64,
     /// Approximate reusable prefix tokens expected to be cache-readable.
     pub optimal_input_tokens: u64,
+    /// Cache reads in the same scope as `optimal_input_tokens` (live requests
+    /// only when resumed history is present). `None` means `read_tokens`.
+    pub optimal_read_tokens: Option<u64>,
     /// Input tokens from the latest completed request with cache telemetry.
     pub last_reported_input_tokens: Option<u64>,
     /// Cached input tokens read on the latest completed request with cache telemetry.
@@ -492,7 +500,8 @@ impl CacheHitInfo {
         if self.optimal_input_tokens == 0 {
             None
         } else {
-            Some((self.read_tokens as f32 / self.optimal_input_tokens as f32).clamp(0.0, 1.0))
+            let read = self.optimal_read_tokens.unwrap_or(self.read_tokens);
+            Some((read as f32 / self.optimal_input_tokens as f32).clamp(0.0, 1.0))
         }
     }
 
@@ -751,6 +760,27 @@ pub struct InfoWidgetData {
     /// Absolute paths the agent edited this session (edit-style tool calls),
     /// used to mark agent changes in the Changes widget.
     pub agent_edited: std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
+    /// Stored account this window uses for the active Claude/OpenAI provider.
+    pub window_account: Option<WindowAccount>,
+}
+
+/// Account shown next to the model: `claude · claude-fox` or
+/// `claude-otter (default)` when the window follows the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowAccount {
+    pub label: String,
+    pub pinned: bool,
+    pub is_default: bool,
+}
+
+impl WindowAccount {
+    pub fn display(&self) -> String {
+        if !self.pinned && self.is_default {
+            format!("{} (default)", self.label)
+        } else {
+            self.label.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1150,6 +1180,12 @@ pub(super) fn calculate_placements_with_cloud_reflow(
         .visible
         .iter()
         .find(|p| p.kind == WidgetKind::Overview)
+        .or_else(|| {
+            anchors
+                .iter()
+                .map(|anchor| &anchor.placement)
+                .find(|placement| placement.kind == WidgetKind::Overview)
+        })
     else {
         return resident;
     };
@@ -1842,7 +1878,7 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 #[path = "info_widget_cache.rs"]
 mod cache_render;
 #[cfg(test)]
-use cache_render::render_kv_cache_summary_line;
+pub(crate) use cache_render::render_kv_cache_summary_line;
 use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget

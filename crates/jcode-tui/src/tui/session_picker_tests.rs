@@ -112,95 +112,81 @@ fn make_session_with_flags(
 }
 
 #[test]
-fn cloud_filter_supports_flat_sessions_and_debug_visibility() {
-    let local = make_session("local", "local", false, SessionStatus::Closed);
-    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
-    cloud.server_icon = Some("☁".into());
-    let mut debug_cloud = cloud.clone();
-    debug_cloud.id = "debug_cloud".into();
-    debug_cloud.is_debug = true;
-    let mut picker = SessionPicker::new(vec![local, cloud, debug_cloud]);
-    picker.filter_mode = SessionFilterMode::Cloud;
-    picker.rebuild_items();
-    assert_eq!(picker.visible_sessions.len(), 1);
-    assert_eq!(picker.selected_session().unwrap().id, "cloud");
-    assert_eq!(picker.hidden_test_count, 1);
-    picker.toggle_test_sessions();
-    assert_eq!(picker.visible_sessions.len(), 2);
-    assert_eq!(picker.hidden_test_count, 0);
-    picker.cycle_filter_mode_backwards();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
-    picker.cycle_filter_mode();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+fn resume_hides_spawned_sessions_by_default_and_toggle_shows_parent_label() {
+    let mut parent = make_session("main-thread-123456", "main", false, SessionStatus::Closed);
+    parent.title = "Main thread title".to_string();
+    let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+    child.parent_id = Some(parent.id.clone());
+
+    let mut picker = SessionPicker::new(vec![parent, child]);
+    assert_eq!(picker.visible_session_iter().count(), 1);
+    assert!(picker.find_item_index_for_session_id("child").is_none());
+
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('a'), KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Continue
+    ));
+    assert_eq!(picker.visible_session_iter().count(), 2);
+    let child = picker
+        .visible_session_iter()
+        .find(|session| session.id == "child")
+        .expect("spawned session is visible after toggle");
+    let rendered = picker.render_session_item_lines(child, false);
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line_text(line).contains("↳ from Main thread title"))
+    );
+
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![
+                make_session("main-thread-123456", "main", false, SessionStatus::Closed),
+                {
+                    let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+                    child.parent_id = Some("main-thread-123456".to_string());
+                    child
+                },
+            ],
+        ))))
+        .expect("fresh list");
+    assert_eq!(picker.visible_session_iter().count(), 2);
+    let reopened = SessionPicker::new(vec![
+        make_session("main-thread-123456", "main", false, SessionStatus::Closed),
+        {
+            let mut child = make_session("child", "agent", false, SessionStatus::Closed);
+            child.parent_id = Some("main-thread-123456".to_string());
+            child
+        },
+    ]);
+    assert_eq!(reopened.visible_session_iter().count(), 1);
 }
 
 #[test]
-fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
-    let now = Utc::now();
-    let mut local = make_session("local", "local", false, SessionStatus::Closed);
-    local.last_message_time = now;
-    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
-    cloud.server_name = Some("cloud: host".into());
-    cloud.server_icon = Some("☁".into());
-    cloud.last_message_time = now - ChronoDuration::minutes(2);
-    let mut old_local = local.clone();
-    old_local.id = "old_local".into();
-    old_local.last_message_time = now - ChronoDuration::minutes(3);
-    let mut saved_cloud = cloud.clone();
-    saved_cloud.id = "saved_cloud".into();
-    saved_cloud.saved = true;
-    let cloud_group = ServerGroup {
-        name: "cloud: host".into(),
-        icon: "☁".into(),
-        version: String::new(),
-        git_hash: String::new(),
-        is_running: false,
-        sessions: vec![cloud, saved_cloud],
-    };
-    let mut picker = SessionPicker::new_grouped(vec![cloud_group], vec![old_local, local]);
-    let ids = |picker: &SessionPicker| {
-        picker
-            .visible_session_iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(ids(&picker), ["saved_cloud", "local", "cloud", "old_local"]);
+fn standalone_resume_renders_before_list_load_finishes() {
+    let mut picker = SessionPicker::loading();
+    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("loading frame");
     assert!(matches!(
-        picker.items[0],
-        PickerItem::SavedHeader { session_count: 1 }
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-    assert!(!picker.items.iter().any(|item| matches!(
-        item,
-        PickerItem::ServerHeader { .. } | PickerItem::OrphanHeader { .. }
-    )));
-
-    let real = make_session("real", "real", false, SessionStatus::Closed);
-    picker.all_server_groups.push(ServerGroup {
-        name: "real server".into(),
-        icon: "🛰".into(),
-        version: "1".into(),
-        git_hash: String::new(),
-        is_running: true,
-        sessions: vec![real],
-    });
-    picker.rebuild_items();
-    assert_eq!(
-        ids(&picker),
-        ["saved_cloud", "real", "local", "cloud", "old_local"]
-    );
-    assert!(picker.items.iter().any(|item| matches!(item, PickerItem::ServerHeader { name, session_count: 1, .. } if name == "real server")));
-    picker.filter_mode = SessionFilterMode::Cloud;
-    picker.rebuild_items();
-    assert_eq!(ids(&picker), ["cloud", "saved_cloud"]);
-    assert!(
-        picker
-            .items
-            .iter()
-            .all(|item| matches!(item, PickerItem::Session))
-    );
-    picker.search_query = "local".into();
-    picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    assert!(picker.loading_message.is_some());
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Loading sessions"));
 }
 
 #[test]
@@ -777,10 +763,16 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
         tool_duration_ms: None,
         token_usage: None,
     });
-    session.save().expect("save session");
+    session.save_prepared().expect("save session");
 
     let sessions = load_sessions().expect("load sessions");
-    let mut picker = SessionPicker::new(sessions);
+    let mut loaded = sessions
+        .into_iter()
+        .find(|loaded| loaded.id == session.id)
+        .expect("saved fixture in picker index");
+    loaded.is_debug = false;
+    loaded.parent_id = None;
+    let mut picker = SessionPicker::new(vec![loaded]);
 
     picker.ensure_selected_preview_loaded();
 
@@ -2634,8 +2626,131 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
     );
 }
 
+#[path = "session_picker_search_tests.rs"]
+mod search;
+
+#[test]
+fn onboarding_start_label_marks_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some(home.display().to_string()));
+    picker.activate_onboarding_banner(vec![Line::from("Welcome to jcode")]);
+    let lines = onboarding::render_onboarding_picker_lines(&mut picker, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("New session in ~ (home)")),
+        "home directory should read '~ (home)': {lines:#?}"
+    );
+}
 #[path = "session_picker_scope_tests.rs"]
 mod project_scope;
 
 #[path = "session_picker_tests/onboarding.rs"]
 mod onboarding;
+
+#[test]
+fn cloud_filter_supports_flat_sessions_and_debug_visibility() {
+    let local = make_session("local", "local", false, SessionStatus::Closed);
+    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
+    cloud.server_icon = Some("☁".into());
+    let mut debug_cloud = cloud.clone();
+    debug_cloud.id = "debug_cloud".into();
+    debug_cloud.is_debug = true;
+    let mut picker = SessionPicker::new(vec![local, cloud, debug_cloud]);
+    picker.filter_mode = SessionFilterMode::Cloud;
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(picker.selected_session().unwrap().id, "cloud");
+    assert_eq!(picker.hidden_test_count, 1);
+    picker.toggle_test_sessions();
+    assert_eq!(picker.visible_sessions.len(), 2);
+    assert_eq!(picker.hidden_test_count, 0);
+    picker.cycle_filter_mode_backwards();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+}
+
+#[test]
+fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
+    let now = Utc::now();
+    let mut local = make_session("local", "local", false, SessionStatus::Closed);
+    local.last_message_time = now;
+    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
+    cloud.server_name = Some("cloud: host".into());
+    cloud.server_icon = Some("☁".into());
+    cloud.last_message_time = now - ChronoDuration::minutes(2);
+    let mut old_local = local.clone();
+    old_local.id = "old_local".into();
+    old_local.last_message_time = now - ChronoDuration::minutes(3);
+    let mut saved_cloud = cloud.clone();
+    saved_cloud.id = "saved_cloud".into();
+    saved_cloud.saved = true;
+    let cloud_group = ServerGroup {
+        name: "cloud: host".into(),
+        icon: "☁".into(),
+        version: String::new(),
+        git_hash: String::new(),
+        is_running: false,
+        sessions: vec![cloud, saved_cloud],
+    };
+    let mut picker = SessionPicker::new_grouped(vec![cloud_group], vec![old_local, local]);
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["saved_cloud", "local", "cloud", "old_local"]
+    );
+    assert!(matches!(
+        picker.items[0],
+        PickerItem::SavedHeader { session_count: 1 }
+    ));
+    assert!(!picker.items.iter().any(|item| matches!(
+        item,
+        PickerItem::ServerHeader { .. } | PickerItem::OrphanHeader { .. }
+    )));
+
+    let real = make_session("real", "real", false, SessionStatus::Closed);
+    picker.all_server_groups.push(ServerGroup {
+        name: "real server".into(),
+        icon: "🛰".into(),
+        version: "1".into(),
+        git_hash: String::new(),
+        is_running: true,
+        sessions: vec![real],
+    });
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["saved_cloud", "real", "local", "cloud", "old_local"]
+    );
+    assert!(picker.items.iter().any(|item| matches!(item, PickerItem::ServerHeader { name, session_count: 1, .. } if name == "real server")));
+    picker.filter_mode = SessionFilterMode::Cloud;
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["cloud", "saved_cloud"]
+    );
+    assert!(
+        picker
+            .items
+            .iter()
+            .all(|item| matches!(item, PickerItem::Session))
+    );
+    picker.search_query = "local".into();
+    picker.rebuild_items();
+    assert!(picker.visible_sessions.is_empty());
+}

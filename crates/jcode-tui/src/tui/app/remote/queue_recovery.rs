@@ -131,9 +131,9 @@ pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &st
     recover_queued_continuation(app, reason, false)
 }
 
-/// A busy rejection proves the send was not accepted, including automatic
-/// reminders. Unlike a disconnect, it is safe to queue these without risking
-/// replaying a continuation that the server is already running.
+/// A busy rejection proves the send was not accepted, including user follow-ups
+/// and automatic reminders. Disconnect recovery remains narrower because an
+/// uncertain delivery could otherwise replay work the server already accepted.
 pub(super) fn recover_rejected_queued_continuation(app: &mut App) -> bool {
     recover_queued_continuation(app, "server busy rejection", true)
 }
@@ -143,9 +143,10 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
         .rate_limit_pending_message
         .as_ref()
         .is_some_and(|pending| {
-            pending.is_system
-                && (rejected || !pending.auto_retry)
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+            (rejected || pending.is_system && !pending.auto_retry)
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
         });
     if !is_recoverable {
         return false;
@@ -155,7 +156,7 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     };
     app.rate_limit_reset = None;
     crate::logging::info(&format!(
-        "Recovering in-flight queued continuation into queued follow-ups after {} (content_chars={}, has_reminder={})",
+        "Recovering rejected in-flight follow-up into queued messages after {} (content_chars={}, has_reminder={})",
         reason,
         pending.content.chars().count(),
         pending.system_reminder.is_some()
@@ -163,8 +164,9 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     if let Some(reminder) = pending.system_reminder {
         app.hidden_queued_system_messages.insert(0, reminder);
     }
-    if !pending.content.trim().is_empty() {
+    if !pending.content.trim().is_empty() || !pending.images.is_empty() {
         app.queued_messages.insert(0, pending.content);
+        app.queued_message_images.splice(0..0, pending.images);
     }
     true
 }
@@ -173,7 +175,8 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
     let Some(interleave) = app.interleave_message.take() else {
         return false;
     };
-    if interleave.trim().is_empty() {
+    if interleave.trim().is_empty() && app.interleave_images.is_empty() {
+        app.interleave_images.clear();
         return false;
     }
 
@@ -182,6 +185,8 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
         reason
     ));
     app.queued_messages.insert(0, interleave);
+    app.queued_message_images
+        .splice(0..0, std::mem::take(&mut app.interleave_images));
     true
 }
 

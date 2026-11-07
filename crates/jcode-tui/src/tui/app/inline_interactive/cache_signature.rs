@@ -1,14 +1,16 @@
 use super::*;
 
 impl App {
-    pub(super) fn model_route_cache_marker(route: &crate::provider::ModelRoute) -> String {
+    pub(in crate::tui::app) fn model_route_cache_marker(
+        route: &crate::provider::ModelRoute,
+    ) -> String {
         format!(
             "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             route.model, route.provider, route.api_method, route.available, route.detail
         )
     }
 
-    pub(super) fn model_picker_cache_signature(
+    pub(in crate::tui::app) fn model_picker_cache_signature(
         &self,
         current_model: &str,
         config_default_model: Option<String>,

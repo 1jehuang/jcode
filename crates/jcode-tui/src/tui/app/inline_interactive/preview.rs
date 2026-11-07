@@ -32,7 +32,7 @@ impl App {
             .or_else(|| trimmed.strip_prefix("/account"))?;
 
         if rest.is_empty() {
-            return Some(InlinePickerPreviewRequest::Account {
+            return crate::tui::is_ssh_remote().then(|| InlinePickerPreviewRequest::Account {
                 provider_filter: None,
                 filter: String::new(),
             });
@@ -49,10 +49,7 @@ impl App {
 
         let rest = rest.trim_start();
         if rest.is_empty() {
-            return Some(InlinePickerPreviewRequest::Account {
-                provider_filter: None,
-                filter: String::new(),
-            });
+            return None;
         }
 
         let mut parts = rest.split_whitespace();
@@ -61,13 +58,10 @@ impl App {
         let remainder = remainder.trim();
 
         match first {
-            "doctor" | "switch" | "use" | "add" | "login" | "remove" | "rm" | "delete"
-            | "default-provider" | "default-model" => return None,
-            "list" | "ls" => {
-                return Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: None,
-                    filter: String::new(),
-                });
+            "switch" | "use" | "add" | "login" | "remove" | "rm" | "delete" | "rename"
+            | "replace" | "reauth" | "reauthenticate" | "refresh" | "default" | "unpin"
+            | "failover" | "doctor" | "default-provider" | "default-model" | "list" | "ls" => {
+                return None;
             }
             _ => {}
         }
@@ -82,21 +76,15 @@ impl App {
 
         if let Some(provider_filter) = provider_filter {
             if remainder.is_empty() {
-                return Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: Some(provider_filter),
-                    filter: String::new(),
-                });
+                return None;
             }
 
             let subcommand = remainder.split_whitespace().next().unwrap_or_default();
             match subcommand {
-                "list" | "ls" => Some(InlinePickerPreviewRequest::Account {
-                    provider_filter: Some(provider_filter),
-                    filter: String::new(),
-                }),
-                "doctor" | "settings" | "login" | "add" | "switch" | "use" | "remove" | "rm"
-                | "delete" | "transport" | "effort" | "fast" | "premium" | "api-base"
-                | "api-key-name" | "env-file" | "default-model" => None,
+                "settings" | "login" | "add" | "switch" | "use" | "remove" | "rm" | "delete"
+                | "rename" | "replace" | "reauth" | "reauthenticate" | "refresh" | "default"
+                | "unpin" | "doctor" | "list" | "ls" | "transport" | "effort" | "fast"
+                | "premium" | "api-base" | "api-key-name" | "env-file" | "default-model" => None,
                 _ => Some(InlinePickerPreviewRequest::Account {
                     provider_filter: Some(provider_filter),
                     filter: remainder.to_string(),
@@ -132,7 +120,7 @@ impl App {
     }
 
     pub(crate) fn sync_model_picker_preview_from_input(&mut self) {
-        self.sync_input_image_attachments();
+        self.ensure_input_image_markers();
         let Some(request) = self.inline_picker_preview_request(&self.input) else {
             if self
                 .inline_interactive_state
@@ -204,6 +192,17 @@ impl App {
             return false;
         }
 
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| {
+                matches!(picker.kind, PickerKind::Account | PickerKind::Model)
+                    && picker.filtered.is_empty()
+            })
+        {
+            return true;
+        }
+
         if let Some(ref mut picker) = self.inline_interactive_state {
             picker.preview = false;
         }
@@ -230,6 +229,7 @@ impl App {
                 (picker.kind == PickerKind::Login
                     && picker.filter.is_empty()
                     && picker.selected == 0)
+                    || super::picker_enter_should_focus_model_browser(picker)
                     || (picker.kind == PickerKind::Account && picker.filter.is_empty())
             })
             .unwrap_or(false)

@@ -398,6 +398,7 @@ fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
 #[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        agent_profile_name: None,
         system_prompt: None,
         supports_pdf_panels: true,
         supports_user_response: true,
@@ -414,12 +415,15 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect: true,
         continue_on_disconnect: true,
         terminal_env: vec![("ZELLIJ_SESSION_NAME".to_string(), "sessionB".to_string())],
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
         client_name: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        agent_profile_name: _,
         system_prompt: _,
         supports_pdf_panels,
         supports_user_response,
@@ -436,6 +440,8 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        account_pins: _,
+        supports_session_accounts: _,
         client_name: _,
     } = decoded
     else {
@@ -464,6 +470,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        agent_profile_name: _,
         system_prompt: _,
         supports_pdf_panels,
         supports_user_response,
@@ -480,6 +487,8 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        account_pins: _,
+        supports_session_accounts: _,
         client_name: _,
     } = decoded
     else {
@@ -715,6 +724,21 @@ fn tool_input_optional_id_preserves_legacy_wire_format() -> Result<()> {
     );
     Ok(())
 }
+#[test]
+fn subscribe_agent_profile_is_optional_and_roundtrips_by_name() {
+    let legacy: Request = serde_json::from_str(r#"{"type":"subscribe","id":17}"#).unwrap();
+    assert!(matches!(legacy, Request::Subscribe { agent_profile_name: None, .. }));
+    let request: Request = serde_json::from_str(
+        r#"{"type":"subscribe","id":18,"agent_profile_name":"reviewer"}"#,
+    ).unwrap();
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["agent_profile_name"], "reviewer");
+    assert!(matches!(request, Request::Subscribe { agent_profile_name: Some(name), .. } if name == "reviewer"));
+    let value = serde_json::to_value(&legacy).unwrap();
+    assert!(value.get("agent_profile_name").is_none());
+}
+
+
 #[test]
 fn context_cap_wire_roundtrip() -> Result<()> {
     for effective_budget in [None, Some(90_000)] {

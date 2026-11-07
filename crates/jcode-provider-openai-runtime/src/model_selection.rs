@@ -63,6 +63,8 @@ impl OpenAIProvider {
         if let Ok(mut current) = self.model.try_write() {
             let changed = current.as_str() != model;
             *current = model.to_string();
+            self.browser_model_unset
+                .store(false, AtomicOrdering::Release);
             jcode_base::provider::clear_model_unavailable_for_scope(&self.catalog_scope(), model);
             drop(current);
             if changed {

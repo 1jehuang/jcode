@@ -37,7 +37,7 @@ struct EnvGuard {
     prev_socket: Option<OsString>,
 }
 
-struct ScopedEnvVar {
+pub(super) struct ScopedEnvVar {
     key: &'static str,
     prev: Option<OsString>,
 }
@@ -209,7 +209,7 @@ impl Drop for EnvGuard {
 }
 
 impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
         // Config is cached with a recheck interval; config-backed env vars
@@ -483,6 +483,7 @@ async fn swarm_worker_report_does_not_revive_cancelled_root() {
 
 #[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    // Serialize with tests that set JCODE_WAKE_MODE=external process-wide.
     let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![

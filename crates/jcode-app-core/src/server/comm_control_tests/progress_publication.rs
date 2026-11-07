@@ -13,19 +13,20 @@ async fn cancelled_task_progress_retains_turn_until_scoped_events_drain() {
     ));
     let (bus, _) = broadcast::channel(16);
     let progress = super::task_progress_event_sender(
-        "progress-test".to_string(),
-        "swarm".to_string(),
-        "task".to_string(),
-        Arc::clone(&members),
-        Arc::new(RwLock::new(HashMap::new())),
-        Arc::new(RwLock::new(HashMap::new())),
-        Arc::new(RwLock::new(HashMap::new())),
-        Arc::new(RwLock::new(VecDeque::new())),
-        Arc::new(AtomicU64::new(0)),
-        bus,
-        Arc::clone(&events),
-        lease.publication_pin(),
-    );
+crate::server::swarm::begin_turn_publication("progress-test").await,
+"progress-test".to_string(),
+"swarm".to_string(),
+"task".to_string(),
+Arc::clone(&members),
+Arc::new(RwLock::new(HashMap::new())),
+Arc::new(RwLock::new(HashMap::new())),
+Arc::new(RwLock::new(HashMap::new())),
+Arc::new(RwLock::new(VecDeque::new())),
+Arc::new(AtomicU64::new(0)),
+bus,
+Arc::clone(&events),
+lease.publication_pin(),
+);
     progress
         .sender()
         .send(ServerEvent::TextDelta {

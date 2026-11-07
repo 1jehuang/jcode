@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 /// Unreferenced versions kept for rollback, newest first.
 pub const DEFAULT_KEEP_RECENT_VERSIONS: usize = 5;
 
-/// Never remove a version installed more recently than this, so an in-flight
-/// build/publish sequence cannot lose its binary between install and symlink.
+/// Retain newly installed versions for rollback convenience. Publication safety
+/// comes from the store lock, never from this age threshold.
 const MIN_VERSION_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Override how many unreferenced versions to keep. `0` disables cleanup.
@@ -43,7 +43,7 @@ fn keep_recent_from_env() -> Option<usize> {
 
 /// Versions that must never be removed: active channels, the build manifest's
 /// canary/stable/pending-activation rollback targets.
-fn protected_versions() -> HashSet<String> {
+fn protected_versions() -> Result<HashSet<String>> {
     let mut protected = HashSet::new();
     for version in [
         read_current_version(),
@@ -63,7 +63,8 @@ fn protected_versions() -> HashSet<String> {
             }
         }
     }
-    if let Ok(manifest) = BuildManifest::load() {
+    let manifest = BuildManifest::load()?;
+    {
         protected.extend(manifest.stable.clone());
         protected.extend(manifest.canary.clone());
         if let Some(pending) = manifest.pending_activation.as_ref() {
@@ -72,7 +73,7 @@ fn protected_versions() -> HashSet<String> {
             protected.extend(pending.previous_shared_server_version.clone());
         }
     }
-    protected
+    Ok(protected)
 }
 
 /// Resolve `<channel>/jcode -> versions/<v>/jcode` to `<v>`.
@@ -96,29 +97,6 @@ fn version_from_binary_path(path: &Path) -> Option<String> {
     (parent == "versions").then_some(version)
 }
 
-/// Versions whose binary is the executable of a live process.
-#[cfg(target_os = "linux")]
-fn running_versions() -> HashSet<String> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return HashSet::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| std::fs::read_link(entry.path().join("exe")).ok())
-        .filter_map(|exe| {
-            // A deleted-but-running binary reads as "<path> (deleted)".
-            let text = exe.to_string_lossy();
-            let trimmed = text.strip_suffix(" (deleted)").unwrap_or(&text);
-            version_from_binary_path(Path::new(trimmed))
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn running_versions() -> HashSet<String> {
-    HashSet::new()
-}
-
 /// Remove old unreferenced version directories. Best-effort, rate limited to
 /// one pass per day per machine, safe to call from a startup thread.
 pub fn prune_old_versions() {
@@ -128,18 +106,43 @@ pub fn prune_old_versions() {
     let Ok(dir) = builds_dir() else {
         return;
     };
+    // Idle housekeeping never waits for an in-flight publication. Do not mark
+    // a contended pass complete, so the next idle opportunity can retry.
+    let Ok(_store_lock) = crate::store_lock::acquire_build_store_lock_nonblocking() else {
+        return;
+    };
     if !prune_due(&dir) {
         return;
     }
-    let mut protected = protected_versions();
-    protected.extend(running_versions());
-    let _ = prune_old_versions_in(
+    let Some(running) = crate::prune::running_executable_ids() else {
+        return;
+    };
+    let Ok(mut protected) = protected_versions() else {
+        return;
+    };
+    let Ok(rollback) = crate::prune::ghe_backup_versions(&dir.join("versions")) else {
+        return;
+    };
+    protected.extend(rollback);
+    if let Ok(entries) = std::fs::read_dir(dir.join("versions")) {
+        for entry in entries.flatten() {
+            if crate::prune::contains_running_file(&entry.path(), &running) {
+                protected.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    let _ = prune_and_mark(&dir, &protected, keep_recent);
+}
+
+fn prune_and_mark(dir: &Path, protected: &HashSet<String>, keep_recent: usize) -> Result<()> {
+    prune_old_versions_in(
         &dir.join("versions"),
-        &protected,
+        protected,
         keep_recent,
         SystemTime::now(),
-    );
-    mark_pruned(&dir);
+    )?;
+    mark_pruned(dir);
+    Ok(())
 }
 
 /// True when the last completed pass is older than the interval. The marker
@@ -162,6 +165,8 @@ fn mark_pruned(dir: &Path) {
 }
 
 /// Core of [`prune_old_versions`], parameterized for unit tests.
+/// Callers using a live store must hold a store lock BEFORE constructing their
+/// `protected` snapshot and through this call, as the production caller does.
 pub fn prune_old_versions_in(
     versions_dir: &Path,
     protected: &HashSet<String>,
@@ -169,10 +174,9 @@ pub fn prune_old_versions_in(
     now: SystemTime,
 ) -> Result<VersionPruneReport> {
     let mut candidates: Vec<(SystemTime, String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(versions_dir)?.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
         if !kind.is_dir() {
             continue;
         }
@@ -204,11 +208,8 @@ pub fn prune_old_versions_in(
             report.kept.push(name);
             continue;
         }
-        if std::fs::remove_dir_all(&path).is_ok() {
-            report.removed.push(name);
-        } else {
-            report.kept.push(name);
-        }
+        std::fs::remove_dir_all(&path)?;
+        report.removed.push(name);
     }
     Ok(report)
 }
@@ -250,6 +251,95 @@ mod tests {
             assert!(!versions.join(removed).exists(), "{removed} should go");
         }
         assert_eq!(report.removed.len(), 5);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_prune_skips_contended_store_without_deletion_or_completion_marker() {
+        crate::tests::with_temp_jcode_home(|| {
+            let builds = builds_dir().unwrap();
+            let versions = builds.join("versions");
+            make_version(&versions, "oldest", DAY * 5);
+            make_version(&versions, "newer", DAY * 3);
+            let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+
+            // Take the actual kernel lock on an independent open file, not a
+            // reentrant guard. Keep it held until the idle call has returned.
+            let lock = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(builds.join(".store.lock"))
+                .unwrap();
+            lock.try_lock().unwrap();
+            let (finished, receive) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                prune_old_versions();
+                finished.send(()).unwrap();
+            });
+            let returned_while_locked = receive.recv_timeout(Duration::from_secs(2));
+            // Release even if the old blocking implementation regresses, so
+            // failure is bounded rather than leaving a worker parked for 30s.
+            drop(lock);
+            let joined = worker.join();
+            if let Some(previous_keep) = previous_keep {
+                jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+            } else {
+                jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+            }
+            joined.unwrap();
+            assert!(
+                returned_while_locked.is_ok(),
+                "idle pruning waited for the publisher"
+            );
+            assert!(versions.join("oldest").is_dir());
+            assert!(!builds.join(PRUNE_MARKER).exists());
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_prune_keeps_ghe_backup_targets() {
+        crate::tests::with_temp_jcode_home(|| {
+            let builds = builds_dir().unwrap();
+            let versions = builds.join("versions");
+            make_version(&versions, "rollback", DAY * 10);
+            make_version(&versions, "unreferenced", DAY * 9);
+            for index in 0..10 {
+                make_version(&versions, &format!("recent-{index}"), DAY * 2);
+            }
+            let backup = builds.join("ghe-install-backups/fixture");
+            fs::create_dir_all(&backup).unwrap();
+            fs::write(
+                backup.join("target-0"),
+                versions.join("rollback/jcode").to_str().unwrap(),
+            )
+            .unwrap();
+            let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+            prune_old_versions();
+            if let Some(previous_keep) = previous_keep {
+                jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+            } else {
+                jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+            }
+            assert!(versions.join("rollback/jcode").is_file());
+            assert!(!versions.join("unreferenced").exists());
+            assert!(builds.join(PRUNE_MARKER).is_file());
+        });
+    }
+
+    #[test]
+    fn failed_daily_pass_does_not_stamp_success() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(prune_and_mark(temp.path(), &HashSet::new(), 0).is_err());
+        assert!(!temp.path().join(PRUNE_MARKER).exists());
+        assert!(prune_due(temp.path()));
+        fs::create_dir(temp.path().join("versions")).unwrap();
+        prune_and_mark(temp.path(), &HashSet::new(), 0).unwrap();
+        assert!(!prune_due(temp.path()));
     }
 
     #[test]

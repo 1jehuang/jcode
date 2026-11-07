@@ -1,5 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[path = "feedback_role_tests.rs"]
+mod feedback_role_tests;
+
 use super::{
     NotifySessionContext, clone_split_session, create_transfer_child_session,
     handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
@@ -127,6 +130,18 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
     parent.system_prompt = Some("forked system prompt".into());
+    parent.agent_profile = Some(crate::agent_profile::AgentProfile {
+        name: "writer".into(),
+        instructions: "saved profile".into(),
+        instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+            id: "file:/snapshot/AGENTS.md".into(),
+            kind: crate::instruction_sources::InstructionSourceKind::AgentsMd,
+            label: "Project Instructions (AGENTS.md)".into(),
+            path: Some("/snapshot/AGENTS.md".into()),
+            content: "fork extra snapshot".into(),
+            priority: 0,
+        }],
+    });
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -146,6 +161,7 @@ fn clone_split_session_uses_persisted_session_state() {
     let mut unsaved_parent = parent.clone();
     unsaved_parent.model = Some("unsaved-model".into());
     unsaved_parent.system_prompt = Some("unsaved prompt".into());
+    unsaved_parent.agent_profile.as_mut().unwrap().instructions = "unsaved profile".into();
     unsaved_parent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -159,6 +175,7 @@ fn clone_split_session_uses_persisted_session_state() {
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.system_prompt, parent.system_prompt);
+    assert_eq!(child.agent_profile, parent.agent_profile);
     assert_eq!(
         child.messages.len(),
         parent.messages.len() + 1,
@@ -261,7 +278,7 @@ async fn split_empty_live_session_without_persisted_parent() {
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    handle_split(17, &parent.id, &agent, &tx).await;
+    handle_split(17, &parent.id, &agent, &tx, None).await;
     let child = split_response(&mut rx, 17);
     assert_ne!(child.id, parent.id);
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -308,7 +325,7 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
 
     timeout(
         Duration::from_millis(100),
-        handle_split(18, &parent.id, &agent, &tx),
+        handle_split(18, &parent.id, &agent, &tx, None),
     )
     .await
     .expect("split must not wait on the held streaming Agent lock");
@@ -350,7 +367,7 @@ async fn split_busy_unsaved_session_returns_error_without_waiting() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     timeout(
         Duration::from_millis(100),
-        handle_split(19, &parent_id, &agent, &tx),
+        handle_split(19, &parent_id, &agent, &tx, None),
     )
     .await
     .expect("missing snapshot must not block a busy session");
@@ -377,6 +394,18 @@ fn transfer_preserves_system_prompt_including_empty_override() {
     for prompt in [None, Some(""), Some("custom system prompt")] {
         let mut parent = crate::session::Session::create(None, None);
         parent.system_prompt = prompt.map(str::to_string);
+        parent.agent_profile = Some(crate::agent_profile::AgentProfile {
+            name: "writer".into(),
+            instructions: "transfer profile snapshot".into(),
+            instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+                id: "session:system_prompt".into(),
+                kind: crate::instruction_sources::InstructionSourceKind::SessionSystemPrompt,
+                label: "Stored session instructions (additive)".into(),
+                path: None,
+                content: "transfer extra snapshot".into(),
+                priority: 2,
+            }],
+        });
         crate::todo::save_todos(
             &parent.id,
             &[crate::todo::TodoItem {
@@ -394,6 +423,7 @@ fn transfer_preserves_system_prompt_including_empty_override() {
             .expect("create transfer session");
         let child = crate::session::Session::load(&child_id).expect("load transfer session");
         assert_eq!(child.system_prompt, parent.system_prompt);
+        assert_eq!(child.agent_profile, parent.agent_profile);
         let child_todos = crate::todo::load_todos(&child_id).unwrap();
         assert_eq!(child_todos.len(), 1);
         assert!(child_todos[0].waiting_on.is_empty());
@@ -656,6 +686,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -775,6 +806,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -940,6 +972,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         &event_counter,
         &swarm_event_tx,
         &client_event_tx,
+        None,
     )
     .await;
 
@@ -1041,6 +1074,7 @@ async fn resume_all_skips_session_with_completed_turn() {
         &event_counter,
         &swarm_event_tx,
         &client_event_tx,
+        None,
     )
     .await;
 

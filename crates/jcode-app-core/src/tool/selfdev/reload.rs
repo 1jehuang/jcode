@@ -325,48 +325,55 @@ impl SelfDevTool {
         };
         let hash = source.version_label.clone();
         let version_before = jcode_build_meta::version().to_string();
-        let published = if test_mode {
-            None
-        } else {
-            Some(build::publish_local_current_build_for_source(
-                &repo_dir, &source,
-            )?)
-        };
-        let previous_shared_server_version = if test_mode {
-            None
-        } else {
-            let published_build = published.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "published build metadata was missing after publish_local_current_build_for_source"
-                )
-            })?;
-            build::smoke_test_server_binary(&published_build.versioned_path)?;
-            build::read_shared_server_version()?
-        };
+        {
+            let _store_lock = if test_mode {
+                None
+            } else {
+                Some(jcode_build_support::acquire_build_store_lock()?)
+            };
+            let published = if test_mode {
+                None
+            } else {
+                Some(build::publish_local_current_build_for_source(
+                    &repo_dir, &source,
+                )?)
+            };
+            let previous_shared_server_version = if test_mode {
+                None
+            } else {
+                let published_build = published.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "published build metadata was missing after publish_local_current_build_for_source"
+                    )
+                })?;
+                build::smoke_test_server_binary(&published_build.versioned_path)?;
+                build::read_shared_server_version()?
+            };
 
-        // Synthetic builds must never publish activation state, even when
-        // JCODE_HOME is unset and storage resolves to the production home.
-        if !test_mode {
-            // Update manifest - track what we're testing
-            let mut manifest = build::BuildManifest::load()?;
-            manifest.canary = Some(hash.clone());
-            manifest.canary_status = Some(build::CanaryStatus::Testing);
-            manifest.set_pending_activation(build::PendingActivation {
-                session_id: session_id.to_string(),
-                new_version: hash.clone(),
-                previous_current_version: published
-                    .as_ref()
-                    .and_then(|published| published.previous_current_version.clone()),
-                previous_shared_server_version,
-                source_fingerprint: Some(source.fingerprint.clone()),
-                requested_at: chrono::Utc::now(),
-            })?;
-            manifest.save()?;
-        }
+            // Synthetic builds must never publish activation state, even when
+            // JCODE_HOME is unset and storage resolves to the production home.
+            if !test_mode {
+                // Update manifest - track what we're testing
+                let mut manifest = build::BuildManifest::load()?;
+                manifest.canary = Some(hash.clone());
+                manifest.canary_status = Some(build::CanaryStatus::Testing);
+                manifest.set_pending_activation(build::PendingActivation {
+                    session_id: session_id.to_string(),
+                    new_version: hash.clone(),
+                    previous_current_version: published
+                        .as_ref()
+                        .and_then(|published| published.previous_current_version.clone()),
+                    previous_shared_server_version,
+                    source_fingerprint: Some(source.fingerprint.clone()),
+                    requested_at: chrono::Utc::now(),
+                })?;
+                manifest.save()?;
+            }
 
-        if !test_mode && let Err(error) = build::update_shared_server_symlink(&hash) {
-            let _ = build::rollback_pending_activation_for_session(session_id);
-            return Err(error);
+            if !test_mode && let Err(error) = build::update_shared_server_symlink(&hash) {
+                let _ = build::rollback_pending_activation_for_session(session_id);
+                return Err(error);
+            }
         }
 
         // Save reload context for continuation after restart

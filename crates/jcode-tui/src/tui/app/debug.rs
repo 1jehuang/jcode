@@ -471,6 +471,7 @@ pub(super) struct ScrollTestState {
     is_processing: bool,
     streaming_text: String,
     queued_messages: Vec<String>,
+    queued_message_images: Vec<(String, String)>,
     interleave_message: Option<String>,
     pending_soft_interrupts: Vec<String>,
     input: String,
@@ -509,6 +510,7 @@ impl ScrollTestState {
             is_processing: app.is_processing,
             streaming_text: app.streaming.streaming_text.clone(),
             queued_messages: app.queued_messages.clone(),
+            queued_message_images: app.queued_message_images.clone(),
             interleave_message: app.interleave_message.clone(),
             pending_soft_interrupts: app.pending_soft_interrupts.clone(),
             input: app.input.clone(),
@@ -546,6 +548,7 @@ impl ScrollTestState {
         app.is_processing = self.is_processing;
         app.replace_streaming_text(self.streaming_text);
         app.queued_messages = self.queued_messages;
+        app.queued_message_images = self.queued_message_images;
         app.interleave_message = self.interleave_message;
         app.pending_soft_interrupts = self.pending_soft_interrupts;
         app.input = self.input;

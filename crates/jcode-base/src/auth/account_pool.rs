@@ -259,7 +259,7 @@ fn key_for_route(route: &str, active: impl Fn(&str) -> Option<String>) -> Option
 }
 
 /// Keep the auto-switch order in step after the default provider changed
-/// through any path (model picker, `/account`, login, Desktop).
+/// through any path (model picker, `/accounts`, login, Desktop).
 pub fn sync_order_with_default_route(route: &str) -> Result<()> {
     let mut pool = AccountPool::load();
     if pool.promote_route(route, active_label) {
@@ -501,13 +501,15 @@ mod tests {
 
     #[test]
     fn priority_tiers_precede_order_and_never_enroll_manual_accounts() {
-        let mut pool = AccountPool::default();
-        pool.members = vec![
-            "openai-api".into(),
-            "work".into(),
-            "personal".into(),
-            "claude".into(),
-        ];
+        let mut pool = AccountPool {
+            members: vec![
+                "openai-api".into(),
+                "work".into(),
+                "personal".into(),
+                "claude".into(),
+            ],
+            ..Default::default()
+        };
         for (key, priority) in [
             ("openai-api", 2),
             ("work", 1),
@@ -538,8 +540,10 @@ mod tests {
 
     #[test]
     fn rotation_stays_with_highest_available_tier_before_lower_tiers() {
-        let mut pool = AccountPool::default();
-        pool.members = vec!["openai:a".into(), "openai:work".into(), "openai:b".into()];
+        let mut pool = AccountPool {
+            members: vec!["openai:a".into(), "openai:work".into(), "openai:b".into()],
+            ..Default::default()
+        };
         pool.set_priority("openai:a", 0);
         pool.set_priority("openai:b", 0);
         pool.set_priority("openai:work", 1);

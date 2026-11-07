@@ -1,5 +1,137 @@
 use super::*;
 
+/// Querying a saved login must authenticate as that login without selecting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_account_usage_uses_target_headers_without_changing_active_account() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    struct Restore {
+        home: Option<std::ffi::OsString>,
+        active_override: Option<String>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            auth::codex::set_active_account_override(self.active_override.take());
+            match self.home.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = Restore {
+        home: std::env::var_os("JCODE_HOME"),
+        active_override: auth::codex::get_active_account_override(),
+    };
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let nonce = uuid::Uuid::new_v4();
+    let active_token = format!("usage-wrapper-active-{nonce}");
+    let target_token = format!("usage-wrapper-target-{nonce}");
+    let account = |label: &str, access: &str, identity: &str| auth::codex::OpenAiAccount {
+        label: label.into(),
+        access_token: access.into(),
+        refresh_token: format!("refresh-{identity}"),
+        id_token: None,
+        account_id: Some(identity.into()),
+        expires_at: Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+        email: Some(format!("{identity}@example.com")),
+    };
+    let stored = auth::codex::JcodeOpenAiAuthFile {
+        openai_accounts: vec![
+            account("usage-active", &active_token, "active-identity"),
+            account("usage-target", &target_token, "target-identity"),
+        ],
+        active_openai_account: Some("usage-active".into()),
+    };
+    auth::codex::save_auth_file(&stored).unwrap();
+    auth::codex::set_active_account_override(Some("usage-active".into()));
+    let stored_before = serde_json::to_value(auth::codex::load_auth_file().unwrap()).unwrap();
+    assert_eq!(
+        auth::codex::active_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::default_account_label().as_deref(),
+        Some("usage-active")
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _url_guard = override_openai_usage_url_for_tests(format!(
+        "http://{}/wham/usage",
+        listener.local_addr().unwrap()
+    ));
+    let request_task = tokio::spawn(async move {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 4096];
+            let count = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(count > 0, "usage request ended before its headers");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = serde_json::json!({
+            "plan_type": "plus", "rate_limit": { "allowed": true,
+                "primary_window": { "used_percent": 25.0, "reset_at": 4_000_000_000u64 },
+                "secondary_window": { "used_percent": 75.0, "reset_at": 4_000_604_800u64 }
+            }
+        })
+        .to_string();
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        ).as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        fetch_saved_account_usage("openai", "usage-target"),
+    )
+    .await
+    .expect("saved-account usage fetch must finish");
+    let request = request_task.await.unwrap();
+    assert!(request.starts_with("GET /wham/usage HTTP/1.1\r\n"));
+    let headers: Vec<_> = request.lines().map(str::to_ascii_lowercase).collect();
+    assert!(headers.contains(&format!("authorization: bearer {target_token}")));
+    assert!(headers.contains(&"chatgpt-account-id: target-identity".to_string()));
+    assert!(!request.contains(&active_token));
+    assert!(!headers.contains(&"chatgpt-account-id: active-identity".to_string()));
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.limits.len(), 2);
+    assert_eq!(report.limits[0].usage_percent, 25.0);
+    assert_eq!(report.limits[1].usage_percent, 75.0);
+    assert!(
+        report
+            .extra_info
+            .contains(&("Account label".into(), "usage-target".into()))
+    );
+    assert_eq!(
+        auth::codex::active_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::default_account_label().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        auth::codex::get_active_account_override().as_deref(),
+        Some("usage-active")
+    );
+    assert_eq!(
+        serde_json::to_value(auth::codex::load_auth_file().unwrap()).unwrap(),
+        stored_before
+    );
+}
+
 #[test]
 fn test_usage_data_default() {
     let data = UsageData::default();
@@ -712,7 +844,23 @@ fn test_account_usage_probe_prefers_best_available_alternative() {
 
     let guidance = probe.switch_guidance().expect("expected switch guidance");
     assert!(guidance.contains("`backup`"));
-    assert!(guidance.contains("/account openai switch backup"));
+    assert!(guidance.contains("/accounts openai switch backup"));
+}
+
+#[test]
+fn saved_account_switch_guidance_uses_only_plural_command() {
+    for (provider, expected) in [
+        (
+            MultiAccountProviderKind::Anthropic,
+            "/accounts switch Research  Team",
+        ),
+        (
+            MultiAccountProviderKind::OpenAI,
+            "/accounts openai switch Research  Team",
+        ),
+    ] {
+        assert_eq!(provider.switch_command("Research  Team"), expected);
+    }
 }
 
 #[test]
@@ -840,6 +988,225 @@ fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
             .iter()
             .any(|(key, _)| key == "Account label")
     );
+}
+
+/// A same-label relogin (e.g. `jcode login --provider claude` reusing
+/// "default" for a different Claude account) must not inherit the old
+/// account's cached usage or its shared 429 backoff.
+#[test]
+fn anthropic_usage_cache_key_changes_when_same_label_holds_new_token() {
+    let old = anthropic_usage_cache_key("sk-ant-oat01-old-account-token", Some("default"));
+    let new = anthropic_usage_cache_key("sk-ant-oat01-new-account-token", Some("default"));
+    assert_ne!(old, new, "new account must not reuse old account's usage");
+    assert_eq!(
+        old,
+        anthropic_usage_cache_key("sk-ant-oat01-old-account-token", Some("default")),
+        "same credential keeps one key so cross-process backoff still applies"
+    );
+}
+
+#[test]
+fn anthropic_usage_invalidate_by_label_clears_every_token_for_that_label() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let key = anthropic_usage_cache_key("sk-ant-oat01-some-token", Some("work"));
+    store_anthropic_usage(
+        key.clone(),
+        UsageData {
+            five_hour: 1.0,
+            seven_day: 1.0,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+    assert!(cached_anthropic_usage(&key).is_some());
+    invalidate_anthropic_usage_reset_state(Some("work"));
+    assert!(cached_anthropic_usage(&key).is_none());
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The per-request Claude precheck must not reject a prompt with the OLD
+/// account's exhausted usage after the same label now holds a new login.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_usage_snapshot_is_dropped_after_same_label_relogin() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let label =
+        crate::auth::claude::upsert_account(account("default", "sk-ant-oat01-exhausted-old"))
+            .unwrap();
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-exhausted-old", Some(&label));
+    set_active_usage_for_tests(
+        UsageData {
+            five_hour: 1.0,
+            seven_day: 1.0,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+        Some(old_key),
+    )
+    .await;
+    assert!(active_claude_usage_exhausted_sync());
+
+    // Re-login: same label, different Claude account.
+    crate::auth::claude::upsert_account(account(&label, "sk-ant-oat01-fresh-new")).unwrap();
+    assert!(
+        !active_claude_usage_exhausted_sync(),
+        "old account's exhausted usage must not gate the new login"
+    );
+
+    set_active_usage_for_tests(UsageData::default(), None).await;
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// A Claude usage fetch that finishes after an account switch must keep the
+/// report under the account that produced it and must not mark the newly
+/// active login as exhausted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_report_finishing_after_account_switch_keeps_old_account_key() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let old_label =
+        crate::auth::claude::upsert_account(account("old", "sk-ant-oat01-switch-old")).unwrap();
+    crate::auth::claude::set_active_account(&old_label).unwrap();
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-switch-old", Some(&old_label));
+    set_active_usage_for_tests(UsageData::default(), None).await;
+
+    // The fetch starts for the old account...
+    let fetched_for = accessors::current_anthropic_usage_key();
+    assert_eq!(fetched_for.as_deref(), Some(old_key.as_str()));
+
+    // ...the user switches accounts while it is in flight...
+    let new_label =
+        crate::auth::claude::upsert_account(account("new", "sk-ant-oat01-switch-new")).unwrap();
+    crate::auth::claude::set_active_account(&new_label).unwrap();
+    let new_key = anthropic_usage_cache_key("sk-ant-oat01-switch-new", Some(&new_label));
+
+    // ...and the old account's exhausted report lands afterwards.
+    let exhausted = ProviderUsage {
+        provider_name: "Anthropic (Claude)".to_string(),
+        limits: vec![
+            UsageLimit {
+                name: "5-hour window".to_string(),
+                usage_percent: 100.0,
+                resets_at: None,
+            },
+            UsageLimit {
+                name: "7-day window".to_string(),
+                usage_percent: 100.0,
+                resets_at: None,
+            },
+        ],
+        ..Default::default()
+    };
+    sync_active_anthropic_usage_from_reports(&[exhausted], fetched_for).await;
+
+    assert!(
+        cached_anthropic_usage(&new_key).is_none(),
+        "old account's report must not be stored under the new login's key"
+    );
+    assert!(
+        cached_anthropic_usage(&old_key).is_some_and(|data| data.five_hour >= 0.99),
+        "report must be stored under the account that produced it"
+    );
+    assert!(
+        !active_claude_usage_exhausted_sync(),
+        "new login must not be rejected by the old account's usage"
+    );
+
+    set_active_usage_for_tests(UsageData::default(), None).await;
+    crate::auth::claude::set_active_account_override(None);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The usage tasks pick the active Claude account while they are enqueued.
+/// If the user switches accounts in that window, the fetched report may belong
+/// to either login, so it must not be tied to the key captured before.
+#[test]
+fn account_switch_while_enqueueing_usage_does_not_tie_report_to_old_key() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let first =
+        crate::auth::claude::upsert_account(account("first", "sk-ant-oat01-enqueue-a")).unwrap();
+    let second =
+        crate::auth::claude::upsert_account(account("second", "sk-ant-oat01-enqueue-b")).unwrap();
+    crate::auth::claude::set_active_account(&first).unwrap();
+
+    // No switch: the key is the active login's key.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| 1);
+    assert_eq!(
+        key,
+        Some(anthropic_usage_cache_key(
+            "sk-ant-oat01-enqueue-a",
+            Some(&first)
+        ))
+    );
+
+    // A switch while the tasks are being enqueued: no key, so the report is
+    // neither stored under the first account nor applied as active usage.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| {
+        crate::auth::claude::set_active_account(&second).unwrap();
+        1
+    });
+    assert_eq!(
+        key, None,
+        "report must not be tied to the key captured before the switch"
+    );
+
+    crate::auth::claude::set_active_account_override(None);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
 }
 
 #[test]
@@ -1016,214 +1383,55 @@ fn jcode_usage_tolerates_older_gateways_without_jev_usage() {
     assert_eq!(report.extra_info[0].0, "Plan");
 }
 
-#[test]
-fn kimi_usage_limits_shape_parses_windowed_quotas() {
-    let json = serde_json::json!({
-        "limits": [
-            {"window": {"duration": 5, "timeUnit": "HOUR"},
-             "detail": {"limit": 100.0, "used": 8.0, "percentage": 8.0, "resetTime": "2026-10-04T10:00:00Z"}},
-            {"window": {"duration": 7, "timeUnit": "DAY"},
-             "detail": {"limit": 100.0, "remaining": 28.0, "resetTime": "2026-10-08T00:00:00Z"}},
-            {"window": {"duration": 30, "timeUnit": "DAY"},
-             "detail": {"limit": 100.0, "used": 45.0, "resetTime": "2026-11-01T00:00:00Z"}}
-        ]
-    });
-    let limits = api_keys::parse_kimi_usage_limits(&json);
-    assert_eq!(limits.len(), 3);
-    // Windows rank 5-hour < Weekly < Monthly regardless of response order.
-    assert_eq!(limits[0].name, "5-hour");
-    assert!((limits[0].usage_percent - 8.0).abs() < f32::EPSILON);
-    assert_eq!(limits[0].resets_at.as_deref(), Some("2026-10-04T10:00:00Z"));
-    assert_eq!(limits[1].name, "Weekly");
-    // Remaining-derived usage: 100 - 28 = 72%.
-    assert!((limits[1].usage_percent - 72.0).abs() < 0.01);
-    assert_eq!(limits[2].name, "Monthly");
-    assert!((limits[2].usage_percent - 45.0).abs() < f32::EPSILON);
-}
+#[path = "provider_quota_tests.rs"]
+mod provider_quota_tests;
 
+/// A token refresh for the same Claude login rotates its access token. The
+/// login's cached usage and shared 429 backoff must follow it to the new key,
+/// in memory and on disk, so the next check does not refetch as if it were a
+/// new account.
 #[test]
-fn kimi_usage_legacy_usages_map_shape() {
-    let json = serde_json::json!({
-        "usages": {
-            "limit_5h": {"used_ratio": 0.08, "reset_time": "2026-10-04T10:00:00Z"},
-            "limit_7d": {"used_ratio": 0.92, "reset_time": "2026-10-08T00:00:00Z"},
-            "limit_30d": {"used_ratio": 0.10}
-        }
-    });
-    let limits = api_keys::parse_kimi_usage_limits(&json);
-    assert_eq!(limits.len(), 3);
-    assert_eq!(limits[0].name, "5-hour");
-    assert!((limits[0].usage_percent - 8.0).abs() < 0.01);
-    assert_eq!(limits[1].name, "Weekly");
-    assert!((limits[1].usage_percent - 92.0).abs() < 0.01);
-    assert_eq!(limits[1].resets_at.as_deref(), Some("2026-10-08T00:00:00Z"));
-    assert_eq!(limits[2].name, "Monthly");
-    assert_eq!(limits[2].resets_at, None);
-}
+fn anthropic_usage_follows_a_token_refresh_of_the_same_login() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
 
-#[test]
-fn kimi_usage_summary_row_falls_back_to_weekly_label() {
-    let json = serde_json::json!({
-        "usage": {"limit": 100.0, "used": 72.0, "resetTime": "2026-10-08T00:00:00Z"}
-    });
-    let limits = api_keys::parse_kimi_usage_limits(&json);
-    assert_eq!(limits.len(), 1);
-    assert_eq!(limits[0].name, "Weekly");
-    assert!((limits[0].usage_percent - 72.0).abs() < 0.01);
-}
+    let label = "refresh-carry";
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-before-refresh", Some(label));
+    let new_key = anthropic_usage_cache_key("sk-ant-oat01-after-refresh", Some(label));
+    let exhausted = UsageData {
+        five_hour: 1.0,
+        seven_day: 1.0,
+        fetched_at: Some(Instant::now()),
+        ..Default::default()
+    };
+    store_anthropic_usage(old_key.clone(), exhausted.clone());
+    super::disk_cache::store_success(&old_key, &exhausted);
+    super::accessors::set_active_usage_key(Some(old_key.clone()));
 
-#[test]
-fn cursor_plan_usage_report_builds_named_limits() {
-    let json = serde_json::json!({
-        "membershipType": "pro",
-        "billingCycleEnd": "1792835722000",
-        "planUsage": {
-            "totalPercentUsed": 27.0,
-            "autoPercentUsed": 29.0,
-            "apiPercentUsed": 150.0
-        }
-    });
-    let report = provider_fetch::cursor_plan_usage_report(&json);
-    assert_eq!(report.provider_name, "Cursor Pro");
-    assert_eq!(report.limits.len(), 3);
-    assert_eq!(report.limits[0].name, "Included");
-    assert!((report.limits[0].usage_percent - 27.0).abs() < f32::EPSILON);
-    assert_eq!(report.limits[2].name, "API");
-    // Out-of-range percentages are clamped.
-    assert!((report.limits[2].usage_percent - 100.0).abs() < f32::EPSILON);
-    let reset = report.limits[0]
-        .resets_at
-        .as_deref()
-        .expect("billing cycle end present");
-    let dt = chrono::DateTime::parse_from_rfc3339(reset).expect("rfc3339 reset");
-    assert_eq!(dt.timestamp(), 1792835722);
-}
-
-#[test]
-fn cursor_plan_usage_report_prefers_team_spend_limit() {
-    let json = serde_json::json!({
-        "membershipType": "pro",
-        "spendLimitUsage": {"limitType": "team"},
-        "planUsage": {"totalPercentUsed": 40.0}
-    });
-    let report = provider_fetch::cursor_plan_usage_report(&json);
-    assert_eq!(report.provider_name, "Cursor Team");
-    assert_eq!(report.limits.len(), 1);
-}
-
-#[test]
-fn reset_timestamp_from_json_value_handles_all_encodings() {
-    // protobuf int64 JSON-encodes as a decimal string of milliseconds.
-    let millis = serde_json::json!("1792835722000");
-    assert_eq!(
-        chrono::DateTime::parse_from_rfc3339(&reset_timestamp_from_json_value(&millis).unwrap())
-            .unwrap()
-            .timestamp(),
-        1792835722
+    carry_anthropic_usage_across_token_refresh(
+        label,
+        "sk-ant-oat01-before-refresh",
+        "sk-ant-oat01-after-refresh",
     );
-    let seconds = serde_json::json!(1792835722u64);
-    assert_eq!(
-        chrono::DateTime::parse_from_rfc3339(&reset_timestamp_from_json_value(&seconds).unwrap())
-            .unwrap()
-            .timestamp(),
-        1792835722
-    );
-    let iso = serde_json::json!("2026-10-24T10:15:22Z");
-    assert_eq!(
-        reset_timestamp_from_json_value(&iso).as_deref(),
-        Some("2026-10-24T10:15:22Z")
-    );
-    assert_eq!(reset_timestamp_from_json_value(&serde_json::json!(0)), None);
-}
 
-#[test]
-fn zai_coding_plan_limits_parse_token_and_time_windows() {
-    let json = serde_json::json!({
-        "data": {
-            "limits": [
-                {"type": "TOKENS_LIMIT", "unit": 6, "percentage": 72.0, "nextResetTime": "2026-10-08T00:00:00Z"},
-                {"type": "TOKENS_LIMIT", "unit": 5, "percentage": 4.8, "nextResetTime": "2026-10-04T10:00:00Z"},
-                {"type": "TIME_LIMIT", "currentValue": 3.0, "usage": 20.0, "nextResetTime": "2026-11-01T00:00:00Z"}
-            ]
-        }
-    });
-    let limits = api_keys::parse_zai_coding_plan_limits(&json);
-    assert_eq!(limits.len(), 3);
-    // 5-hour ranks before Weekly before MCP monthly.
-    assert_eq!(limits[0].name, "5-hour");
-    assert!((limits[0].usage_percent - 4.8).abs() < 0.01);
-    assert_eq!(limits[0].resets_at.as_deref(), Some("2026-10-04T10:00:00Z"));
-    assert_eq!(limits[1].name, "Weekly");
-    assert!((limits[1].usage_percent - 72.0).abs() < f32::EPSILON);
-    assert_eq!(limits[2].name, "MCP monthly");
-    // TIME_LIMIT without percentage falls back to currentValue/usage.
-    assert!((limits[2].usage_percent - 15.0).abs() < 0.01);
-}
+    let carried = cached_anthropic_usage(&new_key).expect("usage follows the refresh");
+    assert_eq!(carried.five_hour, 1.0);
+    assert!(cached_anthropic_usage(&old_key).is_none());
+    assert!(super::disk_cache::fresh(&new_key).is_some());
+    assert!(super::disk_cache::fresh(&old_key).is_none());
 
-#[test]
-fn zai_coding_plan_limits_tolerate_unwrapped_payload() {
-    let json = serde_json::json!({
-        "limits": [
-            {"type": "TOKENS_LIMIT", "unit": 6, "percentage": 10.0}
-        ]
-    });
-    let limits = api_keys::parse_zai_coding_plan_limits(&json);
-    assert_eq!(limits.len(), 1);
-    assert_eq!(limits[0].name, "Weekly");
-    assert_eq!(limits[0].resets_at, None);
-    // Unknown rows and empty payloads yield no limits (caller falls back).
-    let empty =
-        api_keys::parse_zai_coding_plan_limits(&serde_json::json!({"data": {"limits": []}}));
-    assert!(empty.is_empty());
-}
+    // A relogin under the same label is a different account: nothing carries.
+    let relogin_key = anthropic_usage_cache_key("sk-ant-oat01-other-account", Some(label));
+    assert!(cached_anthropic_usage(&relogin_key).is_none());
 
-#[test]
-fn kimi_usage_explicit_weekly_window_beats_summary() {
-    let json = serde_json::json!({
-        "usage": {"limit": 100.0, "used": 12.0, "resetTime": "2026-10-08T00:00:00Z"},
-        "limits": [
-            {"window": {"duration": 7, "timeUnit": "DAY"},
-             "detail": {"limit": 100.0, "used": 72.0, "resetTime": "2026-10-09T00:00:00Z"}}
-        ]
-    });
-    let limits = api_keys::parse_kimi_usage_limits(&json);
-    assert_eq!(limits.len(), 1);
-    assert_eq!(limits[0].name, "Weekly");
-    assert!((limits[0].usage_percent - 72.0).abs() < 0.01);
-    assert_eq!(limits[0].resets_at.as_deref(), Some("2026-10-09T00:00:00Z"));
-}
-
-#[test]
-fn cursor_plan_usage_report_keeps_membership_without_usage_fields() {
-    // Native logins can receive membership info without planUsage fields;
-    // the plan label is still reported instead of falling back to the
-    // API-key probe.
-    let json = serde_json::json!({"membershipType": "pro"});
-    let report = provider_fetch::cursor_plan_usage_report(&json);
-    assert_eq!(report.provider_name, "Cursor Pro");
-    assert!(report.limits.is_empty());
-    assert!(report.error.is_none());
-}
-
-#[test]
-fn zai_quota_url_follows_profile_region() {
-    assert_eq!(
-        api_keys::zai_quota_url("https://api.z.ai/api/coding/paas/v4"),
-        "https://api.z.ai/api/monitor/usage/quota/limit"
-    );
-    assert_eq!(
-        api_keys::zai_quota_url("https://open.bigmodel.cn/api/coding/paas/v4"),
-        "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
-    );
-    // Custom proxies and unparsable bases default to the international host.
-    assert_eq!(
-        api_keys::zai_quota_url("https://proxy.example.com/v1"),
-        "https://api.z.ai/api/monitor/usage/quota/limit"
-    );
-    assert_eq!(
-        api_keys::zai_quota_url("not a url"),
-        "https://api.z.ai/api/monitor/usage/quota/limit"
-    );
+    super::accessors::set_active_usage_key(None);
+    invalidate_anthropic_usage_reset_state(Some(label));
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
 }
 
 #[test]

@@ -58,62 +58,6 @@ impl SearchSelection {
     }
 }
 
-#[cfg(test)]
-mod search_selection_tests {
-    use super::*;
-
-    #[test]
-    fn progressive_batches_wait_for_publish_interval_but_completion_flushes() {
-        let mut selection = SearchSelection::default();
-        selection.update_query("needle");
-        assert!(!selection.publish_results(true, true));
-        assert!(!selection.publish_results(true, true));
-        selection.last_publish =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(126));
-        assert!(selection.publish_results(false, true));
-        assert!(!selection.publish_results(false, true));
-        assert!(!selection.publish_results(true, true));
-        assert!(selection.publish_results(false, false));
-        assert!(!selection.publish_results(false, false));
-    }
-
-    #[test]
-    fn changing_query_discards_unpublished_results() {
-        let mut selection = SearchSelection::default();
-        selection.update_query("old");
-        assert!(!selection.publish_results(true, true));
-        selection.update_query("new");
-        assert!(!selection.publish_results(false, false));
-    }
-
-    #[test]
-    fn follows_for_one_second_without_extending_on_rebuild() {
-        let mut selection = SearchSelection::default();
-        selection.update_query("needle");
-        assert!(selection.following());
-        let deadline = selection.follow_until.unwrap();
-        selection.update_query("needle");
-        assert_eq!(selection.follow_until, Some(deadline));
-        selection.follow_until = Some(std::time::Instant::now());
-        assert!(!selection.following());
-        selection.update_query("needle");
-        assert!(
-            !selection.following(),
-            "same query must not restart an expired window"
-        );
-        selection.update_query("another query");
-        assert!(selection.following());
-        selection.stop();
-        selection.update_query("another query");
-        assert!(
-            !selection.following(),
-            "refresh must not undo a manual override"
-        );
-        selection.update_query("");
-        assert!(!selection.following());
-    }
-}
-
 impl SessionPicker {
     /// Commit the best evidence available when queued Enter completes or its
     /// time budget expires. This never restarts the auto-follow deadline.
@@ -159,6 +103,9 @@ impl SessionPicker {
 
     fn search_matched_session_refs(&mut self, query: &str) -> Vec<SessionRef> {
         let normalized = Self::normalized_search_query(query);
+        if self.cached_search_query.is_empty() && !normalized.is_empty() {
+            self.cached_search_refs.clear();
+        }
         let mut transcript_search = std::mem::take(&mut self.transcript_search);
         transcript_search.reset(
             &normalized,
@@ -236,6 +183,7 @@ impl SessionPicker {
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
                     (show_test || !session.is_debug)
+                        && (self.show_spawned_sessions || session.parent_id.is_none())
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })
@@ -670,5 +618,61 @@ impl SessionPicker {
             self.refresh_live_presence();
         }
         self.rebuild_items();
+    }
+}
+
+#[cfg(test)]
+mod search_selection_tests {
+    use super::*;
+
+    #[test]
+    fn progressive_batches_wait_for_publish_interval_but_completion_flushes() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(!selection.publish_results(true, true));
+        assert!(!selection.publish_results(true, true));
+        selection.last_publish =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(126));
+        assert!(selection.publish_results(false, true));
+        assert!(!selection.publish_results(false, true));
+        assert!(!selection.publish_results(true, true));
+        assert!(selection.publish_results(false, false));
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn changing_query_discards_unpublished_results() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("old");
+        assert!(!selection.publish_results(true, true));
+        selection.update_query("new");
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn follows_for_one_second_without_extending_on_rebuild() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(selection.following());
+        let deadline = selection.follow_until.unwrap();
+        selection.update_query("needle");
+        assert_eq!(selection.follow_until, Some(deadline));
+        selection.follow_until = Some(std::time::Instant::now());
+        assert!(!selection.following());
+        selection.update_query("needle");
+        assert!(
+            !selection.following(),
+            "same query must not restart an expired window"
+        );
+        selection.update_query("another query");
+        assert!(selection.following());
+        selection.stop();
+        selection.update_query("another query");
+        assert!(
+            !selection.following(),
+            "refresh must not undo a manual override"
+        );
+        selection.update_query("");
+        assert!(!selection.following());
     }
 }

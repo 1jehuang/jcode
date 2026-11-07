@@ -1,3 +1,4 @@
+use super::strip_osc_color_replies;
 /// Strip terminal escape-sequence remnants from text headed for the composer.
 ///
 /// Mouse reporting, bracketed paste, and focus events all arrive as CSI
@@ -24,6 +25,9 @@
 pub(in crate::tui::app) fn strip_terminal_control_sequences(
     text: &str,
 ) -> std::borrow::Cow<'_, str> {
+    if let Some((cleaned, _)) = strip_osc_color_replies(text, text.len()) {
+        return std::borrow::Cow::Owned(strip_terminal_control_sequences(&cleaned).into_owned());
+    }
     let looks_suspicious = text
         .chars()
         .any(|ch| ch == '\x1b' || ch == '\u{9b}' || (ch.is_control() && ch != '\t' && ch != '\n'));
@@ -52,8 +56,8 @@ pub(in crate::tui::app) fn strip_terminal_control_sequences(
                     None => index = bytes.len(),
                 }
             } else if index < bytes.len() {
-                // Two-character escape such as ESC O or ESC ].
-                index += 1;
+                // ESC followed by one whole character (including Alt+Unicode).
+                index += text[index..].chars().next().unwrap().len_utf8();
             }
             continue;
         }
@@ -66,6 +70,11 @@ pub(in crate::tui::app) fn strip_terminal_control_sequences(
                     None => index = bytes.len(),
                 }
             }
+            continue;
+        }
+        // C1 OSC/ST are controls, not printable composer content.
+        if byte == 0xc2 && matches!(bytes.get(index + 1), Some(0x9c | 0x9d)) {
+            index += 2;
             continue;
         }
         // A bare report-shaped run left behind by a torn read.

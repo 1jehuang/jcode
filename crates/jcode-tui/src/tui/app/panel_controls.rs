@@ -5,7 +5,10 @@ impl App {
     pub(in crate::tui::app) fn dismiss_side_panel(&mut self) {
         self.side_panel_fullscreen = false;
         crate::tui::clear_side_panel_render_caches();
-        self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
+        // A repeated dismiss must not forget the page to bring back.
+        if let Some(id) = self.side_panel.focused_page_id.clone() {
+            self.last_side_panel_focus_id = Some(id);
+        }
         self.side_panel.focused_page_id = None;
         self.side_panel_user_hidden = true;
         self.side_panel_explicit_hidden = true;

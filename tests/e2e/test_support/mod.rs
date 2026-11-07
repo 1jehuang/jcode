@@ -365,6 +365,7 @@ impl WsTestClient {
         self.next_id += 1;
         let working_dir = std::env::current_dir()?.to_string_lossy().into_owned();
         self.send_request(Request::Subscribe {
+            agent_profile_name: None,
             history_base: None,
             system_prompt: None,
             supports_pdf_panels: false,
@@ -382,6 +383,8 @@ impl WsTestClient {
             client_has_local_history: false,
             allow_session_takeover: false,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         })
         .await
     }

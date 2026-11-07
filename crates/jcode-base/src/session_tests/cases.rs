@@ -1,6 +1,12 @@
 use super::*;
 use anyhow::{Result, anyhow};
 
+// current_dir() reports the resolved path, and macOS keeps the temp dir under the
+// /var -> /private/var symlink, so cwd tests start from the real temp path.
+fn real_temp_dir() -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::temp_dir()).unwrap()
+}
+
 #[test]
 fn test_session_exists_roundtrip() -> Result<()> {
     let tmp_dir = std::env::temp_dir().join(format!(
@@ -27,6 +33,185 @@ fn test_session_exists_roundtrip() -> Result<()> {
     );
     assert!(!session_exists(&random_id));
     Ok(())
+}
+
+#[test]
+fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "azure-openai");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-cache");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("azure-openai")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_maps_claude_code_name() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _active = EnvVarGuard::remove("JCODE_ACTIVE_PROVIDER");
+
+    assert_eq!(
+        derive_session_provider_key("Claude Code").as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
+        derive_session_provider_key("Claude").as_deref(),
+        Some("claude")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_falls_back_to_openrouter_namespace() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("azure-openai")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai-compatible");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "zai");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("zai")
+    );
+}
+
+#[test]
+fn save_label_becomes_the_session_title() {
+    let mut session = Session::create_with_id(
+        "session_save_label_123".to_string(),
+        None,
+        Some("Generated title".to_string()),
+    );
+    session.mark_saved(None);
+    assert_eq!(session.display_title(), Some("Generated title"));
+
+    session.mark_saved(Some("  yc mcp  ".to_string()));
+    assert_eq!(session.save_label.as_deref(), Some("yc mcp"));
+    assert_eq!(session.custom_title.as_deref(), Some("yc mcp"));
+    assert_eq!(session.display_title(), Some("yc mcp"));
+
+    // Legacy bookmarks saved a label without setting the title.
+    session.custom_title = None;
+    assert_eq!(session.display_title(), Some("yc mcp"));
+    session.unmark_saved();
+    assert_eq!(session.display_title(), Some("Generated title"));
+}
+
+#[test]
+fn rename_title_preserves_generated_title_for_clear() {
+    let mut session = Session::create_with_id(
+        "session_rename_clear_123".to_string(),
+        None,
+        Some("Generated first prompt title".to_string()),
+    );
+
+    assert_eq!(
+        session.display_title(),
+        Some("Generated first prompt title")
+    );
+    session.rename_title(Some("Custom planning name".to_string()));
+    assert_eq!(
+        session.title.as_deref(),
+        Some("Generated first prompt title")
+    );
+    assert_eq!(
+        session.custom_title.as_deref(),
+        Some("Custom planning name")
+    );
+    assert_eq!(session.display_title(), Some("Custom planning name"));
+
+    session.rename_title(None);
+    assert_eq!(
+        session.title.as_deref(),
+        Some("Generated first prompt title")
+    );
+    assert!(session.custom_title.is_none());
+    assert_eq!(
+        session.display_title(),
+        Some("Generated first prompt title")
+    );
+
+    session.custom_title = Some("   ".to_string());
+    assert_eq!(
+        session.display_title(),
+        Some("Generated first prompt title")
+    );
+}
+
+#[test]
+fn test_debug_memory_profile_reports_messages_and_provider_cache() {
+    let mut session = Session::create_with_id(
+        "session_memory_profile_test".to_string(),
+        None,
+        Some("Memory profile".to_string()),
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello world".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "echo hi"}),
+                thought_signature: None,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tool_1".to_string(),
+                content: "hi".to_string(),
+                is_error: None,
+            },
+        ],
+    );
+
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 7,
+        original_turn_count: 9,
+        compacted_count: 7,
+    });
+
+    let _ = session.provider_messages();
+    let profile = session.debug_memory_profile();
+
+    assert_eq!(profile["messages"]["count"], 2);
+    assert_eq!(profile["messages"]["memory"]["text_blocks"], 1);
+    assert_eq!(profile["messages"]["memory"]["tool_use_blocks"], 1);
+    assert_eq!(profile["messages"]["memory"]["tool_result_blocks"], 1);
+    assert!(profile["messages"]["json_bytes"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(profile["provider_messages_cache"]["count"], 2);
+    assert_eq!(profile["compaction"]["present"], true);
+    assert_eq!(profile["compaction"]["covers_up_to_turn"], 7);
+    assert_eq!(profile["compaction"]["original_turn_count"], 9);
+    assert_eq!(profile["compaction"]["compacted_count"], 7);
+    assert!(
+        profile["provider_messages_cache"]["json_bytes"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[test]
@@ -150,11 +335,11 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-first-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-second-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -198,11 +383,11 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-stale-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-real-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -247,11 +432,11 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-original-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-late-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -2421,6 +2606,12 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
+    let owner = format!("pid {}(", std::process::id());
+    let owns_streaming_assertion = |output: &str| {
+        output
+            .lines()
+            .any(|line| line.contains(&owner) && line.contains(reason))
+    };
     {
         let _streaming = StreamingGuard::new("session_power");
 
@@ -2431,8 +2622,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         assert!(output.status.success(), "pmset should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains(reason),
-            "pmset output should show the streaming assertion; output was:\n{stdout}"
+            owns_streaming_assertion(&stdout),
+            "pmset output should show this process's streaming assertion; output was:\n{stdout}"
         );
     }
 
@@ -2442,8 +2633,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         .expect("pmset -g assertions should run on macOS");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains(reason),
-        "streaming assertion should be released after guard drop; output was:\n{stdout}"
+        !owns_streaming_assertion(&stdout),
+        "this process's streaming assertion should be released after guard drop; output was:\n{stdout}"
     );
 }
 
@@ -2832,6 +3023,55 @@ fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
     assert!(json.get("system_prompt").is_none());
     let restored: Session = serde_json::from_value(json)?;
     assert_eq!(restored.system_prompt, None);
+    assert_eq!(restored.agent_profile, None);
+    Ok(())
+}
+
+#[test]
+fn agent_profile_persists_empty_session_journal_and_partial_loads() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let profile = crate::agent_profile::AgentProfile {
+        name: "writer".into(),
+        instructions: "  Frozen profile instructions.\n".into(),
+        instruction_sources: vec![crate::instruction_sources::InstructionSourceSnapshot {
+            id: "file:/snapshot/preferred-tools.md".into(),
+            kind: crate::instruction_sources::InstructionSourceKind::PreferredTools,
+            label: "Global Preferred Tools (~/.jcode/preferred-tools.md)".into(),
+            path: Some("/snapshot/preferred-tools.md".into()),
+            content: "Frozen preferred-tool guidance".into(),
+            priority: 1,
+        }],
+    };
+    let mut session = Session::create(None, None);
+    session.agent_profile = Some(profile.clone());
+    session.save()?;
+    for restored in [
+        Session::load(&session.id)?,
+        Session::load_startup_stub(&session.id)?,
+        Session::load_for_remote_startup(&session.id)?,
+    ] {
+        assert_eq!(restored.agent_profile.as_ref(), Some(&profile));
+        assert_eq!(restored.system_prompt, None);
+    }
+    // An unchanged profile survives a metadata journal entry.
+    session.model = Some("profile-model".into());
+    session.save()?;
+    assert_eq!(
+        Session::load_startup_stub(&session.id)?.agent_profile,
+        Some(profile)
+    );
+    // Changing instructions under the same name is a snapshot-worthy change.
+    session.agent_profile.as_mut().unwrap().instructions = "replacement".into();
+    session.save()?;
+    assert_eq!(
+        Session::load_for_remote_startup(&session.id)?.agent_profile,
+        session.agent_profile
+    );
+    session.agent_profile = None;
+    session.save()?;
+    assert_eq!(Session::load(&session.id)?.agent_profile, None);
     Ok(())
 }
 
@@ -2872,6 +3112,55 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
 
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
+}
+
+#[test]
+fn account_pins_persist_through_snapshot_and_journal() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-account-pins-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_account_pins_roundtrip";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.save_prepared()?;
+
+    // Second save goes through the journal meta path.
+    let fox = AccountPin::new("claude-fox", Some("fox@example.com".to_string()));
+    session
+        .account_pins
+        .insert("claude".to_string(), fox.clone());
+    session.account_failover = Some(false);
+    session
+        .account_failover_home
+        .insert("claude".to_string(), AccountPin::new("claude-otter", None));
+    session.save_prepared()?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(loaded.account_pins.get("claude"), Some(&fox));
+    assert_eq!(loaded.account_failover, Some(false));
+    assert_eq!(
+        loaded
+            .account_failover_home
+            .get("claude")
+            .map(|p| p.label.as_str()),
+        Some("claude-otter")
+    );
+
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.account_pins.get("claude"), Some(&fox));
+    assert_eq!(remote.account_failover, Some(false));
+
+    // Old session JSON without the fields still loads with empty defaults.
+    let old: Session = serde_json::from_str(
+        r#"{"id":"old","parent_id":null,"title":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","messages":[]}"#,
+    )?;
+    assert!(old.account_pins.is_empty());
+    assert_eq!(old.account_failover, None);
+    assert!(old.account_failover_home.is_empty());
+    Ok(())
 }
 
 /// Resuming a long session records an env snapshot. Past the retention cap
@@ -3290,9 +3579,3 @@ fn read_compaction_elision_compat_fixture() -> Result<()> {
     );
     Ok(())
 }
-
-#[path = "provider_identity_tests.rs"]
-mod provider_identity;
-
-#[path = "memory_profile_tests.rs"]
-mod memory_profile;

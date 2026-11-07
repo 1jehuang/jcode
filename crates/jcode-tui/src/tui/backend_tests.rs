@@ -2,240 +2,35 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
-async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, mut writer) = peer.into_split();
-    let (ready, released) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let Request::Ping { id } = serde_json::from_str(&line).unwrap() else {
-            panic!("readiness must precede Subscribe");
-        };
-        released.await.unwrap();
-        writer
-            .write_all(
-                format!(
-                    "{{\"type\":\"pong\",\"id\":{id},\"native_ssh_protocol\":1}}\nnext-event\n"
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-    });
-    {
-        let readiness = remote.verify_ssh_ready(Duration::from_secs(1));
-        tokio::pin!(readiness);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(5), &mut readiness)
-                .await
-                .is_err()
-        );
-        ready.send(()).unwrap();
-        readiness.await.unwrap();
-    }
-    assert!(remote.session_id.is_none());
-    let mut next = String::new();
-    remote.reader.read_line(&mut next).await.unwrap();
-    assert_eq!(next, "next-event\n");
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn ssh_readiness_rejects_locally_accepted_but_closed_adapter() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let server = tokio::spawn(async move {
-        let mut reader = BufReader::new(peer);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        // Simulate the adapter discovering a failed ProxyCommand handshake.
-    });
-    assert!(
-        remote
-            .verify_ssh_ready(Duration::from_secs(1))
-            .await
-            .is_err()
-    );
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn ssh_readiness_times_out_without_remote_reply() {
-    let mut remote = RemoteConnection::dummy();
-    let _peer = remote.take_dummy_peer().unwrap();
-    let error = remote
-        .verify_ssh_ready(Duration::from_millis(10))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("timed out"));
-}
-
-#[tokio::test]
-async fn ssh_readiness_rejects_wrong_id_old_protocol_and_oversized_reply() {
-    for reply in [
-        "{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n".to_string(),
-        "{\"type\":\"pong\",\"id\":42}\n".to_string(),
-        "x".repeat(8193),
-    ] {
-        let mut remote = RemoteConnection::dummy();
-        remote.next_request_id = 42;
-        let peer = remote.take_dummy_peer().unwrap();
-        let (reader, mut writer) = peer.into_split();
-        let server = tokio::spawn(async move {
-            let mut reader = BufReader::new(reader);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            writer.write_all(reply.as_bytes()).await.unwrap();
-        });
-        assert!(
-            remote
-                .verify_ssh_ready(Duration::from_secs(1))
-                .await
-                .is_err()
-        );
-        server.await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn runtime_command_writes_control_request_without_prompt() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, _writer) = peer.into_split();
-    let mut reader = BufReader::new(reader);
-    let args = vec!["set".to_string(), "model with spaces".to_string()];
-    let id = remote
-        .runtime_command("subagent_model", args.clone())
-        .await
-        .unwrap();
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
-        .await
-        .unwrap()
-        .unwrap();
-    let request: Request = serde_json::from_str(&line).unwrap();
-    assert!(
-        matches!(request, Request::RuntimeCommand { id: wire_id, command, args: wire_args }
-        if wire_id == id && command == "subagent_model" && wire_args == args)
-    );
-    assert_eq!(remote.next_request_id_for_test(), id + 1);
-    assert!(remote.control_done_ids.lock().unwrap().is_empty());
-    line.clear();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn cloud_session_switch_revokes_and_aborts_before_request() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, _writer) = peer.into_split();
-    let mut reader = BufReader::new(reader);
-    remote.session_id = Some("old".into());
-    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    remote.bind_cloud_authority(&live);
-    let callback = tokio::spawn(std::future::pending::<()>());
-    remote.track_cloud_callback(&callback);
-    remote.resume_session("new").await.unwrap();
-    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(callback.await.unwrap_err().is_cancelled());
-    for kind in ["configure_tools", "resume_session"] {
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["type"], kind);
-    }
-}
-
-#[tokio::test]
-async fn cloud_clear_revokes_before_new_conversation() {
-    let mut remote = RemoteConnection::dummy();
-    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    remote.bind_cloud_authority(&live);
-    remote.clear().await.unwrap();
-    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
-}
-
-#[tokio::test]
-async fn cloud_configuration_is_written_before_message() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, _writer) = peer.into_split();
-    let mut reader = BufReader::new(reader);
-    remote
-        .configure_cloud_tools(crate::protocol::SessionToolConfig::default())
-        .await
-        .unwrap();
-    remote.send_message("continue".into()).await.unwrap();
-    for kind in ["configure_tools", "message"] {
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["type"], kind);
-    }
-}
-
-#[tokio::test]
-async fn cloud_expiry_revokes_without_midturn_protocol_write() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, _writer) = peer.into_split();
-    let mut reader = BufReader::new(reader);
-    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    RemoteConnection::cloud_expiry_revoke(live.clone(), tokio::time::Instant::now())
-        .await
-        .unwrap();
-    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
-    let mut line = String::new();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
-            .await
-            .is_err()
-    );
+async fn named_profile_rejects_resume_before_connecting() {
+    let result = RemoteConnection::connect_with_session_and_profile(
+        Some("existing-session"),
+        None,
+        false,
+        None,
+        false,
+        None,
+        Some("reviewer"),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("resume with a creation-only profile must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("--agent cannot be used"));
 }
 
 #[test]
-fn account_usage_poll_is_immediate_then_throttled() {
-    let now = Instant::now();
-    assert!(account_usage_poll_due(None, now));
-    assert!(!account_usage_poll_due(Some(now), now));
-    assert!(!account_usage_poll_due(
-        Some(now),
-        now + Duration::from_secs(29)
-    ));
-    assert!(account_usage_poll_due(
-        Some(now),
-        now + Duration::from_secs(30)
-    ));
-}
-
-#[tokio::test]
-async fn account_usage_poll_sends_once_and_filters_control_done() {
-    let mut remote = RemoteConnection::dummy();
-    let peer = remote.take_dummy_peer().unwrap();
-    let (reader, _writer) = peer.into_split();
-    let mut reader = BufReader::new(reader);
-    remote.poll_account_usage().await.unwrap();
-    let mut line = String::new();
-    reader.read_line(&mut line).await.unwrap();
-    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(request["type"], "account_usage");
-    let id = request["id"].as_u64().unwrap();
-    let next_id = remote.next_request_id;
-    remote.poll_account_usage().await.unwrap();
-    assert_eq!(remote.next_request_id, next_id);
-    let mut stray = 0;
-    let done = serde_json::to_vec(&ServerEvent::Done { id }).unwrap();
-    assert!(matches!(
-        remote.classify_protocol_line(done, &mut stray),
-        LineOutcome::Skip
-    ));
+fn cli_account_pins_fill_first_subscribe_only() {
+    let _guard = crate::storage::lock_test_env();
+    set_startup_account_pins(vec![("claude".to_string(), "claude-fox".to_string())]);
+    let (pins, supports) = take_subscribe_account_fields();
+    assert_eq!(pins, vec![("claude".to_string(), "claude-fox".to_string())]);
+    assert!(supports, "the TUI handles session_account_changed");
+    // A reconnect must not re-pin a window the user has since switched.
+    let (pins, supports) = take_subscribe_account_fields();
+    assert!(pins.is_empty());
+    assert!(supports);
 }
 
 #[tokio::test]
@@ -722,4 +517,241 @@ fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
         1,
     ));
     assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
+}
+
+#[tokio::test]
+async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, mut writer) = peer.into_split();
+    let (ready, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let Request::Ping { id } = serde_json::from_str(&line).unwrap() else {
+            panic!("readiness must precede Subscribe");
+        };
+        released.await.unwrap();
+        writer
+            .write_all(
+                format!(
+                    "{{\"type\":\"pong\",\"id\":{id},\"native_ssh_protocol\":1}}\nnext-event\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    {
+        let readiness = remote.verify_ssh_ready(Duration::from_secs(1));
+        tokio::pin!(readiness);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut readiness)
+                .await
+                .is_err()
+        );
+        ready.send(()).unwrap();
+        readiness.await.unwrap();
+    }
+    assert!(remote.session_id.is_none());
+    let mut next = String::new();
+    remote.reader.read_line(&mut next).await.unwrap();
+    assert_eq!(next, "next-event\n");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_readiness_rejects_locally_accepted_but_closed_adapter() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        // Simulate the adapter discovering a failed ProxyCommand handshake.
+    });
+    assert!(
+        remote
+            .verify_ssh_ready(Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_readiness_times_out_without_remote_reply() {
+    let mut remote = RemoteConnection::dummy();
+    let _peer = remote.take_dummy_peer().unwrap();
+    let error = remote
+        .verify_ssh_ready(Duration::from_millis(10))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn ssh_readiness_rejects_wrong_id_old_protocol_and_oversized_reply() {
+    for reply in [
+        "{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n".to_string(),
+        "{\"type\":\"pong\",\"id\":42}\n".to_string(),
+        "x".repeat(8193),
+    ] {
+        let mut remote = RemoteConnection::dummy();
+        remote.next_request_id = 42;
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, mut writer) = peer.into_split();
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            writer.write_all(reply.as_bytes()).await.unwrap();
+        });
+        assert!(
+            remote
+                .verify_ssh_ready(Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn runtime_command_writes_control_request_without_prompt() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let args = vec!["set".to_string(), "model with spaces".to_string()];
+    let id = remote
+        .runtime_command("subagent_model", args.clone())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let request: Request = serde_json::from_str(&line).unwrap();
+    assert!(
+        matches!(request, Request::RuntimeCommand { id: wire_id, command, args: wire_args }
+        if wire_id == id && command == "subagent_model" && wire_args == args)
+    );
+    assert_eq!(remote.next_request_id_for_test(), id + 1);
+    assert!(remote.control_done_ids.lock().unwrap().is_empty());
+    line.clear();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cloud_session_switch_revokes_and_aborts_before_request() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.session_id = Some("old".into());
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    let callback = tokio::spawn(std::future::pending::<()>());
+    remote.track_cloud_callback(&callback);
+    remote.resume_session("new").await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(callback.await.unwrap_err().is_cancelled());
+    for kind in ["configure_tools", "resume_session"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_clear_revokes_before_new_conversation() {
+    let mut remote = RemoteConnection::dummy();
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    remote.bind_cloud_authority(&live);
+    remote.clear().await.unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn cloud_configuration_is_written_before_message() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote
+        .configure_cloud_tools(crate::protocol::SessionToolConfig::default())
+        .await
+        .unwrap();
+    remote.send_message("continue".into()).await.unwrap();
+    for kind in ["configure_tools", "message"] {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn cloud_expiry_revokes_without_midturn_protocol_write() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    RemoteConnection::cloud_expiry_revoke(live.clone(), tokio::time::Instant::now())
+        .await
+        .unwrap();
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    let mut line = String::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn account_usage_poll_is_immediate_then_throttled() {
+    let now = Instant::now();
+    assert!(account_usage_poll_due(None, now));
+    assert!(!account_usage_poll_due(Some(now), now));
+    assert!(!account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(29)
+    ));
+    assert!(account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(30)
+    ));
+}
+
+#[tokio::test]
+async fn account_usage_poll_sends_once_and_filters_control_done() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.poll_account_usage().await.unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"], "account_usage");
+    let id = request["id"].as_u64().unwrap();
+    let next_id = remote.next_request_id;
+    remote.poll_account_usage().await.unwrap();
+    assert_eq!(remote.next_request_id, next_id);
+    let mut stray = 0;
+    let done = serde_json::to_vec(&ServerEvent::Done { id }).unwrap();
+    assert!(matches!(
+        remote.classify_protocol_line(done, &mut stray),
+        LineOutcome::Skip
+    ));
 }

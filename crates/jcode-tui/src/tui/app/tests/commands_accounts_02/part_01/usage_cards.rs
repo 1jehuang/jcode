@@ -89,7 +89,9 @@ fn test_usage_card_responsive_terminal_layout() {
         ..Default::default()
     }]);
     let mut card_widths = Vec::new();
-    for width in [40, 60, 100, 180] {
+    // 140, not 100: the fork docks the info box in a fixed side column, so the
+    // transcript needs a wider terminal before the card reaches its max width.
+    for width in [40, 60, 140, 180] {
         let backend = ratatui::backend::TestBackend::new(width, 60);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal

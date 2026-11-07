@@ -273,11 +273,30 @@ jobs:
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
+      - name: Run Claude refresh consent regressions
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-base --lib auth::claude::replacement_tests -- --test-threads=1
+
       - name: Run browser session liveness and reuse regressions
         shell: bash
         run: |
           cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
           cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
+
+      - name: Run macOS ACL preservation regression (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Checkpointed writes preserve a file's macOS ACL via acl(3); this test
+        # sets an ACL and asserts it survives an edit and a rewind. It is
+        # compiled on every platform by the --no-run step above but only runs
+        # here, so execute it explicitly rather than leaving it looks-green.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-base --lib macos_edit_and_rewind_preserve_the_file_acl -- --nocapture
 
       - name: Run automatic model discovery regressions (Linux only)
         if: runner.os == 'Linux'
@@ -292,6 +311,7 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-openrouter-runtime --lib
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-gemini-runtime --lib developer_catalog
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-copilot-runtime -p jcode-provider-cursor-runtime -p jcode-provider-antigravity-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-claude-code-runtime --test fake_cli model_catalog_ -- --test-threads=1
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-bedrock --features aws-sdk --lib
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib catalog_refresh_reaches_every_runtime_slot_and_compatible_profile
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib forced_catalog_refresh_bypasses_freshness_and_throttle_but_not_in_flight
@@ -513,7 +533,8 @@ jobs:
             'test_menu_number_rejected_as_api_key',
             'test_command_palette_suppressed_while_api_key_prompt_pending',
             'test_ctrl_c_with_active_copy_selection_copies_instead_of_quitting',
-            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through'
+            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through',
+            'windows_edit_and_rewind_preserve_a_protected_file_dacl'
           )
 
           foreach ($testName in $tests) {

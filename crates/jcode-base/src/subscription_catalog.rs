@@ -445,6 +445,7 @@ mod tests {
         assert_eq!(model.routing_policy, UpstreamRoutingPolicy::ServerManaged);
         assert_eq!(model.min_tier, JcodeTier::Plus);
         let route = crate::provider::ModelRoute {
+            catalog_metadata: Default::default(),
             model: model.id.to_string(),
             provider: JCODE_PROVIDER_DISPLAY_NAME.to_string(),
             api_method: JCODE_ROUTE_API_METHOD.to_string(),

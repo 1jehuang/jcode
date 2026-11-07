@@ -35,6 +35,8 @@ pub enum LoginProviderTarget {
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
     GrokBuild,
+    /// Claude through the local Claude Code CLI (`[provider.claude_code]`).
+    ClaudeCode,
     Copilot,
     Gemini,
     Antigravity,
@@ -55,6 +57,7 @@ pub enum LoginProviderAuthStateKey {
     Antigravity,
     Cursor,
     GrokBuild,
+    ClaudeCode,
     Google,
 }
 
@@ -365,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn vsllm_login_selects_live_openai_compatible_catalog() {
+        let provider = resolve_login_selection("vsllm", &cli_login_providers())
+            .expect("VSLLM CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("VSLLM should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "vsllm");
+        assert_eq!(profile.api_base, "https://vsllm.cc/v1");
+        assert_eq!(profile.api_key_env, "VSLLM_API_KEY");
+        assert_eq!(profile.setup_url, "https://vsllm.cc/");
+        assert!(profile.requires_api_key);
+        assert_eq!(profile.default_model, None);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
@@ -496,6 +515,22 @@ mod tests {
     fn minimax_profile_uses_official_openai_compatible_configuration() {
         assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
         assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
+    }
+
+    #[test]
+    fn a6api_profile_and_login_align_with_named_config_profile() {
+        // Host and key env must match the pre-existing `[providers.a6api]`
+        // named profile in config.toml so one key serves both lines.
+        assert_eq!(A6API_PROFILE.api_base, "https://api.a6api.vip/v1");
+        assert_eq!(A6API_PROFILE.api_key_env, "A6API_KEY");
+        assert_eq!(A6API_PROFILE.env_file, "a6api.env");
+        assert_eq!(A6API_PROFILE.default_model, Some("gpt-6-astra"));
+        const { assert!(A6API_PROFILE.requires_api_key) };
+        assert!(openai_compatible_profiles().contains(&A6API_PROFILE));
+        assert_eq!(resolve_login_provider("astra-jb"), None);
+        for input in ["a6api", "a6 api", "A6 API", "a6", " A6API "] {
+            assert_eq!(resolve_login_provider(input), Some(A6API_LOGIN_PROVIDER));
+        }
     }
 
     #[test]

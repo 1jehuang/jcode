@@ -8,23 +8,23 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[path = "agent_tests/cache_session_affinity.rs"]
-mod cache_session_affinity;
-
-#[path = "agent_tests/tool_streaming.rs"]
-mod tool_streaming;
-
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
-
 #[path = "agent_tests/concurrency_construction.rs"]
 mod concurrency_construction;
+#[path = "agent_tests/rewind.rs"]
+mod rewind;
+#[path = "agent_tests/tool_streaming.rs"]
+mod tool_streaming;
 
 #[path = "agent_tests/desktop_selfdev.rs"]
 mod desktop_selfdev;
 
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
+
+#[path = "agent_tests/session_accounts.rs"]
+mod session_accounts;
 
 #[path = "agent_tests/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
@@ -179,19 +179,15 @@ async fn saved_account_observed_binding_is_persisted() {
         .is_none()
     );
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
+    // The persisted route follows the window's account: failover, return
+    // home and /accounts switch move it, so a stale label must not block turns.
     agent.session.route_api_method = Some("openai-oauth@personal".to_string());
     agent.sync_bound_account_route();
     assert_eq!(
         agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
+        Some("openai-oauth@work")
     );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
+    assert!(agent.ensure_session_lease().is_ok());
 }
 
 #[tokio::test]
@@ -809,10 +805,9 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
     assert_eq!(
         summary,
         vec![
-            (
-                "one\n\nanon\n\ntwo".to_string(),
-                vec!["f1".into(), "f2".into()]
-            ),
+            ("one".to_string(), vec!["f1".into()]),
+            ("anon".to_string(), vec![]),
+            ("two".to_string(), vec!["f2".into()]),
             ("[Background Task Completed]".to_string(), vec![]),
             ("three".to_string(), vec!["f3".into()]),
         ]
@@ -1038,62 +1033,61 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
-struct MidStreamAccountSwitchProvider {
-    switched: std::sync::atomic::AtomicBool,
+/// Provider that keeps the model id but moves to another OpenAI-compatible
+/// profile during the request (out-of-credit failover between profiles that
+/// serve the same model).
+struct MidStreamProfileSwitchProvider {
+    profile: std::sync::Mutex<String>,
 }
 
 #[async_trait]
-impl Provider for MidStreamAccountSwitchProvider {
+impl Provider for MidStreamProfileSwitchProvider {
     async fn complete(
         &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system: &str,
-        resume_session_id: Option<&str>,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        self.switched
-            .store(true, std::sync::atomic::Ordering::Release);
-        MidStreamModelSwitchProvider {
-            model: std::sync::Mutex::new(self.model()),
-            switch_to: self.model(),
-        }
-        .complete(messages, tools, system, resume_session_id)
-        .await
+        *self.profile.lock().unwrap() = "prof-b".to_string();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta("hello".to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("stop".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     fn name(&self) -> &str {
-        "claude"
+        "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.profile.lock().unwrap().clone()
     }
 
     fn model(&self) -> String {
-        "same-model".to_string()
-    }
-
-    fn oauth_account_label(&self) -> Option<String> {
-        Some(
-            if self.switched.load(std::sync::atomic::Ordering::Acquire) {
-                "personal"
-            } else {
-                "work"
-            }
-            .to_string(),
-        )
+        "glm-5.3".to_string()
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
-            switched: std::sync::atomic::AtomicBool::new(
-                self.switched.load(std::sync::atomic::Ordering::Acquire),
-            ),
+            profile: std::sync::Mutex::new(self.profile.lock().unwrap().clone()),
         })
     }
 }
 
 #[tokio::test]
-async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
+async fn run_turn_streaming_mpsc_emits_model_changed_when_only_the_profile_switches() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(MidStreamAccountSwitchProvider {
-        switched: std::sync::atomic::AtomicBool::new(false),
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamProfileSwitchProvider {
+        profile: std::sync::Mutex::new("prof-a".to_string()),
     });
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -1104,25 +1098,109 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
             cache_control: None,
         }],
     );
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     agent.run_turn_streaming_mpsc(tx).await.unwrap();
-    let mut labels = Vec::new();
+
+    let mut changed = None;
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::ModelChanged {
             model,
-            provider_oauth_account_label,
-            provider_oauth_email,
-            error,
+            provider_name,
             ..
         } = event
         {
-            assert_eq!(model, "same-model");
-            assert!(provider_oauth_email.is_none());
-            assert!(error.is_none());
-            labels.push(provider_oauth_account_label);
+            changed = Some((model, provider_name));
         }
     }
-    assert_eq!(labels, vec![Some("personal".to_string())]);
+    assert_eq!(
+        changed,
+        Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
+        "clients must learn the turn moved to another profile so the header updates"
+    );
+}
+
+/// Provider that moves to another profile during the request and then fails
+/// the stream before finishing the response.
+struct MidStreamProfileSwitchThenErrorProvider {
+    profile: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl Provider for MidStreamProfileSwitchThenErrorProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        *self.profile.lock().unwrap() = "prof-b".to_string();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("hel".to_string()))).await;
+            let _ = tx
+                .send(Err(anyhow::anyhow!("connection dropped mid response")))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.profile.lock().unwrap().clone()
+    }
+
+    fn model(&self) -> String {
+        "glm-5.3".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            profile: std::sync::Mutex::new(self.profile.lock().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_syncs_route_change_when_the_stream_then_fails() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamProfileSwitchThenErrorProvider {
+        profile: std::sync::Mutex::new("prof-a".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = agent.run_turn_streaming_mpsc(tx).await;
+    assert!(result.is_err(), "the stream error must still end the turn");
+
+    let mut changed = None;
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_name,
+            ..
+        } = event
+        {
+            changed = Some((model, provider_name));
+        }
+    }
+    assert_eq!(
+        changed,
+        Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
+        "clients must learn the provider now routes to prof-b even though the turn failed"
+    );
 }
 
 #[tokio::test]
@@ -3038,6 +3116,68 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
     assert_eq!(count, 1);
 }
 
+/// `/skill args` enters the transcript once (Claude Code style) with its
+/// base directory and `$ARGUMENTS` filled in; the system prompt never carries
+/// the body, and a still-active skill is not re-sent on later turns.
+#[test]
+fn active_skill_is_injected_into_transcript_once() {
+    let _lock = crate::storage::lock_test_env();
+    let project = tempfile::tempdir().unwrap();
+    let dir = project.path().join(".jcode/skills/ship");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\ndescription: Ship a branch\n---\n\nShip $ARGUMENTS now.\n",
+    )
+    .unwrap();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project.path().to_str().unwrap()),
+    );
+    let prompt_before = agent.build_system_prompt_split(None);
+    agent.active_skill = Some("ship".to_string());
+    agent.inject_active_skill("the release branch");
+    agent.inject_active_skill("a follow-up turn");
+
+    let injected: Vec<String> = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("Skill invoked: /ship"))
+        .collect();
+    assert_eq!(injected.len(), 1, "{injected:?}");
+    assert!(
+        injected[0].contains("Ship the release branch now."),
+        "{}",
+        injected[0]
+    );
+    assert!(
+        injected[0].contains(&format!("Base directory for this skill: {}", dir.display())),
+        "{}",
+        injected[0]
+    );
+    let prompt_after = agent.build_system_prompt_split(None);
+    assert_eq!(prompt_before.static_part, prompt_after.static_part);
+    assert_eq!(prompt_before.dynamic_part, prompt_after.dynamic_part);
+
+    // Once compaction hides that copy from the provider, the next turn
+    // injects the skill again so the model keeps it.
+    agent.session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: agent.session.messages.len(),
+    });
+    agent.inject_active_skill("after compaction");
+    let injected = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("Skill invoked: /ship"))
+        .count();
+    assert_eq!(injected, 2);
+}
+
 /// Esc after a queued follow-up: a cancelled turn must not swallow the
 /// follow-up into history. It stays queued so the next turn can send it.
 #[tokio::test]
@@ -3192,4 +3332,91 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         "claude-oauth:claude-sonnet-5",
         "workers inheriting the healed session must target the live credential"
     );
+}
+
+struct MidStreamAccountSwitchProvider {
+    switched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Provider for MidStreamAccountSwitchProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.switched
+            .store(true, std::sync::atomic::Ordering::Release);
+        MidStreamModelSwitchProvider {
+            model: std::sync::Mutex::new(self.model()),
+            switch_to: self.model(),
+        }
+        .complete(messages, tools, system, resume_session_id)
+        .await
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "same-model".to_string()
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        Some(
+            if self.switched.load(std::sync::atomic::Ordering::Acquire) {
+                "personal"
+            } else {
+                "work"
+            }
+            .to_string(),
+        )
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            switched: std::sync::atomic::AtomicBool::new(
+                self.switched.load(std::sync::atomic::Ordering::Acquire),
+            ),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamAccountSwitchProvider {
+        switched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    let mut labels = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_oauth_account_label,
+            provider_oauth_email,
+            error,
+            ..
+        } = event
+        {
+            assert_eq!(model, "same-model");
+            assert!(provider_oauth_email.is_none());
+            assert!(error.is_none());
+            labels.push(provider_oauth_account_label);
+        }
+    }
+    assert_eq!(labels, vec![Some("personal".to_string())]);
 }

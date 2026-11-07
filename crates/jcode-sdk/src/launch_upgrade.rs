@@ -29,10 +29,33 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> io::Result<Option<V
         if left.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        stream.set_read_timeout(Some(left))?;
+        // Darwin rejects SO_RCVTIMEO after a peer closes, even when its final
+        // acknowledgement is buffered. Poll the owned stream against the deadline.
+        use std::os::fd::AsRawFd;
+        let mut ready = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = left.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
+        // SAFETY: `ready` is one initialized, writable poll descriptor.
+        let polled = unsafe { libc::poll(&mut ready, 1, millis) };
+        if polled == 0 {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        if polled < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
         let mut byte = [0];
-        if stream.read(&mut byte)? == 0 {
-            return Ok(None);
+        match stream.read(&mut byte) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         }
         if byte[0] == b'\n' {
             return serde_json::from_slice(&bytes)
@@ -57,7 +80,9 @@ enum Outcome {
 fn request(socket: &Path, candidate: &Path, timeout: Duration) -> io::Result<Outcome> {
     let deadline = Instant::now() + timeout;
     let mut stream = connect(socket, timeout)?;
-    stream.set_write_timeout(Some(timeout))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| io::Error::new(error.kind(), format!("runtime write timeout: {error}")))?;
     let mut frame =
         serde_json::to_vec(&json!({"type":"upgrade_runtime", "id":1, "candidate":candidate}))
             .map_err(io::Error::other)?;

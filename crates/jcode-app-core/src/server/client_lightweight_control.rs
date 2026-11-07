@@ -51,11 +51,39 @@ pub(super) fn parse_swarm_spawn_mode(
                         "Invalid spawn_mode '{value}'. Expected one of: visible, headless, inline, auto"
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 None
             }
         },
         None => Some(None),
+    }
+}
+
+/// Checkpoint a reported lifecycle change before acknowledging the report.
+/// Standalone resumed agents update these maps through a lightweight request,
+/// without a server-owned turn completion to persist the new status for them.
+pub(super) async fn persist_reported_member_swarm(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) {
+    let swarm_id = {
+        let members = swarm_members.read().await;
+        members
+            .get(session_id)
+            .and_then(|member| member.swarm_id.clone())
+    };
+    if let Some(swarm_id) = swarm_id {
+        let swarm_state = super::SwarmState {
+            members: Arc::clone(swarm_members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            plans: Arc::clone(swarm_plans),
+            coordinators: Arc::clone(swarm_coordinators),
+        };
+        super::persist_swarm_state_for(&swarm_id, &swarm_state).await;
     }
 }
 
@@ -287,7 +315,12 @@ pub(super) async fn handle_lightweight_control_request(
     }
 
     let _request_activity = crate::runtime_activity::global().try_enter()?;
-    write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
+    let ack = write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await;
+    // A fire-and-forget auth notice (SDK login flow) may hang up right after
+    // writing. The credential change must still be applied.
+    if !matches!(request, Request::NotifyAuthChanged { .. }) {
+        ack?;
+    }
 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let writer_clone = Arc::clone(&writer);
@@ -333,6 +366,19 @@ pub(super) async fn handle_lightweight_control_request(
             super::provider_control::handle_invalidate_anthropic_usage(
                 id,
                 account_label,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::NotifyAuthChanged {
+            id, provider, auth, ..
+        } => {
+            super::provider_control::handle_notify_auth_changed_process_wide(
+                id,
+                provider,
+                auth,
+                provider_template,
+                sessions,
                 &client_event_tx,
             )
             .await;
@@ -798,6 +844,14 @@ pub(super) async fn handle_lightweight_control_request(
                 swarm_coordinators,
             )
             .await;
+            persist_reported_member_swarm(
+                &req_session_id,
+                swarm_members,
+                swarms_by_id,
+                swarm_plans,
+                swarm_coordinators,
+            )
+            .await;
             let _ = client_event_tx.send(ServerEvent::CommReportResponse {
                 id,
                 status,
@@ -1024,6 +1078,7 @@ pub(super) async fn handle_lightweight_control_request(
                 id: other.id(),
                 message: "unsupported lightweight control request".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -1032,6 +1087,10 @@ pub(super) async fn handle_lightweight_control_request(
     let _ = event_handle.await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "comm_report_durability_tests.rs"]
+mod comm_report_durability_tests;
 
 #[cfg(test)]
 mod lightweight_swarm_member_tests {
