@@ -876,11 +876,9 @@ impl OpenRouterProvider {
                 "xhigh" => "high",
                 other => other,
             };
-            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
-            // Preserve omission for built-in and heuristic provider contracts.
-            if effort == "none" && self.reasoning_effort_support != Some(true) {
-                return false;
-            }
+            // Send `reasoning_effort: "none"` explicitly rather than omitting
+            // the field: gateways like LiteLLM default DeepSeek-V3+ thinking to
+            // ON when the field is absent, so dropping it leaves thinking on.
             request["reasoning_effort"] = serde_json::json!(effort);
         } else if self.supports_openai_reasoning_effort() {
             // Strict endpoints such as Mistral reject the UX alias `max`.
@@ -889,11 +887,8 @@ impl OpenRouterProvider {
             } else {
                 effort
             };
-            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
-            // Preserve omission for built-in and heuristic provider contracts.
-            if effort == "none" && self.reasoning_effort_support != Some(true) {
-                return false;
-            }
+            // Same as the DeepSeek branch: omitting the field for `none` would
+            // leave reasoning on for gateways that default to ON.
             request["reasoning_effort"] = serde_json::json!(effort);
         } else if Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
