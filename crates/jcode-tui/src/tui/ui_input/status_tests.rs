@@ -1,59 +1,106 @@
 use super::*;
 use ratatui::style::Modifier;
 
-fn background_row(
-    label: &str,
-    status: crate::tui::BackgroundTaskRowStatus,
-) -> crate::tui::BackgroundTaskRow {
-    crate::tui::BackgroundTaskRow {
-        task_id: label.into(),
-        label: label.into(),
-        percent: None,
-        status,
-        completed_at: None,
+use super::stable_status::{
+    live_processing_status_line_at_width, stable_status_elapsed, stable_status_line,
+    stable_status_telemetry, status_cell,
+};
+
+#[test]
+fn stable_status_elapsed_keeps_cell_width_across_time_boundaries() {
+    for elapsed in [
+        0,
+        999,
+        59_999,
+        60_000,
+        3_599_999,
+        3_600_000,
+        360_000_000,
+        u64::MAX,
+    ] {
+        let value = stable_status_elapsed(elapsed);
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(value.as_str()),
+            8,
+            "{value}"
+        );
+    }
+    assert_eq!(stable_status_elapsed(12_300).trim(), "00:12");
+    assert_eq!(stable_status_elapsed(3_600_000).trim(), "1:00:00");
+}
+
+#[test]
+fn stable_status_cells_fit_unicode_and_normalize_controls() {
+    for width in 0..40 {
+        let value = status_cell("界\n tests\tand \x1bmore", width);
+        assert_eq!(unicode_width::UnicodeWidthStr::width(value.as_str()), width);
+        assert!(!value.chars().any(char::is_control));
     }
 }
 
 #[test]
-fn background_status_keeps_all_running_intents_after_launch_returns() {
-    use crate::tui::BackgroundTaskRowStatus::*;
-    let tasks = [
-        background_row("Run tests", Running),
-        background_row("Build app", Running),
-        background_row("Already done", Completed),
-        background_row("Old failure", Failed),
-    ];
-    let text = status_with_background_tasks(Line::from("thinking…"), &tasks, 120, true).to_string();
-    assert_eq!(text, "thinking… · bg 2: Run tests · Build app");
-    let idle = status_with_background_tasks(Line::from("idle tip"), &tasks, 120, false).to_string();
-    assert_eq!(idle, "bg 2: Run tests · Build app");
-    assert_eq!(
-        status_with_background_tasks(Line::from("thinking…"), &tasks[2..], 120, true).to_string(),
-        "thinking…"
-    );
+fn stable_status_telemetry_stays_anchored_as_values_and_intent_change() {
+    let mut status = crate::protocol::SwarmLiveStatus {
+        phase: "streaming".into(),
+        elapsed_ms: 12_300,
+        ..Default::default()
+    };
+    for width in [60, 80, 100, 120] {
+        let unknown = live_processing_status_line_at_width(&status, None, "*", width).to_string();
+        status.input_tokens = Some(123_456);
+        status.output_tokens = Some(1234);
+        status.output_tps_milli = Some(12_500);
+        status.tool_intent = Some("界 long intent ".repeat(30));
+        let known = live_processing_status_line_at_width(&status, None, "*", width).to_string();
+        let column = |text: &str, needle: char| {
+            text.find(needle)
+                .map(|offset| unicode_width::UnicodeWidthStr::width(&text[..offset]))
+        };
+        assert_eq!(
+            column(&unknown, '↑'),
+            column(&known, '↑'),
+            "{unknown}\n{known}"
+        );
+        assert_eq!(
+            column(&unknown, '↓'),
+            column(&known, '↓'),
+            "{unknown}\n{known}"
+        );
+        assert_eq!(unicode_width::UnicodeWidthStr::width(known.as_str()), width);
+        status.input_tokens = None;
+        status.output_tokens = None;
+        status.output_tps_milli = None;
+        status.tool_intent = None;
+    }
 }
 
 #[test]
-fn background_status_fits_unicode_cells_and_keeps_background_visible() {
-    let tasks = [background_row(
-        "Run 界\n tests\tand more",
-        crate::tui::BackgroundTaskRowStatus::Running,
-    )];
-    for width in 0..120 {
-        for processing in [false, true] {
-            let line = status_with_background_tasks(
-                Line::from("foreground 界 intent ".repeat(10)),
-                &tasks,
-                width,
-                processing,
-            );
-            assert!(line.width() <= width, "width={width}: {line}");
-            let text = line.to_string();
-            assert!(!text.contains('\n') && !text.contains('\t'), "{text}");
-            if width >= 24 {
-                assert!(text.contains("bg 1:"), "width={width}: {text}");
-            }
-        }
+fn stable_status_empty_intent_does_not_add_a_leading_separator() {
+    let status = crate::protocol::SwarmLiveStatus {
+        phase: "streaming".into(),
+        tool_intent: Some(String::new()),
+        status_detail: Some("fresh websocket".into()),
+        ..Default::default()
+    };
+    let text = live_processing_status_line_at_width(&status, None, "*", 120).to_string();
+    assert!(text.contains("│ opening websocket"), "{text}");
+    assert!(!text.contains("│ ·"), "{text}");
+}
+
+#[test]
+fn stable_status_fits_every_terminal_cell_width() {
+    let telemetry = stable_status_telemetry(&crate::protocol::SwarmLiveStatus::default());
+    for width in 0..160 {
+        let line = stable_status_line(
+            "*",
+            "thinking",
+            123_456,
+            &"界\nlong\tintent".repeat(40),
+            &telemetry,
+            width,
+        );
+        assert!(line.width() <= width, "width={width}: {line}");
+        assert!(!line.to_string().chars().any(char::is_control));
     }
 }
 
@@ -191,11 +238,17 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
         tool_intent: Some("Verify 界\noutput".into()),
         ..Default::default()
     };
-    let line = live_processing_status_line(&status, Some(0.0), "⠋");
+    let line = live_processing_status_line_at_width(&status, Some(0.0), "⠋", 160);
     let text = line.to_string();
-    assert!(text.contains("running bash · Verify 界 output"), "{text}");
     assert!(
-        text.contains("↑12k ↓456") && text.contains("existing websocket") && text.contains("12s"),
+        text.contains("bash") && text.contains("Verify 界 output"),
+        "{text}"
+    );
+    assert!(
+        text.contains("↑12k")
+            && text.contains("↓456")
+            && text.contains("existing websocket")
+            && text.contains("00:12"),
         "{text}"
     );
     assert_eq!(line.spans[0].style.fg, Some(ai_color()));
@@ -203,18 +256,19 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     status.phase = "streaming".into();
     status.output_tps_milli = Some(12_500);
     assert!(
-        live_processing_status_line(&status, None, "⠋")
+        live_processing_status_line_at_width(&status, None, "⠋", 160)
             .to_string()
-            .contains("12.5 tps")
+            .contains("12.5/s")
     );
     status.input_tokens = None;
     status.output_tokens = None;
     status.connection_type = None;
-    let text = live_processing_status_line(&status, None, "⠋").to_string();
-    assert!(!text.contains('↑') && !text.contains("websocket"));
+    let text = live_processing_status_line_at_width(&status, None, "⠋", 160).to_string();
+    assert!(!text.contains("↑0") && !text.contains("websocket"));
+    assert!(text.contains("↑-") && text.contains("↓-"), "{text}");
     status.phase = "stopped".into();
     status.stop_reason = Some("Rate limit\nretry later".into());
-    let text = live_processing_status_line(&status, None, "⠋").to_string();
+    let text = live_processing_status_line_at_width(&status, None, "⠋", 160).to_string();
     assert!(text.contains("Rate limit retry later") && !text.contains('⠋'));
 }
 
@@ -426,22 +480,6 @@ fn swarm_effort_model_status_uses_shared_label() {
     );
     assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
     assert_eq!(overscroll_short_reasoning(" "), None);
-}
-
-#[test]
-fn running_tool_header_emphasizes_detail_over_tool_name() {
-    let accent = Color::Rgb(12, 34, 56);
-    let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
-
-    assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0].content.as_ref(), "*");
-    assert_eq!(spans[0].style.fg, Some(accent));
-    assert_eq!(spans[1].content.as_ref(), " running bash");
-    assert_eq!(spans[1].style.fg, Some(dim_color()));
-    assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(spans[2].content.as_ref(), " · cargo test");
-    assert_eq!(spans[2].style.fg, Some(accent));
-    assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -680,58 +718,32 @@ fn connection_phase_waiting_label_is_generic_response_wait() {
 }
 
 #[test]
-fn streaming_liveness_label_shows_quiet_stream_warning_before_message_end() {
-    assert_eq!(
-        streaming_liveness_label("4.2s".to_string(), Some(3.4), false),
-        "(no tokens 3s) · 4.2s"
+fn streaming_liveness_stays_in_activity_and_only_warns_during_streaming() {
+    let mut status = crate::protocol::SwarmLiveStatus {
+        phase: "streaming".into(),
+        elapsed_ms: 12_000,
+        ..Default::default()
+    };
+    let quiet = live_processing_status_line_at_width(&status, Some(3.4), "*", 120).to_string();
+    assert!(quiet.contains("no tokens 3s"), "{quiet}");
+    let stalled = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
+    assert!(stalled.contains("stalled 12s"), "{stalled}");
+    assert_eq!(quiet.find("00:12"), stalled.find("00:12"));
+    status.stream_message_ended = true;
+    let ended = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
+    assert!(
+        ended.starts_with('*') && !ended.contains("stalled"),
+        "{ended}"
     );
-    assert_eq!(
-        streaming_liveness_label("12.0s".to_string(), Some(12.1), false),
-        "(stalled 12s) · 12.0s"
-    );
-}
-
-#[test]
-fn streaming_liveness_label_suppresses_quiet_stream_warning_after_message_end() {
-    assert_eq!(
-        streaming_liveness_label("4.2s".to_string(), Some(3.4), true),
-        "4.2s"
-    );
-    assert_eq!(
-        streaming_liveness_label("12.0s".to_string(), Some(12.1), true),
-        "12.0s"
-    );
-}
-
-#[test]
-fn streaming_status_spans_keep_spinner_while_finalizing() {
-    let spans = streaming_status_spans("⠋", "4.2s".to_string(), false, false, " · +1 queued");
-
-    assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0].content.as_ref(), "⠋");
-    assert_eq!(spans[1].content.as_ref(), " 4.2s");
-    assert_eq!(spans[2].content.as_ref(), " · +1 queued");
-}
-
-#[test]
-fn streaming_status_spans_keep_spinner_after_message_end_while_finalizing() {
-    let spans = streaming_status_spans("⠋", "finalizing".to_string(), true, false, "");
-
-    assert_eq!(spans.len(), 2);
-    assert_eq!(spans[0].content.as_ref(), "⠋");
-    assert_eq!(spans[1].content.as_ref(), " finalizing");
-}
-
-#[test]
-fn push_queued_suffix_appends_only_when_present() {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    push_queued_suffix(&mut spans, "");
-    assert!(spans.is_empty(), "empty suffix should add no span");
-
-    push_queued_suffix(&mut spans, " · +2 queued");
-    assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].content.as_ref(), " · +2 queued");
-    assert_eq!(spans[0].style.fg, Some(queued_color()));
+    status.stream_message_ended = false;
+    for phase in ["thinking", "running_tool", "sending", "connecting"] {
+        status.phase = phase.into();
+        let text = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
+        assert!(
+            !text.contains("stalled") && !text.contains("no tokens"),
+            "{text}"
+        );
+    }
 }
 
 #[test]

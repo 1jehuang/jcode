@@ -12,9 +12,30 @@ use history_repair::*;
 
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
+///
+/// On Claude subscription (OAuth) requests this is sent as the first system
+/// block, as plain text, not as an HTTP header despite the name. Anthropic
+/// strips it server-side before the model sees it: on 2026-11-05 adding it
+/// changed `usage.input_tokens` by 0, while the identity sentence below added
+/// 16, and the model reported no `cc_version`/`cch` in its context.
+///
+/// This block alone is what gets larger models (Opus, Sonnet) accepted on the
+/// OAuth path. Live probes on 2026-11-05 (Opus 4.5 x3, Sonnet 4.5) showed:
+/// - billing block only: accepted
+/// - "Claude Agent SDK" identity sentence only: accepted
+/// - both: accepted
+/// - neither: rejected with HTTP 429 `rate_limit_error` every time
+/// - Haiku 4.5 accepted all variants, so it is not a useful probe model.
+///
+/// We therefore send only the billing block and no identity sentence. The
+/// identity sentence ("You are a Claude agent, built on Anthropic's Claude
+/// Agent SDK.") was added in 96cdd995b and removed on 2026-11-05 because it
+/// made the model tell users that Jcode is built on the Claude Agent SDK,
+/// which is false. Do not add an identity sentence back unless a fresh probe
+/// shows the billing block alone is rejected. If you change this, re-run
+/// `scripts/anthropic_oauth_identity_probe.py claude-opus-4-5` (not Haiku).
+/// Full write-up: docs/ANTHROPIC_OAUTH_IDENTITY_PROBE_2026_11_05.md
 pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
-
-const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 /// Minimal user turn appended when a formatted conversation would otherwise end
 /// on an assistant message, which Anthropic rejects on non-prefill models.
@@ -678,14 +699,11 @@ pub fn build_system_param_split(
 ) -> Option<ApiSystem> {
     if is_oauth {
         let mut blocks = Vec::new();
+        // Billing attribution block. Required for OAuth acceptance on larger
+        // models. Intentionally no identity sentence, see OAUTH_BILLING_HEADER.
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
-            cache_control: None,
-        });
-        blocks.push(ApiSystemBlock {
-            block_type: "text",
-            text: CLAUDE_CODE_IDENTITY.to_string(),
             cache_control: None,
         });
         // Static content - CACHED (instruction files, base prompt, skills)
@@ -1158,8 +1176,8 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        // Curated builtins are present under their OAuth names.
-        for builtin in ["Bash", "Read", "Agent", "Write", "Edit", "Glob", "Grep"] {
+        // Builtins are present under their own Jcode names (no Claude Code rename).
+        for builtin in ["bash", "read", "subagent", "write", "edit", "glob", "grep"] {
             assert!(
                 names.contains(&builtin),
                 "missing builtin {builtin} in {names:?}"
@@ -1172,10 +1190,13 @@ mod cache_prefix_invariant_tests {
                 "custom tool {custom} was dropped on OAuth; got {names:?}"
             );
         }
-        // No duplicate Agent/Bash/Read from the registry remap.
-        assert_eq!(names.iter().filter(|n| **n == "Agent").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Bash").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Read").count(), 1);
+        // No duplicates from the registry.
+        assert_eq!(names.iter().filter(|n| **n == "subagent").count(), 1);
+        assert_eq!(names.iter().filter(|n| **n == "bash").count(), 1);
+        assert_eq!(names.iter().filter(|n| **n == "read").count(), 1);
+        for legacy in ["Bash", "Read", "Agent"] {
+            assert!(!names.contains(&legacy), "legacy Claude Code name {legacy} sent");
+        }
     }
 
     #[test]
@@ -1192,13 +1213,13 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        for ghost in ["Agent", "Glob", "Grep", "Skill"] {
+        for ghost in ["Agent", "Glob", "Grep", "Skill", "subagent", "glob", "grep"] {
             assert!(
                 !names.contains(&ghost),
                 "advertised ghost builtin {ghost} without a backing registry tool: {names:?}"
             );
         }
-        for present in ["Bash", "Read", "Write", "Edit", "agentgrep"] {
+        for present in ["bash", "read", "write", "edit", "agentgrep"] {
             assert!(names.contains(&present), "missing {present} in {names:?}");
         }
     }

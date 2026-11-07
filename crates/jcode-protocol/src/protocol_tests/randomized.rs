@@ -82,6 +82,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect,
             continue_on_disconnect,
             terminal_env: Vec::new(),
+            client_name: None,
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Subscribe {
@@ -101,6 +102,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect: decoded_crash_on_disconnect,
             continue_on_disconnect: decoded_continue_on_disconnect,
             terminal_env: _,
+            client_name: _,
         } = decoded
         else {
             return Err(anyhow!("expected randomized Subscribe"));
@@ -127,6 +129,7 @@ fn test_resume_session_roundtrip_preserves_client_sync_flags() -> Result<()> {
         client_instance_id: Some("client-456".to_string()),
         client_has_local_history: true,
         allow_session_takeover: true,
+        client_name: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"resume_session\""));
@@ -137,6 +140,7 @@ fn test_resume_session_roundtrip_preserves_client_sync_flags() -> Result<()> {
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected ResumeSession"));

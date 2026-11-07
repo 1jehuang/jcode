@@ -43,6 +43,62 @@ fn default_base() -> String {
     DEFAULT_API_BASE.into()
 }
 
+/// APNs environment a device token belongs to. Development-signed builds get
+/// sandbox tokens; TestFlight and App Store builds get production tokens.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PushEnvironment {
+    Production,
+    Sandbox,
+}
+
+/// A device registration for `POST /push/devices`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushDevice {
+    /// Lowercase hex APNs device token.
+    pub token: String,
+    pub environment: PushEnvironment,
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+}
+
+/// What a push is about. Drives the title, category, and interruption level.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PushKind {
+    TurnDone,
+    TurnError,
+    NeedsInput,
+    Wake,
+}
+
+/// A notification for `POST /push/send`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushNotification {
+    pub kind: PushKind,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
+}
+
+/// `POST /push/send` reply. `devices == 0` means nobody is listening.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct PushReceipt {
+    #[serde(default)]
+    pub sent: u32,
+    #[serde(default)]
+    pub devices: u32,
+}
+
+/// Hex-encode a raw APNs device token.
+pub fn push_token_hex(raw: &[u8]) -> String {
+    raw.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A pending browser/device sign-in. Show `verification_uri_complete`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceLogin {
@@ -336,6 +392,64 @@ impl CloudClient {
         }
     }
 
+    /// Register this device's APNs token so the account's jcode servers can
+    /// push to it. `token_hex` is the lowercase hex APNs device token.
+    pub fn register_push_device(&self, account: &Account, device: &PushDevice) -> Result<()> {
+        let body = serde_json::to_value(device)
+            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        self.account_call(account, "POST", "/push/devices", body)
+    }
+
+    /// Forget an APNs token (sign-out, notifications turned off).
+    pub fn unregister_push_device(&self, account: &Account, token_hex: &str) -> Result<()> {
+        self.account_call(
+            account,
+            "DELETE",
+            "/push/devices",
+            serde_json::json!({"token": token_hex}),
+        )
+    }
+
+    /// Reset the account's unread badge (the app came to the foreground).
+    pub fn reset_push_badge(&self, account: &Account) -> Result<()> {
+        self.account_call(account, "POST", "/push/badge", serde_json::json!({"count": 0}))
+    }
+
+    /// Ask the control plane to push `notification` to every device on the
+    /// account. Servers call this with their own account key.
+    pub fn send_push(&self, account: &Account, notification: &PushNotification) -> Result<PushReceipt> {
+        let client = Self {
+            api_base: account.api_base.trim_end_matches('/').to_string(),
+            ..self.clone()
+        };
+        let body = serde_json::to_value(notification)
+            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        client.post("/push/send", Some(&account.api_key), body)
+    }
+
+    fn account_call(
+        &self,
+        account: &Account,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<()> {
+        let client = Self {
+            api_base: account.api_base.trim_end_matches('/').to_string(),
+            ..self.clone()
+        };
+        let (status, body) = client.send_raw(method, path, Some(&account.api_key), body)?;
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let err = &body["error"];
+        Err(describe(
+            status,
+            err["code"].as_str().unwrap_or(""),
+            err["message"].as_str().unwrap_or(""),
+        ))
+    }
+
     fn agent(&self) -> ureq::Agent {
         ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -355,11 +469,27 @@ impl CloudClient {
         api_key: Option<&str>,
         body: serde_json::Value,
     ) -> Result<(u16, serde_json::Value)> {
-        let mut req = self.agent().post(self.url(path));
+        self.send_raw("POST", path, api_key, body)
+    }
+
+    fn send_raw(
+        &self,
+        method: &str,
+        path: &str,
+        api_key: Option<&str>,
+        body: serde_json::Value,
+    ) -> Result<(u16, serde_json::Value)> {
+        let mut req = ureq::http::Request::builder()
+            .method(method)
+            .uri(self.url(path))
+            .header("Content-Type", "application/json");
         if let Some(k) = api_key {
-            req = req.header("Authorization", &format!("Bearer {k}"));
+            req = req.header("Authorization", format!("Bearer {k}"));
         }
-        let mut resp = req.send_json(body).map_err(|e| {
+        let req = req
+            .body(body.to_string())
+            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        let mut resp = self.agent().run(req).map_err(|e| {
             Error::new(
                 ErrorKind::ConnectFailed,
                 format!("Could not reach jcode.sh: {e}"),
@@ -630,6 +760,54 @@ mod tests {
         assert!(req.contains("authorization: bearer secret"));
     }
 
+    #[test]
+    fn push_device_lifecycle_and_send() {
+        let (base, seen) = serve(vec![
+            (200, r#"{"ok":true}"#),
+            (200, r#"{"sent":1,"devices":1}"#),
+            (200, r#"{"ok":true}"#),
+            (401, r#"{"error":{"code":"unauthorized","message":"revoked"}}"#),
+        ]);
+        let cloud = CloudClient::new("t");
+        let account = Account {
+            api_key: "k".into(),
+            email: None,
+            api_base: base,
+        };
+        let device = PushDevice {
+            token: push_token_hex(&[0xab, 0x01]),
+            environment: PushEnvironment::Production,
+            bundle_id: "sh.jcode.mobile.rust".into(),
+            device_name: Some("iPhone".into()),
+        };
+        cloud.register_push_device(&account, &device).unwrap();
+        let req = seen.recv().unwrap();
+        assert!(req.starts_with("POST /push/devices"));
+        assert!(req.contains(r#""token":"ab01""#));
+        assert!(req.contains(r#""environment":"production""#));
+
+        let receipt = cloud
+            .send_push(
+                &account,
+                &PushNotification {
+                    kind: PushKind::TurnDone,
+                    session_id: "s1".into(),
+                    session_title: None,
+                    body: "done".into(),
+                    turn_id: Some(3),
+                },
+            )
+            .unwrap();
+        assert_eq!(receipt, PushReceipt { sent: 1, devices: 1 });
+        assert!(seen.recv().unwrap().contains(r#""kind":"turn_done""#));
+
+        cloud.unregister_push_device(&account, "ab01").unwrap();
+        assert!(seen.recv().unwrap().starts_with("DELETE /push/devices"));
+
+        assert!(cloud.reset_push_badge(&account).is_err());
+    }
+
+    #[test]
     #[test]
     fn unauthorized_host_connect_is_cloud_auth() {
         let (base, _seen) = serve(vec![(

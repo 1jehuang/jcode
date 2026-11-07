@@ -713,7 +713,7 @@ async fn fetch_claude_profile_at_url(
             "User-Agent",
             crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
         )
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+        .header("anthropic-beta", "oauth-2025-04-20")
         .bearer_auth(access_token)
         .send()
         .await?;

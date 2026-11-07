@@ -852,6 +852,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
@@ -930,6 +931,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
 
@@ -1545,22 +1547,22 @@ impl EventMapper {
                     "status": "pending",
                 })]
             }
-            ServerEvent::ToolInput { delta, .. } => {
-                let Some(tool_id) = self.current_tool_id.clone() else {
+            ServerEvent::ToolInput { id, delta } => {
+                // Older daemons omit the ID. Only those events should use the
+                // most recently started tool, since keyed streams can overlap.
+                let Some(tool_id) = id.or_else(|| self.current_tool_id.clone()) else {
                     return Vec::new();
                 };
                 let buffer = self.tool_inputs.entry(tool_id.clone()).or_default();
                 buffer.push_str(&delta);
-                let mut update = json!({
+                let Some(raw_input) = parse_json_object(buffer) else {
+                    return Vec::new();
+                };
+                vec![json!({
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": tool_id,
-                });
-                if let Some(raw_input) = parse_json_object(buffer)
-                    && let Some(object) = update.as_object_mut()
-                {
-                    object.insert("rawInput".to_string(), raw_input);
-                }
-                vec![update]
+                    "rawInput": raw_input,
+                })]
             }
             ServerEvent::ToolExec { id, name } => {
                 self.current_tool_id = Some(id.clone());

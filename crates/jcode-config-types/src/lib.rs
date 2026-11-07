@@ -1048,7 +1048,8 @@ pub struct FeatureConfig {
     /// incomplete todos). `/poke on` / `/poke off` still override this per session
     /// (default: true)
     pub auto_poke: bool,
-    /// Opt in to one aggregate todo weak-point follow-up per completion cycle.
+    /// Opt in to automatic todo quality reviews: weak-point digests, confidence
+    /// validation and spike checks, ownership checks, and long-session reviews.
     /// Requires auto-poke; independent of the display-only completion report.
     /// Disabled by default for every user.
     pub todo_gate_digest: bool,

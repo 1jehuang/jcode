@@ -57,6 +57,8 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[cfg(test)]
+pub(crate) use frame_metrics::body_last_path_for_tests;
 #[path = "ui_header.rs"]
 pub(crate) mod header;
 #[path = "ui_inline_image.rs"]
@@ -991,30 +993,42 @@ impl BodyCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &BodyCacheKey,
-    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &BodyCacheKey) -> Option<Arc<PreparedMessages>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
     #[cfg(test)]
@@ -1161,6 +1175,7 @@ impl BodyCacheState {
         Some((entry.prepared, msg_count, entry.prompt_offset))
     }
 
+    #[cfg(test)]
     fn insert(
         &mut self,
         key: BodyCacheKey,
@@ -1169,6 +1184,17 @@ impl BodyCacheState {
         prompt_offset: usize,
     ) {
         let prepared_bytes = estimate_prepared_messages_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes, msg_count, prompt_offset);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: BodyCacheKey,
+        prepared: Arc<PreparedMessages>,
+        prepared_bytes: usize,
+        msg_count: usize,
+        prompt_offset: usize,
+    ) {
         if prepared_bytes > BODY_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries
@@ -1278,34 +1304,56 @@ impl FullPrepCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &FullPrepCacheKey,
-    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &FullPrepCacheKey) -> Option<Arc<PreparedChatFrame>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
+    #[cfg(test)]
     fn insert(&mut self, key: FullPrepCacheKey, prepared: Arc<PreparedChatFrame>) {
         let prepared_bytes = estimate_prepared_chat_frame_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: FullPrepCacheKey,
+        prepared: Arc<PreparedChatFrame>,
+        prepared_bytes: usize,
+    ) {
         if prepared_bytes > FULL_PREP_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries
@@ -1351,6 +1399,43 @@ static FULL_PREP_CACHE: OnceLock<Mutex<FullPrepCacheState>> = OnceLock::new();
 
 fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
+}
+
+/// Drop every frame-level reference to `base` except the caller's, so the
+/// incremental body build can mutate it in place. Otherwise `Arc::make_mut`
+/// deep-clones the whole wrapped transcript (tens of ms on long sessions) on
+/// every appended message.
+///
+/// The base was just taken out of the body cache because no body entry matched
+/// the current key, so any full-prep frame embedding it is keyed on an older
+/// transcript and cannot be hit again. The last drawn frame is republished by
+/// the draw that triggered this build.
+pub(super) fn release_frame_refs_to_body(base: &Arc<PreparedMessages>) {
+    let holds = |frame: &Arc<PreparedChatFrame>| {
+        frame
+            .sections
+            .iter()
+            .any(|section| Arc::ptr_eq(&section.prepared, base))
+    };
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        cache.entries.retain(|entry| !holds(&entry.prepared));
+        cache
+            .oversized_entries
+            .retain(|entry| !holds(&entry.prepared));
+    }
+    #[cfg(test)]
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(holds) {
+            *slot = None;
+        }
+    });
+    #[cfg(not(test))]
+    if let Ok(mut slot) = last_chat_frame_state().lock()
+        && slot.as_ref().is_some_and(holds)
+    {
+        *slot = None;
+    }
 }
 
 /// Drop only reconstructible presentation data. Call after retaining a bounded
@@ -3088,7 +3173,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
+    let blocker_height = blocker_lines
+        .len()
+        .min(usize::from(chat_area.height.saturating_sub(6))) as u16;
+    let inline_ui_gap_height: u16 = blocker_height.max(if inline_block_height > 0 { 1 } else { 0 });
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
@@ -3578,6 +3667,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Draw inline UI if active
     if inline_block_height > 0 {
         draw_inline_ui(frame, app, chunks[5]);
+    }
+
+    if blocker_height > 0 {
+        frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
     }
 
     let _input_cursor = input_ui::draw_input(

@@ -225,10 +225,7 @@ impl Agent {
             continues_turn,
         )?;
         for notice in &prompt_hook.notices {
-            let _ = event_tx.send(hook_notice_event(
-                &self.session.id,
-                notice,
-            ));
+            let _ = event_tx.send(hook_notice_event(&self.session.id, notice));
         }
         if let Some(context) = prompt_hook.context {
             self.append_turn_system_reminder(&context)?;
