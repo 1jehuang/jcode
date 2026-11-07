@@ -722,6 +722,10 @@ swarm_stall_after_secs = 600
 # turn_complete_sound = "Glass"
 
 [hooks]
+# Project hooks: a trusted project's `.jcode/config.toml` [hooks] table adds
+# commands after these, never replacing them. See docs/HOOKS.md.
+# project_hooks = true
+# project_timeout_cap_ms = 120000
 # Synchronous tool-input transformers. Each receives the tool input JSON on
 # stdin and may print replacement JSON on stdout. Failures and empty output
 # retain the original input. Transformers run before pre_tool policy gates.

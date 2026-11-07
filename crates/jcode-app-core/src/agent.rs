@@ -1259,7 +1259,7 @@ impl Agent {
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
     /// No-op when the hook is not configured.
     pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
-        if !crate::hooks::hook_configured(event_name) {
+        if !crate::hooks::hook_configured_for(event_name, self.working_dir()) {
             return;
         }
         let mut event = crate::hooks::HookEvent::new(event_name)
