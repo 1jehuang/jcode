@@ -13,6 +13,31 @@ pub use theme_mode::{
     is_light_theme, set_theme_mode, theme_mode,
 };
 
+/// Final buffer pass shared by every render loop (`ui::draw`, the standalone
+/// session picker, swarm replay). Fills `Color::Reset` backgrounds with the
+/// theme background when the theme defines one ("dark" on a white terminal,
+/// for instance), then runs the terminal-adaptation pass or the configured
+/// palette pass. Custom TOML themes opt out of terminal adaptation so their
+/// hand-picked colors are not luminance-flipped, while `[display.colors]`
+/// overrides still apply through the palette pass.
+pub fn finish_frame(buf: &mut ratatui::buffer::Buffer) {
+    use ratatui::style::Color;
+
+    let bg = theme::background_color();
+    if bg != Color::Reset {
+        for cell in buf.content.iter_mut() {
+            if cell.bg == Color::Reset {
+                cell.bg = bg;
+            }
+        }
+    }
+    if theme::active_theme_uses_terminal_adaptation() {
+        adapt_buffer_for_display(buf);
+    } else {
+        palette::adapt_buffer_for_palette(buf);
+    }
+}
+
 /// The active palette and theme mode are process-global. One lock serializes
 /// every test that reads or mutates them, wherever the test lives (palette and
 /// theme-mode tests used to carry separate locks and could interleave).
