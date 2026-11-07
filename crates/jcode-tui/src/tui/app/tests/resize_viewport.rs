@@ -20,6 +20,8 @@ fn resize_snaps_tail_follow_to_new_bottom_without_animating() {
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
     app.auto_scroll_paused = false;
     app.scroll_offset = 0;
+    // Pure resize mechanics: keep widget overlays out of the wrap geometry.
+    app.suppress_info_widget_overlays = true;
 
     // Establish the resolved position while following the tail at 100 columns.
     render_and_snap(&app, &mut wide_terminal);
@@ -88,6 +90,7 @@ fn debounced_resize_burst_arms_the_snap_on_its_trailing_frame() {
 
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
     app.auto_scroll_paused = false;
+    app.suppress_info_widget_overlays = true;
     render_and_snap(&app, &mut wide_terminal);
 
     let _ = crate::tui::ui::take_tail_follow_snap_request();
@@ -124,6 +127,7 @@ fn resize_while_paused_in_history_does_not_snap_to_bottom() {
 
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
     app.auto_scroll_paused = false;
+    app.suppress_info_widget_overlays = true;
     render_and_snap(&app, &mut wide_terminal);
     app.scroll_up(20);
     render_and_snap(&app, &mut wide_terminal);
@@ -161,6 +165,7 @@ fn resize_without_overflow_stays_at_the_top() {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
+    app.suppress_info_widget_overlays = true;
     app.display_messages = vec![DisplayMessage::assistant("short response")];
     app.bump_display_messages_version();
     app.auto_scroll_paused = false;

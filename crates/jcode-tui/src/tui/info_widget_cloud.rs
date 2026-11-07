@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(cloud.rect.height, 16);
         assert_eq!(
             compute_page_layout(&data, 40, 55).max_page_height,
-            super::super::info_widget::changes_section_height(&data) + 1
+            super::super::info_widget::changes_section_height(&data, 40) + 1
         );
     }
     #[test]

@@ -25,7 +25,12 @@ fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state()
         app.begin_kv_cache_request(&first, &[], "system", "");
         app.apply_stream_usage_input_report(Some(314), Some(587_580), Some(1_055));
         app.push_turn_footer(Some(1.0));
-        let completed_at = app.kv_cache.kv_cache_baseline.as_ref().unwrap().completed_at;
+        let completed_at = app
+            .kv_cache
+            .kv_cache_baseline
+            .as_ref()
+            .unwrap()
+            .completed_at;
         let last_api = app.last_api_completed;
         let last_prompt = app.last_turn_input_tokens;
         let total_prompt = app.token_accounting.total_cache_prompt_tokens;
@@ -34,7 +39,12 @@ fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state()
         let mut next = first;
         next.push(Message::user("cancelled before provider stream opened"));
         if remote_mode {
-            app.begin_remote_kv_cache_request(App::kv_cache_request_signature(&next, &[], "system", ""));
+            app.begin_remote_kv_cache_request(App::kv_cache_request_signature(
+                &next,
+                &[],
+                "system",
+                "",
+            ));
         } else {
             app.begin_kv_cache_request(&next, &[], "system", "");
         }
@@ -42,7 +52,10 @@ fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state()
         assert!(!app.record_completed_stream_cache_usage());
         assert!(!app.has_streaming_footer_stats());
         assert_eq!(app.build_turn_footer(None), None);
-        assert_eq!(app.build_turn_footer(Some(2.0)), Some(Message::format_duration(2_000)));
+        assert_eq!(
+            app.build_turn_footer(Some(2.0)),
+            Some(Message::format_duration(2_000))
+        );
         if remote_mode {
             app.current_message_id = Some(42);
             app.is_processing = true;
@@ -53,8 +66,18 @@ fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state()
             app.push_turn_footer(Some(2.0));
         }
         assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
-        assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().completed_at, completed_at);
-        assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, next_expected);
+        assert_eq!(
+            app.kv_cache
+                .kv_cache_baseline
+                .as_ref()
+                .unwrap()
+                .completed_at,
+            completed_at
+        );
+        assert_eq!(
+            app.token_accounting.cache_next_optimal_input_tokens,
+            next_expected
+        );
         assert_eq!(app.token_accounting.total_cache_prompt_tokens, total_prompt);
         assert_eq!(app.last_api_completed, last_api);
         assert_eq!(app.last_turn_input_tokens, last_prompt);
@@ -72,8 +95,18 @@ fn cache_accounting_claude_reuses_written_boundary_not_uncached_tail() {
     app.streaming.streaming_cache_creation_tokens = Some(1_375);
     assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.token_accounting.last_cache_prompt_tokens, Some(619_486));
-    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
-    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
+    assert_eq!(
+        app.token_accounting.cache_next_optimal_input_tokens,
+        Some(617_004)
+    );
+    assert_eq!(
+        app.kv_cache
+            .kv_cache_baseline
+            .as_ref()
+            .unwrap()
+            .input_tokens,
+        617_004
+    );
 
     let mut second = first;
     second.push(Message::user("next"));
@@ -84,7 +117,10 @@ fn cache_accounting_claude_reuses_written_boundary_not_uncached_tail() {
     app.streaming.streaming_cache_creation_tokens = Some(3_248);
     assert!(record_reported_test_cache_usage(&mut app));
     assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
-    assert_eq!(app.token_accounting.last_cache_optimal_input_tokens, Some(617_004));
+    assert_eq!(
+        app.token_accounting.last_cache_optimal_input_tokens,
+        Some(617_004)
+    );
 
     second.push(Message::user("third"));
     app.begin_kv_cache_request(&second, &[], "system", "");
@@ -94,7 +130,10 @@ fn cache_accounting_claude_reuses_written_boundary_not_uncached_tail() {
     assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
     assert_eq!(app.kv_cache.kv_cache_miss_samples[0].missed_tokens, 1_782);
-    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].reason, KvCacheMissReason::LowRead);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::LowRead
+    );
 }
 
 #[test]
@@ -108,14 +147,29 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
     app.remote_provider_name = Some("Claude".to_string());
     app.remote_provider_model = Some("claude-opus-5-5".to_string());
     for write in [1_000, 1_375] {
-        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
-            effective_budget: None,
-            input: 2_482, output: 100,
-            cache_read_input: Some(615_629), cache_creation_input: Some(write),
-        }, &mut remote);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TokenUsage {
+                effective_budget: None,
+                input: 2_482,
+                output: 100,
+                cache_read_input: Some(615_629),
+                cache_creation_input: Some(write),
+            },
+            &mut remote,
+        );
     }
-    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
-    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
+    assert_eq!(
+        app.kv_cache
+            .kv_cache_baseline
+            .as_ref()
+            .unwrap()
+            .input_tokens,
+        617_004
+    );
+    assert_eq!(
+        app.token_accounting.cache_next_optimal_input_tokens,
+        Some(617_004)
+    );
     assert_eq!(app.last_turn_input_tokens, Some(619_486));
     // A late correction after compaction must not resurrect an old expectation.
     app.handle_compaction_event(crate::compaction::CompactionEvent {
@@ -129,13 +183,22 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
         summary_chars: Some(100),
         active_messages: Some(3),
     });
-    app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
-        effective_budget: None,
-        input: 2_482, output: 101,
-        cache_read_input: Some(615_629), cache_creation_input: Some(1_375),
-    }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
+            input: 2_482,
+            output: 101,
+            cache_read_input: Some(615_629),
+            cache_creation_input: Some(1_375),
+        },
+        &mut remote,
+    );
     assert!(app.kv_cache.kv_cache_baseline.is_none());
-    assert!(app.token_accounting.cache_next_optimal_input_tokens.is_none());
+    assert!(
+        app.token_accounting
+            .cache_next_optimal_input_tokens
+            .is_none()
+    );
 }
 
 fn cache_accounting_openai_app() -> App {
@@ -417,4 +480,71 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
         stats.contains("cache_expiry_notification_active: true"),
         "{stats}"
     );
+}
+
+#[test]
+fn replay_runtime_suppresses_local_agent_model_override_rows() {
+    // Replay playback shows the recording's own model; today's live-session
+    // worker models would mislead if rendered against a recording. Replay
+    // suppresses the rows, while local and daemon-attached (remote) sessions
+    // resolve them from config + session overrides. Drive the config through
+    // a temp home and assert each runtime mode in isolation.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::invalidate_config_cache();
+    let config_path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        "[agents]\nswarm_model = \"glm-5.2\"\nswarm_effort = \"low\"\nmemory_model = \"gemini-3.8-flash\"\nmemory_effort = \"none\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let overrides_visible = |app: &App| {
+        let data = crate::tui::TuiState::info_widget_data(app);
+        (
+            data.swarm_model_override.is_some(),
+            data.swarm_model_effort.is_some(),
+            data.memory_model_override.is_some(),
+            data.memory_model_effort.is_some(),
+        )
+    };
+
+    // Local runtime: rows render from config.
+    let app = create_test_app();
+    assert_eq!(overrides_visible(&app), (true, true, true, true));
+
+    // Daemon-attached (remote) sessions resolve the same config + session
+    // overrides: the swarm model row must report instead of vanishing.
+    let mut remote = create_test_app();
+    remote.is_remote = true;
+    remote.runtime_mode = AppRuntimeMode::RemoteClient;
+    assert_eq!(overrides_visible(&remote), (true, true, true, true));
+
+    // A per-session /agents pick arrives through History and outranks config.
+    let mut session_scoped = create_test_app();
+    session_scoped.is_remote = true;
+    session_scoped.runtime_mode = AppRuntimeMode::RemoteClient;
+    session_scoped
+        .session
+        .agent_model_overrides
+        .insert("swarm".to_string(), "glm-5.2-air".to_string());
+    let data = crate::tui::TuiState::info_widget_data(&session_scoped);
+    assert_eq!(data.swarm_model_override.as_deref(), Some("glm-5.2-air"));
+
+    // Replay runtime: the recording is the truth; overrides stay hidden.
+    let mut replay = create_test_app();
+    replay.runtime_mode = AppRuntimeMode::Replay;
+    assert_eq!(overrides_visible(&replay), (false, false, false, false));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
 }

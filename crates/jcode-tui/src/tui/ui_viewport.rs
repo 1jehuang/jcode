@@ -325,14 +325,25 @@ pub(super) fn draw_messages(
     area: Rect,
     prepared: Arc<PreparedChatFrame>,
     show_native_scrollbar: bool,
+    pinned_overview_reserve: Option<u16>,
 ) -> (info_widget::Margins, Option<super::NativeScrollbar>) {
     let (render_area, scrollbar_area) =
         super::split_native_scrollbar_area(area, show_native_scrollbar);
     let left_inset = super::left_aligned_content_inset(render_area.width, app.centered_mode());
+    // The pinned Overview HUD owns the rightmost `pinned_overview_reserve`
+    // columns. The transcript was wrapped at (width - reserve) upstream, so
+    // narrowing the text area here by the same reserve keeps every rendered
+    // line left of the HUD: margins measured on the narrowed area then never
+    // report free space under the pin, and centered lines re-center within the
+    // shortened row instead of sliding under the panel.
+    let pinned_reserve = pinned_overview_reserve.unwrap_or(0);
     let text_render_area = Rect {
         x: render_area.x.saturating_add(left_inset),
         y: render_area.y,
-        width: render_area.width.saturating_sub(left_inset),
+        width: render_area
+            .width
+            .saturating_sub(left_inset)
+            .saturating_sub(pinned_reserve),
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;

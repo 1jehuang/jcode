@@ -15,6 +15,7 @@ mod copy_pane_drag;
 pub(crate) use copy_pane_drag::*;
 
 use super::info_widget;
+use super::info_widget_layout;
 use super::markdown;
 use super::ui_diff::{
     DiffLineKind, ParsedDiffLine, collect_diff_lines, diff_add_color, diff_change_counts_for_tool,
@@ -3184,8 +3185,39 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
+    // Known before the prepare pass (it early-returns below for takeover kinds).
+    let onboarding_welcome = app.onboarding_welcome_active();
+    // Info-widget data must exist before the prepare pass: the pinned Overview
+    // HUD reserves a column at both wrap and render width, so the transcript
+    // must know the reserve while it wraps. `info_widget_data` is a pure
+    // snapshot read, safe to hoist above prepare.
+    let widget_data_start = Instant::now();
+    let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
-    let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
+    // Pinned Overview HUD: when the render pass would pin the Overview
+    // top-right, reserve its column now so every wrapped line stops short of
+    // the HUD. The render gate (overlays enabled, no donut, no swarm page,
+    // no fullscreen side panel, not onboarding) is mirrored here: reserving a
+    // column the render pass never pins would waste the right edge for
+    // nothing. Onboarding frames draw the welcome body over the whole chat
+    // column and skip draw_messages, so they must not reserve a column
+    // either.
+    let pinned_overview_reserve = if app.info_widget_overlays_enabled()
+        && !widget_data.is_empty()
+        && !super::idle_donut_active(app)
+        && !swarm_page_active
+        && !side_panel_fullscreen
+        && !onboarding_welcome
+    {
+        info_widget_layout::pinned_overview_reserve(chat_area, &widget_data)
+    } else {
+        None
+    };
+    let wide_prepare_width = chat_area
+        .width
+        .saturating_sub(chat_left_inset)
+        .saturating_sub(pinned_overview_reserve.unwrap_or(0));
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
@@ -3210,8 +3242,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         note_prep_prepare_at(started.elapsed());
         prepared
     };
-
-    let onboarding_welcome = app.onboarding_welcome_active();
 
     // The guided onboarding phases (login import, OpenAI prompt, continue prompt)
     // are entirely key-driven and own the whole chat column: they render their own
@@ -3342,9 +3372,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // A fresh cloud transcript is short even on a tall terminal. Keep enough
     // packed rows for the cloud card stack instead of hiding directory counts
     // above an otherwise unused lower half of the screen.
-    let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
-    let widget_data_elapsed = widget_data_start.elapsed();
     let cloud_card_height = if app.info_widget_overlays_enabled()
         && widget_data.cloud_info.is_some()
         && chat_area.width >= 120
@@ -3580,6 +3607,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             messages_area,
             prepared.clone(),
             chat_scrollbar_visible,
+            pinned_overview_reserve,
         );
         chat_scrollbar = scrollbar;
         margins
@@ -3699,6 +3727,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !show_donut
         && !swarm_page_active
         && !side_panel_fullscreen
+        && !onboarding_welcome
     {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
@@ -3718,7 +3747,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             // always true and useless; instead verify each placement still fits
             // within the free margin the layout reported for the rows it covers.
             for placement in &placements {
-                if widget_overlaps_content(placement, widget_bounds, &margins) {
+                if widget_overlaps_content(placement, widget_bounds, &margins)
+                    && !(placement.kind == info_widget::WidgetKind::Overview
+                        && pinned_overview_reserve.is_some())
+                {
                     capture.anomaly(format!(
                         "Info widget {:?} intrudes into content (rect {:?})",
                         placement.kind, placement.rect
