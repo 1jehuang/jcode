@@ -109,5 +109,12 @@ demonstrate reuse, but its elapsed times are not production API measurements.
 
 A high total alone is not proof of the cause. Compare cache hits/misses, success
 versus failure, cold versus warm connections and local versus daemon stage timing.
+`workspace_command` records distinguish `git_probe`, `inventory_prepare`,
+`inventory_projection`, `preview`, `cloud_status`, and `cloud_status_directories`.
+Older `operation=none` samples cannot reliably identify which subprocess was slow.
+These operations share transport code but have different workloads and deadlines,
+so compare their distributions separately rather than attributing every slow SSH
+command to inventory. The report counts HTTP/read/load errors, output bounds,
+identity mismatches, and nonzero exits as failures, not normal cache misses/skips.
 Do not claim a cold VM wake or a full end-to-end cloud resume is subsecond just
 because one stage or a synthetic fixture is subsecond.
