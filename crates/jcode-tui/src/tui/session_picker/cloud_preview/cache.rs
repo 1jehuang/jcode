@@ -15,18 +15,36 @@ const TTL: Duration = Duration::from_secs(15);
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
     let root = super::super::preview_result(crate::storage::jcode_dir(), "cache directory")?;
     let owner = crate::subscription_catalog::configured_api_key().unwrap_or_default();
-    Some(scoped_key_path(&root, session_id, host, epoch, &owner))
+    let endpoint = crate::subscription_api::configured_api_base();
+    Some(scoped_key_path(
+        &root, session_id, host, epoch, &owner, &endpoint,
+    ))
 }
 
 #[cfg(test)]
 fn key_path(root: &Path, session_id: &str, host: &str, epoch: u64) -> PathBuf {
-    scoped_key_path(root, session_id, host, epoch, "test-owner")
+    scoped_key_path(
+        root,
+        session_id,
+        host,
+        epoch,
+        "test-owner",
+        "https://test.invalid",
+    )
 }
 
-fn scoped_key_path(root: &Path, session_id: &str, host: &str, epoch: u64, owner: &str) -> PathBuf {
+fn scoped_key_path(
+    root: &Path,
+    session_id: &str,
+    host: &str,
+    epoch: u64,
+    owner: &str,
+    endpoint: &str,
+) -> PathBuf {
     let mut digest = Sha256::new();
     for field in [
         owner.as_bytes(),
+        endpoint.as_bytes(),
         host.as_bytes(),
         session_id.as_bytes(),
         &epoch.to_be_bytes(),
@@ -237,8 +255,44 @@ mod tests {
             assert_ne!(baseline, other);
         }
         assert_ne!(
-            scoped_key_path(root, "session", "host", 1, "owner-one"),
-            scoped_key_path(root, "session", "host", 1, "owner-two")
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner-one",
+                "https://api-one.invalid"
+            ),
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner-two",
+                "https://api-one.invalid"
+            )
+        );
+        assert_ne!(
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner",
+                "https://api-one.invalid"
+            ),
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner",
+                "https://api-two.invalid"
+            )
+        );
+        assert_ne!(
+            scoped_key_path(root, "session", "host", 1, "ab", "c"),
+            scoped_key_path(root, "session", "host", 1, "a", "bc")
         );
         assert_ne!(key_path(root, "bc", "a", 0), key_path(root, "c", "ab", 0));
         let hostile = key_path(root, "../../session", "secret-host/..", 1);

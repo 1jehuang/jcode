@@ -1,3 +1,19 @@
+// Read-only production sample, 2026-11-08 UTC: Swan snapshot 97,722,380 bytes,
+// journal 264,881 bytes. Ran this exact embedded projector over existing managed
+// SSH (python3 stdin only), three samples per mode. Snapshot/journal size and
+// mtime_ns were unchanged before/after each sample. No daemon RPC or host writes.
+// Preview: 80 messages, 181,277 output bytes including framing/telemetry.
+// Remote projection ms: 2465.50, 1862.45, 1646.69.
+// End-to-end fresh SSH ms: 8923.53, 5664.24, 7751.36.
+// Local Python json.loads median ms (20 parses/sample): 0.969, 1.121, 0.904.
+// This measures JSON decoding only, NOT Rust parse_preview/hydration. The prior
+// ~49 MB cache/~300 ms parse baseline is therefore not an apples-to-apples timing
+// comparison, though the transferred projection is now bounded and much smaller.
+// Inventory: 278 output bytes; remote ms: 912.64, 1453.10, 736.12.
+// End-to-end fresh SSH ms: 4342.86, 4807.31, 4282.34.
+// Prior 97 MB inventory baseline was 702 ms: no inventory speedup demonstrated.
+// Reproduction script/results: ~/.jcode/scratch/bounded-preview-measure.py and
+// ~/.jcode/scratch/bounded-preview-measure-results.jsonl on the measurement host.
 use super::*;
 use std::io::Write;
 
