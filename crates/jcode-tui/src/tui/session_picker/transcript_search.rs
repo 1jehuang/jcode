@@ -647,6 +647,26 @@ impl TranscriptSearch {
     }
 }
 
+/// Sessions decoded ahead of the first query, most recent first. Bounded so
+/// prefetch stays well inside the text cache's entry and byte budgets.
+const PREFETCH_SESSIONS: usize = 96;
+
+/// Start decoding the most recent transcripts as soon as the picker has its
+/// session list, so typing begins against a warm cache.
+pub(super) fn prefetch_recent<'a>(sessions: impl Iterator<Item = &'a SessionInfo>) {
+    if cfg!(test) {
+        return;
+    }
+    let mut recent: Vec<&SessionInfo> = sessions.collect();
+    recent.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    let paths = recent
+        .into_iter()
+        .take(PREFETCH_SESSIONS)
+        .flat_map(|session| transcript_paths(session).into_iter().take(1))
+        .collect();
+    warmup::prefetch(paths);
+}
+
 fn transcript_paths(session: &SessionInfo) -> Vec<PathBuf> {
     match &session.resume_target {
         ResumeTarget::JcodeSession { session_id } => {

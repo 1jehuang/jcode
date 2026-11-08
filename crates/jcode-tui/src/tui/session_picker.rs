@@ -773,6 +773,12 @@ impl SessionPicker {
         } else {
             (Vec::new(), orphan_sessions)
         };
+        transcript_search::prefetch_recent(
+            all_sessions
+                .iter()
+                .chain(all_orphan_sessions.iter())
+                .chain(server_groups.iter().flat_map(|g| g.sessions.iter())),
+        );
         self.all_sessions = all_sessions;
         self.all_server_groups = server_groups;
         self.all_orphan_sessions = all_orphan_sessions;

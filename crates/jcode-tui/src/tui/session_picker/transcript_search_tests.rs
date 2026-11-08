@@ -69,7 +69,7 @@ fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
     let path = dir.path().join("oversized.jsonl");
     // Too large for warmup or decoded-text caching, so this must use cold IO.
     let mut text = format!("{}\n", r#"{"text":"needle"}"#);
-    text.push_str(&" ".repeat(2 * 1024 * 1024));
+    text.push_str(&" ".repeat(17 * 1024 * 1024));
     std::fs::write(&path, text).unwrap();
     let session = external_session("cold", &path);
     let mut search = TranscriptSearch::default();
