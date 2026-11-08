@@ -600,18 +600,11 @@ fn copy_to_local_clipboard(text: &str) -> bool {
         if clipboard_helper::copy_via_clipboard_helper("wl-copy", &[], text) {
             return true;
         }
-        if clipboard_helper::copy_via_clipboard_helper(
-            "xclip",
-            &["-selection", "clipboard"],
-            text,
-        ) {
+        if clipboard_helper::copy_via_clipboard_helper("xclip", &["-selection", "clipboard"], text)
+        {
             return true;
         }
-        if clipboard_helper::copy_via_clipboard_helper(
-            "xsel",
-            &["--clipboard", "--input"],
-            text,
-        ) {
+        if clipboard_helper::copy_via_clipboard_helper("xsel", &["--clipboard", "--input"], text) {
             return true;
         }
         arboard::Clipboard::new()

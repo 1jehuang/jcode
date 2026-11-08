@@ -76,18 +76,36 @@ mod tests {
                 action: CloudRuntimeCommand::Push { artifact: Some(artifact), from_source: false, reload: false, .. }
             })) if artifact == std::path::Path::new("portable.tar.gz")
         ));
-        assert!(Args::try_parse_from([
-            "jcode", "cloud", "runtime", "push", "--artifact", "a.tar.gz", "--from-source"
-        ])
-        .is_err());
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "cloud",
+                "runtime",
+                "push",
+                "--artifact",
+                "a.tar.gz",
+                "--from-source"
+            ])
+            .is_err()
+        );
         let parsed = Args::try_parse_from([
-            "jcode", "cloud", "runtime", "push", "--from-source", "--reload"
+            "jcode",
+            "cloud",
+            "runtime",
+            "push",
+            "--from-source",
+            "--reload",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Some(Command::Cloud(CloudCommand::Runtime {
-                action: CloudRuntimeCommand::Push { artifact: None, from_source: true, reload: true, wait_secs: 1800 }
+                action: CloudRuntimeCommand::Push {
+                    artifact: None,
+                    from_source: true,
+                    reload: true,
+                    wait_secs: 1800
+                }
             }))
         ));
         assert!(Args::try_parse_from(["jcode", "cloud", "runtime", "reload", "--force"]).is_ok());

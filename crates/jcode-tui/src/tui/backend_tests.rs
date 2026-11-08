@@ -822,5 +822,8 @@ async fn request_send_does_not_block_ui_when_server_stops_reading() {
         }
     })
     .await;
-    assert!(result.is_ok(), "request sends must not wait on the socket writer");
+    assert!(
+        result.is_ok(),
+        "request sends must not wait on the socket writer"
+    );
 }

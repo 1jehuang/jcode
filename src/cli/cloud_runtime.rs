@@ -138,7 +138,10 @@ fn build_from_source() -> Result<std::path::PathBuf> {
         bail!("{} is not a jcode checkout", root.display());
     }
     let target = "x86_64-unknown-linux-gnu";
-    eprintln!("[cloud build] building portable Linux runtime in {}", root.display());
+    eprintln!(
+        "[cloud build] building portable Linux runtime in {}",
+        root.display()
+    );
     let builder = if Command::new("justrust").arg("--version").output().is_ok() {
         "justrust"
     } else {
@@ -164,7 +167,11 @@ fn build_from_source() -> Result<std::path::PathBuf> {
     if !status.success() {
         bail!("portable Linux build failed ({status})");
     }
-    let binary = root.join("target").join(target).join("selfdev").join("jcode");
+    let binary = root
+        .join("target")
+        .join(target)
+        .join("selfdev")
+        .join("jcode");
     let output = root.join("target/cloud-runtime/jcode-linux-x86_64.tar.gz");
     eprintln!("[cloud build] packaging");
     let status = Command::new(&script)
@@ -275,7 +282,9 @@ pub(crate) fn run_cli(action: CloudRuntimeCommand) -> Result<()> {
             if then_reload {
                 reload(wait_secs, false)
             } else {
-                eprintln!("Active daemons are not restarted. Run `jcode cloud runtime reload` to switch.");
+                eprintln!(
+                    "Active daemons are not restarted. Run `jcode cloud runtime reload` to switch."
+                );
                 Ok(())
             }
         }

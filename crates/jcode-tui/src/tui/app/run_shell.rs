@@ -36,6 +36,8 @@ const STATUS_SPINNER_FPS: f32 = 12.5;
 const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 /// Tick cadence while the reload fast-start transcript is still rendering.
 const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Minimum spacing between non-input full frames in the remote loop (~60fps).
+const EVENT_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -943,6 +945,8 @@ impl App {
                 needs_redraw = true;
             }
 
+            let mut input_redraw = true;
+            let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
@@ -980,7 +984,20 @@ impl App {
                         || last_unfocused_draw
                             .map(|t| t.elapsed() >= UNFOCUSED_IDLE_REDRAW_MIN_INTERVAL)
                             .unwrap_or(true);
-                    if allow_redraw {
+                    // Coalesce event-driven bursts: server events can land a
+                    // few ms apart and each used to trigger a full draw that
+                    // changed nothing. Input-driven and forced redraws still
+                    // paint immediately so typing latency is unaffected.
+                    let coalesce_until = (!input_redraw
+                        && !self.force_full_redraw
+                        && !self.force_full_repaint)
+                        .then_some(status_spinner_renderer.last_full_frame_at)
+                        .flatten()
+                        .map(|at| at + EVENT_REDRAW_MIN_INTERVAL)
+                        .filter(|deadline| *deadline > Instant::now());
+                    deferred_redraw_at = coalesce_until.map(tokio::time::Instant::from_std);
+                    if allow_redraw && deferred_redraw_at.is_none() {
+                        input_redraw = false;
                         // Idle animated screen: repaint only the animation rows
                         // when nothing else is due (see the local loop).
                         if status_spinner_renderer.idle_animation_only_available(&self)
@@ -1026,7 +1043,9 @@ impl App {
                     biased;
                     event = event_stream.next() => {
                         if event.is_some() {
-                            needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                            let event_redraw = remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                            needs_redraw |= event_redraw;
+                            input_redraw |= event_redraw;
                         } else if super::terminal_liveness::terminal_abandoned() {
                             // Input EOF with the controlling terminal gone:
                             // orphaned client (see local loop). Exit; the
@@ -1047,6 +1066,14 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
+                    }
+                    _ = async {
+                        match deferred_redraw_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => futures::future::pending::<()>().await,
+                        }
+                    } => {
+                        deferred_redraw_at = None;
                     }
                     event = remote_conn.next_event() => {
                         let (outcome, event_redraw) = remote::handle_remote_event(

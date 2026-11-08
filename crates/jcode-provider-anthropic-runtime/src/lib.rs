@@ -2704,7 +2704,11 @@ mod sse_utf8_chunk_tests {
         let split = payload.find('你').unwrap() + 1; // inside the 3-byte char
         let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
         let mut buffer = String::new();
-        for chunk in [&bytes[..split], &bytes[split..split + 3], &bytes[split + 3..]] {
+        for chunk in [
+            &bytes[..split],
+            &bytes[split..split + 3],
+            &bytes[split + 3..],
+        ] {
             buffer.push_str(&utf8.decode(chunk));
         }
         let event = parse_sse_event(&mut buffer).expect("complete event");
