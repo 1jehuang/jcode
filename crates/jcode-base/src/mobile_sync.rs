@@ -31,6 +31,9 @@ const MAX_TEXT_CHARS: usize = 100_000;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
+// Also bounded when no background worker runs or mobile sync is disabled.
+// Evicted hints are recovered by the periodic snapshot/journal reconciliation.
+const MAX_DIRTY_SESSIONS: usize = 1024;
 static PERSISTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static DIRTY_SESSIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,11 +42,19 @@ static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Notify retains a permit while an upload is running. The set also retains
 /// same-millisecond writes which the reconciliation mtime cannot distinguish.
 pub(crate) fn notify_session_persisted(id: &str) {
-    DIRTY_SESSIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id.to_owned());
+    mark_dirty(id);
     PERSISTED.notify_one();
+}
+
+fn mark_dirty(id: &str) {
+    if !valid_session_id(id) {
+        return;
+    }
+    let mut dirty = DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if dirty.len() == MAX_DIRTY_SESSIONS && !dirty.contains(id) {
+        dirty.pop_first();
+    }
+    dirty.insert(id.to_owned());
 }
 
 fn state_lock() -> Result<std::fs::File> {
@@ -527,7 +538,8 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     }
     candidates.sort_by_key(|(id, _, _)| !dirty.contains(id));
 
-    for (id, path, mtime) in candidates {
+    let mut candidates = candidates.into_iter();
+    while let Some((id, path, mtime)) = candidates.next() {
         if !sync_still_enabled(state.generation) {
             break;
         }
@@ -547,10 +559,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         let session = match Session::load_from_path(&path) {
             Ok(s) => s,
             Err(_) => {
-                DIRTY_SESSIONS
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(id);
+                mark_dirty(&id);
                 continue;
             }
         };
@@ -610,10 +619,23 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 },
             );
         } else {
-            DIRTY_SESSIONS
+            mark_dirty(&id);
+        }
+        if reconcile
+            && !DIRTY_SESSIONS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(id);
+                .is_empty()
+        {
+            // Finish this session, commit its progress, then let the event pass
+            // handle fresh saves. Unvisited backlog remains discoverable on the
+            // next periodic reconciliation. Preserve any consumed dirty hints.
+            for (id, _, _) in candidates {
+                if dirty.contains(&id) {
+                    mark_dirty(&id);
+                }
+            }
+            break;
         }
     }
     // Merge under a cross-process lock, never write a stale enabled flag or
@@ -702,6 +724,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn disabled_dirty_hints_are_bounded_without_reading_sync_state() {
+        let _lock = storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+        DIRTY_SESSIONS.lock().unwrap().clear();
+        for index in 0..MAX_DIRTY_SESSIONS * 2 {
+            notify_session_persisted(&format!("disabled-{index}"));
+        }
+        notify_session_persisted("../invalid");
+        let mut dirty = DIRTY_SESSIONS.lock().unwrap();
+        assert_eq!(dirty.len(), MAX_DIRTY_SESSIONS);
+        assert!(dirty.contains(&format!("disabled-{}", MAX_DIRTY_SESSIONS * 2 - 1)));
+        assert!(!home.path().join("mobile_sync.json").exists());
+        dirty.clear();
     }
 
     #[test]
@@ -915,6 +954,65 @@ mod tests {
         assert_eq!(external["messages"][0]["text"], "external writer");
         release.send(()).unwrap();
         assert_eq!(reconcile.await.unwrap().messages_uploaded, 1);
+        // Old snapshots have no local dirty hints, as with another process's
+        // backlog. Block the first old upload, then durably save a fresh session.
+        for id in ["old-a", "old-b", "old-c"] {
+            let mut old = Session::create_with_id(id.into(), None, None);
+            old.custom_title = Some(id.into());
+            old.messages = vec![msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: id.into(),
+                    cache_control: None,
+                }],
+            )];
+            storage::write_json_fast(&home.path().join(format!("sessions/{id}.json")), &old)
+                .unwrap();
+        }
+        let reconcile = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
+        let (old, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let old_id = old["title"].as_str().unwrap().to_owned();
+        assert!(old_id.starts_with("old-"));
+        let mut fresh = Session::create_with_id("fresh-save".into(), None, None);
+        fresh.custom_title = Some("fresh-save".into());
+        fresh.messages = vec![msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "fresh".into(),
+                cache_control: None,
+            }],
+        )];
+        fresh.save().unwrap();
+        release.send(()).unwrap();
+        let (next, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next["title"], "fresh-save",
+            "fresh save must bypass old backlog"
+        );
+        assert_eq!(reconcile.await.unwrap().sessions_uploaded, 1);
+        assert_eq!(load_state().sessions[&old_id].uploaded, 1);
+        release.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        // The next periodic-style pass resumes the unvisited backlog, without
+        // uploading the completed old session again.
+        let resume = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
+        for _ in 0..2 {
+            let (remaining, release) =
+                tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(remaining["title"].as_str().unwrap().starts_with("old-"));
+            assert_ne!(remaining["title"], old_id);
+            release.send(()).unwrap();
+        }
+        assert_eq!(resume.await.unwrap().sessions_uploaded, 2);
         session.custom_title = Some("metadata only".into());
         session.save().unwrap();
         let (metadata, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
