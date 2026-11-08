@@ -41,12 +41,21 @@ fn hash_row(buffer: &Buffer, area: Rect, y: u16) -> u64 {
     }
     let start = buffer.index_of(left, y);
     for cell in &buffer.content[start..start + usize::from(right - left)] {
-        let symbol = cell.symbol();
-        if blank && !symbol.trim().is_empty() {
-            blank = false;
-        }
-        for &byte in symbol.as_bytes() {
-            hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
+        let bytes = cell.symbol().as_bytes();
+        // Single-byte symbols (the common case) are checked for blankness
+        // without the Unicode `trim()` walk.
+        if let [b] = bytes {
+            if blank && !char::from(*b).is_whitespace() {
+                blank = false;
+            }
+            hash = (hash ^ u64::from(*b)).wrapping_mul(PRIME);
+        } else {
+            if blank && !cell.symbol().trim().is_empty() {
+                blank = false;
+            }
+            for &byte in bytes {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
+            }
         }
         // Cell separator so "ab","c" differs from "a","bc".
         hash = (hash ^ 0xff).wrapping_mul(PRIME);
