@@ -1225,6 +1225,16 @@ impl BodyCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // An entry that differs only by an older `messages_version` can never
+        // be an exact hit again, and the new entry is a better incremental
+        // base for the same layout. Keeping it only holds memory.
+        self.entries.retain(|entry| {
+            !(entry.key.messages_version < key.messages_version
+                && BodyCacheKey {
+                    messages_version: key.messages_version,
+                    ..entry.key.clone()
+                } == key)
+        });
         self.entries.push_front(BodyCacheEntry {
             key,
             prepared,
