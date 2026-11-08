@@ -19,6 +19,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
+mod timing;
+
 const PROTOCOL: u32 = 1;
 const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
@@ -118,11 +120,9 @@ impl NativeSsh {
             );
         }
         options.working_dir = remote_working_dir.map(str::to_owned);
-        // Fail before entering the TUI, with authentication/host-key diagnostics.
         let probe = SshConnection::connect(&options).await?;
         let handshake = probe.handshake.clone();
-        // Remote --cwd already verified the directory and the header contains
-        // its resolved path. Keep reconnects on that same verified workspace.
+        // Keep reconnects on the workspace already resolved and verified by remote --cwd.
         options.working_dir = Some(handshake.working_dir.clone());
 
         let directory = private_directory()?;
@@ -333,8 +333,7 @@ struct SshConnection {
 
 impl SshConnection {
     async fn connect(options: &SshOptions) -> Result<Self> {
-        // Jcode Cloud hosts may be asleep: waking the VM and starting the
-        // remote daemon routinely exceeds the plain SSH startup deadline.
+        // Waking cloud hosts and starting their daemon exceeds the plain SSH deadline.
         let cloud = super::cloud_managed::is_managed(&options.host)
             || super::cloud_ephemeral::host_id(&options.host).is_some();
         let (deadline, attempts) = if cloud {
@@ -356,11 +355,13 @@ impl SshConnection {
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {
+        let mut timing = timing::StartupTiming::new();
         let mut connection = Self::spawn_process(command)?;
         if let Err(error) = connection.establish(deadline).await {
             connection.shutdown().await;
             return Err(error.context(connection.diagnostic()));
         }
+        timing.success();
         Ok(connection)
     }
 
@@ -369,8 +370,7 @@ impl SshConnection {
         #[cfg(target_os = "linux")]
         {
             let parent_pid = std::process::id();
-            // SIGKILL/process::exit do not run guards. Do not leave SSH holding
-            // a remote bridge open if the local UI disappears abruptly.
+            // SIGKILL/process::exit skip guards, so bind SSH lifetime to this UI.
             unsafe {
                 command.as_std_mut().pre_exec(move || {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {

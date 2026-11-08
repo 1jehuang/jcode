@@ -23,13 +23,13 @@ pub struct BackgroundTaskRow {
     pub label: String,
     pub percent: Option<f32>,
     pub status: BackgroundTaskRowStatus,
-    /// When a successful task stopped being actionable. Running and failed
-    /// tasks remain visible until their state changes or the session closes.
+    /// When a successful task stopped being actionable, retained until session closure.
     pub completed_at: Option<std::time::Instant>,
 }
 
 pub mod backend;
 mod cloud_git;
+mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
 mod core;

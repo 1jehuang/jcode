@@ -141,7 +141,9 @@ impl Target {
         // processes. Waiters reuse only a fully successful preflight.
         let _guard = if self.transport.is_none() {
             Some(timed_move_stage("preflight singleflight wait", || {
-                let path = crate::storage::jcode_dir()?.join("cloud-preflight.lock");
+                let home = crate::storage::jcode_dir()?;
+                std::fs::create_dir_all(&home).context("create cloud preflight directory")?;
+                let path = home.join("cloud-preflight.lock");
                 let file = std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(false)

@@ -1,0 +1,53 @@
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+import unittest
+
+SPEC = importlib.util.spec_from_file_location("cloud_latency_report", Path(__file__).with_name("cloud_latency_report.py"))
+reporter = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(reporter)
+
+
+class CloudLatencyReportTests(unittest.TestCase):
+    def test_collects_failure_and_secondary_wait_metrics(self):
+        groups, failures = reporter.collect([
+            "[INFO] [CLOUD_TIMING] stage=event_parse operation=history outcome=ok duration_ms=12.5 request_wait_ms=1400 bytes=261000\n",
+            "[INFO] [CLOUD_TIMING] stage=event_parse operation=history outcome=error duration_ms=2\n",
+            "[INFO] mobile_sync stage=http_upload outcome=timeout duration_ms=6000\n",
+        ])
+        self.assertEqual(groups[("event_parse:history", "duration_ms")], [12.5, 2])
+        self.assertEqual(groups[("event_parse:history", "request_wait_ms")], [1400])
+        self.assertEqual(failures[("event_parse:history", "duration_ms")], 1)
+        self.assertEqual(failures[("http_upload", "duration_ms")], 1)
+
+    def test_ignores_unrelated_invalid_and_nonfinite_values(self):
+        groups, _ = reporter.collect([
+            "private stage=anything outcome=ok duration_ms=9000",
+            "[CLOUD_TIMING] stage=https://secret outcome=ok duration_ms=9",
+            "[CLOUD_TIMING] stage=parse outcome=ok duration_ms=nan",
+            "[CLOUD_TIMING] stage=parse outcome=ok duration_ms=inf",
+            "[CLOUD_TIMING] stage=parse outcome=ok request_wait_ms=none",
+            "[CLOUD_TIMING] stage=parse outcome=ok duration_ms=" + "9" * 400,
+        ])
+        self.assertFalse(groups)
+
+    def test_report_is_ranked_filtered_and_content_free(self):
+        groups, failures = reporter.collect([
+            "[CLOUD_TIMING] stage=fast outcome=ok duration_ms=20 payload=PRIVATE",
+            "[CLOUD_TIMING] stage=slow outcome=error duration_ms=1000 payload=PRIVATE",
+            "[CLOUD_TIMING] stage=slower outcome=ok duration_ms=3000 token=SECRET",
+        ])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            reporter.report(groups, failures, threshold_ms=500)
+        text = output.getvalue()
+        self.assertLess(text.index("slower"), text.index("slow "))
+        self.assertNotIn("fast", text)
+        self.assertNotIn("PRIVATE", text)
+        self.assertNotIn("SECRET", text)
+        self.assertEqual(reporter.percentile([1, 2, 3, 4], .95), 4)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -390,6 +390,8 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        let mut timing = super::cloud_latency::Span::new("connect");
+        timing.operation("socket_connect");
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let socket_path = server::socket_path();
@@ -436,6 +438,7 @@ impl RemoteConnection {
         };
 
         let connection_setup_ms = connection_setup_start.elapsed().as_millis();
+        timing.operation("ssh_ready");
         let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
@@ -445,6 +448,7 @@ impl RemoteConnection {
 
         let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
+        timing.operation("subscribe");
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
@@ -481,6 +485,7 @@ impl RemoteConnection {
 
         // If resuming a session, the target-aware Subscribe attaches directly to
         // that session and returns History, so avoid a second bootstrap request.
+        timing.operation("bootstrap_request");
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
         if resume_target.is_none() {
@@ -523,6 +528,8 @@ impl RemoteConnection {
             bootstrap_request,
         ));
 
+        timing.operation("complete");
+        timing.finish("ok");
         Ok(conn)
     }
 
@@ -532,20 +539,7 @@ impl RemoteConnection {
     fn spawn_usage_hydration(
         hydrate: impl FnOnce() -> bool + Send + 'static,
     ) -> tokio::task::JoinHandle<()> {
-        let queued = Instant::now();
-        tokio::task::spawn_blocking(move || {
-            let started = Instant::now();
-            let imported = hydrate();
-            crate::logging::info(&format!(
-                "[TIMING] remote quota hydration: queue={}ms, read={}ms, imported={}",
-                queued
-                    .elapsed()
-                    .saturating_sub(started.elapsed())
-                    .as_millis(),
-                started.elapsed().as_millis(),
-                imported,
-            ));
-        })
+        super::cloud_latency::spawn_usage_hydration(hydrate)
     }
 
     fn interrupt_request_log_fields(
@@ -615,6 +609,7 @@ impl RemoteConnection {
             ));
         }
 
+        let mut timing = super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
         let writer_wait_start = Instant::now();
         let mut w = self.writer.lock().await;
@@ -640,7 +635,11 @@ impl RemoteConnection {
                 )),
             }
         }
+        if let Some(timing) = &mut timing {
+            timing.finish(if result.is_ok() { "ok" } else { "error" });
+        }
         result?;
+        super::cloud_latency::request_sent(&request);
         Ok(())
     }
 
@@ -1450,7 +1449,7 @@ impl RemoteConnection {
             }
             return LineOutcome::Skip;
         }
-        match serde_json::from_str(&text) {
+        match super::cloud_latency::parse_event(&text) {
             Ok(ServerEvent::Done { id })
                 if self
                     .control_done_ids

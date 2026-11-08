@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 mod input_dispatch;
 mod key_handling;
+mod latency;
 mod queue_recovery;
 mod reconnect;
 mod server_event_handlers;
@@ -52,8 +53,7 @@ use session_persistence::{
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
-// Re-export the remote input dispatch helpers for sibling modules/tests that go
-// through the `remote` facade instead of private submodule paths.
+// Re-export remote input dispatch helpers for sibling modules/tests.
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
@@ -65,7 +65,7 @@ pub(super) use input_dispatch::{
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
 };
-pub(super) use server_events::handle_server_event;
+pub(super) use latency::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
