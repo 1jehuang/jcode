@@ -309,6 +309,25 @@ pub(super) async fn cancelled(cancel: &AtomicBool) {
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+fn bundled_root_store() -> rustls::RootCertStore {
+    rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    }
+}
+
+/// iOS is Unix but has no OpenSSL CA bundle. rustls-native-certs 0.8 uses
+/// its Unix filesystem loader there, not the Apple trust store. An explicit
+/// connector also avoids Cargo feature unification selecting native roots or
+/// another TLS backend. Keep rustls's default chain, time and hostname checks.
+fn tls_connector() -> tokio_tungstenite::Connector {
+    tokio_tungstenite::Connector::Rustls(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(bundled_root_store())
+            .with_no_client_auth(),
+    ))
+}
+
 pub struct NariSession {
     socket: Socket,
     cancel: Arc<AtomicBool>,
@@ -389,10 +408,14 @@ impl NariSession {
                 max_frame_size: Some(MAX_RESPONSE_BYTES),
                 ..Default::default()
             };
-            let (mut socket, _) =
-                tokio_tungstenite::connect_async_with_config(request, Some(config), false)
-                    .await
-                    .map_err(handshake_error)?;
+            let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                Some(config),
+                false,
+                Some(tls_connector()),
+            )
+            .await
+            .map_err(handshake_error)?;
             super::timing::mark("nari websocket connected");
             send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
@@ -667,6 +690,34 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_tls_roots_are_complete_without_native_store() {
+        // No native loader or environment override participates in this store.
+        // Run with SSL_CERT_FILE/SSL_CERT_DIR pointing to missing paths as well.
+        let roots = bundled_root_store();
+        assert!(!roots.is_empty());
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        for (actual, expected) in roots.roots.iter().zip(webpki_roots::TLS_SERVER_ROOTS) {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn bundled_tls_connector_uses_rustls_even_with_unified_features() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let tokio_tungstenite::Connector::Rustls(config) = tls_connector() else {
+            panic!("voice must use the explicit bundled-root rustls connector");
+        };
+        assert!(config.enable_sni);
+        assert!(!config.client_auth_cert_resolver.has_certs());
+        let connection = rustls::ClientConnection::new(
+            config,
+            rustls::pki_types::ServerName::try_from("relay.example").unwrap(),
+        );
+        assert!(connection.is_ok());
+    }
+
     #[tokio::test]
     async fn relay_rejects_unsafe_urls_and_invalid_bearers_before_network() {
         for url in [
