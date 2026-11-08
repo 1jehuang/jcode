@@ -999,6 +999,7 @@ impl BashTool {
                                     if stdin_tx.send(request).is_err() {
                                         break;
                                     }
+                                    crate::agents_status::waiting(&push_session_id, &push_command);
                                     crate::mobile_push::notify(
                                         crate::mobile_push::PushKind::NeedsInput,
                                         &push_session_id,

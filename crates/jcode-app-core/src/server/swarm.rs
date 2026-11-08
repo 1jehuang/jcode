@@ -1172,6 +1172,7 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
+    crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",
         vec![

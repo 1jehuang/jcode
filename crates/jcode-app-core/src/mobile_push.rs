@@ -437,6 +437,14 @@ impl Suppression {
 
 static SUPPRESSION: Mutex<Suppression> = Mutex::new(Suppression { until: None });
 
+/// True while the API recently reported no registered devices.
+pub(crate) fn devices_suppressed() -> bool {
+    SUPPRESSION
+        .lock()
+        .map(|s| s.is_suppressed(Instant::now()))
+        .unwrap_or(false)
+}
+
 fn env_opted_out(value: Option<&str>) -> bool {
     matches!(
         value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
@@ -444,7 +452,7 @@ fn env_opted_out(value: Option<&str>) -> bool {
     )
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     let opt_out = match std::env::var(OPT_OUT_ENV) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
@@ -459,7 +467,7 @@ fn enabled() -> bool {
     crate::config::config().server.mobile_push != Some(false)
 }
 
-fn credentials() -> Option<(String, String)> {
+pub(crate) fn credentials() -> Option<(String, String)> {
     let key = crate::provider_catalog::load_api_key_from_env_or_config(
         JCODE_API_KEY_ENV,
         JCODE_ENV_FILE,
@@ -986,7 +994,9 @@ mod tests {
             (PushKind::TurnError, "boom", "\u{274C}"),
             (PushKind::Wake, "bash completed", "\u{23F0}"),
         ] {
-            let t = build_payload(kind, "s", Some("T"), body, None).session_title.unwrap();
+            let t = build_payload(kind, "s", Some("T"), body, None)
+                .session_title
+                .unwrap();
             assert_eq!(t, format!("{marker} T"));
         }
         let bullets = "- Updated parser\n- Added tests\n- Shipped v2 to production servers today";

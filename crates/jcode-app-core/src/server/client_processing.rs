@@ -296,9 +296,11 @@ pub(super) async fn start_processing_message(
             client_session_id, id, error
         ));
     }
+    let status_title = agent_guard.session_display_title_or_name();
     drop(agent_guard);
 
     *state.client_is_processing = true;
+    crate::agents_status::turn_started(client_session_id, &status_title);
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
 
@@ -399,6 +401,14 @@ pub(super) async fn start_processing_message(
                 agent.session_display_title_or_name(),
             )
         };
+        crate::agents_status::turn_finished(
+            &push_session_id,
+            result
+                .as_ref()
+                .err()
+                .map(|error| crate::util::format_error_chain(error))
+                .as_deref(),
+        );
         // Mobile push: fire-and-forget, skipped for user cancellation and for
         // swarm worker sessions (their coordinator reports instead).
         if !owned_worker && !crate::mobile_push::take_cancelled(&push_session_id) {
