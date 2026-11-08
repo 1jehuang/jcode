@@ -41,38 +41,29 @@ fn desired_nofile_soft_limit_only_raises_when_possible() {
 #[cfg(unix)]
 #[test]
 fn spawn_detached_creates_new_session() {
-    use tempfile::NamedTempFile;
-
-    let output = NamedTempFile::new().expect("temp file");
-    let output_path = output.path().to_string_lossy().to_string();
     let parent_sid = unsafe { libc::getsid(0) };
 
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg("ps -o sid= -p $$ > \"$JCODE_TEST_OUTPUT\"")
-        .env("JCODE_TEST_OUTPUT", &output_path)
+    // The child lives long enough for the parent to query its session id
+    // with getsid(2). Parsing `ps` output is not portable: Linux procps and
+    // macOS BSD ps expose different keywords (and macOS leaves `sess` at 0).
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("5")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
     let mut child = super::spawn_detached(&mut cmd).expect("spawn detached child");
-    let status = child.wait().expect("wait for child");
-    assert!(status.success(), "child should exit successfully");
-
-    let child_sid = std::fs::read_to_string(&output_path)
-        .expect("read child sid")
-        .trim()
-        .parse::<u32>()
-        .expect("parse child sid");
-
+    let child_sid = unsafe { libc::getsid(child.id().try_into().unwrap()) };
     assert_eq!(
         child_sid,
-        child.id(),
+        child.id() as libc::pid_t,
         "detached child should lead its own session"
     );
     assert_ne!(
-        child_sid as i32, parent_sid,
+        child_sid, parent_sid,
         "detached child should not share parent session"
     );
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(windows)]

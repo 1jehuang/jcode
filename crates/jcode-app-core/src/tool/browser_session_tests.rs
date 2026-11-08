@@ -209,7 +209,7 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         let _ = release_rx.recv_timeout(Duration::from_secs(3));
         std::fs::write(release_path, "ready").unwrap();
     });
-    let started = Instant::now();
+    let _startup_spawn = Instant::now();
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(5));
     let mut browser_calls = Vec::new();
     let mut bash_calls = Vec::new();
@@ -234,10 +234,14 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         .starts()
         .iter()
         .any(|(name, _)| name.contains("blocked"))
-        && started.elapsed() < Duration::from_secs(2)
+        && _startup_spawn.elapsed() < Duration::from_secs(2)
     {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // Responsiveness is measured from the moment a stalled startup is
+    // confirmed: daemon process spawn cost on a loaded host must not count
+    // against the healthy-call budget.
+    let started = Instant::now();
     let healthy = tokio::spawn(async move {
         firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &healthy_ctx).await
     });

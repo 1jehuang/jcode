@@ -236,7 +236,7 @@ impl Tool for BrowserTool {
 
     fn parameters_schema(&self) -> Value {
         let mut properties = Map::new();
-        properties.insert("intent".into(), json!({"type": "string"}));
+        properties.insert("intent".into(), crate::tool::intent_schema_property());
         properties.insert(
             "action".into(),
             json!({

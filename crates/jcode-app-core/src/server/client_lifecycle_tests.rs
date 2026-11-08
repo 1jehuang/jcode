@@ -1289,8 +1289,10 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let message_count = agent.lock().await.message_count();
         let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
 
-        // A stale History continuation arriving after the final answer is a
-        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        // A stale History continuation whose reminder was already delivered
+        // still carries user-shaped content, so e6d9cb47c semantics run it as
+        // a real turn; the invalid skill then errors out. No turn/skill/status
+        // edits happen beyond that terminal event.
         start_processing_message(
             ProcessingMessage {
                 id: 78,
@@ -1330,10 +1332,11 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             event_count
         );
         assert!(processing_done_rx.try_recv().is_err());
-        assert!(matches!(
-            client_event_rx.try_recv(),
-            Ok(ServerEvent::Done { id: 78 })
-        ));
+        let received = client_event_rx.try_recv();
+        assert!(
+            matches!(received, Ok(ServerEvent::Error { id: 78, .. })),
+            "invalid skill on a content-carrying send must terminal-error, got {received:?}"
+        );
         assert!(client_event_rx.try_recv().is_err());
 
         // Unrelated reminders and ordinary prompts (even the exact body) are

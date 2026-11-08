@@ -1172,9 +1172,10 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         "NO_PROXY",
         "no_proxy",
     ]);
-    // 0.0.0.0 is accepted as an insecure HTTP test host but is not treated as
-    // localhost by resolve_openai_compatible_profile, so this exercises the
-    // hosted/API-key code path while still serving the response locally.
+    // 0.0.0.0 is accepted as an insecure HTTP test host. Since #2018 a bare
+    // IP is deliberately treated like loopback (no API key required), so this
+    // covers the discovery flow over a served local endpoint. The API-key
+    // binding itself is pinned by resolve_openai_compatible_profile tests.
     let api_base = spawn_single_response_http_server_on_host(
         "0.0.0.0",
         200,
@@ -1191,7 +1192,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::OPENAI_COMPAT_PROFILE,
     );
-    assert!(resolved.requires_api_key);
+    assert!(!resolved.requires_api_key);
 
     let plan = auth_test_choice_plan(
         &super::super::provider_init::ProviderChoice::OpenaiCompatible,

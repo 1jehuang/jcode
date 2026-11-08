@@ -1438,6 +1438,12 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
     use crate::tui::app::onboarding_flow::ImportReview;
 
     with_temp_jcode_home(|| {
+        // The strongest-model preference check below asserts ambient
+        // first-run conditions, but the var can be set by an ambient session
+        // (an agent harness runs jcode with an explicit provider). Same
+        // save/remove/restore guard as the strongest-model unit test.
+        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
         let legacy_auth = crate::auth::codex::legacy_auth_file_path().expect("legacy auth path");
         std::fs::create_dir_all(legacy_auth.parent().expect("legacy auth parent"))
             .expect("create legacy auth dir");
@@ -1521,6 +1527,12 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
 
             assert_eq!(model, jcode_provider_core::DEFAULT_OPENAI_MODEL);
             assert_eq!(provider_key.as_deref(), Some("openai-api"));
+
+            if let Some(value) = previous_explicit {
+                crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
+            } else {
+                crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+            }
         });
     });
 }

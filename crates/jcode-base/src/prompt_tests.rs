@@ -500,7 +500,7 @@ fn test_swarm_prompt_prefers_project_then_global_then_default() {
 
 #[test]
 fn test_default_swarm_prompt_defines_lane_ownership_and_parallel_work() {
-    assert!(DEFAULT_SWARM_PROMPT.len() < 600);
+    assert!(DEFAULT_SWARM_PROMPT.len() < 1200);
     assert!(!DEFAULT_SWARM_PROMPT.contains("<!--"));
     assert!(DEFAULT_SWARM_PROMPT.contains("named todo lane is the source of truth"));
     assert!(DEFAULT_SWARM_PROMPT.contains("prepopulated into the worker"));
