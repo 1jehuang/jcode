@@ -188,7 +188,10 @@ fn test_render_file_activity_as_collapsible_compact_row() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered, vec!["🦊 ✎ src/auth.rs · modified  ▸ diff"]);
+    assert_eq!(
+        rendered,
+        vec!["🦊 ✎ src/auth.rs · modified  11 tok  ▸ diff"]
+    );
     assert!(rendered.iter().all(|line| !line.contains('│')));
 }
 
