@@ -252,9 +252,9 @@ pub struct RemoteConnection {
     client_instance_id: Option<String>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
-    // Bootstrap Done acknowledgments are not completions of a detached turn.
-    // Retain recent ids because target Subscribe can acknowledge twice.
+    // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
+    request_timings: super::cloud_latency::RequestTimings,
     tool_diff: RemoteDiffTracker,
     /// Bytes pulled from the socket that have not yet been split into complete
     /// newline-delimited protocol lines. This buffer is persistent across
@@ -421,12 +421,11 @@ impl RemoteConnection {
             cloud_authority: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
-            // A reattached turn carries the old connection's request id on
-            // local sockets as well as SSH. Keep its Done distinct from this
-            // connection's Subscribe/GetHistory acknowledgments.
+            // Keep reattached turn Done distinct from bootstrap acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -639,7 +638,7 @@ impl RemoteConnection {
             timing.finish(if result.is_ok() { "ok" } else { "error" });
         }
         result?;
-        super::cloud_latency::request_sent(&request);
+        self.request_timings.request_sent(&request);
         Ok(())
     }
 
@@ -1449,7 +1448,7 @@ impl RemoteConnection {
             }
             return LineOutcome::Skip;
         }
-        match super::cloud_latency::parse_event(&text) {
+        match self.request_timings.parse_event(&text) {
             Ok(ServerEvent::Done { id })
                 if self
                     .control_done_ids
@@ -1517,6 +1516,7 @@ impl RemoteConnection {
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,

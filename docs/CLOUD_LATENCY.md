@@ -49,13 +49,21 @@ not an authorization mechanism. `none` means a metric was not available.
 JSON parsing. It includes remote queue/work, transfer and client scheduling, not
 just network RTT. Server writer-lock versus write versus encode timings help
 separate those causes. This measurement survives a cancelled socket-read future
-because it is attached to the outstanding request, not a particular read attempt.
+because it is attached to the connection's outstanding request, not a particular
+read attempt or executor thread. Separate connections never share correlation
+queues. A fresh Subscribe completes with Done, while a target-aware Subscribe
+retains its correlation until History. Explicit todo polls take precedence over
+bootstrap snapshots. Todo events have no wire request ID, so their association is
+best-effort FIFO, not proof that a specific request caused a pushed snapshot.
 The correlation queue is bounded; old entries expire when subsequent requests
 arrive. Expiry is a diagnostic observation, not an application timeout.
 
 `frame_ready` measures from completed event application until a composed TUI frame
 is ready. It is not a physical display/terminal flush timestamp. Updates may share
-a frame. Existing rendering diagnostics give detailed draw costs when needed.
+a frame. Unfocused idle terminals intentionally coalesce redraws for up to five
+seconds, and hibernation can defer them further. This wall-clock wait is not the
+CPU cost of rendering. Existing rendering diagnostics give detailed draw costs
+when needed.
 Fast streaming tokens are deliberately not logged individually. Key sync milestones
 are logged consistently, while unrelated protocol events only receive a parse
 record if slow or malformed, avoiding per-token logging overhead.
@@ -66,6 +74,17 @@ stage/outcome labels, numeric sizes/durations and bounded correlation fields, no
 credentials, keys, paths, transcript contents, payloads or raw server error bodies.
 Keep ordinary diagnostic log files private nevertheless, since other existing
 subsystems may include information beyond these timing records.
+
+Unchanged mobile reconciliation candidates are counted in a single
+`mobile_sync candidates=... unchanged=... progress_updates=...` summary rather
+than timed and logged individually. Changed-session and HTTP timings remain.
+A repeatable no-network filesystem benchmark is available with:
+
+```bash
+justrust test --remote -p jcode-base --lib benchmark_unchanged_reconciliation -- --ignored --nocapture
+```
+
+It measures 1,300 unchanged sessions, not upload or end-to-end cloud latency.
 
 A high total alone is not proof of the cause. Compare cache hits/misses, success
 versus failure, cold versus warm connections and local versus daemon stage timing.
