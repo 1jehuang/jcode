@@ -907,6 +907,35 @@ reasoning_effort = "max"
     }
 
     #[test]
+    fn effort_update_keeps_the_api_key_pool() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[provider]
+openai_reasoning_effort = "low"
+
+[providers.gateway]
+type = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+api_key_envs = ["GATEWAY_KEY_1", "GATEWAY_KEY_2"]
+"#,
+        )
+        .unwrap();
+
+        Config::set_openai_reasoning_effort(Some("high")).unwrap();
+
+        let parsed = Config::load_strict().unwrap();
+        assert_eq!(
+            parsed.providers["gateway"].api_key_envs,
+            ["GATEWAY_KEY_1", "GATEWAY_KEY_2"]
+        );
+    }
+
+    #[test]
     fn effort_update_refuses_to_overwrite_malformed_config() {
         let _lock = crate::storage::lock_test_env();
         let home = tempfile::tempdir().unwrap();
