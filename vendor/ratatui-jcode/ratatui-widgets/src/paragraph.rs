@@ -436,6 +436,59 @@ impl Paragraph<'_> {
                 }
             }
             render_lines(line_composer, text_area, buf);
+        } else if self.scroll.x == 0 {
+            // ratatui-jcode: unwrapped, unscrolled text. Left-aligned lines are
+            // written straight into the row slice, skipping LineTruncator and
+            // its per-line grapheme Vec. Semantics match LineTruncator +
+            // render_line exactly (over-wide graphemes are skipped, the line
+            // stops at the first grapheme that would overflow).
+            let max = text_area.width;
+            for (y, line) in self
+                .text
+                .lines
+                .iter()
+                .skip(self.scroll.y as usize)
+                .take(usize::from(text_area.height))
+                .enumerate()
+            {
+                let y = y as u16;
+                let alignment = line.alignment.unwrap_or(self.alignment);
+                if alignment != Alignment::Left {
+                    let one = core::iter::once((line.styled_graphemes(self.text.style), alignment));
+                    let mut composer = LineTruncator::new(one, max);
+                    if let Some(ref wrapped) = composer.next_line() {
+                        render_line(wrapped, text_area, buf, y);
+                    }
+                    continue;
+                }
+                let row_y = text_area.top() + y;
+                if !buf.area.contains(Position::new(text_area.left(), row_y)) {
+                    continue;
+                }
+                let row_start = buf.index_of(buf.area.left(), row_y);
+                let row_end = row_start + usize::from(buf.area.width);
+                let row = &mut buf.content[row_start..row_end];
+                let base = usize::from(text_area.left() - buf.area.left());
+                let mut x: u16 = 0;
+                for StyledGrapheme { symbol, style } in line.styled_graphemes(self.text.style) {
+                    let width = ratatui_core::fast::str_width(symbol);
+                    let w = u16::try_from(width).unwrap_or(u16::MAX);
+                    if w > max {
+                        continue;
+                    }
+                    if x + w > max {
+                        break;
+                    }
+                    if w == 0 {
+                        continue;
+                    }
+                    let Some(cell) = row.get_mut(base + usize::from(x)) else {
+                        break;
+                    };
+                    cell.set_symbol(symbol).set_style(style);
+                    x += w;
+                }
+            }
         } else {
             // avoid unnecessary work by skipping directly to the relevant line before rendering
             let lines = styled.skip(self.scroll.y as usize);
