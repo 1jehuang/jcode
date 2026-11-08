@@ -79,34 +79,38 @@ pub fn apply_oauth_attribution_headers(
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
 
-pub fn load_anthropic_api_key() -> Result<String> {
-    if std::env::var("JCODE_ANTHROPIC_AUTH")
+/// Whether `JCODE_ANTHROPIC_AUTH=none` turns the API key off.
+fn anthropic_auth_is_none() -> bool {
+    std::env::var("JCODE_ANTHROPIC_AUTH")
         .ok()
         .is_some_and(|value| value.eq_ignore_ascii_case("none"))
-    {
+}
+
+/// Env names of the key pool from `JCODE_ANTHROPIC_API_KEY_NAMES`, or `None` without a pool.
+pub fn anthropic_api_key_pool_names() -> Option<Vec<String>> {
+    if anthropic_auth_is_none() {
+        return None;
+    }
+    let Ok(raw) = std::env::var("JCODE_ANTHROPIC_API_KEY_NAMES") else {
+        return None;
+    };
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+pub fn load_anthropic_api_key() -> Result<String> {
+    if anthropic_auth_is_none() {
         return Ok(String::new());
     }
     if let Ok(env_name) = std::env::var("JCODE_ANTHROPIC_API_KEY_NAME") {
         let env_name = env_name.trim();
         if !env_name.is_empty() {
-            if let Ok(value) = std::env::var(env_name)
-                && !value.trim().is_empty()
-            {
-                return Ok(value);
-            }
-            if let Ok(env_file) = std::env::var("JCODE_ANTHROPIC_ENV_FILE")
-                && let Some(value) = crate::provider_catalog::load_env_value_from_config_file(
-                    env_name,
-                    env_file.trim(),
-                )
-                && !value.trim().is_empty()
-            {
-                return Ok(value);
-            }
-            anyhow::bail!(
-                "Anthropic-compatible profile credential '{}' is not configured",
-                env_name
-            );
+            return load_anthropic_profile_key(env_name);
         }
     }
     if let Ok(value) = std::env::var("ANTHROPIC_AUTH_TOKEN")
@@ -127,6 +131,26 @@ pub fn load_anthropic_api_key() -> Result<String> {
         );
     }
     Ok(key)
+}
+
+/// Key for a named Anthropic-compatible profile, from the environment or its env file.
+pub fn load_anthropic_profile_key(env_name: &str) -> Result<String> {
+    if let Ok(value) = std::env::var(env_name)
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
+    if let Ok(env_file) = std::env::var("JCODE_ANTHROPIC_ENV_FILE")
+        && let Some(value) =
+            crate::provider_catalog::load_env_value_from_config_file(env_name, env_file.trim())
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
+    anyhow::bail!(
+        "Anthropic-compatible profile credential '{}' is not configured",
+        env_name
+    )
 }
 
 pub fn has_anthropic_api_key() -> bool {

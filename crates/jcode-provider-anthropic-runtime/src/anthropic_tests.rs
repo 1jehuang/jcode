@@ -87,10 +87,7 @@ fn named_profile_runtime_captures_transport_and_credential_immutably() {
         "https://one.example/v1/messages"
     );
     assert_eq!(provider.direct_transport.auth_mode, "bearer");
-    assert_eq!(
-        provider.profile_api_key.as_ref().unwrap().as_ref().unwrap(),
-        "one-secret"
-    );
+    assert_eq!(provider.direct_api_key().unwrap(), "one-secret");
 }
 
 #[test]

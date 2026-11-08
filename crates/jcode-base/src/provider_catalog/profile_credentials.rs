@@ -73,3 +73,32 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         .map(|value| parse_bool_like(&value))
         .unwrap_or(false)
 }
+
+pub(super) fn inline_key_env_name(profile_name: &str) -> String {
+    let suffix = profile_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("JCODE_PROVIDER_{}_API_KEY", suffix)
+}
+
+pub fn clear_anthropic_profile_env() {
+    for key in [
+        "JCODE_ANTHROPIC_API_BASE",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_API_KEY_NAMES",
+        "JCODE_ANTHROPIC_ENV_FILE",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_AUTH_HEADER",
+        "JCODE_ANTHROPIC_HEADERS",
+        "JCODE_ANTHROPIC_MODEL",
+    ] {
+        crate::env::remove_var(key);
+    }
+}

@@ -11,8 +11,9 @@ pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
 mod profile_credentials;
+use profile_credentials::inline_key_env_name;
 pub use profile_credentials::{
-    load_openai_compatible_profile_api_key, load_runtime_api_key,
+    clear_anthropic_profile_env, load_openai_compatible_profile_api_key, load_runtime_api_key,
     openai_compatible_profile_is_configured,
 };
 
@@ -899,34 +900,6 @@ fn apply_openai_compatible_profile_env_impl(
     }
 }
 
-fn inline_key_env_name(profile_name: &str) -> String {
-    let suffix = profile_name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("JCODE_PROVIDER_{}_API_KEY", suffix)
-}
-
-pub fn clear_anthropic_profile_env() {
-    for key in [
-        "JCODE_ANTHROPIC_API_BASE",
-        "JCODE_ANTHROPIC_API_KEY_NAME",
-        "JCODE_ANTHROPIC_ENV_FILE",
-        "JCODE_ANTHROPIC_AUTH",
-        "JCODE_ANTHROPIC_AUTH_HEADER",
-        "JCODE_ANTHROPIC_HEADERS",
-        "JCODE_ANTHROPIC_MODEL",
-    ] {
-        crate::env::remove_var(key);
-    }
-}
-
 pub fn apply_named_provider_profile_env(profile_name: &str) -> anyhow::Result<String> {
     let config = crate::config::Config::load_strict()?;
     apply_named_provider_profile_env_from_config(profile_name, &config)
@@ -968,7 +941,7 @@ pub fn apply_named_provider_profile_env_from_config(
             crate::env::set_var("JCODE_ANTHROPIC_MODEL", model);
         }
 
-        let key_env = profile
+        let single_key_env = profile
             .api_key_env
             .as_deref()
             .map(str::trim)
@@ -990,6 +963,7 @@ pub fn apply_named_provider_profile_env_from_config(
                         env_name
                     })
             });
+        let key_env = profile.api_key_envs.first().cloned().or(single_key_env);
         if let Some(key_env) = key_env {
             if !is_safe_env_key_name(&key_env) {
                 anyhow::bail!(
@@ -1001,6 +975,23 @@ pub fn apply_named_provider_profile_env_from_config(
             crate::env::set_var("JCODE_ANTHROPIC_API_KEY_NAME", key_env);
         } else {
             crate::env::remove_var("JCODE_ANTHROPIC_API_KEY_NAME");
+        }
+        for key_env in &profile.api_key_envs {
+            if !is_safe_env_key_name(key_env) {
+                anyhow::bail!(
+                    "Provider profile '{}' has invalid api_key_env '{}'.",
+                    profile_name,
+                    key_env
+                );
+            }
+        }
+        if profile.api_key_envs.is_empty() {
+            crate::env::remove_var("JCODE_ANTHROPIC_API_KEY_NAMES");
+        } else {
+            crate::env::set_var(
+                "JCODE_ANTHROPIC_API_KEY_NAMES",
+                profile.api_key_envs.join(","),
+            );
         }
         if let Some(env_file) = profile
             .env_file

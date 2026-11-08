@@ -831,7 +831,18 @@ impl Provider for OpenRouterProvider {
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
+    fn set_session_id(&self, session_id: &str) {
+        if let Some(pool) = &self.key_pool {
+            pool.bind(session_id);
+        }
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
+        let key_pool = self.key_pool.as_ref().map(KeyPool::fork);
+        let auth = match &key_pool {
+            Some(pool) => pool.auth(),
+            None => self.auth.clone(),
+        };
         Arc::new(Self {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(
@@ -839,7 +850,7 @@ impl Provider for OpenRouterProvider {
             )),
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
-            auth: self.auth.clone(),
+            auth,
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
@@ -872,6 +883,7 @@ impl Provider for OpenRouterProvider {
             )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
+            key_pool,
         })
     }
 }
