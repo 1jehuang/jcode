@@ -411,7 +411,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     } else if !app.is_processing
         && !app.queued_messages.is_empty()
-        && !app.reload_recovery_dispatch_pending
+        && !app.reload_recovery_blocks_queue()
     {
         let mut queued_messages = std::mem::take(&mut app.queued_messages);
         super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
@@ -473,6 +473,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             || (remote.has_loaded_history() && app.has_pending_cloud_recovery()))
     {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        app.reload_recovery_dispatch_pending = false;
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
             "Sending hidden continuation reminder ({} chars)",
@@ -1694,7 +1695,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 )));
             }
         }
-    } else if !app.queued_messages.is_empty() && !app.reload_recovery_dispatch_pending {
+    } else if !app.queued_messages.is_empty() && !app.reload_recovery_blocks_queue() {
         let mut queued_messages = std::mem::take(&mut app.queued_messages);
         super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
@@ -1748,6 +1749,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        app.reload_recovery_dispatch_pending = false;
         let combined = reminders.join("\n\n");
         if begin_remote_send(
             app,
