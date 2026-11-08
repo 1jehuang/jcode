@@ -4907,6 +4907,7 @@ dependencies = [
  "cpal",
  "futures",
  "jcode-base",
+ "jcode-provider-env",
  "libc",
  "regex",
  "reqwest 0.12.28",
