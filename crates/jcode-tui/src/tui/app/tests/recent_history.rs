@@ -76,7 +76,10 @@ fn recent_history_page_retries_instead_of_discarding_live_append() {
         app.display_messages.last().unwrap().content,
         "live response after request"
     );
-    assert_eq!(app.compacted_history_lazy.pending_request_visible, Some(192));
+    assert_eq!(
+        app.compacted_history_lazy.pending_request_visible,
+        Some(192)
+    );
     assert_eq!(app.take_pending_compacted_history_load(), None);
     app.recent_history_retry_at = Some(Instant::now());
     assert_eq!(app.take_pending_compacted_history_load(), Some(192));
@@ -126,8 +129,14 @@ fn recent_history_page_rejects_snapshot_missing_already_visible_rows() {
     let mut app = recent_history_test_app();
     let mut stale = vec![DisplayMessage::user("latest prompt")];
     assert!(!app.recent_history_page_contains_visible_tail(&mut stale, 192));
-    assert_eq!(app.compacted_history_lazy.pending_request_visible, Some(192));
-    assert_eq!(app.display_messages.last().unwrap().content, "latest answer");
+    assert_eq!(
+        app.compacted_history_lazy.pending_request_visible,
+        Some(192)
+    );
+    assert_eq!(
+        app.display_messages.last().unwrap().content,
+        "latest answer"
+    );
     let mut newer = vec![
         DisplayMessage::assistant("older page content"),
         DisplayMessage::user("latest prompt"),

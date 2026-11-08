@@ -903,6 +903,9 @@ impl App {
     }
 
     pub(super) fn maybe_queue_compacted_history_load_with_overshoot(&mut self, overshoot: usize) {
+        if self.recent_history_request.is_some() {
+            return;
+        }
         if !self.auto_scroll_paused {
             return;
         }
@@ -950,7 +953,10 @@ impl App {
     }
 
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
-        if self.recent_history_retry_at.is_some_and(|deadline| Instant::now() < deadline) {
+        if self
+            .recent_history_retry_at
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
             return None;
         }
         self.recent_history_retry_at = None;
