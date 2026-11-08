@@ -1620,6 +1620,9 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        // Paint persisted todos with the first frame, not a throttled tick after
+        // the server has finished loading the resumed conversation.
+        app.refresh_pinned_todos_now();
         // After `resume_session_id`: the hint needs to know whether this is a
         // new session (configured effort applies) or a resumed one.
         app.apply_remote_header_hint();

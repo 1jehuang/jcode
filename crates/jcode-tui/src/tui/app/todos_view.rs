@@ -20,7 +20,15 @@ impl App {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
     ) {
-        let session_id = self.active_client_session_id();
+        // Local resumes know their session before the server sends History.
+        // SSH sessions must never read potentially unrelated local state.
+        let session_id = self.active_client_session_id().or_else(|| {
+            if crate::tui::is_ssh_remote() {
+                None
+            } else {
+                self.resume_session_id.as_deref()
+            }
+        });
         if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
             let payload = self
                 .remote_todos_payload

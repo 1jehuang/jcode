@@ -341,6 +341,113 @@ fn pinned_todos_payload_stays_empty_when_config_off() {
 }
 
 #[test]
+fn pinned_todos_render_before_resumed_server_history() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo(
+            "resume-first-frame",
+            "Resumed pinned task",
+            "pending",
+        )],
+    )
+    .unwrap();
+    let startup_started = std::time::Instant::now();
+    let resumed = App::new_for_remote(Some(session_id.clone()));
+    assert!(
+        resumed
+            .pinned_todos_payload_ref()
+            .expect("startup constructor seeds pinned todos without server History")
+            .contains("Resumed pinned task")
+    );
+    eprintln!(
+        "resume pinned todos ready in {:?} without server History",
+        startup_started.elapsed()
+    );
+    app.is_remote = true;
+    app.remote_session_id = None;
+    app.resume_session_id = Some(session_id.clone());
+    app.onboarding_flow = None;
+    app.onboarding_startup_checked = true;
+    app.push_display_message(crate::tui::DisplayMessage::system("Resumed transcript"));
+
+    // This is the startup seed, before any server History or polling tick.
+    app.refresh_pinned_todos_now();
+    assert!(
+        app.pinned_todos_payload_ref()
+            .unwrap()
+            .contains("Resumed pinned task")
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Resumed pinned task"), "{text}");
+    assert!(
+        !app.refresh_pinned_todos_if_needed(),
+        "unchanged state stays throttled"
+    );
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+}
+
+#[test]
+fn pinned_todos_session_switch_bypasses_previous_snapshot_and_throttle() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("new-task", "New session task", "pending")],
+    )
+    .unwrap();
+    app.is_remote = true;
+    app.remote_session_id = Some("previous-todo-session".into());
+    app.receive_remote_todos(
+        "previous-todo-session".into(),
+        serde_json::json!({
+            "todos": [pinned_band_todo("old-task", "Previous session task", "pending")],
+            "plan": {}, "goals": []
+        })
+        .to_string(),
+    );
+    app.remote_todos_requested_at = Some(std::time::Instant::now());
+    assert!(
+        app.pinned_todos_payload_ref()
+            .unwrap()
+            .contains("Previous session task")
+    );
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _runtime_guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let history = serde_json::from_value(serde_json::json!({
+        "type": "history", "id": 1, "session_id": session_id,
+        "messages": [], "mcp_servers": [], "skills": [], "all_sessions": []
+    }))
+    .unwrap();
+    app.handle_server_event(history, &mut remote);
+    assert!(app.remote_todos_payload.is_none());
+    assert!(app.remote_todos_requested_at.is_none());
+    let payload = app
+        .pinned_todos_payload_ref()
+        .expect("new session todos loaded during History");
+    assert!(payload.contains("New session task"));
+    assert!(!payload.contains("Previous session task"));
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+}
+
+#[test]
 fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
