@@ -652,7 +652,8 @@ impl Provider for OpenRouterProvider {
         let static_model_ids: HashSet<String> = self.static_models.iter().cloned().collect();
         let is_direct_profile = self.profile_id.is_some();
 
-        self.available_models_display()
+        let mut routes: Vec<_> = self
+            .available_models_display()
             .into_iter()
             .filter(|model| jcode_base::provider::is_listable_model_name(model))
             .map(|model| {
@@ -681,7 +682,9 @@ impl Provider for OpenRouterProvider {
                     reasoning_efforts: None,
                 }
             })
-            .collect()
+            .collect();
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {

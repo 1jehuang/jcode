@@ -525,13 +525,10 @@ pub(super) fn route_reasoning_efforts(
         | Method::Current
         | Method::Other(_) => None,
     }?;
-    Some(
-        runtime
-            .reasoning_efforts_for_model(&route.model)
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-    )
+    Some(jcode_provider_core::served_reasoning_efforts(
+        runtime.as_ref(),
+        &route.model,
+    ))
 }
 
 /// Anthropic models via OAuth and/or API key.

@@ -946,6 +946,23 @@ pub struct ModelRoute {
     pub reasoning_efforts: Option<Vec<String>>,
 }
 
+/// Efforts `runtime` accepts for `model`, as reported on
+/// [`ModelRoute::reasoning_efforts`].
+pub fn served_reasoning_efforts<P: Provider + ?Sized>(runtime: &P, model: &str) -> Vec<String> {
+    runtime
+        .reasoning_efforts_for_model(model)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Fill [`ModelRoute::reasoning_efforts`] on routes `runtime` serves itself.
+pub fn fill_served_reasoning_efforts<P: Provider + ?Sized>(runtime: &P, routes: &mut [ModelRoute]) {
+    for route in routes {
+        route.reasoning_efforts = Some(served_reasoning_efforts(runtime, &route.model));
+    }
+}
+
 /// Exact runtime identity for a selected model route.
 ///
 /// A runtime key identifies the concrete endpoint/auth/account slot that will

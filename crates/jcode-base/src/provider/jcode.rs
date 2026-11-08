@@ -171,7 +171,9 @@ impl Provider for JcodeProvider {
 
     fn model_routes(&self) -> Vec<ModelRoute> {
         self.ensure_runtime_mode();
-        Self::model_routes_for(crate::subscription_catalog::effective_tier())
+        let mut routes = Self::model_routes_for(crate::subscription_catalog::effective_tier());
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {
