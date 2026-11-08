@@ -156,6 +156,33 @@ pub(super) async fn append_context_message(
     }
 }
 
+/// A send whose reload continuation reminder was already delivered is a pure
+/// replay only when it carries no user content. A queued follow-up combined
+/// with that reminder must still run (only the reminder is dropped).
+fn delivered_replay_is_reminder_only(content: &str, image_count: usize) -> bool {
+    content.trim().is_empty() && image_count == 0
+}
+
+#[cfg(test)]
+mod delivered_replay_tests {
+    use super::delivered_replay_is_reminder_only;
+
+    #[test]
+    fn reminder_only_replay_is_suppressed() {
+        assert!(delivered_replay_is_reminder_only("", 0));
+        assert!(delivered_replay_is_reminder_only("  \n", 0));
+    }
+
+    #[test]
+    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
+        assert!(!delivered_replay_is_reminder_only(
+            "please also fix the tests",
+            0
+        ));
+        assert!(!delivered_replay_is_reminder_only("", 1));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
@@ -171,7 +198,7 @@ pub(super) async fn start_processing_message(
         id,
         content,
         images,
-        system_reminder,
+        mut system_reminder,
         active_skill,
         server_failover,
     } = message;
@@ -207,23 +234,45 @@ pub(super) async fn start_processing_message(
             return;
         }
     };
-    if let Some(reminder) = system_reminder.as_deref() {
-        match super::super::reload_recovery::is_delivered_continuation(client_session_id, reminder)
-        {
-            Ok(true) => {
-                crate::logging::info(&format!(
-                    "Suppressing delivered reload recovery replay session={} id={}",
-                    client_session_id, id
-                ));
-                let _ = client_event_tx.send(ServerEvent::Done { id });
-                return;
+    let reminder_already_delivered = match system_reminder.as_deref() {
+        Some(reminder) => {
+            match super::super::reload_recovery::is_delivered_continuation(
+                client_session_id,
+                reminder,
+            ) {
+                Ok(delivered) => delivered,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Failed to inspect reload recovery replay session={}: {}",
+                        client_session_id, error
+                    ));
+                    false
+                }
             }
-            Ok(false) => {}
-            Err(error) => crate::logging::warn(&format!(
-                "Failed to inspect reload recovery replay session={}: {}",
-                client_session_id, error
-            )),
         }
+        None => false,
+    };
+    if reminder_already_delivered {
+        if delivered_replay_is_reminder_only(&content, images.len()) {
+            crate::logging::info(&format!(
+                "Suppressing delivered reload recovery replay session={} id={}",
+                client_session_id, id
+            ));
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+            return;
+        }
+        // After a reload the client combines a queued user follow-up with the
+        // reload continuation reminder into one send. Only the reminder is a
+        // replay. Suppressing the whole message silently dropped the user's
+        // queued prompt, so strip the reminder and run the real content.
+        crate::logging::info(&format!(
+            "Stripping delivered reload recovery reminder but keeping queued content session={} id={} content_chars={} images={}",
+            client_session_id,
+            id,
+            content.chars().count(),
+            images.len()
+        ));
+        system_reminder = None;
     }
     if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
