@@ -433,3 +433,39 @@ fn user_prompt_transcript_hit_beats_recent_tool_output_hit() {
     wait(&mut picker);
     assert_eq!(ids(&picker), ["user", "tool"]);
 }
+
+#[test]
+fn retyped_later_user_prompt_beats_scattered_literal_hits() {
+    let temp = tempfile::tempdir().unwrap();
+    let target_path = temp.path().join("target.jsonl");
+    let noise_path = temp.path().join("noise.jsonl");
+    let user = |text: &str| {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{text}\"}}]}}}}\n"
+        )
+    };
+    std::fs::write(
+        &target_path,
+        user("can you tell me about resume session search") + &user("okay ltes do that"),
+    )
+    .unwrap();
+    // Every query word appears literally, but never together.
+    std::fs::write(
+        &noise_path,
+        user("okay great") + &user("oaky is a typo") + &user("ltes test") + &user("do that later"),
+    )
+    .unwrap();
+    for query in ["oaky ltes do that", "okay ltes do that"] {
+        let target = session("target", "resume search", 500, &target_path);
+        let noise = session("noise", "unrelated", 0, &noise_path);
+        let mut picker = SessionPicker::new(vec![noise, target]);
+        picker.search_query = query.into();
+        picker.rebuild_items();
+        wait(&mut picker);
+        assert_eq!(
+            ids(&picker).first().map(String::as_str),
+            Some("target"),
+            "{query}"
+        );
+    }
+}
