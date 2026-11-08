@@ -12,6 +12,9 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 4096;
 const MAX_PREFIX_PROBES: usize = 64;
+/// Larger match lists are not worth their memory: such tokens are common, and
+/// the full scan for them stops early on the first user-prompt hit anyway.
+const MAX_NARROW_SEGMENTS: usize = 2048;
 
 /// A token found in a transcript: its first-match fuzzy score and the
 /// strongest origin it appears in.
@@ -30,6 +33,10 @@ pub(crate) fn hit(score: i64) -> Hit {
 
 struct Evidence {
     outcome: Option<Hit>,
+    /// Literal mode only: every segment containing the token, when bounded.
+    /// A longer token can only occur in these, so typing `alph` -> `alpha`
+    /// rescans a few segments instead of the whole transcript.
+    segments: Option<Arc<[u32]>>,
     used: u64,
     bytes: usize,
 }
@@ -100,6 +107,32 @@ impl Cache {
         }
         None
     }
+    /// The segment list of the longest cached literal prefix of `token` that
+    /// matched. None means no narrowing is available.
+    fn narrowing(&mut self, text: &Arc<Segments>, token: &str) -> Option<Arc<[u32]>> {
+        let generation = self.generations.get_mut(&(Arc::as_ptr(text) as usize))?;
+        if !generation.text.ptr_eq(&Arc::downgrade(text)) {
+            return None;
+        }
+        let mode = &mut generation.modes[0];
+        let ends: Vec<usize> = token
+            .char_indices()
+            .skip(1)
+            .take(MAX_PREFIX_PROBES)
+            .map(|(end, _)| end)
+            .collect();
+        for end in ends.into_iter().rev() {
+            if let Some(entry) = mode.get_mut(&token[..end])
+                && entry.outcome.is_some()
+                && let Some(segments) = &entry.segments
+            {
+                self.clock = self.clock.wrapping_add(1);
+                entry.used = self.clock;
+                return Some(segments.clone());
+            }
+        }
+        None
+    }
     fn evict(&mut self, incoming_bytes: usize) {
         // Batch eviction amortizes the global LRU pass over many insertions.
         // Hits only touch timestamps, without allocating or pruning anything.
@@ -133,6 +166,16 @@ impl Cache {
         }
     }
     fn insert(&mut self, text: &Arc<Segments>, token: &str, fuzzy: bool, outcome: Option<Hit>) {
+        self.insert_narrowed(text, token, fuzzy, outcome, None);
+    }
+    fn insert_narrowed(
+        &mut self,
+        text: &Arc<Segments>,
+        token: &str,
+        fuzzy: bool,
+        outcome: Option<Hit>,
+        segments: Option<Arc<[u32]>>,
+    ) {
         if token.len() > MAX_TOKEN_BYTES {
             return;
         }
@@ -142,7 +185,9 @@ impl Cache {
         }
         self.insertions += 1;
         let token = token.to_owned();
-        let bytes = EVIDENCE_BYTES + token.capacity();
+        let bytes = EVIDENCE_BYTES
+            + token.capacity()
+            + segments.as_ref().map_or(0, |list| list.len() * 4 + 16);
         // Reserve generation overhead even for an existing generation: eviction
         // could remove its final entry before this insertion recreates it.
         let incoming_bytes = bytes + GENERATION_BYTES;
@@ -171,6 +216,7 @@ impl Cache {
             token,
             Evidence {
                 outcome,
+                segments,
                 used: self.clock,
                 bytes,
             },
@@ -272,9 +318,30 @@ fn resolve(
         }
         let cached =
             super::super::preview_result(cache.lock(), "token cache lock")?.get(text, token, fuzzy);
-        let outcome = match cached {
-            Some(outcome) => outcome,
-            None => {
+        let narrowing = if cached.is_none() && !fuzzy {
+            super::super::preview_result(cache.lock(), "token cache lock")?.narrowing(text, token)
+        } else {
+            None
+        };
+        let outcome = match (cached, narrowing) {
+            (Some(outcome), _) => outcome,
+            (None, Some(candidates)) => {
+                let (outcome, segments) =
+                    literal_in_segments(text, token, candidates.iter().copied(), cancel)?;
+                super::super::preview_result(cache.lock(), "token cache lock")?
+                    .insert_narrowed(text, token, false, outcome, segments);
+                outcome
+            }
+            (None, None) if !fuzzy && token.chars().count() <= 2 => {
+                // Short literal tokens are the prefixes of whatever is typed
+                // next. Record where they match so extensions scan only there.
+                let (outcome, segments) =
+                    literal_in_segments(text, token, 0..text.text.len() as u32, cancel)?;
+                super::super::preview_result(cache.lock(), "token cache lock")?
+                    .insert_narrowed(text, token, false, outcome, segments);
+                outcome
+            }
+            (None, None) => {
                 let outcome = scan(text, token, cancel, fuzzy)?;
                 // Publish each completed token independently, even if a later
                 // token cancels. Incomplete negatives never reach this point.
@@ -291,6 +358,45 @@ fn resolve(
         Some(outcomes)
     }
 }
+/// Literal match over the given segments, with the same semantics as the
+/// literal scanner (substring match, score 0, strongest origin), plus the
+/// list of matching segments when it is small enough to keep.
+fn literal_in_segments(
+    text: &Segments,
+    token: &str,
+    candidates: impl Iterator<Item = u32>,
+    cancel: &AtomicBool,
+) -> Option<(Option<Hit>, Option<Arc<[u32]>>)> {
+    let mut best: Option<Source> = None;
+    let mut found = Vec::new();
+    let mut bounded = true;
+    for (step, index) in candidates.enumerate() {
+        if step % 256 == 0 && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (Some(segment), Some(source)) = (
+            text.text.get(index as usize),
+            text.sources.get(index as usize),
+        ) else {
+            continue;
+        };
+        if segment.contains(token) {
+            best = super::source::stronger(best, Some(*source));
+            if bounded {
+                if found.len() < MAX_NARROW_SEGMENTS {
+                    found.push(index);
+                } else {
+                    bounded = false;
+                    found = Vec::new();
+                }
+            }
+        }
+    }
+    let outcome = best.map(|source| Hit { score: 0, source });
+    let segments = (bounded && outcome.is_some()).then(|| Arc::from(found));
+    Some((outcome, segments))
+}
+
 #[cfg(test)]
 fn scan_token(
     text: &Segments,
@@ -459,6 +565,55 @@ mod tests {
     }
 
     #[test]
+    fn literal_extensions_scan_only_segments_matching_their_prefix() {
+        let cache = Mutex::new(Cache::default());
+        let text = Arc::new(Segments {
+            text: tokens(&["alpine", "nothing", "alpha tool", "beta", "alpha prompt"]),
+            sources: vec![
+                Source::Other,
+                Source::User,
+                Source::ToolOutput,
+                Source::User,
+                Source::User,
+            ],
+        });
+        let cancel = AtomicBool::new(false);
+        let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
+            panic!("extension must reuse its prefix's segments")
+        };
+        let resolve_one =
+            |token: &str,
+             scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
+                resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
+            };
+        let user = Some(Hit {
+            score: 0,
+            source: Source::User,
+        });
+        assert_eq!(resolve_one("al", &never), user);
+        assert_eq!(resolve_one("alp", &never), user);
+        assert_eq!(resolve_one("alpha", &never), user);
+        assert_eq!(
+            resolve_one("alpine", &never),
+            Some(Hit {
+                score: 0,
+                source: Source::Other
+            })
+        );
+        assert_eq!(resolve_one("alphax", &never), None);
+        // Narrowed evidence agrees with a full scan.
+        for token in ["alp", "alpha", "alpine", "alphax", "alpha tool"] {
+            assert_eq!(
+                scan_token(&text, token, &cancel, false).unwrap(),
+                resolve_one(token, &never),
+                "{token}"
+            );
+        }
+        let narrowed = cache.lock().unwrap().narrowing(&text, "alphaz").unwrap();
+        assert_eq!(&*narrowed, &[2, 4]);
+    }
+
+    #[test]
     fn cancellation_keeps_completed_work_not_incomplete_negatives() {
         let cache = Mutex::new(Cache::default());
         let text = Arc::new(Segments::from(tokens(&["alpha"])));
@@ -598,7 +753,9 @@ mod tests {
                 Some(vec![None])
             );
         }
-        assert_eq!(calls, 2);
+        // Short literal tokens resolve through the segment-recording scan, so
+        // only the fuzzy lookup reaches the injected scanner.
+        assert_eq!(calls, 1);
         let mut guard = cache.lock().unwrap();
         guard.insert(&text, "alpha", false, Some(hit(0)));
         assert_eq!(guard.get(&text, "alphabeta", false), None);
