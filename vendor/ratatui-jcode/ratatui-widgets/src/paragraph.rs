@@ -460,7 +460,8 @@ fn render_lines<'a, C: LineComposer<'a>>(mut composer: C, area: Rect, buf: &mut 
 fn render_line(wrapped: &WrappedLine<'_, '_>, area: Rect, buf: &mut Buffer, y: u16) {
     let mut x = get_line_offset(wrapped.width, area.width, wrapped.alignment);
     for StyledGrapheme { symbol, style } in wrapped.graphemes {
-        let width = symbol.width();
+        // ratatui-jcode: printable-ASCII width fast path.
+        let width = ratatui_core::fast::str_width(symbol);
         if width == 0 {
             continue;
         }

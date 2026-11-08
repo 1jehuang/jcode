@@ -548,17 +548,12 @@ impl StatusSpinnerRenderer {
             render_elapsed = render_start.elapsed();
         })?;
         let total_elapsed = draw_start.elapsed();
+        // ratatui-jcode reports how many cells its own diff emitted, so there is
+        // no second full-buffer comparison here.
         let changed_cells = previous_frame
             .filter(|_| crate::tui::ui::changed_cells_wanted())
             .filter(|previous| previous.area == completed.buffer.area)
-            .map(|previous| {
-                previous
-                    .content
-                    .iter()
-                    .zip(completed.buffer.content.iter())
-                    .filter(|(left, right)| left != right)
-                    .count()
-            });
+            .map(|_| completed.flushed_updates);
         let total_cells = Some(completed.buffer.content.len());
         let completed_buffer = match stored_frame.as_mut() {
             Some(buffer) => {

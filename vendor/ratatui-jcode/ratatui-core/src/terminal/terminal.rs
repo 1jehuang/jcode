@@ -97,6 +97,8 @@ where
     last_known_cursor_pos: Position,
     /// Number of frames rendered up until current time.
     frame_count: usize,
+    /// ratatui-jcode: number of cell updates emitted by the most recent flush.
+    last_flush_updates: usize,
 }
 
 /// Options to pass to [`Terminal::with_options`]
@@ -199,6 +201,7 @@ where
             last_known_area: area,
             last_known_cursor_pos: cursor_pos,
             frame_count: 0,
+            last_flush_updates: 0,
         })
     }
 
@@ -247,6 +250,13 @@ where
         }
     }
 
+    /// ratatui-jcode: number of cell updates the most recent [`Terminal::flush`]
+    /// sent to the backend. Lets callers report changed cells without
+    /// re-comparing buffers.
+    pub const fn last_flush_updates(&self) -> usize {
+        self.last_flush_updates
+    }
+
     /// Gets the current buffer as a mutable reference.
     pub const fn current_buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffers[self.current]
@@ -268,6 +278,7 @@ where
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
         let updates = previous_buffer.diff(current_buffer);
+        self.last_flush_updates = updates.len();
         if let Some((col, row, _)) = updates.last() {
             self.last_known_cursor_pos = Position { x: *col, y: *row };
         }
@@ -483,6 +494,7 @@ where
             buffer: &self.buffers[1 - self.current],
             area: self.last_known_area,
             count: self.frame_count,
+            flushed_updates: self.last_flush_updates,
         };
 
         // increment frame count before returning from draw

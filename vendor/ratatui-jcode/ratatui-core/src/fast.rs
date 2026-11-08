@@ -48,3 +48,28 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod grapheme_parity {
+    use alloc::vec::Vec;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use crate::style::Style;
+    use crate::text::Span;
+
+    #[test]
+    fn ascii_fast_path_matches_upstream_segmentation() {
+        for s in ["", "hello world", "a\tb", "x\ry", "fn main() {}", "héllo", "e\u{301}", "👍🏽 ok"] {
+            let span = Span::raw(s);
+            let fast: Vec<&str> = span
+                .styled_graphemes(Style::default())
+                .map(|g| g.symbol)
+                .collect();
+            let upstream: Vec<&str> = s
+                .graphemes(true)
+                .filter(|g| !g.contains(char::is_control))
+                .collect();
+            assert_eq!(fast, upstream, "{s:?}");
+        }
+    }
+}

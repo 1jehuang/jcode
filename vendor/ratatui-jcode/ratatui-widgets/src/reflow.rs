@@ -293,30 +293,30 @@ where
             current_alignment = *alignment;
 
             for StyledGrapheme { symbol, style } in current_line {
+                // ratatui-jcode: measure each grapheme once (upstream measured
+                // it up to four times) via the printable-ASCII fast path.
+                let width = ratatui_core::fast::str_width(symbol);
                 // Ignore characters wider that the total max width.
-                if symbol.width() as u16 > self.max_line_width {
+                if width as u16 > self.max_line_width {
                     continue;
                 }
 
-                if current_line_width + symbol.width() as u16 > self.max_line_width {
+                if current_line_width + width as u16 > self.max_line_width {
                     // Truncate line
                     break;
                 }
 
-                let symbol = if horizontal_offset == 0 || Alignment::Left != *alignment {
-                    symbol
+                let (symbol, width) = if horizontal_offset == 0 || Alignment::Left != *alignment {
+                    (symbol, width)
+                } else if width > horizontal_offset {
+                    let t = trim_offset(symbol, horizontal_offset);
+                    horizontal_offset = 0;
+                    (t, ratatui_core::fast::str_width(t))
                 } else {
-                    let w = symbol.width();
-                    if w > horizontal_offset {
-                        let t = trim_offset(symbol, horizontal_offset);
-                        horizontal_offset = 0;
-                        t
-                    } else {
-                        horizontal_offset -= w;
-                        ""
-                    }
+                    horizontal_offset -= width;
+                    ("", 0)
                 };
-                current_line_width += symbol.width() as u16;
+                current_line_width += width as u16;
                 self.current_line.push(StyledGrapheme { symbol, style });
             }
         }

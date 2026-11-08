@@ -44,6 +44,9 @@ pub struct CompletedFrame<'a> {
     pub area: Rect,
     /// The frame count indicating the sequence number of this frame.
     pub count: usize,
+    /// ratatui-jcode: number of cell updates the flush for this frame sent to
+    /// the backend (the size of the buffer diff).
+    pub flushed_updates: usize,
 }
 
 impl Frame<'_> {
