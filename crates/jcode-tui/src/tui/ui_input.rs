@@ -1193,7 +1193,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             app.working_dir().as_deref(),
         ),
         branch: overscroll_git_branch(&data),
-        git: data.git_info.clone(),
+        git: overscroll_git_info(&data).cloned(),
         context: overscroll_context_usage(&data),
         account_remaining: overscroll_account_remaining(&data),
         auth: overscroll_auth_label(data.auth_method),
@@ -1246,7 +1246,7 @@ pub(crate) fn preview_overscroll_line_for_host(
             data.working_dir.as_deref(),
         ),
         branch: overscroll_git_branch(data),
-        git: data.git_info.clone(),
+        git: overscroll_git_info(data).cloned(),
         context: overscroll_context_usage(data),
         account_remaining: overscroll_account_remaining(data),
         auth: overscroll_auth_label(data.auth_method),
@@ -1551,10 +1551,23 @@ fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec
 }
 
 /// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.
+/// Git facts for the status line. Cloud sessions keep their repository in
+/// `dual_git_info.cloud`, so prefer that over the (absent) local `git_info`.
+fn overscroll_git_info(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<&crate::tui::info_widget::GitInfo> {
+    if let Some(dual) = &data.dual_git_info
+        && let crate::tui::cloud_git::RepoState::Ready(info) = &dual.cloud
+    {
+        return Some(info);
+    }
+    data.git_info.as_ref()
+}
+
 /// Compact git branch label for the status line and fact stack. Truncated so
 /// long branch names cannot crowd out the other facts.
 fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
-    let branch = data.git_info.as_ref()?.branch.trim();
+    let branch = overscroll_git_info(data)?.branch.trim();
     if branch.is_empty() {
         return None;
     }
