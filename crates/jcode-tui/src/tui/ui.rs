@@ -1382,6 +1382,12 @@ impl FullPrepCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // A frame keyed on partial streaming text can never be hit again once
+        // the stream advances: text only grows, and the turn ending bumps
+        // `messages_version`. Holding them just pins multi-MB snapshots of the
+        // whole transcript (measured: 4 entries, 13.6 MB on one client).
+        self.entries
+            .retain(|entry| entry.key.streaming_text_len == 0);
         self.entries.push_front(FullPrepCacheEntry {
             key,
             prepared,
