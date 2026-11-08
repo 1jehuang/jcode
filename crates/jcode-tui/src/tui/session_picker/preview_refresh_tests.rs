@@ -328,3 +328,31 @@ fn resume_time_modes_pick_expected_timestamp() {
         now - Duration::minutes(5)
     );
 }
+
+#[test]
+fn running_session_shows_spinner_state_instead_of_age() {
+    let session = fixture();
+    let mut picker = SessionPicker::new(vec![session.clone()]);
+    let text = |picker: &SessionPicker| {
+        picker
+            .render_session_item_lines_at_frame(&session, false, 0)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<String>()
+    };
+    assert!(text(&picker).contains("ago"));
+
+    picker.live_presence.insert(
+        session.id.clone(),
+        crate::session::SessionPresence {
+            session_id: session.id.clone(),
+            pid: 1,
+            streaming: true,
+            streaming_since: None,
+            internal: false,
+        },
+    );
+    let running = text(&picker);
+    assert!(running.contains("running"), "row: {running}");
+    assert!(!running.contains("ago"), "row: {running}");
+}

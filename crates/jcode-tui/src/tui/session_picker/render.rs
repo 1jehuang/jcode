@@ -197,7 +197,7 @@ impl SessionPicker {
         &self,
         session: &SessionInfo,
         is_selected: bool,
-        _spinner_frame: usize,
+        spinner_frame: usize,
     ) -> Vec<Line<'static>> {
         let dim: Color = rgb(100, 100, 100);
         let dimmer: Color = rgb(70, 70, 70);
@@ -320,8 +320,18 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let activity = format!("  {active_ago}");
-        detail_spans.push(Span::styled(activity, Style::default().fg(dim)));
+        // A running turn is a state, not an age: show a spinner instead of
+        // a stale "x ago" that would count up while the agent is busy.
+        if self.session_is_streaming(session) {
+            let frames = jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAMES;
+            detail_spans.push(Span::styled(
+                format!("  {} running", frames[spinner_frame % frames.len()]),
+                Style::default().fg(rgb(255, 193, 7)),
+            ));
+        } else {
+            let activity = format!("  {active_ago}");
+            detail_spans.push(Span::styled(activity, Style::default().fg(dim)));
+        }
         let mut rows = vec![line1, Line::from(detail_spans)];
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
