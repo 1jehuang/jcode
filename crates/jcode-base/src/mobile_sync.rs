@@ -4,7 +4,9 @@
 //! session transcripts to the Jcode account API so the iOS app can show them.
 //! Local sessions and sessions running on Jcode Cloud machines both upload with
 //! the account API key. Uploads are incremental: per-session high-water marks
-//! (message count + snapshot mtime) live in `~/.jcode/mobile_sync.json`.
+//! (message count + snapshot/journal revisions) live in `~/.jcode/mobile_sync.json`.
+//! Successful session persistence wakes a debounced incremental pass. A 20s
+//! reconciliation also catches saves made by other processes and retries.
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
 //! one-line summary, and tool results truncated. Hidden reasoning, images and
@@ -16,8 +18,10 @@ use crate::subscription_api;
 use anyhow::{Context, Result};
 use jcode_message_types::{ContentBlock, Role};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(20);
@@ -26,12 +30,43 @@ const MAX_TOOL_RESULT_CHARS: usize = 4_000;
 const MAX_TEXT_CHARS: usize = 100_000;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
-const MAX_SESSIONS_PER_PASS: usize = 200;
+const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
+static PERSISTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static DIRTY_SESSIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Called only after a durable session write, never after sync-state writes.
+/// Notify retains a permit while an upload is running. The set also retains
+/// same-millisecond writes which the reconciliation mtime cannot distinguish.
+pub(crate) fn notify_session_persisted(id: &str) {
+    DIRTY_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_owned());
+    PERSISTED.notify_one();
+}
+
+fn state_lock() -> Result<std::fs::File> {
+    let dir = storage::jcode_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("mobile_sync.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.lock()?;
+    Ok(file)
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MobileSyncState {
     #[serde(default)]
     pub enabled: bool,
+    /// Fences uploads started before a disable/re-enable cycle.
+    #[serde(default)]
+    pub generation: u64,
     /// session id -> progress
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionProgress>,
@@ -43,9 +78,17 @@ pub struct SessionProgress {
     pub uploaded: usize,
     /// Snapshot+journal mtime (unix ms) at the last successful pass.
     pub mtime_ms: u64,
+    /// Snapshot and journal (nanosecond mtime, byte length). Older state files
+    /// omit this and receive one full reconciliation on upgrade.
+    #[serde(default)]
+    pub revision: Option<[u64; 4]>,
+    /// Hash of previously uploaded visible entries. Rewrites below the count
+    /// high-water mark must be replayed, not mistaken for metadata-only saves.
+    #[serde(default)]
+    pub fingerprint: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
 pub struct WireMessage {
     pub seq: usize,
     pub role: &'static str,
@@ -150,11 +193,57 @@ pub fn load_state() -> MobileSyncState {
 }
 
 pub fn save_state(state: &MobileSyncState) -> Result<()> {
-    storage::write_json_secret(&state_path()?, state)
+    let _lock = state_lock()?;
+    // Opt-in/out is authoritative, but an enable based on a stale read must
+    // not discard progress committed by another daemon in the meantime.
+    let mut next = load_state();
+    if next.enabled != state.enabled {
+        next.generation = next.generation.wrapping_add(1);
+    }
+    next.enabled = state.enabled;
+    if state.enabled {
+        if next.generation == state.generation {
+            merge_progress(&mut next, &state.sessions);
+        }
+    } else {
+        next.sessions.clear();
+    }
+    storage::write_json_secret(&state_path()?, &next)
+}
+
+fn merge_progress(state: &mut MobileSyncState, updates: &BTreeMap<String, SessionProgress>) {
+    for (id, progress) in updates {
+        let version = |p: &SessionProgress| {
+            p.revision
+                .map(|r| r[0].max(r[2]))
+                .unwrap_or(p.mtime_ms.saturating_mul(1_000_000))
+        };
+        if state.sessions.get(id).is_none_or(|old| {
+            version(old) < version(progress)
+                || (version(old) == version(progress) && old.uploaded <= progress.uploaded)
+        }) {
+            state.sessions.insert(id.clone(), progress.clone());
+        }
+    }
+}
+
+fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>) -> Result<()> {
+    let _lock = state_lock()?;
+    let mut current = load_state();
+    if current.enabled && current.generation == generation {
+        merge_progress(&mut current, updates);
+        storage::write_json_secret(&state_path()?, &current)?;
+    }
+    Ok(())
 }
 
 pub fn is_enabled() -> bool {
     load_state().enabled
+}
+
+fn sync_still_enabled(generation: u64) -> bool {
+    let state = load_state();
+    state.enabled && state.generation == generation
 }
 
 /// `cloud` when running on a Jcode Cloud machine, `local` otherwise.
@@ -262,6 +351,25 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         .collect()
 }
 
+fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for message in messages.iter().take_while(|message| message.seq < end) {
+        message.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+fn incremental_messages(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
+    let mut messages = wire_messages(session, 0);
+    let fingerprint = wire_fingerprint(&messages, session.messages.len());
+    let unchanged_prefix = progress.uploaded <= session.messages.len()
+        && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
+    if unchanged_prefix {
+        messages.retain(|message| message.seq >= progress.uploaded);
+    }
+    (messages, fingerprint)
+}
+
 fn mtime_ms(path: &Path) -> u64 {
     match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
         Ok(modified) => match modified.duration_since(UNIX_EPOCH) {
@@ -283,6 +391,26 @@ fn session_mtime_ms(snapshot: &Path) -> u64 {
     mtime_ms(snapshot).max(mtime_ms(
         &crate::session::session_journal_path_from_snapshot(snapshot),
     ))
+}
+
+fn session_revision(snapshot: &Path) -> [u64; 4] {
+    fn stamp(path: &Path) -> (u64, u64) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return (0, 0);
+        };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        (modified, meta.len())
+    }
+    let (snapshot_time, snapshot_len) = stamp(snapshot);
+    let (journal_time, journal_len) = stamp(&crate::session::session_journal_path_from_snapshot(
+        snapshot,
+    ));
+    [snapshot_time, snapshot_len, journal_time, journal_len]
 }
 
 /// Candidate sessions: real (non-debug) snapshots modified since the window.
@@ -310,7 +438,6 @@ fn candidate_sessions(since_ms: u64) -> Result<Vec<(String, PathBuf, u64)>> {
         }
     }
     out.sort_by(|a, b| b.2.cmp(&a.2));
-    out.truncate(MAX_SESSIONS_PER_PASS);
     Ok(out)
 }
 
@@ -364,6 +491,11 @@ fn valid_session_id(id: &str) -> bool {
 
 /// One incremental sync pass. Safe to call repeatedly.
 pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
+    sync_pass(client, true).await
+}
+
+async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncReport> {
+    let _pass = SYNC_PASS.lock().await;
     let mut state = load_state();
     if !state.enabled {
         return Ok(SyncReport::default());
@@ -379,8 +511,26 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
     let host = host_name();
     let source = session_source();
     let mut report = SyncReport::default();
+    let mut candidates = if reconcile {
+        candidate_sessions(since)?
+    } else {
+        Vec::new()
+    };
+    let dirty = std::mem::take(&mut *DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
+    for id in &dirty {
+        if valid_session_id(id) && !candidates.iter().any(|(candidate, _, _)| candidate == id) {
+            let path = storage::jcode_dir()?
+                .join("sessions")
+                .join(format!("{id}.json"));
+            candidates.push((id.clone(), path.clone(), session_mtime_ms(&path)));
+        }
+    }
+    candidates.sort_by_key(|(id, _, _)| !dirty.contains(id));
 
-    for (id, path, mtime) in candidate_sessions(since)? {
+    for (id, path, mtime) in candidates {
+        if !sync_still_enabled(state.generation) {
+            break;
+        }
         if !valid_session_id(&id) {
             continue;
         }
@@ -390,12 +540,19 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
             .get(&id)
             .cloned()
             .unwrap_or_else(SessionProgress::default);
-        if progress.mtime_ms >= mtime {
+        let revision = session_revision(&path);
+        if progress.revision == Some(revision) && !dirty.contains(&id) {
             continue;
         }
         let session = match Session::load_from_path(&path) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                DIRTY_SESSIONS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id);
+                continue;
+            }
         };
         if session.is_debug || session.messages.is_empty() {
             state.sessions.insert(
@@ -403,12 +560,13 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
                 SessionProgress {
                     uploaded: progress.uploaded,
                     mtime_ms: mtime,
+                    revision: Some(revision),
+                    fingerprint: progress.fingerprint,
                 },
             );
             continue;
         }
-        let start = progress.uploaded.min(session.messages.len());
-        let messages = wire_messages(&session, start);
+        let (messages, fingerprint) = incremental_messages(&session, &progress);
         let title = session.custom_title.as_deref().or(session.title.as_deref());
         let mut ok = true;
         // Always send at least one request so metadata (title, updated_at) refreshes.
@@ -418,6 +576,10 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
             messages.chunks(MAX_MESSAGES_PER_UPLOAD).collect()
         };
         for chunk in chunks {
+            if !sync_still_enabled(state.generation) {
+                ok = false;
+                break;
+            }
             let body = UploadBody {
                 title,
                 source,
@@ -443,15 +605,20 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
                 SessionProgress {
                     uploaded: session.messages.len(),
                     mtime_ms: mtime,
+                    revision: Some(revision),
+                    fingerprint: Some(fingerprint),
                 },
             );
+        } else {
+            DIRTY_SESSIONS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id);
         }
     }
-    // Reload `enabled` so a concurrent `jcode mobile disable` wins.
-    state.enabled = load_state().enabled;
-    if state.enabled {
-        save_state(&state)?;
-    }
+    // Merge under a cross-process lock, never write a stale enabled flag or
+    // overwrite another process's unrelated session progress.
+    commit_progress(state.generation, &state.sessions)?;
     Ok(report)
 }
 
@@ -477,26 +644,338 @@ pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
 
 /// Background loop used by the jcode server daemon.
 pub fn spawn_background_sync() {
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let mut ticks = tokio::time::interval(SYNC_INTERVAL);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticks.tick().await;
-            if !is_enabled() {
-                continue;
+    tokio::spawn(background_sync());
+}
+
+async fn background_sync() {
+    let client = reqwest::Client::new();
+    let mut ticks = tokio::time::interval(SYNC_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let reconcile = tokio::select! {
+            _ = ticks.tick() => true,
+            _ = PERSISTED.notified() => {
+                // A bounded coalescing window, not a trailing debounce:
+                // continuous token saves cannot postpone sync forever.
+                tokio::time::sleep(SYNC_DEBOUNCE).await;
+                false
             }
-            if let Err(err) = sync_once(&client).await {
-                crate::logging::debug(&format!("mobile sync pass failed: {err:#}"));
-            }
+        };
+        if !is_enabled() {
+            continue;
         }
-    });
+        if let Err(err) = sync_pass(&client, reconcile).await {
+            crate::logging::debug(&format!("mobile sync pass failed: {err:#}"));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use jcode_session_types::StoredMessage;
+
+    struct TestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl TestEnv {
+        fn set(values: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+            Self(
+                values
+                    .iter()
+                    .map(|(name, value)| {
+                        let previous = std::env::var_os(name);
+                        crate::env::set_var(name, value);
+                        (*name, previous)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                if let Some(value) = value {
+                    crate::env::set_var(name, value);
+                } else {
+                    crate::env::remove_var(name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn state_commits_merge_concurrent_progress_and_never_reenable() {
+        let _lock = storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+        save_state(&MobileSyncState {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let generation = load_state().generation;
+        let progress = |uploaded, mtime_ms| SessionProgress {
+            uploaded,
+            mtime_ms,
+            ..Default::default()
+        };
+        let stale = BTreeMap::from([("first".into(), progress(1, 1))]);
+        commit_progress(
+            generation,
+            &BTreeMap::from([("second".into(), progress(2, 2))]),
+        )
+        .unwrap();
+        commit_progress(generation, &stale).unwrap();
+        assert_eq!(load_state().sessions.len(), 2);
+        commit_progress(
+            generation,
+            &BTreeMap::from([("first".into(), progress(3, 3))]),
+        )
+        .unwrap();
+        commit_progress(generation, &stale).unwrap();
+        assert_eq!(load_state().sessions["first"].uploaded, 3);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let writers: Vec<_> = (0..8)
+            .map(|index| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    commit_progress(
+                        generation,
+                        &BTreeMap::from([(format!("parallel-{index}"), progress(index, 10))]),
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(load_state().sessions.len(), 10);
+        save_state(&MobileSyncState::default()).unwrap();
+        commit_progress(generation, &stale).unwrap();
+        assert!(!load_state().enabled);
+        assert!(load_state().sessions.is_empty());
+        save_state(&MobileSyncState {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        commit_progress(generation, &stale).unwrap();
+        assert!(
+            load_state().sessions.is_empty(),
+            "old opt-in generation cannot restore wiped progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_notifications_upload_under_one_second_and_retain_inflight_writes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _lock = storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _env = TestEnv::set(&[
+            ("JCODE_HOME", home.path().as_os_str()),
+            ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
+            ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
+        ]);
+        let (requests_tx, mut requests) = tokio::sync::mpsc::channel(8);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let body_start = loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let header = String::from_utf8_lossy(&bytes[..body_start]);
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|s| s.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                while bytes.len() < body_start + length {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                let body: serde_json::Value =
+                    serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
+                let (release, wait) = tokio::sync::oneshot::channel::<()>();
+                requests_tx.send((body, release)).await.unwrap();
+                wait.await.unwrap();
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let background = tokio::spawn(background_sync());
+        // Consume the initial reconciliation while disabled.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let mut session = Session::create_with_id("event-sync".into(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "first".into(),
+                cache_control: None,
+            }],
+        );
+        session.save().unwrap();
+        assert!(!is_enabled());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(220), requests.recv())
+                .await
+                .is_err()
+        );
+        save_state(&MobileSyncState {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "second".into(),
+                cache_control: None,
+            }],
+        );
+        session.save().unwrap();
+        for title in ["coalesce one", "coalesce two", "coalesce final"] {
+            session.custom_title = Some(title.into());
+            session.save().unwrap();
+        }
+        let (first, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        eprintln!(
+            "mobile persistence-to-upload notification: {}ms",
+            started.elapsed().as_millis()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(first["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(first["title"], "coalesce final");
+        // Persist while the first upload is still blocked in the network.
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "during-upload".into(),
+                cache_control: None,
+            }],
+        );
+        session.save().unwrap();
+        release.send(()).unwrap();
+        let (second, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(second["messages"][0]["seq"], 2);
+        assert_eq!(second["messages"][0]["text"], "during-upload");
+        release.send(()).unwrap();
+        // Progress persistence itself must not schedule another upload.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), requests.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(load_state().sessions["event-sync"].uploaded, 3);
+        // Simulate a writer in another process: no notification hook in this
+        // process, so only the reconciliation path can discover the update.
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "external writer".into(),
+                cache_control: None,
+            }],
+        );
+        let path = home.path().join("sessions/event-sync.json");
+        storage::write_json_fast(&path, &session).unwrap();
+        session = Session::load_from_path(&path).unwrap();
+        let reconcile = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
+        let (external, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(external["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(external["messages"][0]["text"], "external writer");
+        release.send(()).unwrap();
+        assert_eq!(reconcile.await.unwrap().messages_uploaded, 1);
+        session.custom_title = Some("metadata only".into());
+        session.save().unwrap();
+        let (metadata, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata["title"], "metadata only");
+        assert!(metadata["messages"].as_array().unwrap().is_empty());
+        // A disable racing an upload must not be undone by its completion.
+        save_state(&MobileSyncState::default()).unwrap();
+        release.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert!(!load_state().enabled);
+        assert!(load_state().sessions.is_empty());
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "disabled".into(),
+                cache_control: None,
+            }],
+        );
+        session.save().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), requests.recv())
+                .await
+                .is_err()
+        );
+        background.abort();
+        server.abort();
+        let _ = background.await;
+        let _ = server.await;
+    }
+
+    #[test]
+    fn reconciliation_does_not_starve_old_candidates_or_miss_same_millisecond_writes() {
+        let _lock = storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+        let sessions = home.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for index in 0..205 {
+            std::fs::write(sessions.join(format!("session-{index}.json")), b"{}").unwrap();
+        }
+        assert_eq!(candidate_sessions(0).unwrap().len(), 205);
+        let path = sessions.join("session-0.json");
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let original = file.metadata().unwrap().modified().unwrap();
+        let before = session_revision(&path);
+        let before_ms = session_mtime_ms(&path);
+        std::fs::write(&path, b"{\"changed\":true}").unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(original))
+            .unwrap();
+        assert_eq!(session_mtime_ms(&path), before_ms);
+        assert_ne!(session_revision(&path), before);
+        let journal = crate::session::session_journal_path_from_snapshot(&path);
+        std::fs::write(&journal, b"journal update\n").unwrap();
+        let with_journal = session_revision(&path);
+        std::fs::remove_file(journal).unwrap();
+        assert_ne!(session_revision(&path), with_journal);
+        assert_eq!(SYNC_INTERVAL, Duration::from_secs(20));
+    }
 
     async fn mock_listing(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -651,5 +1130,46 @@ mod tests {
         assert!(valid_session_id("session_abc-123.x"));
         assert!(!valid_session_id("bad id"));
         assert!(!valid_session_id(""));
+    }
+
+    #[test]
+    fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
+        let mut session = Session::create_with_id("rewrite".into(), None, None);
+        for text in ["first", "second"] {
+            session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: text.into(),
+                    cache_control: None,
+                }],
+            );
+        }
+        let (initial, fingerprint) = incremental_messages(&session, &SessionProgress::default());
+        assert_eq!(initial.len(), 2);
+        let progress = SessionProgress {
+            uploaded: 2,
+            fingerprint: Some(fingerprint),
+            ..Default::default()
+        };
+        assert!(incremental_messages(&session, &progress).0.is_empty());
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "appended".into(),
+                cache_control: None,
+            }],
+        );
+        let appended = incremental_messages(&session, &progress).0;
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].seq, 2);
+        session.messages[0].content = vec![ContentBlock::Text {
+            text: "rewritten".into(),
+            cache_control: None,
+        }];
+        let rewritten = incremental_messages(&session, &progress).0;
+        assert_eq!(rewritten.len(), 3);
+        assert_eq!(rewritten[0].text, "rewritten");
+        session.truncate_messages(1);
+        assert_eq!(incremental_messages(&session, &progress).0.len(), 1);
     }
 }

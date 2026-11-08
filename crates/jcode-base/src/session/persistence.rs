@@ -875,6 +875,7 @@ impl Session {
             fields.push(("error", crate::util::format_error_chain(error)));
             crate::logging::event_warn("SESSION_PERSISTENCE", fields);
         } else {
+            crate::mobile_sync::notify_session_persisted(&self.id);
             if let Err(error) = crate::recent_session_index::upsert_session(self) {
                 crate::logging::warn(&format!(
                     "Failed to update recent-session metadata for {}: {error}",
