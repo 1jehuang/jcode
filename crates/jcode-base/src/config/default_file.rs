@@ -157,6 +157,10 @@ timeout_secs = 90
 # without Jcode Desktop. Empty disables it.
 # global_devices = []
 
+# Show live voice input inside the input box: a waveform row above the prompt
+# and the transcript streaming in as ghost text. false uses the status line.
+# composer_preview = true
+
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"

@@ -1191,6 +1191,10 @@ impl crate::tui::TuiState for App {
         self.voice_input_status_line()
     }
 
+    fn voice_composer_preview(&self) -> Option<crate::tui::VoiceComposerPreview> {
+        self.voice_composer_preview_state()
+    }
+
     fn reset_hint_visible(&self, key: &str) -> bool {
         let mut seen = self.reset_hint_seen.borrow_mut();
         let now = Instant::now();

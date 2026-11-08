@@ -932,6 +932,10 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    /// Voice input rendered in the composer instead of the status line.
+    fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
+        None
+    }
     /// How long since the user last pressed a key, scrolled, or pasted, or
     /// `None` when they have not interacted yet.
     ///
@@ -1413,6 +1417,19 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+}
+
+/// Live voice input shown inside the composer: a waveform row above the
+/// prompt and the in-progress transcript as ghost text after the cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceComposerPreview {
+    pub recording: bool,
+    pub elapsed_secs: u64,
+    /// Recent RMS levels, oldest first.
+    pub levels: Vec<f32>,
+    pub live: String,
+    /// Trailing key hint, e.g. `Ctrl+Space send · Esc cancel`.
+    pub hint: String,
 }
 
 /// Render snapshot of the Ctrl+R reverse prompt-history search overlay.

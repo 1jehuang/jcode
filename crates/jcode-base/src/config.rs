@@ -1062,6 +1062,9 @@ pub struct DictationConfig {
     /// (Linux evdev nodes, preferably stable `/dev/input/by-id/...` paths).
     /// Empty disables the companion's global voice listener.
     pub global_devices: Vec<std::path::PathBuf>,
+    /// Show live voice input (waveform and streaming transcript) inside the
+    /// input box. False puts it in the status line instead.
+    pub composer_preview: bool,
 }
 
 impl Default for DictationConfig {
@@ -1074,6 +1077,7 @@ impl Default for DictationConfig {
             vocabulary: Vec::new(),
             recorder: String::new(),
             global_devices: Vec::new(),
+            composer_preview: true,
         }
     }
 }

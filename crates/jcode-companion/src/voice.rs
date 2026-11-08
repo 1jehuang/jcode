@@ -29,7 +29,8 @@ const FOCUS_REFRESH: Duration = Duration::from_millis(400);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Waveform update cadence to the focused TUI, matching its own meter tick.
 const WAVEFORM_TICK: Duration = Duration::from_millis(80);
-const WAVEFORM_HISTORY: usize = 16;
+/// Enough samples to fill the TUI composer's waveform row (up to 48 cells).
+const WAVEFORM_HISTORY: usize = 48;
 const ACTIVITY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Which visible indicators companion push-to-talk uses.
