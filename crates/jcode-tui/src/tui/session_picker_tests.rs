@@ -34,6 +34,106 @@ fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatu
     make_session_with_flags(id, short_name, is_debug, false, status)
 }
 
+/// Copy the highlighted session without changing selection and report failures.
+#[test]
+fn copy_session_identifier_reports_success_and_failure() {
+    let session = make_session("session_alpha", "alpha", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session]);
+    let mut copied = String::new();
+    picker.copy_selected_session_with(|id| {
+        copied = id.to_owned();
+        true
+    });
+    assert_eq!(copied, "session_alpha");
+    assert_eq!(picker.copy_notice, Some("Session ID copied"));
+    assert_eq!(picker.selected_session().unwrap().id, "session_alpha");
+    picker.copy_selected_session_with(|_| false);
+    assert_eq!(picker.copy_notice, Some("Could not copy to clipboard"));
+}
+
+/// Copy the actual external identifier and label Pi's path accurately.
+#[test]
+fn copy_external_session_uses_resume_target() {
+    let mut session = make_session("internal-id", "external", false, SessionStatus::Closed);
+    session.resume_target = ResumeTarget::PiSession {
+        session_path: "pi/session.jsonl".into(),
+    };
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.copy_selected_session_with(|id| {
+        assert_eq!(id, "pi/session.jsonl");
+        true
+    });
+    assert_eq!(picker.copy_notice, Some("Session path copied"));
+}
+
+/// Search still accepts y as text and the copy action handles an empty list.
+#[test]
+fn copy_shortcut_does_not_interfere_with_search_or_empty_picker() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.copy_notice, Some("No session selected"));
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::empty())
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.search_query, "y");
+    assert_eq!(picker.copy_notice, None);
+}
+
+/// The picker shortcut invokes the shared clipboard implementation.
+#[test]
+fn copy_shortcut_copies_highlighted_session() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let mut picker = SessionPicker::new(vec![make_session(
+        "session_alpha",
+        "alpha",
+        false,
+        SessionStatus::Closed,
+    )]);
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.copy_notice, Some("Session ID copied"));
+}
+
+/// The picker advertises the shortcut and shows the result in its footer.
+#[test]
+fn copy_shortcut_and_result_are_visible() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let mut picker = SessionPicker::new(vec![make_session(
+        "session_alpha",
+        "alpha",
+        false,
+        SessionStatus::Closed,
+    )]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("y copy ID"));
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Session ID copied"));
+}
+
 #[path = "session_picker_tests/identity_search.rs"]
 mod identity_search;
 

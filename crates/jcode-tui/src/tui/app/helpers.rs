@@ -656,7 +656,7 @@ fn copy_to_local_macos_clipboard(text: &str) -> bool {
 /// paste inside jcode keeps working. In a local session the native clipboard
 /// is authoritative and OSC 52 is the final fallback (see
 /// [`copy_to_local_clipboard`] for the per-platform native chain).
-pub(super) fn copy_to_clipboard(text: &str) -> bool {
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
     // which forks a clipboard server that does not exit; waiting on it hangs the
