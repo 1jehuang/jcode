@@ -161,7 +161,7 @@ impl Tool for WebFetchTool {
 
         let note = if output_truncated {
             format!(
-                "\n\n(output truncated to {MAX_OUTPUT_CHARS} of {full_len} chars; \
+                "\n\n(output truncated to {MAX_OUTPUT_CHARS} of {full_len} bytes; \
                  fetch a more specific URL or anchor for the rest)"
             )
         } else {
