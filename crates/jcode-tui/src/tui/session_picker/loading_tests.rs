@@ -395,6 +395,7 @@ fn grouped_refresh_bypasses_fresh_in_process_session_cache() {
 #[test]
 fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     let _env_lock = crate::storage::lock_test_env();
+    let _account = EnvVarGuard::set_str("JCODE_API_KEY", "");
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _runtime = EnvVarGuard::set_path("JCODE_RUNTIME_DIR", temp.path());
@@ -430,8 +431,8 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     );
     session::record_window_closed(id);
     let (sender, receiver) = std::sync::mpsc::channel();
-    send_session_list_updates(sender);
-    for _ in 0..2 {
+    send_session_list_updates_with_discovery(sender, true, || Ok(true));
+    for _ in 0..3 {
         let super::super::SessionListUpdate::Cached((groups, orphans)) = receiver.recv().unwrap()
         else {
             panic!("recent recovery and cache must precede the history refresh");
@@ -455,6 +456,68 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
             .any(|s| s.id == id),
         "bounded history scan must retain recovered session"
     );
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn failed_cloud_refresh_warns_without_discarding_local_or_last_good_cloud_rows() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let local_id = "session_cloud_failure_local";
+    let mut session = Session::create_with_id(local_id.into(), None, Some("Local work".into()));
+    session.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Keep this local session usable".into(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let cloud_id = "session_cloud_failure_cached";
+    let lease = storage::SessionLease {
+        session_id: cloud_id.into(),
+        epoch: 5,
+        away_host: Some("jcode-cloud".into()),
+        repo_root: Some("/cloud/cached".into()),
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: "2026-11-08T05:00:00Z".into(),
+    };
+    storage::write_session_lease(&lease).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    send_session_list_updates_with_discovery(sender, true, || {
+        anyhow::bail!("synthetic account failure")
+    });
+    let mut warning_seen = false;
+    let mut fresh_seen = false;
+    for update in receiver {
+        match update {
+            super::super::SessionListUpdate::CloudUnavailable(warning) => {
+                assert!(warning.contains("Reopen /resume"));
+                warning_seen = true;
+            }
+            super::super::SessionListUpdate::Fresh(result) => {
+                assert!(
+                    warning_seen,
+                    "explain incomplete discovery before ending refresh"
+                );
+                let (groups, orphans) = result.unwrap();
+                let ids: HashSet<_> = groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter())
+                    .chain(orphans.iter())
+                    .map(|s| s.id.as_str())
+                    .collect();
+                assert!(ids.contains(local_id));
+                assert!(ids.contains(cloud_id));
+                fresh_seen = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(warning_seen && fresh_seen);
+    assert_eq!(storage::read_session_lease(cloud_id), Some(lease));
     invalidate_session_list_cache();
 }
 

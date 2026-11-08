@@ -384,16 +384,25 @@ impl RemoteConnection {
     ) -> Result<Self> {
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
-        let stream = Stream::connect(server::socket_path()).await?;
+        let socket_path = server::socket_path();
+        let stream = Stream::connect(&socket_path).await?;
         let socket_connect_ms = socket_connect_start.elapsed().as_millis();
         let (reader, writer) = stream.into_split();
+        let quota_setup_start = Instant::now();
         // Quotas for headed clients belong to this daemon connection. Clear
         // previous/local snapshots before any startup account rows are drawn.
-        crate::usage::clear_remote_account_usage();
+        let usage_generation = crate::usage::clear_remote_account_usage();
         if !super::is_ssh_remote() {
-            crate::usage::hydrate_remote_account_usage(&server::socket_path());
+            Self::spawn_usage_hydration(move || {
+                crate::usage::hydrate_remote_account_usage_for_generation(
+                    &socket_path,
+                    usage_generation,
+                )
+            });
         }
 
+        let quota_setup_ms = quota_setup_start.elapsed().as_millis();
+        let connection_setup_start = Instant::now();
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
@@ -418,12 +427,15 @@ impl RemoteConnection {
             call_output_tokens_seen: 0,
         };
 
+        let connection_setup_ms = connection_setup_start.elapsed().as_millis();
+        let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
         if super::is_ssh_remote() {
             conn.verify_ssh_ready(Duration::from_secs(35)).await?;
         }
 
+        let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
@@ -491,8 +503,11 @@ impl RemoteConnection {
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 
         crate::logging::info(&format!(
-            "[TIMING] remote connect: socket={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
+            "[TIMING] remote connect: socket={}ms, quota_setup={}ms, connection_setup={}ms, ssh_ready={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
             socket_connect_ms,
+            quota_setup_ms,
+            connection_setup_ms,
+            ssh_ready_ms,
             subscribe_ms,
             bootstrap_request_ms,
             connect_start.elapsed().as_millis(),
@@ -501,6 +516,28 @@ impl RemoteConnection {
         ));
 
         Ok(conn)
+    }
+
+    /// Advisory disk snapshots must not delay Subscribe/History or block the
+    /// async runtime. The generation check in the importer gives live replies
+    /// and subsequent connections precedence over a late disk read.
+    fn spawn_usage_hydration(
+        hydrate: impl FnOnce() -> bool + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let queued = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let imported = hydrate();
+            crate::logging::info(&format!(
+                "[TIMING] remote quota hydration: queue={}ms, read={}ms, imported={}",
+                queued
+                    .elapsed()
+                    .saturating_sub(started.elapsed())
+                    .as_millis(),
+                started.elapsed().as_millis(),
+                imported,
+            ));
+        })
     }
 
     fn interrupt_request_log_fields(

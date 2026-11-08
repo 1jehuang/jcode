@@ -79,6 +79,7 @@ type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
 
 pub(crate) enum SessionListUpdate {
     Cached(GroupedSessionList),
+    CloudUnavailable(String),
     Fresh(Result<GroupedSessionList>),
 }
 
@@ -311,6 +312,7 @@ pub struct SessionPicker {
     pending_search_submission: Option<KeyModifiers>,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
+    pub(crate) cloud_warning: Option<String>,
     resume_latency: latency::Latency,
     latency_transcript_rendered: bool,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
@@ -402,6 +404,7 @@ impl SessionPicker {
             search_selection: Default::default(),
             pending_search_submission: None,
             loading_message: None,
+            cloud_warning: None,
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
@@ -461,6 +464,7 @@ impl SessionPicker {
             search_selection: Default::default(),
             pending_search_submission: None,
             loading_message: Some("Loading sessions…".to_string()),
+            cloud_warning: None,
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
@@ -552,6 +556,7 @@ impl SessionPicker {
             search_selection: Default::default(),
             pending_search_submission: None,
             loading_message: None,
+            cloud_warning: None,
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
@@ -2399,9 +2404,17 @@ impl SessionPicker {
         self.run_with_session_updates(None)
     }
 
+    pub(crate) fn set_cloud_warning(&mut self, warning: String) {
+        self.cloud_warning = Some(warning);
+    }
+
     fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
         let (sessions, finished) = match update {
             SessionListUpdate::Cached(sessions) => (sessions, false),
+            SessionListUpdate::CloudUnavailable(warning) => {
+                self.set_cloud_warning(warning);
+                return Ok(false);
+            }
             SessionListUpdate::Fresh(sessions) => (sessions?, true),
         };
         self.reseed_grouped(sessions.0, sessions.1);

@@ -414,6 +414,27 @@ impl SessionPicker {
         virtualize: bool,
     ) {
         self.poll_transcript_search();
+        // Reserve a compact warning row without substituting for local sessions.
+        // Keep it independent of loading state so Fresh(local) cannot erase it.
+        let area = if let Some(warning) = self.cloud_warning.as_deref().filter(|_| area.height > 2)
+        {
+            let line = Line::from(Span::styled(
+                warning.to_string(),
+                Style::default().fg(rgb(255, 200, 100)),
+            ));
+            let line = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &line,
+                usize::from(area.width),
+            );
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+        } else {
+            area
+        };
+        self.last_list_area = Some(area);
         // List rows never wrap. Determine exact heights without formatting the
         // offscreen titles, prompts, paths, timestamps, or highlighted spans.
         let mut item_heights: Vec<usize> = self

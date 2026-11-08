@@ -2,6 +2,54 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
+async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let hydration = RemoteConnection::spawn_usage_hydration(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        false
+    });
+    started_rx.await.unwrap();
+    let remote = RemoteConnection::dummy();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_millis(250), async {
+        remote
+            .send_request(Request::GetHistory { id: 9 })
+            .await
+            .unwrap();
+        let mut bytes = [0; 256];
+        peer.readable().await.unwrap();
+        let count = peer.try_read(&mut bytes).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+            Request::GetHistory { id: 9 }
+        ));
+    })
+    .await;
+    let elapsed = start.elapsed();
+    release_tx.send(()).unwrap();
+    hydration.await.unwrap();
+    result.expect("quota disk reads must not delay bootstrap requests");
+    eprintln!(
+        "bootstrap while snapshot read blocked: {}us",
+        elapsed.as_micros()
+    );
+}
+
+#[test]
+fn measure_local_quota_hydration_cost() {
+    let socket = server::socket_path();
+    let started = Instant::now();
+    let imported = crate::usage::hydrate_remote_account_usage(&socket);
+    eprintln!(
+        "local quota hydration: {}us, imported={imported}",
+        started.elapsed().as_micros()
+    );
+}
+
+#[tokio::test]
 async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();

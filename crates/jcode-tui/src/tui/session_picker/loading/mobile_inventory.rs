@@ -18,7 +18,7 @@ for sid in sys.argv[1].splitlines():
         lease = json.loads(lease_path.read_text()) if lease_path.exists() else {}
         if lease.get('away_host'):
             continue
-        result.append({'session_id': sid, 'epoch': max(session.get('migration_epoch', 0), lease.get('epoch', 0)), 'cwd': session.get('working_dir')})
+        result.append({'session_id': sid, 'epoch': max(session.get('migration_epoch', 0), lease.get('epoch', 0)), 'cwd': session.get('working_dir'), 'title': session.get('custom_title') if session.get('custom_title') is not None else session.get('title'), 'updated_at': session.get('updated_at')})
     except (OSError, ValueError, TypeError):
         continue
 print(json.dumps({'host': socket.gethostname(), 'sessions': result}))
@@ -36,13 +36,15 @@ struct VerifiedSession {
     session_id: String,
     epoch: u64,
     cwd: Option<String>,
+    title: Option<String>,
+    updated_at: Option<String>,
 }
 
 /// Called only after publishing local results, never on the render thread.
 pub(super) fn available() -> bool {
     crate::mobile_sync::session_source() != "cloud"
-        && crate::subscription_catalog::has_credentials()
-        && storage::jcode_dir().is_ok_and(|home| home.join("cloud/ssh_config").is_file())
+        && crate::subscription_catalog::configured_api_key()
+            .is_some_and(|key| !key.trim().is_empty())
 }
 
 pub(super) fn refresh() -> Result<bool> {
@@ -51,9 +53,6 @@ pub(super) fn refresh() -> Result<bool> {
     }
     let home = storage::jcode_dir()?;
     let config = home.join("cloud/ssh_config");
-    if !config.is_file() {
-        return Ok(false);
-    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -61,17 +60,12 @@ pub(super) fn refresh() -> Result<bool> {
         let inventory = crate::mobile_sync::discover_cloud_sessions().await?;
         let candidates: Vec<_> = inventory
             .into_iter()
-            .filter(|s| {
-                storage::read_session_lease(&s.session_id).is_none()
-                    && !home
-                        .join("sessions")
-                        .join(format!("{}.json", s.session_id))
-                        .exists()
-            })
+            .filter(|s| should_verify(&home, &s.session_id))
             .collect();
         if candidates.is_empty() {
             return Ok(false);
         }
+        prepare_ssh_config(&config).await?;
         let ids = candidates
             .iter()
             .map(|s| s.session_id.as_str())
@@ -93,6 +87,54 @@ pub(super) fn refresh() -> Result<bool> {
     })
 }
 
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+}
+
+fn should_verify(home: &Path, id: &str) -> bool {
+    if !valid_id(id) {
+        return false;
+    }
+    match storage::read_session_lease(id) {
+        Some(lease) => lease.session_id == id && lease.away_host.as_deref() == Some("jcode-cloud"),
+        None => {
+            !home
+                .join("session_leases")
+                .join(format!("{id}.json"))
+                .exists()
+                && !home.join("sessions").join(format!("{id}.json")).exists()
+        }
+    }
+}
+
+async fn prepare_ssh_config(config: &Path) -> Result<()> {
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "--no-update",
+            "--no-selfdev",
+            "cloud",
+            "machine",
+            "prepare-ssh",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let (status, _) = crate::tui::cloud_git::bounded_output(command, Duration::from_secs(8), 4096)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("cloud SSH setup unavailable"))?;
+    anyhow::ensure!(
+        status.success() && config.is_file(),
+        "cloud SSH setup failed"
+    );
+    Ok(())
+}
+
 fn register(
     home: &Path,
     candidates: Vec<crate::mobile_sync::SyncedSession>,
@@ -105,36 +147,53 @@ fn register(
         }) else {
             continue;
         };
-        // Recheck after network IO. Never replace a migration decision or local work.
-        if storage::read_session_lease(&remote.session_id).is_some()
-            || home
-                .join("sessions")
-                .join(format!("{}.json", remote.session_id))
-                .exists()
+        if !valid_id(&remote.session_id) || !should_verify(home, &remote.session_id) {
+            continue;
+        }
+        // Never let metadata discovery supersede a migration. Only update an
+        // existing managed-cloud lease at the exact epoch we verified remotely.
+        let existing = storage::read_session_lease(&remote.session_id);
+        if existing
+            .as_ref()
+            .is_some_and(|lease| lease.epoch != remote.epoch)
         {
             continue;
         }
-        let lease = storage::SessionLease {
-            session_id: remote.session_id,
+        let mut lease = existing.clone().unwrap_or_else(|| storage::SessionLease {
+            session_id: remote.session_id.clone(),
             epoch: remote.epoch,
             away_host: Some("jcode-cloud".into()),
-            repo_root: remote.cwd.or_else(|| metadata.cwd.clone()),
+            repo_root: None,
             last_sync_snapshot: None,
             last_sync_head: None,
-            updated_at: metadata
-                .updated_at
-                .clone()
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
-        };
-        storage::write_session_lease(&lease)?;
-        // A picker-only sidecar preserves the title, not a canonical transcript.
+            updated_at: String::new(),
+        });
+        lease.repo_root = remote.cwd;
+        if let Some(updated_at) = remote.updated_at.or_else(|| metadata.updated_at.clone()) {
+            // Ignore malformed timestamps rather than poisoning picker sorting.
+            if chrono::DateTime::parse_from_rfc3339(&updated_at).is_ok() {
+                lease.updated_at = updated_at;
+            }
+        }
+        if lease.updated_at.is_empty() {
+            lease.updated_at = chrono::Utc::now().to_rfc3339();
+        }
+        if existing.as_ref() != Some(&lease) {
+            storage::write_session_lease(&lease)?;
+            changed = true;
+        }
+        // A picker-only sidecar preserves metadata, never a canonical transcript.
         let path = home
             .join("cloud/mobile-session-titles")
             .join(format!("{}.json", lease.session_id));
-        if let Some(title) = metadata.title.as_deref() {
-            storage::write_json(&path, &title)?;
+        let title = remote.title.unwrap_or_else(|| {
+            let name = extract_session_name(&lease.session_id).unwrap_or(&lease.session_id);
+            format!("{name} (cloud session)")
+        });
+        if storage::read_json::<String>(&path).ok().as_deref() != Some(&title) {
+            storage::write_json_secret(&path, &title)?;
+            changed = true;
         }
-        changed = true;
     }
     Ok(changed)
 }
