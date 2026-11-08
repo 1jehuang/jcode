@@ -1117,6 +1117,7 @@ pub fn apply_named_provider_profile_env_from_config(
                         env_name
                     })
                 });
+            let key_env = profile.api_key_envs.first().cloned().or(key_env);
 
             if let Some(key_env) = key_env {
                 if !is_safe_env_key_name(&key_env) {
