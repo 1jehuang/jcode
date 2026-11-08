@@ -75,12 +75,30 @@ impl App {
                 || crate::config::config().display.pin_todos)
             || self
                 .remote_todos_requested_at
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+                .is_some_and(|at| at.elapsed() < self.remote_todos_poll_interval())
         {
             return false;
         }
         self.remote_todos_requested_at = Some(Instant::now());
         true
+    }
+
+    /// Todos only change while a turn runs (the todo tool) or through an
+    /// explicit command, both of which clear `remote_todos_requested_at` for an
+    /// immediate refresh. An idle session therefore needs only a slow safety
+    /// poll: a 2s poll from every open window kept the shared server and each
+    /// client waking for nothing.
+    fn remote_todos_poll_interval(&self) -> std::time::Duration {
+        if self.is_processing() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(30)
+        }
+    }
+
+    /// Ask for a fresh remote todo snapshot on the next tick.
+    pub(super) fn request_remote_todos_refresh_soon(&mut self) {
+        self.remote_todos_requested_at = None;
     }
 
     pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
