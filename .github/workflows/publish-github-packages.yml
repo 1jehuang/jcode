@@ -45,9 +45,11 @@ jobs:
       - name: Verify release artifact exists
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.jcode_release_tag }}"
+          # The tag arrives through env so it is never spliced into shell source.
+          TAG="$RELEASE_TAG"
 
           echo "Checking for artifact ${{ matrix.artifact }}.tar.gz in release $TAG..."
           if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qF "${{ matrix.artifact }}.tar.gz"; then
@@ -62,9 +64,10 @@ jobs:
         id: check
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
           set -euo pipefail
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           PACKAGE_URL="https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/jcode%2F${{ matrix.artifact }}/versions"
           HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${GHCR_TOKEN}" \
@@ -89,10 +92,11 @@ jobs:
         if: steps.check.outputs.already_published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          gh release download "${{ inputs.jcode_release_tag }}" --dir dist \
+          gh release download "$RELEASE_TAG" --dir dist \
             --pattern "${{ matrix.artifact }}.tar.gz"
 
           echo "Downloaded artifacts:"
@@ -100,6 +104,8 @@ jobs:
 
       - name: Extract and package for GitHub Packages
         if: steps.check.outputs.already_published != 'true'
+        env:
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
           set -euo pipefail
 
@@ -118,7 +124,7 @@ jobs:
           echo "Binary ready: $(file "$BINARY")"
 
           # Write OCI image metadata
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION_NUM="${VERSION#v}"
 
           cat > config.json << EOF
@@ -215,10 +221,12 @@ jobs:
         shell: bash
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
           set -euo pipefail
 
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION_NUM="${VERSION#v}"
           PACKAGE_NAME="ghcr.io/${{ github.repository_owner }}/jcode/${{ matrix.artifact }}"
           FULL_TAG="${PACKAGE_NAME}:${VERSION_NUM}"
@@ -238,10 +246,10 @@ jobs:
           ./crane --version
 
           # Authenticate crane to GHCR
-          echo "$GHCR_TOKEN" | ./crane auth login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "$GHCR_TOKEN" | ./crane auth login ghcr.io -u "$GHCR_USER" --password-stdin
 
           # Create a minimal OCI image with the binary as the sole layer
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION_NUM="${VERSION#v}"
 
           # Use crane to append the layer to an empty base image
@@ -281,7 +289,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION_NUM="${VERSION#v}"
           PACKAGE_NAME="ghcr.io/${{ github.repository_owner }}/jcode/${{ matrix.artifact }}"
           FULL_TAG="${PACKAGE_NAME}:${VERSION_NUM}"
@@ -295,8 +303,10 @@ jobs:
           fi
           CRANE=$(command -v crane 2>/dev/null || echo "./crane")
 
-          echo "$GHCR_TOKEN" | $CRANE auth login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
-          env GHCR_TOKEN="${{ secrets.GITHUB_TOKEN }}" $CRANE auth login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
+          # Authenticate from the step env only. Do not pass the token inline
+          # as `env TOKEN=... cmd`: that puts the secret in /proc/<pid>/cmdline
+          # where `ps` and other local users can read it.
+          echo "$GHCR_TOKEN" | $CRANE auth login ghcr.io -u "$GHCR_USER" --password-stdin 2>/dev/null || true
 
           # Verify the tag exists and is resolvable
           if $CRANE digest "${FULL_TAG}" >/dev/null 2>&1; then
@@ -306,6 +316,8 @@ jobs:
           fi
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
 
   summary:
     name: Publish summary
@@ -315,8 +327,10 @@ jobs:
       contents: read
     steps:
       - name: Generate summary
+        env:
+          RELEASE_TAG: ${{ inputs.jcode_release_tag }}
         run: |
-          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION="$RELEASE_TAG"
           echo "## Published jcode to GitHub Packages" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Release: \`${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
