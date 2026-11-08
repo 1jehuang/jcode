@@ -21,6 +21,8 @@ use super::{
     SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
 };
 
+mod mobile_inventory;
+
 use super::{ResumeTarget, SessionSource};
 
 #[cfg(test)]
@@ -305,6 +307,18 @@ fn load_recently_closed_sessions() -> Vec<SessionInfo> {
 /// Shared staged loader for the standalone and in-session pickers. A just-closed
 /// session is actionable before loading either the cache or the historical list.
 pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::SessionListUpdate>) {
+    send_session_list_updates_with_discovery(
+        sender,
+        mobile_inventory::available(),
+        mobile_inventory::refresh,
+    );
+}
+
+fn send_session_list_updates_with_discovery(
+    sender: std::sync::mpsc::Sender<super::SessionListUpdate>,
+    discovery_available: bool,
+    refresh: impl FnOnce() -> Result<bool>,
+) {
     let recent = load_recently_closed_sessions();
     if !recent.is_empty()
         && sender
@@ -345,9 +359,57 @@ pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::S
                     .flat_map(|g| g.sessions.iter().map(|s| s.id.clone())),
             )
             .collect();
-        orphans.extend(recent.into_iter().filter(|s| !loaded.contains(&s.id)));
+        orphans.extend(recent.iter().filter(|s| !loaded.contains(&s.id)).cloned());
         (groups, orphans)
     });
+    if !discovery_available {
+        let _ = sender.send(super::SessionListUpdate::Fresh(result));
+        return;
+    }
+    // Keep local results immediately usable while account/SSH discovery runs.
+    let local = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = sender.send(super::SessionListUpdate::Fresh(Err(error)));
+            return;
+        }
+    };
+    if sender
+        .send(super::SessionListUpdate::Cached(local.clone()))
+        .is_err()
+    {
+        return;
+    }
+    let result = match refresh() {
+        Ok(true) => {
+            invalidate_session_list_cache();
+            load_sessions_grouped().map(|(groups, mut orphans)| {
+                let loaded: HashSet<_> = orphans
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .chain(
+                        groups
+                            .iter()
+                            .flat_map(|g| g.sessions.iter().map(|s| s.id.as_str())),
+                    )
+                    .collect();
+                let recovered: Vec<_> = recent
+                    .into_iter()
+                    .filter(|s| !loaded.contains(s.id.as_str()))
+                    .collect();
+                orphans.extend(recovered);
+                (groups, orphans)
+            })
+        }
+        Ok(false) => Ok(local),
+        Err(error) => {
+            crate::logging::debug(&format!("Mobile resume discovery unavailable: {error:#}"));
+            let _ = sender.send(super::SessionListUpdate::CloudUnavailable(
+                "Cloud sessions could not be refreshed. Reopen /resume to retry.".into(),
+            ));
+            Ok(local)
+        }
+    };
     let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
 
@@ -2762,6 +2824,27 @@ fn include_cloud_sessions(
             sessions.push(session);
         }
         if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
+            // A migrated local snapshot is historical. Verified cloud metadata
+            // must win for display, project scoping, sorting, and search.
+            if let Some(title) = mobile_inventory::title(id) {
+                session.title = title;
+                session.working_dir = lease.repo_root.clone();
+                if let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&lease.updated_at) {
+                    let updated_at = updated_at.with_timezone(&chrono::Utc);
+                    session.last_message_time = updated_at;
+                    session.last_active_at = Some(updated_at);
+                    session.needs_catchup =
+                        catchup_seen.needs_catchup(id, updated_at, &session.status);
+                }
+                session.search_index = build_search_index_from_summary(
+                    id,
+                    &session.short_name,
+                    &session.title,
+                    session.working_dir.as_deref(),
+                    session.save_label.as_deref(),
+                    &session.search_index,
+                );
+            }
             session.server_name = Some(format!("cloud: {host}"));
             session.server_icon = Some("☁".to_string());
             session
@@ -2779,7 +2862,8 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
     let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
         .map(|time| time.with_timezone(&chrono::Utc))
         .unwrap_or_default();
-    let title = format!("{short_name} (cloud session)");
+    let title =
+        mobile_inventory::title(id).unwrap_or_else(|| format!("{short_name} (cloud session)"));
     let search_index = build_search_index(
         id,
         &short_name,

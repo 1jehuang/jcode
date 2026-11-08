@@ -1384,6 +1384,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,

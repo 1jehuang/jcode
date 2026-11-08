@@ -95,6 +95,7 @@ fn session_menu_item_title_loads_persisted_todo_title() {
             id: "menubar-label".to_string(),
             group: Some("Meaningful menu labels".to_string()),
             lane_after: None,
+            lane_owner: None,
             confidence: Some(crate::todo::ConfidenceState::Plausible),
             completion_confidence: None,
             confidence_history: Vec::new(),

@@ -1854,6 +1854,19 @@ fn handle_server_event_inner(
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
             if session_changed {
+                // Drop the previous session's snapshot and polling deadlines.
+                // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
+                // A resume sends its authoritative todo snapshot before the
+                // large History frame. Keep that snapshot, never the old one.
+                if app
+                    .remote_todos_payload
+                    .as_ref()
+                    .is_some_and(|(id, _)| id != &session_id)
+                {
+                    app.remote_todos_payload = None;
+                }
+                app.remote_todos_requested_at = None;
+                app.pinned_todos_checked_at = None;
                 app.remote_available_service_tiers = None;
                 app.usage_reset.openai_quota_rejected = false;
             }
@@ -1930,6 +1943,9 @@ fn handle_server_event_inner(
                 app.swarm_plan_version = None;
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
+            }
+            if session_changed {
+                app.refresh_pinned_todos_now();
             }
             // Facts seeded from the last launch are only a first-frame guess.
             // When History reports a different model, drop them so the snapshot
@@ -2390,6 +2406,7 @@ fn handle_server_event_inner(
             true
         }
         ServerEvent::CompactedHistory {
+            id,
             session_id,
             messages,
             images,
@@ -2406,7 +2423,10 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            let restored_messages = messages
+            if !app.accept_recent_history_response(id) {
+                return false;
+            }
+            let mut restored_messages: Vec<_> = messages
                 .into_iter()
                 .map(|msg| DisplayMessage {
                     role: msg.role,
@@ -2417,6 +2437,12 @@ fn handle_server_event_inner(
                     tool_data: msg.tool_data,
                 })
                 .collect();
+            if !app.recent_history_page_contains_visible_tail(
+                &mut restored_messages,
+                compacted_visible,
+            ) {
+                return false;
+            }
             app.apply_compacted_history_window(
                 restored_messages,
                 images,
@@ -3195,10 +3221,15 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            app.push_display_message(DisplayMessage::swarm(
-                presentation.title.clone(),
-                presentation.message.clone(),
-            ));
+            let now = std::time::Instant::now();
+            let since_last = app
+                .swarm_last_message_at
+                .insert(sender.clone(), now)
+                .map(|prev| now.duration_since(prev).as_secs_f32());
+            let mut swarm_message =
+                DisplayMessage::swarm(presentation.title.clone(), presentation.message.clone());
+            swarm_message.duration_secs = since_last;
+            app.push_display_message(swarm_message);
             persist_replay_display_message(
                 app,
                 "swarm",

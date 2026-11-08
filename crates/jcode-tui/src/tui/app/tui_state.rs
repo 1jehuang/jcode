@@ -1079,6 +1079,10 @@ impl crate::tui::TuiState for App {
         self.mouse_scroll_queue != 0
     }
 
+    fn stream_reveal_pending(&self) -> bool {
+        !self.stream_buffer.is_empty()
+    }
+
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         // In remote mode, use tokens from server
         // Independent mode doesn't currently track total tokens

@@ -8,7 +8,7 @@
 mod ssh_sessions;
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -18,6 +18,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+
+fn subscribe_history_base(base: Option<HistoryBase>, ssh_remote: bool) -> Option<HistoryBase> {
+    if ssh_remote {
+        Some(HistoryBase::recent(128))
+    } else {
+        base
+    }
+}
 
 /// Debug events broadcast by local harnesses via debug socket.
 /// These expose the full internal state for debugging/comparison.
@@ -244,9 +252,9 @@ pub struct RemoteConnection {
     client_instance_id: Option<String>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
-    // Bootstrap Done acknowledgments are not completions of a detached turn.
-    // Retain recent ids because target Subscribe can acknowledge twice.
+    // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
+    request_timings: super::cloud_latency::RequestTimings,
     tool_diff: RemoteDiffTracker,
     /// Bytes pulled from the socket that have not yet been split into complete
     /// newline-delimited protocol lines. This buffer is persistent across
@@ -382,18 +390,29 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        let mut timing = super::cloud_latency::Span::new("connect");
+        timing.operation("socket_connect");
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
-        let stream = Stream::connect(server::socket_path()).await?;
+        let socket_path = server::socket_path();
+        let stream = Stream::connect(&socket_path).await?;
         let socket_connect_ms = socket_connect_start.elapsed().as_millis();
         let (reader, writer) = stream.into_split();
+        let quota_setup_start = Instant::now();
         // Quotas for headed clients belong to this daemon connection. Clear
         // previous/local snapshots before any startup account rows are drawn.
-        crate::usage::clear_remote_account_usage();
+        let usage_generation = crate::usage::clear_remote_account_usage();
         if !super::is_ssh_remote() {
-            crate::usage::hydrate_remote_account_usage(&server::socket_path());
+            Self::spawn_usage_hydration(move || {
+                crate::usage::hydrate_remote_account_usage_for_generation(
+                    &socket_path,
+                    usage_generation,
+                )
+            });
         }
 
+        let quota_setup_ms = quota_setup_start.elapsed().as_millis();
+        let connection_setup_start = Instant::now();
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
@@ -402,12 +421,11 @@ impl RemoteConnection {
             cloud_authority: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
-            // A reattached turn carries the old connection's request id on
-            // local sockets as well as SSH. Keep its Done distinct from this
-            // connection's Subscribe/GetHistory acknowledgments.
+            // Keep reattached turn Done distinct from bootstrap acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -418,13 +436,18 @@ impl RemoteConnection {
             call_output_tokens_seen: 0,
         };
 
+        let connection_setup_ms = connection_setup_start.elapsed().as_millis();
+        timing.operation("ssh_ready");
+        let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
         if super::is_ssh_remote() {
             conn.verify_ssh_ready(Duration::from_secs(35)).await?;
         }
 
+        let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
+        timing.operation("subscribe");
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
@@ -444,7 +467,7 @@ impl RemoteConnection {
             target_session_id: resume_target.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history: client_has_local_history && !super::is_ssh_remote(),
-            history_base: history_base.filter(|_| !super::is_ssh_remote()),
+            history_base: subscribe_history_base(history_base, super::is_ssh_remote()),
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: super::is_ssh_remote(),
@@ -461,6 +484,7 @@ impl RemoteConnection {
 
         // If resuming a session, the target-aware Subscribe attaches directly to
         // that session and returns History, so avoid a second bootstrap request.
+        timing.operation("bootstrap_request");
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
         if resume_target.is_none() {
@@ -491,8 +515,11 @@ impl RemoteConnection {
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 
         crate::logging::info(&format!(
-            "[TIMING] remote connect: socket={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
+            "[TIMING] remote connect: socket={}ms, quota_setup={}ms, connection_setup={}ms, ssh_ready={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
             socket_connect_ms,
+            quota_setup_ms,
+            connection_setup_ms,
+            ssh_ready_ms,
             subscribe_ms,
             bootstrap_request_ms,
             connect_start.elapsed().as_millis(),
@@ -500,7 +527,18 @@ impl RemoteConnection {
             bootstrap_request,
         ));
 
+        timing.operation("complete");
+        timing.finish("ok");
         Ok(conn)
+    }
+
+    /// Advisory disk snapshots must not delay Subscribe/History or block the
+    /// async runtime. The generation check in the importer gives live replies
+    /// and subsequent connections precedence over a late disk read.
+    fn spawn_usage_hydration(
+        hydrate: impl FnOnce() -> bool + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        super::cloud_latency::spawn_usage_hydration(hydrate)
     }
 
     fn interrupt_request_log_fields(
@@ -570,6 +608,7 @@ impl RemoteConnection {
             ));
         }
 
+        let mut timing = super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
         let writer_wait_start = Instant::now();
         let mut w = self.writer.lock().await;
@@ -595,7 +634,11 @@ impl RemoteConnection {
                 )),
             }
         }
+        if let Some(timing) = &mut timing {
+            timing.finish(if result.is_ok() { "ok" } else { "error" });
+        }
         result?;
+        self.request_timings.request_sent(&request);
         Ok(())
     }
 
@@ -854,11 +897,16 @@ impl RemoteConnection {
     }
 
     /// Request a wider compacted-history window for the active session.
-    pub async fn get_compacted_history(&mut self, visible_messages: usize) -> Result<u64> {
+    pub async fn get_compacted_history(
+        &mut self,
+        visible_messages: usize,
+        recent_history: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::GetCompactedHistory {
             id,
             visible_messages,
+            recent_history,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -1400,7 +1448,7 @@ impl RemoteConnection {
             }
             return LineOutcome::Skip;
         }
-        match serde_json::from_str(&text) {
+        match self.request_timings.parse_event(&text) {
             Ok(ServerEvent::Done { id })
                 if self
                     .control_done_ids
@@ -1468,6 +1516,7 @@ impl RemoteConnection {
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,

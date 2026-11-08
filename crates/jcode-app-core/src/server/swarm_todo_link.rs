@@ -414,6 +414,25 @@ pub(crate) async fn resync_plan_after_todo_save(
         return None;
     }
     let mut plans = swarm_plans.write().await;
+    // Worker-owned lanes are dispatched without a launch call, so the first
+    // save that has one seeds the lane plan that status views read.
+    let wants_plan = todos.iter().any(crate::todo::stages::lane_requests_worker);
+    if wants_plan
+        && plans
+            .get(&swarm_id)
+            .is_none_or(|plan| plan.items.is_empty())
+    {
+        let items = plan_items_from_todos(todos);
+        if !items.is_empty() {
+            let plan = plans
+                .entry(swarm_id.clone())
+                .or_insert_with(super::VersionedPlan::new);
+            plan.replace_items(items);
+            plan.participants.insert(session_id.to_string());
+            plan.version += 1;
+            return Some(swarm_id);
+        }
+    }
     let plan = plans.get_mut(&swarm_id)?;
     let items = resync_lane_plan(todos, &plan.items)?;
     plan.replace_items(items);

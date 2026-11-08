@@ -399,7 +399,7 @@ impl DeadMemberSalvage {
             ));
         }
         parts.push(
-            "Queued tasks will be picked up by assign_next/run_plan; check plan_status for details."
+            "Queued worker lanes start automatically as dependencies and capacity allow; check plan_status for details."
                 .to_string(),
         );
         parts.join(" ")
@@ -1172,6 +1172,7 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
+    crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",
         vec![

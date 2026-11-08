@@ -47,6 +47,7 @@ pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTrans
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
 mod jade_relay;
+mod lane_dispatch;
 mod lifecycle;
 mod live_status;
 mod live_turn;
@@ -1138,6 +1139,22 @@ impl Server {
             shutdown_signals: Arc::clone(&self.shutdown_signals),
             soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
         });
+        lane_dispatch::register_context(lane_dispatch::LaneDispatchContext {
+            provider: Arc::clone(&self.provider),
+            sessions: Arc::clone(&self.sessions),
+            global_session_id: Arc::clone(&self.session_id),
+            swarm_state: self.swarm_state.clone(),
+            channel_subscriptions: Arc::clone(&self.channel_subscriptions),
+            channel_subscriptions_by_session: Arc::clone(&self.channel_subscriptions_by_session),
+            event_history: Arc::clone(&self.event_history),
+            event_counter: Arc::clone(&self.event_counter),
+            swarm_event_tx: self.swarm_event_tx.clone(),
+            mcp_pool: Arc::clone(&self.mcp_pool),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            swarm_mutation_runtime: self.swarm_mutation_runtime.clone(),
+            client_connections: Arc::clone(&self.client_connections),
+        });
+        lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
@@ -2295,6 +2312,9 @@ impl Server {
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
+                    // Worker-owned lanes whose dependencies are met get a
+                    // worker automatically; no launch call is involved.
+                    self::lane_dispatch::on_todos_saved(&event.session_id, &event.todos);
                     // A coordinator's todo list is its lane plan: keep a
                     // running plan mirroring every save, so new or reshaped
                     // lanes are picked up without relaunching.

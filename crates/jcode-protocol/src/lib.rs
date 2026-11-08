@@ -90,6 +90,26 @@ pub struct HistoryBase {
     /// When it matches, History omits `images` and sets `images_unchanged`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images_fingerprint: Option<u64>,
+    /// Opt into a recent rendered-history window on a full bootstrap. Only
+    /// honored when `count` is zero, never combined with prefix validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_messages: Option<usize>,
+}
+
+/// Synthetic lazy-window marker used by remote transcript bootstraps.
+pub const RECENT_HISTORY_MARKER_PREFIX: &str = "Earlier remote history - ";
+
+impl HistoryBase {
+    /// Request a bounded initial view. Older servers ignore this hint and
+    /// return their ordinary full History payload.
+    pub fn recent(visible: usize) -> Self {
+        Self {
+            count: 0,
+            fingerprint: 0,
+            images_fingerprint: None,
+            recent_messages: Some(visible),
+        }
+    }
 }
 
 /// Stable fingerprint of a History image set (order, metadata and data).
@@ -195,6 +215,7 @@ impl HistoryFingerprinter {
             count: self.count,
             fingerprint: self.finish(),
             images_fingerprint: None,
+            recent_messages: None,
         }
     }
 }
@@ -898,6 +919,10 @@ impl Request {
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                // One-shot login clients report new credentials without a
+                // session. Subscribed connections still take the
+                // session-local path that also switches their model.
+                | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }

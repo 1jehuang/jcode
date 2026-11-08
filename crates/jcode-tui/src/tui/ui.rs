@@ -1225,6 +1225,16 @@ impl BodyCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // An entry that differs only by an older `messages_version` can never
+        // be an exact hit again, and the new entry is a better incremental
+        // base for the same layout. Keeping it only holds memory.
+        self.entries.retain(|entry| {
+            !(entry.key.messages_version < key.messages_version
+                && BodyCacheKey {
+                    messages_version: key.messages_version,
+                    ..entry.key.clone()
+                } == key)
+        });
         self.entries.push_front(BodyCacheEntry {
             key,
             prepared,
@@ -1391,6 +1401,12 @@ impl FullPrepCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // A frame keyed on partial streaming text can never be hit again once
+        // the stream advances: text only grows, and the turn ending bumps
+        // `messages_version`. Holding them just pins multi-MB snapshots of the
+        // whole transcript (measured: 4 entries, 13.6 MB on one client).
+        self.entries
+            .retain(|entry| entry.key.streaming_text_len == 0);
         self.entries.push_front(FullPrepCacheEntry {
             key,
             prepared,
@@ -2825,8 +2841,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Classic Kitty placements must follow all text writes. Unlike Unicode
     // placeholders they survive scrolling, so finalize even an image-free frame.
-    // This also drains deferred cache-eviction deletions when no image remains.
     crate::tui::mermaid::finish_terminal_image_frame(frame.buffer_mut());
+    crate::tui::cloud_latency::rendered();
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();

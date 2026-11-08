@@ -6,12 +6,33 @@ use std::path::PathBuf;
 pub(crate) enum CloudRuntimeCommand {
     /// Show the installed runtime, running daemon, and update policy.
     Status,
-    /// Upload an explicit Linux x86_64 runtime package and select dev policy.
-    /// Active daemons keep their executable until their next normal start.
+    /// Upload a Linux x86_64 runtime package and select dev policy.
+    /// Active daemons keep their executable until their next start, or until
+    /// `--reload` restarts the daemon once no session is mid-turn.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["artifact", "from_source"])))]
     Push {
         /// Compatible jcode-linux-x86_64.tar.gz package, not a laptop executable.
         #[arg(long)]
-        artifact: PathBuf,
+        artifact: Option<PathBuf>,
+        /// Build a portable Linux package from this jcode checkout first.
+        #[arg(long)]
+        from_source: bool,
+        /// After upload, restart the cloud daemon onto it once no session is mid-turn.
+        #[arg(long)]
+        reload: bool,
+        /// Seconds to wait for running turns before giving up (with --reload).
+        #[arg(long, default_value_t = 1800)]
+        wait_secs: u64,
+    },
+    /// Restart the cloud daemon onto the selected runtime once no session is
+    /// mid-turn. Sessions are saved and resume when clients reconnect.
+    Reload {
+        /// Restart immediately even if turns are running (they are interrupted).
+        #[arg(long)]
+        force: bool,
+        /// Seconds to wait for running turns before giving up.
+        #[arg(long, default_value_t = 1800)]
+        wait_secs: u64,
     },
     /// Return to automatic managed stable updates (may select an older release).
     Stable {
@@ -52,9 +73,42 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Some(Command::Cloud(CloudCommand::Runtime {
-                action: CloudRuntimeCommand::Push { artifact }
+                action: CloudRuntimeCommand::Push { artifact: Some(artifact), from_source: false, reload: false, .. }
             })) if artifact == std::path::Path::new("portable.tar.gz")
         ));
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "cloud",
+                "runtime",
+                "push",
+                "--artifact",
+                "a.tar.gz",
+                "--from-source"
+            ])
+            .is_err()
+        );
+        let parsed = Args::try_parse_from([
+            "jcode",
+            "cloud",
+            "runtime",
+            "push",
+            "--from-source",
+            "--reload",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Cloud(CloudCommand::Runtime {
+                action: CloudRuntimeCommand::Push {
+                    artifact: None,
+                    from_source: true,
+                    reload: true,
+                    wait_secs: 1800
+                }
+            }))
+        ));
+        assert!(Args::try_parse_from(["jcode", "cloud", "runtime", "reload", "--force"]).is_ok());
     }
 
     #[test]
