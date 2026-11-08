@@ -507,6 +507,9 @@ pub enum BusEvent {
     /// from the cached one, so the branch/dirty/commit chrome needs a repaint
     /// now rather than at the next unrelated redraw.
     GitInfoRefreshed,
+    /// A client reload candidate binary was published (inotify). Clients
+    /// re-exec onto it once idle so every session follows hot reloads.
+    ClientBinaryChanged,
     /// Productivity report finished generating off the UI thread
     ProductivityReportReady(ProductivityReportReady),
 }

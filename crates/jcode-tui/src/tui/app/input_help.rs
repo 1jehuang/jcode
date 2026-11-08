@@ -7,6 +7,9 @@ impl App {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
             }
+            "mobile" => {
+                "/mobile\nMove this session and its swarm to your managed Jcode Cloud host, then send a push notification. Tap it in the mobile app to open this session. If already on cloud, only the notification is sent.\n\nSign in to the same Jcode account in the CLI and app, and enable app notifications. Push failures do not undo a successful cloud move.\n\n/mobile cancel\nCancel a queued handoff. An already-running transfer cannot be cancelled here."
+            }
             "compact" => {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }
@@ -176,7 +179,7 @@ impl App {
                 "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
             }
             "usage" => {
-                "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
+                "/usage [provider]\nFetch and display usage limits for connected providers. Pass a provider (claude, openai, copilot, cursor, gemini, ...) to show a card for just that provider. This command only reports real connected-provider usage windows and reset times."
             }
             "subscription" => {
                 "/subscription\nCompatibility alias for /hosted status. Shows hosted-model usage, your monthly spending limit, billing status, and router configuration."

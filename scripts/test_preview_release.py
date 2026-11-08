@@ -348,7 +348,7 @@ class PreviewWorkflowTests(unittest.TestCase):
         self.assertNotIn("tags:", triggers)
         self.assertNotIn("workflow_run:", triggers)
         self.assertNotIn("release:", triggers)
-        self.assertIn("cancel-in-progress: true", workflow)
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
         self.assertIn("group: v1-preview-master", workflow)
         self.assertIn("vars.JCODE_V1_PREVIEW_ENABLED != 'false'", workflow)
         self.assertLess(workflow.index("run: sleep 900"), workflow.index("check_release_ci.py"))

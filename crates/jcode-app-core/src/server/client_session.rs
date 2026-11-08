@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use super::client_state::{handle_get_history, spawn_model_prefetch_update};
+use super::client_state::{handle_get_history, send_resume_todos, spawn_model_prefetch_update};
 use super::swarm::notify_owner_of_unrestored_idle_workers;
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
@@ -1495,6 +1495,7 @@ pub(super) async fn handle_resume_session(
 
         *client_session_id = session_id.clone();
 
+        send_resume_todos(&session_id, writer).await?;
         handle_get_history(
             id,
             &session_id,
@@ -1956,23 +1957,27 @@ pub(super) async fn handle_resume_session(
                 ));
             }
             let pre_history_ms = resume_start.elapsed().as_millis();
-            let history_result = handle_get_history(
-                id,
-                &session_id,
-                false,
-                agent,
-                provider,
-                sessions,
-                client_connections,
-                client_count,
-                writer,
-                server_name,
-                server_icon,
-                Some(was_interrupted),
-                supports_pdf_panels,
-                supports_turn_identity,
-                history_base,
-            )
+            let history_result = async {
+                send_resume_todos(&session_id, writer).await?;
+                handle_get_history(
+                    id,
+                    &session_id,
+                    false,
+                    agent,
+                    provider,
+                    sessions,
+                    client_connections,
+                    client_count,
+                    writer,
+                    server_name,
+                    server_icon,
+                    Some(was_interrupted),
+                    supports_pdf_panels,
+                    supports_turn_identity,
+                    history_base,
+                )
+                .await
+            }
             .await;
             // Persist even if history delivery failed, but do not make inbound
             // controls wait for a recovery turn that already owns the agent.

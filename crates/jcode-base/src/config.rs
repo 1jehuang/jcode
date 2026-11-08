@@ -10,9 +10,9 @@ pub use jcode_config_types::{
     GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
-    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeTimeMode,
+    SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode,
+    SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -125,6 +125,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",
     "JCODE_COMMIT_LOG_KEY",
     "JCODE_RESUME_PROJECT_SCOPE",
+    "JCODE_RESUME_TIME",
+    "JCODE_BROWSER_HANDOFF",
     "JCODE_SWARM_STALL_AFTER_SECS",
     "JCODE_SWARM_STALL_NUDGE",
     "JCODE_ACP_PROFILE",
@@ -719,6 +721,9 @@ pub struct Config {
     /// Power-management configuration (prevent sleep while streaming)
     pub power: PowerConfig,
 
+    /// `jcode companion`: per-login helper for desktop effects.
+    pub companion: CompanionConfig,
+
     /// macOS menu bar session indicator
     pub menubar: MenubarConfig,
 
@@ -770,6 +775,9 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+    /// Send mobile push notifications through the Jcode API when an account
+    /// key is available. `None` means enabled; set `false` to opt out.
+    pub mobile_push: Option<bool>,
 }
 
 /// Agent Client Protocol adapter configuration.
@@ -992,6 +1000,46 @@ fn normalize_tool_name(name: &str) -> String {
     jcode_tool_types::resolve_tool_name(trimmed).to_string()
 }
 
+/// `jcode companion` features. Each toggle is read when the companion starts,
+/// except `autostart`, which clients read when they launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CompanionConfig {
+    /// Start the companion in the background when a Jcode client launches
+    /// and none is running.
+    pub autostart: bool,
+    /// Copilot-key push-to-talk (Linux). Also needs `[dictation] global_devices`.
+    pub voice: bool,
+    /// Show a live waveform and transcript in the focused Jcode CLI while
+    /// companion push-to-talk records.
+    pub voice_waveform: bool,
+    /// Show desktop notifications for companion voice state.
+    pub voice_notifications: bool,
+    /// Open URLs and files for the server.
+    pub open: bool,
+    /// Open new terminal windows for the server.
+    pub spawn_terminal: bool,
+    /// Lid-close override while agents work (macOS/Windows).
+    pub lid: bool,
+    /// Hourly browser bridge auto-update.
+    pub browser_updates: bool,
+}
+
+impl Default for CompanionConfig {
+    fn default() -> Self {
+        Self {
+            autostart: true,
+            voice: true,
+            voice_waveform: true,
+            voice_notifications: true,
+            open: true,
+            spawn_terminal: true,
+            lid: true,
+            browser_updates: true,
+        }
+    }
+}
+
 /// External dictation / speech-to-text integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1016,6 +1064,9 @@ pub struct DictationConfig {
     /// (Linux evdev nodes, preferably stable `/dev/input/by-id/...` paths).
     /// Empty disables the companion's global voice listener.
     pub global_devices: Vec<std::path::PathBuf>,
+    /// Show live voice input (waveform and streaming transcript) inside the
+    /// input box. False puts it in the status line instead.
+    pub composer_preview: bool,
 }
 
 impl Default for DictationConfig {
@@ -1028,6 +1079,7 @@ impl Default for DictationConfig {
             vocabulary: Vec::new(),
             recorder: String::new(),
             global_devices: Vec::new(),
+            composer_preview: true,
         }
     }
 }

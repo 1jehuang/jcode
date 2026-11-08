@@ -212,6 +212,88 @@ fn event_mapper_maps_tool_lifecycle() {
 }
 
 #[test]
+fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    for id in ["a", "b"] {
+        mapper.map_event(ServerEvent::ToolStart {
+            id: id.to_string(),
+            name: "bash".to_string(),
+        });
+        assert!(
+            mapper
+                .map_event(ServerEvent::ToolInput {
+                    id: Some(id.to_string()),
+                    delta: "{\"command\":".to_string(),
+                })
+                .is_empty()
+        );
+    }
+    for (id, command) in [("a", "true"), ("b", "false")] {
+        let updates = mapper.map_event(ServerEvent::ToolInput {
+            id: Some(id.to_string()),
+            delta: format!("\"{command}\"}}"),
+        });
+        assert_eq!(
+            updates,
+            vec![json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "rawInput": {"command": command},
+            })]
+        );
+    }
+    for (id, command) in [("a", "true"), ("b", "false")] {
+        let updates = mapper.map_event(ServerEvent::ToolExec {
+            id: id.to_string(),
+            name: "bash".to_string(),
+        });
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["toolCallId"], id);
+        assert_eq!(updates[0]["status"], "in_progress");
+        assert_eq!(updates[0]["rawInput"], json!({"command": command}));
+    }
+}
+
+#[test]
+fn event_mapper_suppresses_incomplete_legacy_tool_input() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    assert!(
+        mapper
+            .map_event(ServerEvent::ToolInput {
+                id: None,
+                delta: "ignored without a tool".to_string(),
+            })
+            .is_empty()
+    );
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "legacy".to_string(),
+        name: "bash".to_string(),
+    });
+    for delta in ["", "{", "\"command\":"] {
+        assert!(
+            mapper
+                .map_event(ServerEvent::ToolInput {
+                    id: None,
+                    delta: delta.to_string(),
+                })
+                .is_empty()
+        );
+    }
+    let updates = mapper.map_event(ServerEvent::ToolInput {
+        id: None,
+        delta: "\"true\"}".to_string(),
+    });
+    assert_eq!(
+        updates,
+        vec![json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "legacy",
+            "rawInput": {"command": "true"},
+        })]
+    );
+}
+
+#[test]
 fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
     let params = json!({"mcpServers": [{"name": "fs"}]});
     assert!(validate_acp_mcp_servers(&params).is_ok());
@@ -473,4 +555,58 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
         state.context_limit(),
         crate::provider::DEFAULT_CONTEXT_LIMIT as u64
     );
+}
+
+#[test]
+fn acp_turn_outcome_maps_terminal_limits_and_refusals() {
+    use crate::protocol::TurnStopReason;
+    let limit = |raw: Option<&str>, msg: &str| ServerEvent::TurnStopped {
+        reason: TurnStopReason::LimitReached,
+        message: msg.to_string(),
+        provider_stop_reason: raw.map(str::to_string),
+    };
+    let mut o = TurnOutcome::default();
+    o.observe(&ServerEvent::Ack { id: 7 }, 7);
+    assert_eq!(o.stop_reason(false), "end_turn");
+    o.observe(&limit(Some("max_tokens"), "truncated"), 7);
+    assert_eq!(o.stop_reason(false), "max_tokens");
+    // A continued model request clears an intermediate limit.
+    o.observe(&ServerEvent::RetryRollback { attempt: 1, max: 3 }, 7);
+    assert_eq!(o.stop_reason(false), "end_turn");
+    o.observe(&limit(Some("max_turn_requests"), "limit"), 7);
+    assert_eq!(o.stop_reason(false), "max_turn_requests");
+
+    let mut o = TurnOutcome::default();
+    o.observe(&ServerEvent::Ack { id: 7 }, 7);
+    o.observe(
+        &ServerEvent::ProviderGuardrail {
+            stop_reason: Some("refusal".into()),
+            message: "blocked".into(),
+        },
+        7,
+    );
+    assert_eq!(o.stop_reason(false), "refusal");
+    // Cancellation wins over everything for the cancelled prompt.
+    assert_eq!(o.stop_reason(true), "cancelled");
+
+    // Non-refusal provider notices are not refusals.
+    let mut o = TurnOutcome::default();
+    o.observe(
+        &ServerEvent::ProviderGuardrail {
+            stop_reason: Some("end_turn".into()),
+            message: "empty".into(),
+        },
+        7,
+    );
+    assert_eq!(o.stop_reason(false), "end_turn");
+}
+
+#[test]
+fn acp_turn_outcome_ignores_stale_interrupt_before_ack() {
+    let mut o = TurnOutcome::default();
+    o.observe(&ServerEvent::Interrupted, 9);
+    o.observe(&ServerEvent::Ack { id: 9 }, 9);
+    assert_eq!(o.stop_reason(false), "end_turn");
+    o.observe(&ServerEvent::Interrupted, 9);
+    assert_eq!(o.stop_reason(false), "cancelled");
 }

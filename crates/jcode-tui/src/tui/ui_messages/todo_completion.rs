@@ -10,6 +10,14 @@ struct Snapshot {
     todos: Vec<crate::todo::TodoItem>,
     #[serde(default)]
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    plan: CompletionPlan,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct CompletionPlan {
+    #[serde(default)]
+    title: Option<String>,
 }
 
 pub(super) fn render(
@@ -49,7 +57,7 @@ fn render_with_gate_diagnostics(
     let width = width.max(1) as usize;
     let mut lines =
         render_finished_todo_summary(&snapshot.todos, "", width, Some("Todo completion"));
-    // Keep the age on the summary row itself so the report stays one line.
+    // Keep the age on the last lane row, below the optional plan heading.
     if let Some(completed_at) = snapshot.completed_at
         && let Some(last) = lines.last_mut()
     {
@@ -62,6 +70,21 @@ fn render_with_gate_diagnostics(
             Style::default().fg(todo_meta_color()),
         ));
         *last = super::super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width);
+    }
+    if let Some(title) = snapshot.plan.title {
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !title.is_empty() {
+            lines.insert(
+                0,
+                super::super::truncate_line_with_ellipsis_to_width(
+                    &Line::from(Span::styled(
+                        title,
+                        Style::default().fg(todo_group_color()).bold(),
+                    )),
+                    width,
+                ),
+            );
+        }
     }
     if show_gate_diagnostics {
         lines.extend(render_gate_categories(&snapshot.observations, width));
@@ -113,6 +136,39 @@ fn render_gate_categories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_completion_plan_title_precedes_lanes_and_age() {
+        let mut msg = DisplayMessage::system(serde_json::json!({
+            "todo_completion_version": 1,
+            "plan": {"title": "  Ship\n界 fix  "},
+            "todos": [
+                {"id":"a", "content":"Hidden", "status":"completed", "priority":"high", "group":"main"},
+                {"id":"b", "content":"Hidden", "status":"completed", "priority":"high", "group":"markdown"}
+            ],
+            "completed_at": chrono::Utc::now()
+        }).to_string());
+        msg.title = Some("Todo completion".into());
+        for width in 1..100 {
+            let lines = render_with_gate_diagnostics(&msg, width, false).unwrap();
+            assert_eq!(lines.len(), 3);
+            assert!(lines.iter().all(|line| line.width() <= width as usize));
+            if width >= 60 {
+                assert_eq!(lines[0].to_string(), "Ship 界 fix");
+                assert!(lines[1].to_string().starts_with("✓ main"));
+                assert!(!lines[1].to_string().contains("finished"));
+                assert!(lines[2].to_string().contains("finished"));
+            }
+        }
+        for title in [serde_json::Value::Null, serde_json::json!(" \n\t ")] {
+            msg.content = serde_json::json!({
+                "todo_completion_version": 1, "plan": {"title": title}
+            })
+            .to_string();
+            let lines = render_with_gate_diagnostics(&msg, 80, false).unwrap();
+            assert_eq!(lines.len(), 1);
+        }
+    }
 
     #[test]
     fn todo_completion_categories_are_unique_and_above_cards() {
