@@ -10,6 +10,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 const HELPER: &str = "/opt/jcode-cloud/runtime-update";
+/// Must match `jcode-app-core`'s managed live reload capability marker. A
+/// daemon binary containing it re-execs the managed selection on reload.
+const LIVE_RELOAD_MARKER: &str = "jcode-managed-cloud-live-reload-v1";
 const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// All remote arguments are fixed verbs, validated release tags, or hex digests.
@@ -33,6 +36,184 @@ fn remote_command(verb: &str, value: Option<&str>) -> Result<String> {
         command.push_str(value);
     }
     Ok(command)
+}
+
+/// Remote reload: wait until no session is streaming, then restart the
+/// managed service. `ExecStartPre` activates any pending runtime and
+/// `ExecStopPost` rolls back a runtime that fails to start. Only an integer
+/// and a fixed flag are interpolated.
+fn reload_command(wait_secs: u64, force: bool) -> String {
+    let force = if force { 1 } else { 0 };
+    let marker = LIVE_RELOAD_MARKER;
+    format!(
+        r#"set -u
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+say() {{ echo "[cloud reload] $*" >&2; }}
+streaming() {{
+  activity=$(/opt/jcode-cloud/jcode --no-update --no-selfdev menubar --json 2>/dev/null) || return 1
+  printf '%s' "$activity" | python3 -c 'import json,sys; n=json.load(sys.stdin).get("streaming"); sys.exit(1) if type(n) is not int or n < 0 else print(n)' 2>/dev/null
+}}
+deadline=$(( $(date +%s) + {wait_secs} ))
+last=""
+if [ {force} = 0 ]; then
+  while :; do
+    n=$(streaming) || {{ say "cannot verify cloud activity; not restarting"; exit 3; }}
+    [ "$n" = 0 ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then say "still $n session(s) mid-turn after {wait_secs}s; not restarting. Retry later or use --force."; exit 3; fi
+    [ "$n" != "$last" ] && say "waiting for $n session(s) to finish their turn"
+    last=$n; sleep 5
+  done
+fi
+before=$(readlink /opt/jcode-cloud/jcode)
+pending=0
+sudo -n /usr/local/sbin/jcode-cloud-runtime status 2>/dev/null | grep -q '"pending": {{' && pending=1
+# Live path: a daemon built with managed live reload re-execs the selected
+# runtime in place, so sessions, clients and in-flight turns survive the same
+# way a local self-dev reload does. Older daemons fall through to a restart.
+daemon=$(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' | head -n1)
+if [ -n "$daemon" ] && grep -qa {marker} "/proc/$daemon/exe" 2>/dev/null; then
+  live_ok=1
+  if [ "$pending" = 1 ]; then
+    sudo -n /usr/local/sbin/jcode-cloud-runtime activate-live >/dev/null || live_ok=0
+  fi
+  if [ "$live_ok" = 1 ]; then
+    target=$(readlink -f /opt/jcode-cloud/jcode)
+    say "live reloading daemon (sessions stay attached)"
+    JCODE_SOCKET="$XDG_RUNTIME_DIR/jcode.sock" /opt/jcode-cloud/jcode --no-update --no-selfdev server reload --force --json >/dev/null 2>&1 || live_ok=0
+    if [ "$live_ok" = 1 ] && [ "$(readlink /proc/$daemon/exe 2>/dev/null)" = "$target" ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
+      [ "$pending" = 1 ] && say "activated new runtime"
+      say "daemon ready: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+      exit 0
+    fi
+  fi
+  say "live reload did not land; falling back to a restart"
+  if [ "$pending" = 1 ]; then
+    sudo -n /usr/local/sbin/jcode-cloud-runtime rollback-live >/dev/null 2>&1 && say "rolled back the live-activated runtime"
+    pending=0
+  fi
+  before=$(readlink /opt/jcode-cloud/jcode)
+fi
+say "restarting cloud daemon"
+# A daemon may have handed itself off outside systemd on an earlier stop. If it
+# keeps the socket, the unit start fails and the new runtime is falsely rolled
+# back. Turns are idle here (or --force), so stop every daemon first.
+systemctl --user stop jcode-cloud.service 2>/dev/null
+for p in $(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)'); do say "stopping detached daemon pid $p"; kill -TERM "$p" 2>/dev/null; done
+for i in $(seq 1 20); do pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' >/dev/null || break; sleep 1; done
+pkill -KILL -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' 2>/dev/null
+rm -f "$XDG_RUNTIME_DIR/jcode.sock"
+systemctl --user reset-failed jcode-cloud.service 2>/dev/null
+systemctl --user start jcode-cloud.service || {{ say "start failed"; exit 1; }}
+for i in $(seq 1 60); do
+  pid=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
+  if [ "${{pid:-0}}" != 0 ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
+    sleep 3
+    pid2=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
+    if [ "$pid2" = "$pid" ]; then
+      after=$(readlink /opt/jcode-cloud/jcode)
+      if [ "$pending" = 1 ] && [ "$after" = "$before" ]; then
+        say "new runtime failed to start and was rolled back; daemon is on: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+        exit 1
+      fi
+      [ "$after" = "$before" ] || say "activated new runtime"
+      say "daemon ready: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+      exit 0
+    fi
+  fi
+  sleep 1
+done
+say "daemon did not become ready; see: journalctl --user -u jcode-cloud.service"
+sudo -n /usr/local/sbin/jcode-cloud-runtime status >&2 || true
+exit 1
+"#
+    )
+}
+
+fn run_remote(script: &str, input: Option<File>) -> Result<std::process::ExitStatus> {
+    let args = cloud_managed::ssh_args()?;
+    Command::new("ssh")
+        .args(args)
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])
+        .arg(cloud_managed::HOST)
+        .arg(script)
+        .stdin(input.map(Stdio::from).unwrap_or_else(Stdio::null))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("connect to the managed cloud host over SSH")
+}
+
+fn reload(wait_secs: u64, force: bool) -> Result<()> {
+    let status = run_remote(&reload_command(wait_secs, force), None)?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(3) => bail!("cloud reload deferred: turns were still running. Nothing was restarted."),
+        _ => bail!("cloud reload failed ({status})"),
+    }
+}
+
+/// Build a portable Linux x86_64 package from the jcode checkout containing
+/// the current directory.
+fn build_from_source() -> Result<std::path::PathBuf> {
+    let root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("run git")?;
+    if !root.status.success() {
+        bail!("--from-source must run inside a jcode checkout");
+    }
+    let root = std::path::PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let script = root.join("scripts/package_cloud_runtime.sh");
+    if !script.is_file() {
+        bail!("{} is not a jcode checkout", root.display());
+    }
+    let target = "x86_64-unknown-linux-gnu";
+    eprintln!(
+        "[cloud build] building portable Linux runtime in {}",
+        root.display()
+    );
+    let builder = if Command::new("justrust").arg("--version").output().is_ok() {
+        "justrust"
+    } else {
+        "cargo"
+    };
+    let status = Command::new(builder)
+        .current_dir(&root)
+        .args([
+            "zigbuild",
+            "--profile",
+            "selfdev",
+            "-p",
+            "jcode",
+            "--bin",
+            "jcode",
+            "--target",
+            &format!("{target}.2.17"),
+            "--features",
+            "linux-compat-vendored-openssl",
+        ])
+        .status()
+        .with_context(|| format!("run {builder} zigbuild"))?;
+    if !status.success() {
+        bail!("portable Linux build failed ({status})");
+    }
+    let binary = root
+        .join("target")
+        .join(target)
+        .join("selfdev")
+        .join("jcode");
+    let output = root.join("target/cloud-runtime/jcode-linux-x86_64.tar.gz");
+    eprintln!("[cloud build] packaging");
+    let status = Command::new(&script)
+        .arg(&binary)
+        .arg(&output)
+        .stdout(Stdio::null())
+        .status()
+        .context("run package_cloud_runtime.sh")?;
+    if !status.success() {
+        bail!("packaging the cloud runtime failed ({status})");
+    }
+    Ok(output)
 }
 
 fn valid_release_tag(value: &str) -> bool {
@@ -112,13 +293,32 @@ pub(crate) fn run_cli(action: CloudRuntimeCommand) -> Result<()> {
             };
             invoke("pin", Some(&version), None)
         }
-        CloudRuntimeCommand::Push { artifact } => {
+        CloudRuntimeCommand::Push {
+            artifact,
+            from_source,
+            reload: then_reload,
+            wait_secs,
+        } => {
+            let artifact = match (artifact, from_source) {
+                (Some(path), false) => path,
+                (None, true) => build_from_source()?,
+                _ => bail!("pass exactly one of --artifact or --from-source"),
+            };
             let (file, digest) = package(&artifact)?;
             eprintln!(
-                "Uploading explicit cloud runtime package ({digest}). This selects dev policy for the whole host. Active daemons are not restarted."
+                "[cloud push] uploading runtime package {digest}. This selects dev policy for the whole host."
             );
-            invoke("push", Some(&digest), Some(file))
+            invoke("push", Some(&digest), Some(file))?;
+            if then_reload {
+                reload(wait_secs, false)
+            } else {
+                eprintln!(
+                    "Active daemons are not restarted. Run `jcode cloud runtime reload` to switch."
+                );
+                Ok(())
+            }
         }
+        CloudRuntimeCommand::Reload { force, wait_secs } => reload(wait_secs, force),
     }
 }
 
@@ -162,6 +362,48 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!(" push {digest}"))
         );
+    }
+
+    #[test]
+    fn live_reload_marker_matches_daemon_capability() {
+        assert_eq!(LIVE_RELOAD_MARKER, crate::server::MANAGED_CLOUD_LIVE_RELOAD_MARKER);
+        let script = reload_command(0, false);
+        assert!(script.contains(&format!("grep -qa {LIVE_RELOAD_MARKER} ")));
+        assert!(script.contains("activate-live"));
+        assert!(script.contains("rollback-live"));
+    }
+
+    #[test]
+    fn runtime_reload_requires_a_verified_nonnegative_idle_count() {
+        // Execute only the idle gate. No test can reach service stop/start code.
+        let generated = reload_command(0, false);
+        let gate = generated.split("before=$(readlink").next().unwrap();
+        for (json, status, idle) in [
+            (r#"{"streaming":0}"#, 0, true),
+            (r#"{"streaming":2}"#, 0, false),
+            (r#"{"streaming":0}"#, 1, false),
+            ("", 0, false),
+            ("not json", 0, false),
+            ("{}", 0, false),
+            (r#"{"streaming":false}"#, 0, false),
+            (r#"{"streaming":-1}"#, 0, false),
+            (r#"{"streaming":"0"}"#, 0, false),
+        ] {
+            let mock = r#"sh -c 'printf %s "$MOCK_ACTIVITY"; exit $MOCK_STATUS' --"#;
+            let script = gate.replace("/opt/jcode-cloud/jcode", mock) + "printf verified_idle";
+            let result = Command::new("sh")
+                .args(["-c", &script])
+                .env("MOCK_ACTIVITY", json)
+                .env("MOCK_STATUS", status.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(result.status.success(), idle, "{json:?}, status={status}");
+            assert_eq!(result.stdout == b"verified_idle", idle);
+            if !idle {
+                assert_eq!(result.status.code(), Some(3));
+                assert!(String::from_utf8_lossy(&result.stderr).contains("not restarting"));
+            }
+        }
     }
 
     #[test]

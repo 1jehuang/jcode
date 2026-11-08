@@ -7,7 +7,11 @@ mod menubar;
 mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
-pub use {display::DisplayConfig, menubar::MenubarConfig, power::PowerConfig};
+pub use {
+    display::{DisplayConfig, ResumeTimeMode},
+    menubar::MenubarConfig,
+    power::PowerConfig,
+};
 pub mod keybindings;
 mod serde_lenient;
 pub use keybindings::{

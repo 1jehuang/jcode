@@ -1,4 +1,6 @@
 //! Bounded token evidence tied to validated decoded-text generations.
+use super::source::Source;
+use super::text_cache::Segments;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{
@@ -10,14 +12,36 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 4096;
 const MAX_PREFIX_PROBES: usize = 64;
+/// Larger match lists are not worth their memory: such tokens are common, and
+/// the full scan for them stops early on the first user-prompt hit anyway.
+const MAX_NARROW_SEGMENTS: usize = 2048;
+
+/// A token found in a transcript: its first-match fuzzy score and the
+/// strongest origin it appears in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Hit {
+    pub(crate) score: i64,
+    pub(crate) source: Source,
+}
+#[cfg(test)]
+pub(crate) fn hit(score: i64) -> Hit {
+    Hit {
+        score,
+        source: Source::Other,
+    }
+}
 
 struct Evidence {
-    outcome: Option<i64>,
+    outcome: Option<Hit>,
+    /// Literal mode only: every segment containing the token, when bounded.
+    /// A longer token can only occur in these, so typing `alph` -> `alpha`
+    /// rescans a few segments instead of the whole transcript.
+    segments: Option<Arc<[u32]>>,
     used: u64,
     bytes: usize,
 }
 struct Generation {
-    text: Weak<Vec<String>>,
+    text: Weak<Segments>,
     modes: [HashMap<String, Evidence>; 2],
 }
 // Include owned keys, values, and conservative hash-table bookkeeping. Text is
@@ -52,7 +76,7 @@ impl Cache {
             }
         }
     }
-    fn get(&mut self, text: &Arc<Vec<String>>, token: &str, fuzzy: bool) -> Option<Option<i64>> {
+    fn get(&mut self, text: &Arc<Segments>, token: &str, fuzzy: bool) -> Option<Option<Hit>> {
         if token.len() > MAX_TOKEN_BYTES {
             return None;
         }
@@ -79,6 +103,32 @@ impl Cache {
                     entry.used = self.clock;
                     return Some(None);
                 }
+            }
+        }
+        None
+    }
+    /// The segment list of the longest cached literal prefix of `token` that
+    /// matched. None means no narrowing is available.
+    fn narrowing(&mut self, text: &Arc<Segments>, token: &str) -> Option<Arc<[u32]>> {
+        let generation = self.generations.get_mut(&(Arc::as_ptr(text) as usize))?;
+        if !generation.text.ptr_eq(&Arc::downgrade(text)) {
+            return None;
+        }
+        let mode = &mut generation.modes[0];
+        let ends: Vec<usize> = token
+            .char_indices()
+            .skip(1)
+            .take(MAX_PREFIX_PROBES)
+            .map(|(end, _)| end)
+            .collect();
+        for end in ends.into_iter().rev() {
+            if let Some(entry) = mode.get_mut(&token[..end])
+                && entry.outcome.is_some()
+                && let Some(segments) = &entry.segments
+            {
+                self.clock = self.clock.wrapping_add(1);
+                entry.used = self.clock;
+                return Some(segments.clone());
             }
         }
         None
@@ -115,7 +165,17 @@ impl Cache {
             self.prune();
         }
     }
-    fn insert(&mut self, text: &Arc<Vec<String>>, token: &str, fuzzy: bool, outcome: Option<i64>) {
+    fn insert(&mut self, text: &Arc<Segments>, token: &str, fuzzy: bool, outcome: Option<Hit>) {
+        self.insert_narrowed(text, token, fuzzy, outcome, None);
+    }
+    fn insert_narrowed(
+        &mut self,
+        text: &Arc<Segments>,
+        token: &str,
+        fuzzy: bool,
+        outcome: Option<Hit>,
+        segments: Option<Arc<[u32]>>,
+    ) {
         if token.len() > MAX_TOKEN_BYTES {
             return;
         }
@@ -125,7 +185,9 @@ impl Cache {
         }
         self.insertions += 1;
         let token = token.to_owned();
-        let bytes = EVIDENCE_BYTES + token.capacity();
+        let bytes = EVIDENCE_BYTES
+            + token.capacity()
+            + segments.as_ref().map_or(0, |list| list.len() * 4 + 16);
         // Reserve generation overhead even for an existing generation: eviction
         // could remove its final entry before this insertion recreates it.
         let incoming_bytes = bytes + GENERATION_BYTES;
@@ -154,6 +216,7 @@ impl Cache {
             token,
             Evidence {
                 outcome,
+                segments,
                 used: self.clock,
                 bytes,
             },
@@ -175,7 +238,7 @@ pub(super) fn matches(
     tokens: &[String],
     cancel: &AtomicBool,
     fuzzy: bool,
-) -> Option<Vec<Option<i64>>> {
+) -> Option<Vec<Option<Hit>>> {
     matches_with_scores(
         path,
         tokens,
@@ -191,7 +254,7 @@ pub(super) fn matches_with_scores(
     cancel: &AtomicBool,
     fuzzy: bool,
     scores: &mut super::WordScores,
-) -> Option<Vec<Option<i64>>> {
+) -> Option<Vec<Option<Hit>>> {
     let text = super::text_cache::segments(path, cancel)?;
     resolve(
         cache(),
@@ -210,7 +273,7 @@ pub(super) fn matches_cached(
     tokens: &[String],
     cancel: &AtomicBool,
     fuzzy: bool,
-) -> Option<Vec<Option<i64>>> {
+) -> Option<Vec<Option<Hit>>> {
     matches_cached_with_scores(
         path,
         tokens,
@@ -228,7 +291,7 @@ pub(super) fn matches_cached_with_scores(
     cancel: &AtomicBool,
     fuzzy: bool,
     scores: &mut super::WordScores,
-) -> Option<Vec<Option<i64>>> {
+) -> Option<Vec<Option<Hit>>> {
     let text = super::text_cache::cached_segments(path, cancel)?;
     resolve(
         cache(),
@@ -242,12 +305,12 @@ pub(super) fn matches_cached_with_scores(
 
 fn resolve(
     cache: &Mutex<Cache>,
-    text: &Arc<Vec<String>>,
+    text: &Arc<Segments>,
     tokens: &[String],
     cancel: &AtomicBool,
     fuzzy: bool,
-    mut scan: impl FnMut(&[String], &str, &AtomicBool, bool) -> Option<Option<i64>>,
-) -> Option<Vec<Option<i64>>> {
+    mut scan: impl FnMut(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>,
+) -> Option<Vec<Option<Hit>>> {
     let mut outcomes = Vec::with_capacity(tokens.len());
     for token in tokens {
         if cancel.load(Ordering::Relaxed) {
@@ -255,9 +318,30 @@ fn resolve(
         }
         let cached =
             super::super::preview_result(cache.lock(), "token cache lock")?.get(text, token, fuzzy);
-        let outcome = match cached {
-            Some(outcome) => outcome,
-            None => {
+        let narrowing = if cached.is_none() && !fuzzy {
+            super::super::preview_result(cache.lock(), "token cache lock")?.narrowing(text, token)
+        } else {
+            None
+        };
+        let outcome = match (cached, narrowing) {
+            (Some(outcome), _) => outcome,
+            (None, Some(candidates)) => {
+                let (outcome, segments) =
+                    literal_in_segments(text, token, candidates.iter().copied(), cancel)?;
+                super::super::preview_result(cache.lock(), "token cache lock")?
+                    .insert_narrowed(text, token, false, outcome, segments);
+                outcome
+            }
+            (None, None) if !fuzzy && token.chars().count() <= 2 => {
+                // Short literal tokens are the prefixes of whatever is typed
+                // next. Record where they match so extensions scan only there.
+                let (outcome, segments) =
+                    literal_in_segments(text, token, 0..text.text.len() as u32, cancel)?;
+                super::super::preview_result(cache.lock(), "token cache lock")?
+                    .insert_narrowed(text, token, false, outcome, segments);
+                outcome
+            }
+            (None, None) => {
                 let outcome = scan(text, token, cancel, fuzzy)?;
                 // Publish each completed token independently, even if a later
                 // token cancels. Incomplete negatives never reach this point.
@@ -274,13 +358,52 @@ fn resolve(
         Some(outcomes)
     }
 }
+/// Literal match over the given segments, with the same semantics as the
+/// literal scanner (substring match, score 0, strongest origin), plus the
+/// list of matching segments when it is small enough to keep.
+fn literal_in_segments(
+    text: &Segments,
+    token: &str,
+    candidates: impl Iterator<Item = u32>,
+    cancel: &AtomicBool,
+) -> Option<(Option<Hit>, Option<Arc<[u32]>>)> {
+    let mut best: Option<Source> = None;
+    let mut found = Vec::new();
+    let mut bounded = true;
+    for (step, index) in candidates.enumerate() {
+        if step % 256 == 0 && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (Some(segment), Some(source)) = (
+            text.text.get(index as usize),
+            text.sources.get(index as usize),
+        ) else {
+            continue;
+        };
+        if segment.contains(token) {
+            best = super::source::stronger(best, Some(*source));
+            if bounded {
+                if found.len() < MAX_NARROW_SEGMENTS {
+                    found.push(index);
+                } else {
+                    bounded = false;
+                    found = Vec::new();
+                }
+            }
+        }
+    }
+    let outcome = best.map(|source| Hit { score: 0, source });
+    let segments = (bounded && outcome.is_some()).then(|| Arc::from(found));
+    Some((outcome, segments))
+}
+
 #[cfg(test)]
 fn scan_token(
-    text: &[String],
+    text: &Segments,
     token: &str,
     cancel: &AtomicBool,
     fuzzy: bool,
-) -> Option<Option<i64>> {
+) -> Option<Option<Hit>> {
     scan_token_with_scores(
         text,
         token,
@@ -290,32 +413,36 @@ fn scan_token(
     )
 }
 
+/// Matches the streaming scanner: the first matching segment sets the score,
+/// later literal occurrences can only raise the origin. Stops early once the
+/// token is seen in a user prompt, the strongest origin.
 fn scan_token_with_scores(
-    text: &[String],
+    text: &Segments,
     token: &str,
     cancel: &AtomicBool,
     fuzzy: bool,
     scores: &mut super::WordScores,
-) -> Option<Option<i64>> {
+) -> Option<Option<Hit>> {
     let tokens = [token.to_owned()];
-    let mut scan = super::Scan {
-        tokens: &tokens,
-        found: vec![false],
-        cancel,
-        fuzzy,
-        score: 0,
-        scores,
+    let mode = if fuzzy {
+        super::ScanMode::Fuzzy
+    } else {
+        super::ScanMode::Literal
     };
-    for segment in text {
+    let mut scan = super::Scan::new(&tokens, &[], cancel, mode, scores);
+    for (segment, source) in text.iter() {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let scanned = scan.normalized_text::<serde_json::Error>(segment);
-        // The visitor uses an error sentinel to stop JSON traversal after a hit.
-        if scan.complete() {
-            return Some(Some(scan.score));
+        if scan.sources[0] == Some(Source::User) {
+            break;
         }
-        if let Err(error) = scanned {
+        let scanned = scan.normalized_text::<serde_json::Error>(segment, source);
+        // The scanner signals completion with an error sentinel. Keep reading
+        // for a stronger origin, but stop on a genuine failure.
+        if let Err(error) = scanned
+            && !scan.all_found()
+        {
             if !cancel.load(Ordering::Relaxed) {
                 crate::logging::debug(&format!("Transcript token scan stopped: {error}"));
             }
@@ -325,7 +452,10 @@ fn scan_token_with_scores(
     if cancel.load(Ordering::Relaxed) {
         None
     } else {
-        Some(None)
+        Some(scan.sources[0].map(|source| Hit {
+            score: scan.score,
+            source,
+        }))
     }
 }
 
@@ -339,7 +469,7 @@ mod tests {
     #[test]
     fn long_queries_bound_prefix_probes_and_fall_back_safely() {
         let mut cache = Cache::default();
-        let text = Arc::new(Vec::new());
+        let text = Arc::new(Segments::default());
         cache.insert(&text, "x", false, None);
         assert_eq!(
             cache.get(&text, &"x".repeat(MAX_TOKEN_BYTES + 1), false),
@@ -354,7 +484,7 @@ mod tests {
     #[test]
     fn completed_tokens_and_backspacing_reuse_positive_and_negative_evidence() {
         let cache = Mutex::new(Cache::default());
-        let text = Arc::new(tokens(&["alpha beta"]));
+        let text = Arc::new(Segments::from(tokens(&["alpha beta"])));
         let cancel = AtomicBool::new(false);
         let mut calls = 0;
         for query in [
@@ -374,7 +504,7 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(result[0], Some(0));
+            assert_eq!(result[0], Some(hit(0)));
             assert_eq!(result[1], None);
         }
         assert_eq!(calls, 3);
@@ -387,7 +517,10 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let query = tokens(&["alpha"]);
         std::fs::write(&path, "\"alpha\"").unwrap();
-        assert_eq!(matches(&path, &query, &cancel, false), Some(vec![Some(0)]));
+        assert_eq!(
+            matches(&path, &query, &cancel, false),
+            Some(vec![Some(hit(0))])
+        );
         std::fs::write(&path, "\"replacement\"").unwrap();
         assert_eq!(matches(&path, &query, &cancel, false), Some(vec![None]));
         std::fs::remove_file(&path).unwrap();
@@ -396,19 +529,19 @@ mod tests {
 
     #[test]
     fn fuzzy_matches_single_scan_first_segment_scores_and_separate_mode() {
-        let text = Arc::new(tokens(&["alphabet betta", "alpha beta"]));
+        let text = Arc::new(Segments::from(tokens(&["alphabet betta", "alpha beta"])));
         let query = tokens(&["alpha", "beta", "unmatched", "alp"]);
         let cancel = AtomicBool::new(false);
-        let mut scan = super::super::Scan {
-            tokens: &query,
-            found: vec![false; query.len()],
-            cancel: &cancel,
-            fuzzy: true,
-            score: 0,
-            scores: &mut super::super::WordScores::default(),
-        };
-        for segment in text.iter() {
-            let _ = scan.normalized_text::<serde_json::Error>(segment);
+        let mut scores = super::super::WordScores::default();
+        let mut scan = super::super::Scan::new(
+            &query,
+            &[],
+            &cancel,
+            super::super::ScanMode::Fuzzy,
+            &mut scores,
+        );
+        for (segment, source) in text.iter() {
+            let _ = scan.normalized_text::<serde_json::Error>(segment, source);
         }
         let cache = Mutex::new(Cache::default());
         let result = resolve(&cache, &text, &query, &cancel, true, scan_token).unwrap();
@@ -418,20 +551,72 @@ mod tests {
             }),
             Some(result.clone())
         );
-        assert_eq!(result.iter().flatten().sum::<i64>(), scan.score);
+        assert_eq!(
+            result.iter().flatten().map(|hit| hit.score).sum::<i64>(),
+            scan.score
+        );
         assert_eq!(
             result.iter().map(Option::is_some).collect::<Vec<_>>(),
             scan.found
         );
         let literal = resolve(&cache, &text, &query, &cancel, false, scan_token).unwrap();
-        assert!(literal.iter().flatten().all(|score| *score == 0));
-        assert!(result[0].unwrap() > 0);
+        assert!(literal.iter().flatten().all(|hit| hit.score == 0));
+        assert!(result[0].unwrap().score > 0);
+    }
+
+    #[test]
+    fn literal_extensions_scan_only_segments_matching_their_prefix() {
+        let cache = Mutex::new(Cache::default());
+        let text = Arc::new(Segments {
+            text: tokens(&["alpine", "nothing", "alpha tool", "beta", "alpha prompt"]),
+            sources: vec![
+                Source::Other,
+                Source::User,
+                Source::ToolOutput,
+                Source::User,
+                Source::User,
+            ],
+        });
+        let cancel = AtomicBool::new(false);
+        let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
+            panic!("extension must reuse its prefix's segments")
+        };
+        let resolve_one =
+            |token: &str,
+             scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
+                resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
+            };
+        let user = Some(Hit {
+            score: 0,
+            source: Source::User,
+        });
+        assert_eq!(resolve_one("al", &never), user);
+        assert_eq!(resolve_one("alp", &never), user);
+        assert_eq!(resolve_one("alpha", &never), user);
+        assert_eq!(
+            resolve_one("alpine", &never),
+            Some(Hit {
+                score: 0,
+                source: Source::Other
+            })
+        );
+        assert_eq!(resolve_one("alphax", &never), None);
+        // Narrowed evidence agrees with a full scan.
+        for token in ["alp", "alpha", "alpine", "alphax", "alpha tool"] {
+            assert_eq!(
+                scan_token(&text, token, &cancel, false).unwrap(),
+                resolve_one(token, &never),
+                "{token}"
+            );
+        }
+        let narrowed = cache.lock().unwrap().narrowing(&text, "alphaz").unwrap();
+        assert_eq!(&*narrowed, &[2, 4]);
     }
 
     #[test]
     fn cancellation_keeps_completed_work_not_incomplete_negatives() {
         let cache = Mutex::new(Cache::default());
-        let text = Arc::new(tokens(&["alpha"]));
+        let text = Arc::new(Segments::from(tokens(&["alpha"])));
         let cancel = AtomicBool::new(false);
         let query = tokens(&["alpha", "absent", "missing"]);
         assert!(
@@ -452,7 +637,7 @@ mod tests {
             .is_none()
         );
         let mut guard = cache.lock().unwrap();
-        assert_eq!(guard.get(&text, "alpha", false), Some(Some(0)));
+        assert_eq!(guard.get(&text, "alpha", false), Some(Some(hit(0))));
         assert_eq!(guard.get(&text, "absent", false), Some(None));
         assert_eq!(guard.get(&text, "missing", false), None);
         drop(guard);
@@ -460,7 +645,7 @@ mod tests {
         cancel.store(false, Ordering::Relaxed);
         assert_eq!(
             resolve(&cache, &text, &query, &cancel, false, scan_token),
-            Some(vec![Some(0), None, None])
+            Some(vec![Some(hit(0)), None, None])
         );
     }
 
@@ -477,7 +662,7 @@ mod tests {
             None
         );
         assert!(super::super::text_cache::cached_segments(&path, &cancel).is_none());
-        let expected = Some(vec![Some(0), None]);
+        let expected = Some(vec![Some(hit(0)), None]);
         assert_eq!(
             matches_with_scores(&path, &query, &cancel, false, &mut scores),
             expected
@@ -513,9 +698,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
+            let segments = Segments::from(text.clone());
             let expected = query
                 .iter()
-                .map(|token| scan_token(&text, token, &cancel, true).unwrap())
+                .map(|token| scan_token(&segments, token, &cancel, true).unwrap())
                 .collect::<Vec<_>>();
             let path = dir.path().join(format!("{index}.json"));
             std::fs::write(&path, serde_json::to_vec(&text).unwrap()).unwrap();
@@ -533,7 +719,7 @@ mod tests {
     #[test]
     fn literal_negative_extensions_skip_scans_but_not_backspacing_or_fuzzy() {
         let cache = Mutex::new(Cache::default());
-        let text = Arc::new(tokens(&["alphabet"]));
+        let text = Arc::new(Segments::from(tokens(&["alphabet"])));
         let cancel = AtomicBool::new(false);
         assert_eq!(
             resolve(&cache, &text, &tokens(&["zz"]), &cancel, false, scan_token),
@@ -567,14 +753,16 @@ mod tests {
                 Some(vec![None])
             );
         }
-        assert_eq!(calls, 2);
+        // Short literal tokens resolve through the segment-recording scan, so
+        // only the fuzzy lookup reaches the injected scanner.
+        assert_eq!(calls, 1);
         let mut guard = cache.lock().unwrap();
-        guard.insert(&text, "alpha", false, Some(0));
+        guard.insert(&text, "alpha", false, Some(hit(0)));
         assert_eq!(guard.get(&text, "alphabeta", false), None);
         guard.insert(&text, "missing", true, None);
         assert_eq!(guard.get(&text, "missinglonger", true), None);
         assert_eq!(guard.get(&text, "missinglonger", false), None);
-        let other = Arc::new(tokens(&["zzmore"]));
+        let other = Arc::new(Segments::from(tokens(&["zzmore"])));
         assert_eq!(guard.get(&other, "zzmore", false), None);
         guard.insert(&text, "界", false, None);
         assert_eq!(guard.get(&text, "界面", false), Some(None));
@@ -584,21 +772,21 @@ mod tests {
     #[test]
     fn warm_lookups_do_not_prune_unrelated_generations() {
         let mut cache = Cache::default();
-        let stale = Arc::new(tokens(&["stale"]));
+        let stale = Arc::new(Segments::from(tokens(&["stale"])));
         let stale_key = Arc::as_ptr(&stale) as usize;
-        cache.insert(&stale, "old", false, Some(0));
+        cache.insert(&stale, "old", false, Some(hit(0)));
         drop(stale);
-        let live = Arc::new(tokens(&["live"]));
-        cache.insert(&live, "hit", false, Some(0));
+        let live = Arc::new(Segments::from(tokens(&["live"])));
+        cache.insert(&live, "hit", false, Some(hit(0)));
         let insertions = cache.insertions;
         for _ in 0..PRUNE_EVERY * 2 {
-            assert_eq!(cache.get(&live, "hit", false), Some(Some(0)));
+            assert_eq!(cache.get(&live, "hit", false), Some(Some(hit(0))));
             assert_eq!(cache.get(&live, "unknown", true), None);
         }
         assert_eq!(cache.insertions, insertions);
         assert!(cache.generations.contains_key(&stale_key));
         for i in 0..PRUNE_EVERY {
-            cache.insert(&live, &format!("new-{i}"), false, Some(0));
+            cache.insert(&live, &format!("new-{i}"), false, Some(hit(0)));
         }
         assert!(!cache.generations.contains_key(&stale_key));
         assert_eq!(cache.entries, PRUNE_EVERY + 1);
@@ -607,30 +795,30 @@ mod tests {
     #[test]
     fn generation_maps_and_batch_lru_keep_recent_hits_at_full_capacity() {
         let mut cache = Cache::default();
-        let texts: Vec<_> = (0..256).map(|_| Arc::new(Vec::new())).collect();
+        let texts: Vec<_> = (0..256).map(|_| Arc::new(Segments::default())).collect();
         for text in &texts {
             for token in 0..16 {
-                cache.insert(text, &format!("token-{token}!"), false, Some(0));
+                cache.insert(text, &format!("token-{token}!"), false, Some(hit(0)));
             }
         }
         assert_eq!(cache.entries, MAX_ENTRIES);
         assert_eq!(cache.generations.len(), 256);
-        assert_eq!(cache.get(&texts[0], "token-0!", false), Some(Some(0)));
+        assert_eq!(cache.get(&texts[0], "token-0!", false), Some(Some(hit(0))));
         assert_eq!(cache.get(&texts[0], "token-0!", true), None);
-        cache.insert(&texts[255], "new", false, Some(0));
+        cache.insert(&texts[255], "new", false, Some(hit(0)));
         assert!(cache.entries <= MAX_ENTRIES * 7 / 8);
-        assert_eq!(cache.get(&texts[0], "token-0!", false), Some(Some(0)));
+        assert_eq!(cache.get(&texts[0], "token-0!", false), Some(Some(hit(0))));
         assert_eq!(cache.get(&texts[0], "token-1!", false), None);
-        assert_eq!(cache.get(&texts[255], "new", false), Some(Some(0)));
+        assert_eq!(cache.get(&texts[255], "new", false), Some(Some(hit(0))));
         assert!(cache.bytes <= MAX_BYTES);
     }
 
     #[test]
     fn weak_generations_lru_entry_and_key_byte_limits() {
         let mut cache = Cache::default();
-        let text = Arc::new(Vec::new());
+        let text = Arc::new(Segments::default());
         cache.insert(&text, "old", false, None);
-        let distinct_generation = Arc::new(Vec::new());
+        let distinct_generation = Arc::new(Segments::default());
         assert_eq!(cache.get(&distinct_generation, "old", false), None);
         let weak = Arc::downgrade(&text);
         drop(text);
@@ -638,12 +826,12 @@ mod tests {
         cache.prune();
         assert_eq!(cache.entries, 0);
         assert!(cache.generations.is_empty());
-        let text = Arc::new(Vec::new());
+        let text = Arc::new(Segments::default());
         for i in 0..MAX_ENTRIES {
             cache.insert(&text, &format!("{i}!"), false, None);
         }
         assert_eq!(cache.get(&text, "0!", false), Some(None));
-        cache.insert(&text, "new", false, Some(0));
+        cache.insert(&text, "new", false, Some(hit(0)));
         assert_eq!(cache.get(&text, "1!", false), None);
         assert_eq!(cache.get(&text, "0!", false), Some(None));
         for i in 0..MAX_ENTRIES {

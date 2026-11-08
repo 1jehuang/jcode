@@ -100,8 +100,9 @@ pub struct DisplayConfig {
     #[serde(default = "default_true")]
     pub keybinding_hints: bool,
     /// Color theme: "auto" (detect terminal background), "dark", or "light".
-    /// Auto queries the terminal's background color (OSC 11) at startup and
-    /// adapts jcode's palette for light backgrounds. Default: auto.
+    /// Auto queries the terminal's background color (OSC 11) at startup,
+    /// periodically during the session, and on focus. Adapts jcode's palette
+    /// when the terminal switches light/dark mode. Default: auto.
     #[serde(default)]
     pub theme: String,
     /// Per-role color overrides, e.g. `user = "#8ab4f8"`. Any TUI color can be
@@ -131,8 +132,42 @@ pub struct DisplayConfig {
     /// within this many seconds in Resume (default: 30). Zero disables it.
     /// This uses socket-disconnect events, never transcript/message activity.
     pub resume_recent_close_seconds: u64,
+    /// Which timestamp Resume shows as "x ago" and sorts by
+    /// (message/activity/opened/created, default: message).
+    #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub resume_time: ResumeTimeMode,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+}
+
+/// Timestamp used for Resume's "x ago" label and recency ordering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResumeTimeMode {
+    /// Newest conversation message of any role: prompts, replies, tool
+    /// results (default). Opening a session without working does not count.
+    #[default]
+    #[serde(alias = "messages", alias = "last_message")]
+    Message,
+    /// Newest of the last message and the last open/resume.
+    Activity,
+    /// Last time the session was opened, resumed, or attached.
+    #[serde(alias = "active", alias = "resumed")]
+    Opened,
+    /// When the session was created.
+    Created,
+}
+
+impl ResumeTimeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "message" | "messages" | "last_message" => Some(Self::Message),
+            "activity" => Some(Self::Activity),
+            "opened" | "active" | "resumed" => Some(Self::Opened),
+            "created" => Some(Self::Created),
+            _ => None,
+        }
+    }
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -174,6 +209,7 @@ impl Default for DisplayConfig {
             external_sessions: true,
             resume_project_scope: false,
             resume_recent_close_seconds: 30,
+            resume_time: ResumeTimeMode::default(),
             usage_display: "left".to_string(),
         }
     }
@@ -245,6 +281,27 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
             assert_eq!(roundtrip.show_link_urls, value);
         }
+    }
+
+    #[test]
+    fn resume_time_defaults_to_message_and_parses_modes() {
+        use super::ResumeTimeMode;
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.resume_time, ResumeTimeMode::Message);
+        for (raw, mode) in [
+            ("message", ResumeTimeMode::Message),
+            ("activity", ResumeTimeMode::Activity),
+            ("opened", ResumeTimeMode::Opened),
+            ("created", ResumeTimeMode::Created),
+        ] {
+            let config: DisplayConfig =
+                serde_json::from_value(serde_json::json!({ "resume_time": raw })).unwrap();
+            assert_eq!(config.resume_time, mode);
+            assert_eq!(ResumeTimeMode::parse(raw), Some(mode));
+        }
+        let bogus: DisplayConfig =
+            serde_json::from_value(serde_json::json!({ "resume_time": "bogus" })).unwrap();
+        assert_eq!(bogus.resume_time, ResumeTimeMode::Message);
     }
 
     #[test]

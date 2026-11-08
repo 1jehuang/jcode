@@ -282,9 +282,8 @@ fn inventory_lines(
                 Style::default().fg(dim_color()),
             ));
         }
-        if let Some(banked) =
-            header_account_banked_resets(usage_provider, &account.label)
-                .and_then(|banked| banked_resets_span(&banked))
+        if let Some(banked) = header_account_banked_resets(usage_provider, &account.label)
+            .and_then(|banked| banked_resets_span(&banked))
         {
             row.spans
                 .push(Span::styled(" · ", Style::default().fg(dim_color())));
@@ -418,7 +417,8 @@ fn header_account_banked_resets(
 
 /// Warmer colors mean less time to spend a reset. Unknown expiry stays blue.
 fn banked_expiry_color(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Color {
-    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else {
+    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    else {
         return Color::Rgb(120, 190, 255);
     };
     let remaining = expiry.signed_duration_since(now);

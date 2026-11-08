@@ -45,6 +45,8 @@ pub struct SessionSpawnContext {
     /// hooks so the new window lands in the client's terminal instead of the
     /// server's stale startup env (#405).
     pub client_terminal_env: Vec<(String, String)>,
+    /// Explicit non-secret runtime variables for the child process.
+    pub runtime_env: Vec<(String, String)>,
 }
 
 impl SessionSpawnContext {
@@ -52,6 +54,7 @@ impl SessionSpawnContext {
         Self {
             kind: Some(kind.into()),
             extra_env: Vec::new(),
+            runtime_env: Vec::new(),
             client_terminal_env: Vec::new(),
         }
     }
@@ -67,6 +70,41 @@ impl SessionSpawnContext {
         self
     }
 
+    /// Attach the explicit runtime env sent only to the spawned jcode child.
+    pub fn with_runtime_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.runtime_env = env;
+        self
+    }
+
+    /// Capture effective local runtime values, not just inherited overrides.
+    /// The connected socket takes precedence over any stale `JCODE_SOCKET`.
+    pub fn with_local_runtime(mut self, connected_socket: &std::path::Path) -> Self {
+        let mut env = Vec::new();
+        if let Ok(home) = crate::storage::jcode_dir() {
+            env.push((
+                "JCODE_HOME".to_string(),
+                home.to_string_lossy().into_owned(),
+            ));
+        }
+        env.extend([
+            (
+                "JCODE_RUNTIME_DIR".to_string(),
+                crate::storage::runtime_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "JCODE_SOCKET".to_string(),
+                connected_socket.to_string_lossy().into_owned(),
+            ),
+        ]);
+        for key in ["JCODE_API_SOCKET", "JCODE_NO_AUTO_UPDATE"] {
+            if let Ok(value) = std::env::var(key) {
+                env.push((key.to_string(), value));
+            }
+        }
+        self.runtime_env = env;
+        self
+    }
+
     fn apply(
         &self,
         mut command: crate::terminal_launch::TerminalCommand,
@@ -79,11 +117,210 @@ impl SessionSpawnContext {
         for (key, value) in &self.extra_env {
             command = command.spawn_env(key.clone(), value.clone());
         }
+        if !self.runtime_env.is_empty() {
+            command = command.runtime_env(self.runtime_env.clone());
+        }
         if !self.client_terminal_env.is_empty() {
             command = command.client_terminal_env(self.client_terminal_env.clone());
         }
         command
     }
+}
+
+#[cfg(test)]
+mod runtime_context_tests {
+    use super::*;
+
+    #[test]
+    fn app_core_runtime_allowlist_facade_is_portable() {
+        let _: &'static [&'static str] = crate::terminal_launch::RUNTIME_ENV_VARS;
+        assert!(crate::terminal_launch::RUNTIME_ENV_VARS.contains(&"JCODE_SOCKET"));
+    }
+
+    fn value<'a>(context: &'a SessionSpawnContext, key: &str) -> Option<&'a str> {
+        context
+            .runtime_env
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn run_isolated_context_case(mode: &str) -> std::process::Output {
+        let parent_home =
+            std::path::PathBuf::from(std::env::var_os("HOME").expect("isolated HOME"));
+
+        let root = parent_home.join(format!(
+            "jcode-runtime-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create isolated runtime context directory");
+        let home = root.join("home with spaces/it's 🧪");
+        let runtime_dir = root.join("runtime dir/it's 🧪");
+        let xdg_runtime_dir = root.join("xdg runtime/it's 🧪");
+        let jcode_home = root.join("jcode home/it's 🧪");
+        let api_socket = root.join("api socket.sock");
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "session_launch::runtime_context_tests::runtime_context_child",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("HOME", &home)
+            .env(
+                "XDG_RUNTIME_DIR",
+                if mode == "custom" {
+                    root.join("unused runtime/it's 🧪")
+                } else {
+                    xdg_runtime_dir.clone()
+                },
+            )
+            .env("JCODE_SOCKET", root.join("stale socket.sock"))
+            .env("JCODE_CONTEXT_TEST_MODE", mode)
+            .env("JCODE_CONTEXT_TEST_HOME", &home)
+            .env("JCODE_CONTEXT_TEST_RUNTIME", &runtime_dir)
+            .env("JCODE_CONTEXT_TEST_JCODE_HOME", &jcode_home)
+            .env("JCODE_CONTEXT_TEST_XDG_RUNTIME", &xdg_runtime_dir)
+            .env("JCODE_CONTEXT_TEST_API_SOCKET", &api_socket);
+        if mode == "custom" {
+            command
+                .env("JCODE_HOME", &jcode_home)
+                .env("JCODE_RUNTIME_DIR", &runtime_dir);
+        } else {
+            command
+                .env("JCODE_API_SOCKET", &api_socket)
+                .env("JCODE_NO_AUTO_UPDATE", "1");
+        }
+        let output = command.output().expect("run isolated context case");
+        std::fs::remove_dir_all(&root).expect("remove isolated runtime context directory");
+        output
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_runtime_context_captures_custom_paths_and_connected_socket() {
+        let output = run_isolated_context_case("custom");
+        assert!(
+            output.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_runtime_context_uses_effective_default_home_and_optional_values() {
+        let output = run_isolated_context_case("default");
+        assert!(
+            output.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_context_child() {
+        let Ok(mode) = std::env::var("JCODE_CONTEXT_TEST_MODE") else {
+            return;
+        };
+        let home = std::env::var("JCODE_CONTEXT_TEST_HOME").expect("isolated test home");
+        let jcode_home =
+            std::env::var("JCODE_CONTEXT_TEST_JCODE_HOME").expect("isolated jcode home");
+        let runtime_dir =
+            std::env::var("JCODE_CONTEXT_TEST_RUNTIME").expect("isolated runtime dir");
+        let xdg_runtime_dir =
+            std::env::var("JCODE_CONTEXT_TEST_XDG_RUNTIME").expect("isolated XDG runtime dir");
+        let api_socket =
+            std::env::var("JCODE_CONTEXT_TEST_API_SOCKET").expect("isolated API socket");
+        let socket = std::path::Path::new(&home).join("connected socket/it's 🧪.sock");
+        let context = SessionSpawnContext::default().with_local_runtime(&socket);
+        if mode == "custom" {
+            assert_eq!(value(&context, "JCODE_HOME"), Some(jcode_home.as_str()));
+            assert_eq!(
+                value(&context, "JCODE_RUNTIME_DIR"),
+                Some(runtime_dir.as_str())
+            );
+
+            assert_eq!(value(&context, "JCODE_API_SOCKET"), None);
+            assert_eq!(value(&context, "JCODE_NO_AUTO_UPDATE"), None);
+        } else {
+            let expected_home = std::path::Path::new(&home).join(".jcode");
+            assert_eq!(
+                value(&context, "JCODE_HOME"),
+                Some(expected_home.to_str().unwrap())
+            );
+            assert_eq!(
+                value(&context, "JCODE_RUNTIME_DIR"),
+                Some(xdg_runtime_dir.as_str())
+            );
+            assert_eq!(
+                value(&context, "JCODE_API_SOCKET"),
+                Some(api_socket.as_str())
+            );
+            assert_eq!(value(&context, "JCODE_NO_AUTO_UPDATE"), Some("1"));
+        }
+        assert_eq!(
+            value(&context, "JCODE_SOCKET"),
+            Some(socket.to_str().unwrap())
+        );
+        let socket_value = socket.to_string_lossy().into_owned();
+        for session_id in ["ses active child", "ses completed child"] {
+            let args = resume_args(session_id, None, &context);
+            assert_eq!(
+                args,
+                vec![
+                    "--fresh-spawn".to_string(),
+                    "--socket".to_string(),
+                    socket_value.clone(),
+                    "--resume".to_string(),
+                    session_id.to_string(),
+                ]
+            );
+            let command = context.apply(
+                crate::terminal_launch::TerminalCommand::new(
+                    "/usr/local/bin/jcode",
+                    resume_args(session_id, None, &context),
+                )
+                .fresh_spawn(),
+                "resume",
+                session_id,
+            );
+            assert_eq!(command.session_id.as_deref(), Some(session_id));
+            assert_eq!(command.args, args);
+            assert_eq!(command.runtime_env, context.runtime_env);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn resume_args(
+    session_id: &str,
+    provider_key: Option<&str>,
+    context: &SessionSpawnContext,
+) -> Vec<String> {
+    let mut args = vec!["--fresh-spawn".to_string()];
+    if let Some(provider_arg) = resume_provider_arg(provider_key) {
+        args.push("--provider".to_string());
+        args.push(provider_arg.to_string());
+    }
+    if let Some((_, socket)) = context
+        .runtime_env
+        .iter()
+        .find(|(key, _)| key == "JCODE_SOCKET")
+    {
+        args.extend(["--socket".to_string(), socket.clone()]);
+    }
+    args.extend(["--resume".to_string(), session_id.to_string()]);
+    args
 }
 
 /// Compute the window/terminal title used when (re)launching a session.
@@ -247,12 +484,7 @@ pub fn spawn_resume_in_new_terminal_with_context(
     context: &SessionSpawnContext,
 ) -> Result<bool> {
     let title = resumed_window_title(session_id);
-    let mut args = vec!["--fresh-spawn".to_string()];
-    if let Some(provider_arg) = resume_provider_arg(provider_key) {
-        args.push("--provider".to_string());
-        args.push(provider_arg.to_string());
-    }
-    args.extend(["--resume".to_string(), session_id.to_string()]);
+    let args = resume_args(session_id, provider_key, context);
     let command = crate::terminal_launch::TerminalCommand::new(exe, args)
         .title(title)
         .fresh_spawn();
@@ -474,6 +706,7 @@ pub fn spawn_resume_in_new_terminal_with_context(
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
+                crate::terminal_launch::apply_runtime_env(&mut cmd, &context.runtime_env);
                 crate::platform::spawn_detached(&mut cmd)
             }
             "wt" | "windows-terminal" => {
@@ -488,6 +721,7 @@ pub fn spawn_resume_in_new_terminal_with_context(
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
+                crate::terminal_launch::apply_runtime_env(&mut cmd, &context.runtime_env);
                 crate::platform::spawn_detached(&mut cmd)
             }
             "alacritty" => {
@@ -502,6 +736,7 @@ pub fn spawn_resume_in_new_terminal_with_context(
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
+                crate::terminal_launch::apply_runtime_env(&mut cmd, &context.runtime_env);
                 crate::platform::spawn_detached(&mut cmd)
             }
             _ => continue,

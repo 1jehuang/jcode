@@ -23,6 +23,10 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+mod timing;
+#[cfg(test)]
+mod timing_tests;
+
 /// Production control plane.
 pub const DEFAULT_API_BASE: &str = "https://api.jcode.sh/v1";
 /// How long [`CloudClient::wait_for_host`] waits for a host to provision.
@@ -287,11 +291,13 @@ impl CloudClient {
             serde_json::json!({"device_code": login.device_code}),
         )?;
         if (200..300).contains(&status) {
-            let r: LoginReply = serde_json::from_value(body).map_err(|e| {
-                Error::new(
-                    ErrorKind::UnexpectedReply,
-                    format!("Unexpected reply from jcode.sh: {e}"),
-                )
+            let r: LoginReply = timing::measured("reply_decode", "device_poll", || {
+                serde_json::from_value(body).map_err(|e| {
+                    Error::new(
+                        ErrorKind::UnexpectedReply,
+                        format!("Unexpected reply from jcode.sh: {e}"),
+                    )
+                })
             })?;
             return Ok(Some(self.account(r)));
         }
@@ -367,29 +373,51 @@ impl CloudClient {
         progress: &dyn Fn(&str),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<CloudTarget> {
-        let deadline = Instant::now() + PROVISION_DEADLINE;
-        let mut last = String::new();
-        loop {
-            let reply = self.request_host_connect(account, public_key_openssh)?;
-            if reply.ready {
-                return CloudTarget::from_reply(&reply);
+        self.wait_for_host_until(
+            account,
+            public_key_openssh,
+            progress,
+            cancelled,
+            Instant::now() + PROVISION_DEADLINE,
+        )
+    }
+
+    fn wait_for_host_until(
+        &self,
+        account: &Account,
+        public_key_openssh: &str,
+        progress: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> Result<CloudTarget> {
+        timing::measured("total", "wait_for_host", || {
+            let mut last = String::new();
+            loop {
+                let reply = timing::measured("poll", "wait_for_host", || {
+                    self.request_host_connect(account, public_key_openssh)
+                })?;
+                if reply.ready {
+                    return CloudTarget::from_reply(&reply);
+                }
+                let message = reply
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("Jcode Cloud machine is {}…", reply.state));
+                if message != last {
+                    progress(&message);
+                    last = message;
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::new(
+                        ErrorKind::StartupTimeout,
+                        "Jcode Cloud did not become ready in time. Retry to keep waiting.",
+                    ));
+                }
+                timing::measured("poll_wait", "wait_for_host", || {
+                    sleep_unless(self.poll_interval, cancelled)
+                })?;
             }
-            let message = reply
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("Jcode Cloud machine is {}…", reply.state));
-            if message != last {
-                progress(&message);
-                last = message;
-            }
-            if Instant::now() >= deadline {
-                return Err(Error::new(
-                    ErrorKind::StartupTimeout,
-                    "Jcode Cloud did not become ready in time. Retry to keep waiting.",
-                ));
-            }
-            sleep_unless(self.poll_interval, cancelled)?;
-        }
+        })
     }
 
     /// Register this device's APNs token so the account's jcode servers can
@@ -412,12 +440,21 @@ impl CloudClient {
 
     /// Reset the account's unread badge (the app came to the foreground).
     pub fn reset_push_badge(&self, account: &Account) -> Result<()> {
-        self.account_call(account, "POST", "/push/badge", serde_json::json!({"count": 0}))
+        self.account_call(
+            account,
+            "POST",
+            "/push/badge",
+            serde_json::json!({"count": 0}),
+        )
     }
 
     /// Ask the control plane to push `notification` to every device on the
     /// account. Servers call this with their own account key.
-    pub fn send_push(&self, account: &Account, notification: &PushNotification) -> Result<PushReceipt> {
+    pub fn send_push(
+        &self,
+        account: &Account,
+        notification: &PushNotification,
+    ) -> Result<PushReceipt> {
         let client = Self {
             api_base: account.api_base.trim_end_matches('/').to_string(),
             ..self.clone()
@@ -479,6 +516,8 @@ impl CloudClient {
         api_key: Option<&str>,
         body: serde_json::Value,
     ) -> Result<(u16, serde_json::Value)> {
+        let operation = timing::operation(method, path);
+        let send_started = Instant::now();
         let mut req = ureq::http::Request::builder()
             .method(method)
             .uri(self.url(path))
@@ -486,24 +525,43 @@ impl CloudClient {
         if let Some(k) = api_key {
             req = req.header("Authorization", format!("Bearer {k}"));
         }
-        let req = req
-            .body(body.to_string())
-            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        let mut resp = self.agent().run(req).map_err(|e| {
+        let req = req.body(body.to_string()).map_err(|e| {
+            timing::record("http_send", operation, "error", send_started.elapsed());
+            Error::new(ErrorKind::Transport, e.to_string())
+        })?;
+        let response = self.agent().run(req);
+        let outcome = match &response {
+            Ok(resp) if resp.status().is_success() => "success",
+            Ok(_) => "error",
+            Err(ureq::Error::Timeout(_)) => "timeout",
+            Err(_) => "error",
+        };
+        timing::record("http_send", operation, outcome, send_started.elapsed());
+        let mut resp = response.map_err(|e| {
             Error::new(
                 ErrorKind::ConnectFailed,
                 format!("Could not reach jcode.sh: {e}"),
             )
         })?;
         let status = resp.status().as_u16();
-        let text = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        Ok((
-            status,
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
-        ))
+        let start = Instant::now();
+        let text = resp.body_mut().read_to_string();
+        timing::record(
+            "http_body",
+            operation,
+            timing::http_outcome(&text),
+            start.elapsed(),
+        );
+        let text = text.map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        let start = Instant::now();
+        let decoded = serde_json::from_str(&text);
+        timing::record(
+            "http_decode",
+            operation,
+            if decoded.is_ok() { "success" } else { "error" },
+            start.elapsed(),
+        );
+        Ok((status, decoded.unwrap_or(serde_json::Value::Null)))
     }
 
     fn post<T: for<'de> Deserialize<'de>>(
@@ -514,11 +572,13 @@ impl CloudClient {
     ) -> Result<T> {
         let (status, body) = self.post_raw(path, api_key, body)?;
         if (200..300).contains(&status) {
-            return serde_json::from_value(body).map_err(|e| {
-                Error::new(
-                    ErrorKind::UnexpectedReply,
-                    format!("Unexpected reply from jcode.sh: {e}"),
-                )
+            return timing::measured("reply_decode", timing::operation("POST", path), || {
+                serde_json::from_value(body).map_err(|e| {
+                    Error::new(
+                        ErrorKind::UnexpectedReply,
+                        format!("Unexpected reply from jcode.sh: {e}"),
+                    )
+                })
             });
         }
         let err = &body["error"];
@@ -634,7 +694,9 @@ mod tests {
     }
 
     /// Minimal one-shot HTTP server for flow tests.
-    fn serve(replies: Vec<(u16, &'static str)>) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(super) fn serve(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -766,7 +828,10 @@ mod tests {
             (200, r#"{"ok":true}"#),
             (200, r#"{"sent":1,"devices":1}"#),
             (200, r#"{"ok":true}"#),
-            (401, r#"{"error":{"code":"unauthorized","message":"revoked"}}"#),
+            (
+                401,
+                r#"{"error":{"code":"unauthorized","message":"revoked"}}"#,
+            ),
         ]);
         let cloud = CloudClient::new("t");
         let account = Account {
@@ -798,7 +863,13 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(receipt, PushReceipt { sent: 1, devices: 1 });
+        assert_eq!(
+            receipt,
+            PushReceipt {
+                sent: 1,
+                devices: 1
+            }
+        );
         assert!(seen.recv().unwrap().contains(r#""kind":"turn_done""#));
 
         cloud.unregister_push_device(&account, "ab01").unwrap();

@@ -1020,9 +1020,17 @@ impl Default for WidgetsState {
 
 /// Global widget state (for polling across frames)
 static WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
+/// Separate widget state for secondary renders (resume preview) so their
+/// placements and animations never disturb the live session's widgets.
+static SECONDARY_WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
 
 fn get_or_init_state() -> std::sync::MutexGuard<'static, Option<WidgetsState>> {
-    let mut guard = WIDGETS_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = if super::ui::secondary_render_active() {
+        &SECONDARY_WIDGETS_STATE
+    } else {
+        &WIDGETS_STATE
+    };
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(WidgetsState::default());
     }

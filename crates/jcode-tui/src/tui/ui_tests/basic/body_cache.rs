@@ -1043,3 +1043,105 @@ fn test_prepare_body_collapses_anchored_images_when_inline_images_hidden() {
 #[path = "cache_equivalence_tests.rs"]
 mod cache_equivalence;
 use cache_equivalence::assert_prepared_equivalent;
+
+/// Frames keyed on partial streaming text can never be hit again (the stream
+/// only grows and the end of the turn bumps `messages_version`), so a new
+/// insert must not keep them pinned. Settled frames stay cached.
+#[test]
+fn test_full_prep_cache_drops_superseded_streaming_frames() {
+    let mut cache = FullPrepCacheState::default();
+    let key_for = |streaming_text_len: usize, width: u16| FullPrepCacheKey {
+        width,
+        height: 20,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 1,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        compact_thinking: false,
+        mermaid_aspect_bucket: None,
+        is_processing: streaming_text_len > 0,
+        streaming_text_len,
+        streaming_text_hash: streaming_text_len as u64,
+        batch_progress_hash: 0,
+        inline_images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
+        inline_images_visible: true,
+    };
+    let prepared = || {
+        make_prepared_chat_frame(Arc::new(PreparedMessages {
+            wrapped_lines: vec![Line::from("x")],
+            wrapped_plain_lines: Arc::new(vec!["x".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
+            raw_plain_lines: Arc::new(Vec::new()),
+            wrapped_line_map: Arc::new(Vec::new()),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        }))
+    };
+
+    cache.insert(key_for(0, 80), prepared());
+    cache.insert(key_for(10, 80), prepared());
+    cache.insert(key_for(20, 80), prepared());
+
+    assert!(cache.get_exact(&key_for(0, 80)).is_some(), "settled frame kept");
+    assert!(cache.get_exact(&key_for(10, 80)).is_none(), "stale stream frame dropped");
+    assert!(cache.get_exact(&key_for(20, 80)).is_some(), "newest stream frame kept");
+}
+
+#[test]
+fn test_body_cache_drops_superseded_message_versions() {
+    let mut cache = BodyCacheState::default();
+    let key_for = |width: u16, version: u64| BodyCacheKey {
+        width,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: version,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        compact_thinking: false,
+        mermaid_aspect_bucket: None,
+        pin_images: true,
+        inline_images_visible: true,
+        images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
+    };
+    let prepared = || {
+        Arc::new(PreparedMessages {
+            wrapped_lines: vec![Line::from("x")],
+            wrapped_plain_lines: Arc::new(vec!["x".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
+            raw_plain_lines: Arc::new(Vec::new()),
+            wrapped_line_map: Arc::new(Vec::new()),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        })
+    };
+    for version in 1..=5 {
+        cache.insert(key_for(80, version), prepared(), version as usize, 0);
+    }
+    // Other layouts are kept for fast width toggles.
+    cache.insert(key_for(120, 3), prepared(), 3, 0);
+
+    assert_eq!(cache.entries.len(), 2);
+    assert!(cache.get_exact(&key_for(80, 5)).is_some());
+    assert!(cache.get_exact(&key_for(120, 3)).is_some());
+}

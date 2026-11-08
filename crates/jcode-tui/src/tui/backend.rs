@@ -8,7 +8,7 @@
 mod ssh_sessions;
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -18,6 +18,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+
+fn subscribe_history_base(base: Option<HistoryBase>, ssh_remote: bool) -> Option<HistoryBase> {
+    if ssh_remote {
+        Some(HistoryBase::recent(128))
+    } else {
+        base
+    }
+}
 
 /// Debug events broadcast by local harnesses via debug socket.
 /// These expose the full internal state for debugging/comparison.
@@ -237,6 +245,14 @@ pub struct BackendInfo {
 pub struct RemoteConnection {
     reader: BufReader<crate::transport::ReadHalf>,
     writer: Arc<Mutex<WriteHalf>>,
+    /// FIFO outbound queue drained by a dedicated writer task. The UI event
+    /// loop must never await socket writes: if the daemon's receive buffer is
+    /// full while the daemon is itself blocked writing to us, awaiting the
+    /// write here would stop us reading and deadlock both ends.
+    outbound: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<OutboundWrite>>>,
+    /// Queued writes not yet flushed. When a backlog exists, senders do not
+    /// wait for their own write result at all.
+    outbound_pending: Arc<std::sync::atomic::AtomicUsize>,
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
@@ -244,9 +260,9 @@ pub struct RemoteConnection {
     client_instance_id: Option<String>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
-    // Bootstrap Done acknowledgments are not completions of a detached turn.
-    // Retain recent ids because target Subscribe can acknowledge twice.
+    // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
+    request_timings: super::cloud_latency::RequestTimings,
     tool_diff: RemoteDiffTracker,
     /// Bytes pulled from the socket that have not yet been split into complete
     /// newline-delimited protocol lines. This buffer is persistent across
@@ -268,6 +284,12 @@ pub struct RemoteConnection {
 }
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest a request send waits for its own write result before returning.
+const OUTBOUND_RESULT_WAIT: Duration = Duration::from_millis(250);
+type OutboundWrite = (
+    Vec<u8>,
+    tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+);
 const MAX_STRAY_REMOTE_PROTOCOL_LINES: usize = 32;
 /// Hard cap for one newline-delimited server event. History events can be large
 /// because they may contain images, but an authenticated or compromised peer
@@ -382,32 +404,44 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        let mut timing = super::cloud_latency::Span::new("connect");
+        timing.operation("socket_connect");
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
-        let stream = Stream::connect(server::socket_path()).await?;
+        let socket_path = server::socket_path();
+        let stream = Stream::connect(&socket_path).await?;
         let socket_connect_ms = socket_connect_start.elapsed().as_millis();
         let (reader, writer) = stream.into_split();
+        let quota_setup_start = Instant::now();
         // Quotas for headed clients belong to this daemon connection. Clear
         // previous/local snapshots before any startup account rows are drawn.
-        crate::usage::clear_remote_account_usage();
+        let usage_generation = crate::usage::clear_remote_account_usage();
         if !super::is_ssh_remote() {
-            crate::usage::hydrate_remote_account_usage(&server::socket_path());
+            Self::spawn_usage_hydration(move || {
+                crate::usage::hydrate_remote_account_usage_for_generation(
+                    &socket_path,
+                    usage_generation,
+                )
+            });
         }
 
+        let quota_setup_ms = quota_setup_start.elapsed().as_millis();
+        let connection_setup_start = Instant::now();
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
+            outbound: std::sync::Mutex::new(None),
+            outbound_pending: Default::default(),
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
-            // A reattached turn carries the old connection's request id on
-            // local sockets as well as SSH. Keep its Done distinct from this
-            // connection's Subscribe/GetHistory acknowledgments.
+            // Keep reattached turn Done distinct from bootstrap acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -418,13 +452,18 @@ impl RemoteConnection {
             call_output_tokens_seen: 0,
         };
 
+        let connection_setup_ms = connection_setup_start.elapsed().as_millis();
+        timing.operation("ssh_ready");
+        let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
         if super::is_ssh_remote() {
             conn.verify_ssh_ready(Duration::from_secs(35)).await?;
         }
 
+        let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
+        timing.operation("subscribe");
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
@@ -444,7 +483,7 @@ impl RemoteConnection {
             target_session_id: resume_target.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history: client_has_local_history && !super::is_ssh_remote(),
-            history_base: history_base.filter(|_| !super::is_ssh_remote()),
+            history_base: subscribe_history_base(history_base, super::is_ssh_remote()),
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: super::is_ssh_remote(),
@@ -461,6 +500,7 @@ impl RemoteConnection {
 
         // If resuming a session, the target-aware Subscribe attaches directly to
         // that session and returns History, so avoid a second bootstrap request.
+        timing.operation("bootstrap_request");
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
         if resume_target.is_none() {
@@ -491,8 +531,11 @@ impl RemoteConnection {
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 
         crate::logging::info(&format!(
-            "[TIMING] remote connect: socket={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
+            "[TIMING] remote connect: socket={}ms, quota_setup={}ms, connection_setup={}ms, ssh_ready={}ms, subscribe={}ms, bootstrap_request={}ms, total={}ms, resumed={}, request={}",
             socket_connect_ms,
+            quota_setup_ms,
+            connection_setup_ms,
+            ssh_ready_ms,
             subscribe_ms,
             bootstrap_request_ms,
             connect_start.elapsed().as_millis(),
@@ -500,7 +543,18 @@ impl RemoteConnection {
             bootstrap_request,
         ));
 
+        timing.operation("complete");
+        timing.finish("ok");
         Ok(conn)
+    }
+
+    /// Advisory disk snapshots must not delay Subscribe/History or block the
+    /// async runtime. The generation check in the importer gives live replies
+    /// and subsequent connections precedence over a late disk read.
+    fn spawn_usage_hydration(
+        hydrate: impl FnOnce() -> bool + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        super::cloud_latency::spawn_usage_hydration(hydrate)
     }
 
     fn interrupt_request_log_fields(
@@ -570,33 +624,90 @@ impl RemoteConnection {
             ));
         }
 
+        let mut timing = super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
-        let writer_wait_start = Instant::now();
-        let mut w = self.writer.lock().await;
-        let writer_wait_ms = writer_wait_start.elapsed().as_millis();
-        let write_start = Instant::now();
-        let result = w.write_all(json.as_bytes()).await;
+        let backlogged = self
+            .outbound_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0;
+        let result = match self.enqueue_outbound(json.into_bytes()) {
+            Err(error) => Err(error),
+            Ok(_) if backlogged => Ok(()),
+            // Surface prompt write failures (broken pipe) to the caller, but
+            // never wait longer than a short bound: a full socket must not
+            // stall the loop that drains server events.
+            Ok(done) => match tokio::time::timeout(OUTBOUND_RESULT_WAIT, done).await {
+                Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
+                Ok(Err(_)) => Err(anyhow::anyhow!("remote connection writer closed")),
+                Ok(Ok(Ok(()))) | Err(_) => Ok(()),
+            },
+        };
         if let Some(fields) = &interrupt_log {
             match &result {
                 Ok(()) => crate::logging::info(&format!(
-                    "REMOTE_INTERRUPT_SEND_OK {} writer_wait_ms={} write_ms={} total_ms={}",
+                    "REMOTE_INTERRUPT_SEND_OK {} queued total_ms={}",
                     fields,
-                    writer_wait_ms,
-                    write_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis()
                 )),
                 Err(error) => crate::logging::warn(&format!(
-                    "REMOTE_INTERRUPT_SEND_ERR {} writer_wait_ms={} write_ms={} total_ms={} error={}",
+                    "REMOTE_INTERRUPT_SEND_ERR {} total_ms={} error={}",
                     fields,
-                    writer_wait_ms,
-                    write_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis(),
                     error
                 )),
             }
         }
+        if let Some(timing) = &mut timing {
+            timing.finish(if result.is_ok() { "ok" } else { "error" });
+        }
         result?;
+        self.request_timings.request_sent(&request);
         Ok(())
+    }
+
+    /// Queue bytes for the connection writer task, spawning it on first use.
+    /// Never waits on the socket, so the caller keeps draining server events.
+    /// The returned receiver resolves with the write result.
+    fn enqueue_outbound(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>> {
+        let mut slot = self.outbound.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_none_or(|tx| tx.is_closed()) {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundWrite>();
+            let writer = Arc::clone(&self.writer);
+            // Writes dropped with a dead writer task never flushed.
+            self.outbound_pending
+                .store(0, std::sync::atomic::Ordering::Release);
+            let pending = Arc::clone(&self.outbound_pending);
+            tokio::spawn(async move {
+                while let Some((bytes, done)) = rx.recv().await {
+                    let mut w = writer.lock().await;
+                    let result = w.write_all(&bytes).await;
+                    drop(w);
+                    pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    let failed = result.is_err();
+                    let _ = done.send(result.map_err(|error| error.to_string()));
+                    if failed {
+                        crate::logging::warn("Remote writer task stopped after write error");
+                        break;
+                    }
+                }
+            });
+            *slot = Some(tx);
+        }
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        self.outbound_pending
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        slot.as_ref()
+            .expect("outbound sender initialized")
+            .send((bytes, done_tx))
+            .map_err(|_| {
+                self.outbound_pending
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                anyhow::anyhow!("remote connection writer closed")
+            })?;
+        Ok(done_rx)
     }
 
     async fn send_request(&self, request: Request) -> Result<()> {
@@ -854,11 +965,16 @@ impl RemoteConnection {
     }
 
     /// Request a wider compacted-history window for the active session.
-    pub async fn get_compacted_history(&mut self, visible_messages: usize) -> Result<u64> {
+    pub async fn get_compacted_history(
+        &mut self,
+        visible_messages: usize,
+        recent_history: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::GetCompactedHistory {
             id,
             visible_messages,
+            recent_history,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -1400,7 +1516,7 @@ impl RemoteConnection {
             }
             return LineOutcome::Skip;
         }
-        match serde_json::from_str(&text) {
+        match self.request_timings.parse_event(&text) {
             Ok(ServerEvent::Done { id })
                 if self
                     .control_done_ids
@@ -1460,6 +1576,8 @@ impl RemoteConnection {
         Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
+            outbound: std::sync::Mutex::new(None),
+            outbound_pending: Default::default(),
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,
@@ -1468,6 +1586,7 @@ impl RemoteConnection {
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
