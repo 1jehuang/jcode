@@ -1941,6 +1941,7 @@ impl SessionPicker {
                 duration_secs: msg.duration_secs,
                 title: msg.title.clone(),
                 tool_data: msg.tool_data.clone(),
+                tool_duration_ms: None,
             })
             .collect();
         let wide_width = inner

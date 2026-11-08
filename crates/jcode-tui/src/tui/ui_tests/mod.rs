@@ -569,5 +569,8 @@ mod rendering;
 mod scrollbar_overlay;
 #[path = "swarm_buffer.rs"]
 mod swarm_buffer;
+#[cfg(test)]
+#[path = "tool_duration.rs"]
+mod tool_duration;
 #[path = "tools.rs"]
 mod tools;
