@@ -36,10 +36,14 @@ impl Default for CompanionOptions {
     }
 }
 
+type TerminalLauncher =
+    dyn Fn(jcode_base::terminal_launch::TerminalCommand, PathBuf) -> Result<bool> + Send + Sync;
+
 /// Shared state for request handlers.
 pub struct Companion {
     lid: Mutex<LidState>,
     capabilities: Vec<String>,
+    terminal_launcher: Arc<TerminalLauncher>,
 }
 
 struct LidState {
@@ -60,6 +64,9 @@ impl Companion {
                 active_until: None,
             }),
             capabilities,
+            terminal_launcher: Arc::new(|command, cwd| {
+                jcode_base::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
+            }),
         }
     }
 
@@ -82,45 +89,34 @@ impl Companion {
                     Err(error) => CompanionResponse::error(format!("{error:#}")),
                 }
             }
-            CompanionRequest::SpawnTerminal {
-                program,
-                args,
-                cwd,
-                title,
-                kind,
-                session_id,
-                env,
-                client_terminal_env,
-            } => {
-                let mut command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
-                    .client_terminal_env(client_terminal_env);
-                if let Some(title) = title {
-                    command = command.title(title);
-                }
-                if let Some(kind) = kind {
-                    command = command.kind(kind);
-                }
-                if let Some(session_id) = session_id {
-                    command = command.session_id(session_id);
-                }
-                for (key, value) in env {
-                    command = command.spawn_env(key, value);
-                }
-                let spawn = tokio::task::spawn_blocking(move || {
-                    jcode_base::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
-                })
-                .await;
-                match spawn {
-                    Ok(Ok(true)) => CompanionResponse::ok("terminal"),
-                    Ok(Ok(false)) => CompanionResponse::error("no terminal emulator found"),
-                    Ok(Err(error)) => CompanionResponse::error(format!("{error:#}")),
-                    Err(error) => CompanionResponse::error(error.to_string()),
+            request @ (CompanionRequest::SpawnTerminal { .. }
+            | CompanionRequest::SpawnTerminalWithRuntime { .. }) => {
+                match terminal_command_from_request(request) {
+                    Some((command, cwd)) => self.launch_terminal(command, cwd).await,
+                    None => {
+                        CompanionResponse::error("spawn request did not carry a launchable command")
+                    }
                 }
             }
             CompanionRequest::PowerActivity { active } => {
                 self.set_power_active(active, Instant::now());
                 CompanionResponse::ok(if active { "engaged" } else { "released" })
             }
+        }
+    }
+
+    async fn launch_terminal(
+        &self,
+        command: jcode_base::terminal_launch::TerminalCommand,
+        cwd: PathBuf,
+    ) -> CompanionResponse {
+        let terminal_launcher = self.terminal_launcher.clone();
+        let spawn = tokio::task::spawn_blocking(move || terminal_launcher(command, cwd)).await;
+        match spawn {
+            Ok(Ok(true)) => CompanionResponse::ok("terminal"),
+            Ok(Ok(false)) => CompanionResponse::error("no terminal emulator found"),
+            Ok(Err(error)) => CompanionResponse::error(format!("{error:#}")),
+            Err(error) => CompanionResponse::error(error.to_string()),
         }
     }
 
@@ -156,6 +152,94 @@ impl Companion {
 async fn open(target: &str) -> Result<String> {
     let target = jcode_desktop_open::Target::parse(target)?;
     jcode_desktop_open::open_target(&target).await
+}
+
+fn terminal_command_from_parts(
+    program: PathBuf,
+    args: Vec<String>,
+    title: Option<String>,
+    kind: Option<String>,
+    session_id: Option<String>,
+    env: Vec<(String, String)>,
+    client_terminal_env: Vec<(String, String)>,
+    runtime_env: Vec<(String, String)>,
+    fresh_spawn: bool,
+) -> jcode_base::terminal_launch::TerminalCommand {
+    let mut command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
+        .client_terminal_env(client_terminal_env)
+        .runtime_env(runtime_env);
+    if fresh_spawn {
+        command = command.fresh_spawn();
+    }
+    if let Some(title) = title {
+        command = command.title(title);
+    }
+    if let Some(kind) = kind {
+        command = command.kind(kind);
+    }
+    if let Some(session_id) = session_id {
+        command = command.session_id(session_id);
+    }
+    for (key, value) in env {
+        command = command.spawn_env(key, value);
+    }
+    command
+}
+
+fn terminal_command_from_request(
+    request: CompanionRequest,
+) -> Option<(jcode_base::terminal_launch::TerminalCommand, PathBuf)> {
+    match request {
+        CompanionRequest::SpawnTerminal {
+            program,
+            args,
+            cwd,
+            title,
+            kind,
+            session_id,
+            env,
+            client_terminal_env,
+        } => Some((
+            terminal_command_from_parts(
+                program,
+                args,
+                title,
+                kind,
+                session_id,
+                env,
+                client_terminal_env,
+                Vec::new(),
+                false,
+            ),
+            cwd,
+        )),
+        CompanionRequest::SpawnTerminalWithRuntime {
+            program,
+            args,
+            cwd,
+            title,
+            kind,
+            session_id,
+            env,
+            client_terminal_env,
+            runtime_env,
+            fresh_spawn,
+        } => Some((
+            terminal_command_from_parts(
+                program,
+                args,
+                title,
+                kind,
+                session_id,
+                env,
+                client_terminal_env,
+                runtime_env,
+                fresh_spawn,
+            ),
+            cwd,
+        )),
+        _ => None,
+    }
 }
 
 /// Run the companion until SIGTERM/SIGINT. Fails if another companion already
@@ -332,12 +416,17 @@ mod tests {
     use super::*;
 
     fn companion() -> Companion {
+        companion_with_terminal_launcher(Arc::new(|_, _| Ok(true)))
+    }
+
+    fn companion_with_terminal_launcher(terminal_launcher: Arc<TerminalLauncher>) -> Companion {
         Companion {
             lid: Mutex::new(LidState {
                 lid: None,
                 active_until: None,
             }),
             capabilities: vec!["open".into()],
+            terminal_launcher,
         }
     }
 
@@ -347,6 +436,44 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.protocol, PROTOCOL_VERSION);
         assert_eq!(response.capabilities, vec!["open".to_string()]);
+    }
+
+    #[test]
+    fn contextual_spawn_request_reconstructs_runtime_and_target_metadata() {
+        let request = CompanionRequest::SpawnTerminalWithRuntime {
+            program: "/usr/bin/jcode".into(),
+            args: vec!["--resume".into(), "ses_context".into()],
+            cwd: "/work".into(),
+            title: Some("context window".into()),
+            kind: Some("swarm-agent".into()),
+            session_id: Some("ses_context".into()),
+            env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())],
+            client_terminal_env: vec![("TMUX_PANE".into(), "%12".into())],
+            runtime_env: vec![
+                ("JCODE_SOCKET".into(), "/tmp/connected.sock".into()),
+                ("JCODE_API_KEY".into(), "drop".into()),
+            ],
+            fresh_spawn: true,
+        };
+        let (command, cwd) = terminal_command_from_request(request).expect("terminal request");
+        assert_eq!(command.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(command.args, ["--resume", "ses_context"]);
+        assert_eq!(command.title.as_deref(), Some("context window"));
+        assert_eq!(command.kind.as_deref(), Some("swarm-agent"));
+        assert_eq!(command.session_id.as_deref(), Some("ses_context"));
+        assert_eq!(
+            command.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())]
+        );
+        assert_eq!(
+            command.client_terminal_env,
+            [("TMUX_PANE".into(), "%12".into())]
+        );
+        assert_eq!(
+            command.runtime_env,
+            [("JCODE_SOCKET".into(), "/tmp/connected.sock".into())]
+        );
+        assert_eq!(cwd, PathBuf::from("/work"));
     }
 
     #[tokio::test]
@@ -402,6 +529,140 @@ mod tests {
         assert!(response.ok);
         assert!(response.message.starts_with("jcode companion"));
         server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contextual_spawn_crosses_socket_and_launches_with_filtered_runtime() {
+        async fn request(path: PathBuf, request: CompanionRequest) -> CompanionResponse {
+            tokio::task::spawn_blocking(move || {
+                jcode_base::companion_client::request_at(&path, &request, Duration::from_secs(2))
+            })
+            .await
+            .unwrap()
+            .unwrap()
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("jcode-companion-socket-test-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join("contextual-companion.sock");
+        let listener = bind(&path).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let launcher_capture = captured.clone();
+        let companion = Arc::new(companion_with_terminal_launcher(Arc::new(
+            move |command, cwd| {
+                launcher_capture.lock().unwrap().push((command, cwd));
+                Ok(true)
+            },
+        )));
+        let server = {
+            let companion = companion.clone();
+            tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    serve(stream, &companion).await.unwrap();
+                }
+            })
+        };
+
+        let contextual = request(
+            path.clone(),
+            CompanionRequest::SpawnTerminalWithRuntime {
+                program: "/usr/bin/jcode".into(),
+                args: vec![
+                    "--resume".into(),
+                    "ses_context".into(),
+                    "--label".into(),
+                    "work tree".into(),
+                ],
+                cwd: "/work/tree".into(),
+                title: Some("context window".into()),
+                kind: Some("swarm-agent".into()),
+                session_id: Some("ses_context".into()),
+                env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())],
+                client_terminal_env: vec![("TMUX_PANE".into(), "%12".into())],
+                runtime_env: vec![
+                    ("JCODE_SOCKET".into(), "/tmp/new-pane.sock".into()),
+                    ("JCODE_RUNTIME_DIR".into(), "/tmp/new-pane-runtime".into()),
+                    ("JCODE_API_KEY".into(), "must-not-cross".into()),
+                ],
+                fresh_spawn: true,
+            },
+        )
+        .await;
+        assert!(contextual.ok, "{}", contextual.message);
+
+        let legacy = request(
+            path.clone(),
+            CompanionRequest::SpawnTerminal {
+                program: "/usr/bin/jcode".into(),
+                args: vec!["--version".into()],
+                cwd: "/work/no-context".into(),
+                title: Some("plain window".into()),
+                kind: Some("manual".into()),
+                session_id: None,
+                env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-2".into())],
+                client_terminal_env: vec![("TMUX_PANE".into(), "%13".into())],
+            },
+        )
+        .await;
+        assert!(legacy.ok, "{}", legacy.message);
+        server.await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let (contextual, cwd) = &captured[0];
+        assert_eq!(contextual.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(
+            contextual.args,
+            ["--resume", "ses_context", "--label", "work tree"]
+        );
+        assert_eq!(cwd, &PathBuf::from("/work/tree"));
+        assert_eq!(contextual.title.as_deref(), Some("context window"));
+        assert_eq!(contextual.kind.as_deref(), Some("swarm-agent"));
+        assert_eq!(contextual.session_id.as_deref(), Some("ses_context"));
+        assert_eq!(
+            contextual.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())]
+        );
+        assert_eq!(
+            contextual.client_terminal_env,
+            [("TMUX_PANE".into(), "%12".into())]
+        );
+        assert!(contextual.fresh_spawn);
+        assert_eq!(
+            contextual.runtime_env,
+            [
+                ("JCODE_SOCKET".into(), "/tmp/new-pane.sock".into()),
+                ("JCODE_RUNTIME_DIR".into(), "/tmp/new-pane-runtime".into()),
+            ]
+        );
+        assert!(
+            !contextual
+                .runtime_env
+                .iter()
+                .any(|(key, _)| key == "JCODE_API_KEY")
+        );
+
+        let (legacy, cwd) = &captured[1];
+        assert_eq!(legacy.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(legacy.args, ["--version"]);
+        assert_eq!(cwd, &PathBuf::from("/work/no-context"));
+        assert_eq!(legacy.title.as_deref(), Some("plain window"));
+        assert_eq!(legacy.kind.as_deref(), Some("manual"));
+        assert_eq!(legacy.session_id, None);
+        assert_eq!(
+            legacy.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-2".into())]
+        );
+        assert_eq!(
+            legacy.client_terminal_env,
+            [("TMUX_PANE".into(), "%13".into())]
+        );
+        assert!(!legacy.fresh_spawn);
+        assert!(legacy.runtime_env.is_empty());
     }
 
     #[cfg(unix)]
