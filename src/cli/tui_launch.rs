@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::process::Command as ProcessCommand;
 
 use crate::{
-    id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
+    build, id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
 };
 
 use super::hot_exec::{execute_requested_action, has_requested_action};
@@ -591,6 +591,17 @@ fn cloud_resume_target_args(
     Some(args)
 }
 
+/// Binary a session picker launches its selection with. A picker window can
+/// sit open for hours while builds move on, and `current_exe()` is the frozen
+/// versioned binary it started from. Resume onto the active channel instead,
+/// the same candidate reload uses, so stale pickers do not revive old builds.
+fn picker_resume_exe() -> Result<std::path::PathBuf> {
+    match build::client_update_candidate(false) {
+        Some((exe, _)) => Ok(exe),
+        None => Ok(std::env::current_exe()?),
+    }
+}
+
 pub fn list_sessions() -> Result<()> {
     fn build_resume_target_command(
         exe: &std::path::Path,
@@ -703,7 +714,7 @@ pub fn list_sessions() -> Result<()> {
             else {
                 anyhow::bail!("Claude takeover did not produce a Jcode session");
             };
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let mut session_cwd = std::env::current_dir()?;
             if let Ok(sess) = session::Session::load(session_id)
                 && let Some(dir) = sess.working_dir.as_deref()
@@ -723,7 +734,7 @@ pub fn list_sessions() -> Result<()> {
             tui::session_picker::PickerResult::Selected(targets)
             | tui::session_picker::PickerResult::SelectedInCurrentTerminal(targets),
         ) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
 
             if targets.len() == 1 {
@@ -803,7 +814,7 @@ pub fn list_sessions() -> Result<()> {
             }
         }
         Some(tui::session_picker::PickerResult::SelectedInNewTerminal(targets)) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;
@@ -866,7 +877,7 @@ pub fn list_sessions() -> Result<()> {
                 recovered.len()
             );
 
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;
