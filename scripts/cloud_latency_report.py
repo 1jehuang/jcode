@@ -14,6 +14,11 @@ FIELD = re.compile(r"\b([a-z_]+)=([^\s,]+)")
 NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
 SAFE_LABEL = re.compile(r"^[a-zA-Z0-9_.:-]{1,96}$")
 TIMESTAMP = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]")
+FAILURE_OUTCOMES = {
+    "error", "failed", "dropped", "timeout", "cancelled", "expired",
+    "error_or_cancelled", "http_error", "load_error", "read_error",
+    "size_limit", "oversized", "identity_mismatch", "exit_failure",
+}
 
 
 def local_timestamp(value):
@@ -68,7 +73,7 @@ def collect(lines):
                 continue
             key = (name, metric)
             groups[key].append(number)
-            if outcome in {"error", "failed", "dropped", "timeout", "cancelled", "expired", "error_or_cancelled"}:
+            if outcome in FAILURE_OUTCOMES:
                 failures[key] += 1
     return groups, failures
 

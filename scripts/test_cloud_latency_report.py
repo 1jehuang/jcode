@@ -53,6 +53,16 @@ class CloudLatencyReportTests(unittest.TestCase):
         ])
         self.assertFalse(groups)
 
+    def test_counts_http_body_and_projection_failures_not_normal_skips(self):
+        bad = ["http_error", "load_error", "read_error", "size_limit", "oversized", "identity_mismatch", "exit_failure"]
+        normal = ["success", "miss", "skipped_absent", "skipped_disabled", "success_cache_unavailable"]
+        groups, failures = reporter.collect([
+            f"[CLOUD_TIMING] stage=probe outcome={outcome} duration_ms=10"
+            for outcome in bad + normal
+        ])
+        self.assertEqual(len(groups[("probe", "duration_ms")]), len(bad + normal))
+        self.assertEqual(failures[("probe", "duration_ms")], len(bad))
+
     def test_report_is_ranked_filtered_and_content_free(self):
         groups, failures = reporter.collect([
             "[CLOUD_TIMING] stage=fast outcome=ok duration_ms=20 payload=PRIVATE",
