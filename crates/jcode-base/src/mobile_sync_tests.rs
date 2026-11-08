@@ -8,24 +8,33 @@ async fn benchmark_unchanged_reconciliation() {
     let home = tempfile::tempdir().unwrap();
     let _env = TestEnv::set(&[
         ("JCODE_HOME", home.path().as_os_str()),
-        ("JCODE_API_KEY", std::ffi::OsStr::new("benchmark-no-network")),
+        (
+            "JCODE_API_KEY",
+            std::ffi::OsStr::new("benchmark-no-network"),
+        ),
         ("JCODE_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:1")),
     ]);
     DIRTY_SESSIONS.lock().unwrap().clear();
     let dir = home.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
-    let mut state = MobileSyncState { enabled: true, ..Default::default() };
+    let mut state = MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    };
     for index in 0..1300 {
         let id = format!("benchmark-{index:04}");
         let path = dir.join(format!("{id}.json"));
         // An unchanged revision must never need to deserialize a transcript.
         std::fs::write(&path, b"{}").unwrap();
-        state.sessions.insert(id, SessionProgress {
-            uploaded: 100,
-            mtime_ms: session_mtime_ms(&path),
-            revision: Some(session_revision(&path)),
-            fingerprint: Some(42),
-        });
+        state.sessions.insert(
+            id,
+            SessionProgress {
+                uploaded: 100,
+                mtime_ms: session_mtime_ms(&path),
+                revision: Some(session_revision(&path)),
+                fingerprint: Some(42),
+            },
+        );
     }
     save_state(&state).unwrap();
     // Enabling increments the fence, so seed progress in the current generation.
@@ -39,7 +48,10 @@ async fn benchmark_unchanged_reconciliation() {
         elapsed.push(started.elapsed().as_micros());
     }
     elapsed.sort_unstable();
-    eprintln!("unchanged reconciliation: candidates=1300 passes=7 median_us={} max_us={} samples_us={elapsed:?}", elapsed[3], elapsed[6]);
+    eprintln!(
+        "unchanged reconciliation: candidates=1300 passes=7 median_us={} max_us={} samples_us={elapsed:?}",
+        elapsed[3], elapsed[6]
+    );
 }
 
 #[test]
@@ -86,6 +98,145 @@ async fn upload_failure_does_not_retain_private_server_response() {
 }
 
 struct TestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[tokio::test]
+async fn unchanged_pass_and_identical_commit_do_not_rewrite_state() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[
+        ("JCODE_HOME", home.path().as_os_str()),
+        ("JCODE_API_KEY", std::ffi::OsStr::new("no-network")),
+        ("JCODE_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:1")),
+    ]);
+    DIRTY_SESSIONS.lock().unwrap().clear();
+    let path = home.path().join("sessions/unchanged.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"not a transcript").unwrap();
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let generation = load_state().generation;
+    let updates = BTreeMap::from([(
+        "unchanged".into(),
+        SessionProgress {
+            revision: Some(session_revision(&path)),
+            ..Default::default()
+        },
+    )]);
+    commit_progress(generation, &updates).unwrap();
+    let state = state_path().unwrap();
+    std::fs::File::open(&state)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100)))
+        .unwrap();
+    let before = session_revision(&state);
+    commit_progress(generation, &updates).unwrap();
+    assert_eq!(
+        session_revision(&state),
+        before,
+        "identical merge must not write"
+    );
+    std::fs::remove_file(home.path().join("mobile_sync.lock")).unwrap();
+    for reconcile in [true, false] {
+        assert_eq!(
+            sync_pass(&reqwest::Client::new(), reconcile).await.unwrap(),
+            SyncReport::default()
+        );
+        assert_eq!(
+            session_revision(&state),
+            before,
+            "no-op pass must not write"
+        );
+        assert!(
+            !home.path().join("mobile_sync.lock").exists(),
+            "no-op pass must not acquire cross-process lock"
+        );
+    }
+}
+
+#[tokio::test]
+async fn disable_reenable_during_upload_fences_remaining_chunks_and_progress() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _env = TestEnv::set(&[
+        ("JCODE_HOME", home.path().as_os_str()),
+        ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
+        ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
+    ]);
+    DIRTY_SESSIONS.lock().unwrap().clear();
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut session = Session::create_with_id("generation-cycle".into(), None, None);
+    session.messages = (0..MAX_MESSAGES_PER_UPLOAD + 1)
+        .map(|index| {
+            let mut message = msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "visible".into(),
+                    cache_control: None,
+                }],
+            );
+            message.id = format!("message-{index}");
+            message
+        })
+        .collect();
+    session.save().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(start) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header = String::from_utf8_lossy(&bytes[..start]);
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                if bytes.len() >= start + 4 + length {
+                    break;
+                }
+            }
+        }
+        save_state(&MobileSyncState::default()).unwrap();
+        save_state(&MobileSyncState {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_err(),
+            "old generation must not send its second chunk"
+        );
+    });
+    let report = sync_once(&reqwest::Client::new()).await.unwrap();
+    assert_eq!(report.messages_uploaded, MAX_MESSAGES_PER_UPLOAD);
+    assert_eq!(report.sessions_uploaded, 0);
+    server.await.unwrap();
+    assert!(load_state().enabled);
+    assert!(load_state().sessions.is_empty());
+    DIRTY_SESSIONS.lock().unwrap().clear();
+}
 
 impl TestEnv {
     fn set(values: &[(&'static str, &std::ffi::OsStr)]) -> Self {
