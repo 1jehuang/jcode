@@ -2,6 +2,8 @@
 
 mod clipboard_helper;
 mod git_line_cache;
+#[cfg_attr(test, allow(dead_code))]
+mod git_watch;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
@@ -1284,6 +1286,11 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
                 if *refreshing {
                     return cached.clone();
                 }
+                // The inotify watcher refreshes on change. Nothing to poll.
+                if git_watch::is_healthy() {
+                    *ts = std::time::Instant::now();
+                    return cached.clone();
+                }
                 // Nothing in .git moved and the last full probe is recent:
                 // extend the entry without spawning any git process.
                 if let Some(root) = cached.as_ref().and_then(|info| info.repo_root.as_deref())
@@ -1315,7 +1322,29 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 #[cfg(not(test))]
 fn spawn_git_info_refresh() {
     std::thread::spawn(|| {
+        run_git_info_refresh();
+    });
+}
+
+/// Watcher callback: probe now, on the watcher thread (it is already
+/// debounced and off the render path).
+#[cfg(not(test))]
+fn git_watch_changed() {
+    if let Ok(mut guard) = GIT_INFO_CACHE.lock()
+        && let Some((_, _, refreshing)) = guard.as_mut()
+    {
+        *refreshing = true;
+    }
+    run_git_info_refresh();
+}
+
+#[cfg(not(test))]
+fn run_git_info_refresh() {
+    {
         let result = gather_git_info_inner();
+        if let Some(root) = result.as_ref().and_then(|info| info.repo_root.as_deref()) {
+            git_watch::ensure_started(root, git_watch_changed);
+        }
         if let Ok(mut stamp) = GIT_PROBE_STAMP.lock() {
             *stamp = result
                 .as_ref()
@@ -1335,7 +1364,7 @@ fn spawn_git_info_refresh() {
         if changed {
             crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
         }
-    });
+    }
 }
 
 /// Start the git probe and give it up to `budget` to land before returning.
