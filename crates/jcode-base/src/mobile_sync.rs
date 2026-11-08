@@ -259,7 +259,11 @@ pub fn save_state(state: &MobileSyncState) -> Result<()> {
     storage::write_json_secret(&state_path()?, &next)
 }
 
-fn merge_progress(state: &mut MobileSyncState, updates: &BTreeMap<String, SessionProgress>) {
+fn merge_progress(
+    state: &mut MobileSyncState,
+    updates: &BTreeMap<String, SessionProgress>,
+) -> bool {
+    let mut changed = false;
     for (id, progress) in updates {
         let version = |p: &SessionProgress| {
             p.revision
@@ -267,20 +271,27 @@ fn merge_progress(state: &mut MobileSyncState, updates: &BTreeMap<String, Sessio
                 .unwrap_or(p.mtime_ms.saturating_mul(1_000_000))
         };
         if state.sessions.get(id).is_none_or(|old| {
-            version(old) < version(progress)
-                || (version(old) == version(progress) && old.uploaded <= progress.uploaded)
+            old != progress
+                && (version(old) < version(progress)
+                    || (version(old) == version(progress) && old.uploaded <= progress.uploaded))
         }) {
             state.sessions.insert(id.clone(), progress.clone());
+            changed = true;
         }
     }
+    changed
 }
 
 fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
     let _lock = state_lock()?;
     let mut current = load_state();
     if current.enabled && current.generation == generation {
-        merge_progress(&mut current, updates);
-        storage::write_json_secret(&state_path()?, &current)?;
+        if merge_progress(&mut current, updates) {
+            storage::write_json_secret(&state_path()?, &current)?;
+        }
     }
     Ok(())
 }
@@ -552,7 +563,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         "pass_incremental"
     });
     timing.outcome = "error";
-    let mut state = load_state();
+    let state = load_state();
     if !state.enabled {
         timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
@@ -584,15 +595,12 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     }
     candidates.sort_by_key(|(id, _, _)| !dirty.contains(id));
 
+    let candidate_count = candidates.len();
+    let mut unchanged_count = 0;
+    let mut updates = BTreeMap::new();
     let mut candidates = candidates.into_iter();
     while let Some((id, path, mtime)) = candidates.next() {
-        let mut upload_timing = SyncTiming::new("upload");
-        if !sync_still_enabled(state.generation) {
-            upload_timing.outcome = "skipped_disabled";
-            break;
-        }
         if !valid_session_id(&id) {
-            upload_timing.outcome = "skipped_invalid";
             continue;
         }
         // No previous upload means a new session, not an error.
@@ -603,8 +611,16 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             .unwrap_or_else(SessionProgress::default);
         let revision = session_revision(&path);
         if progress.revision == Some(revision) && !dirty.contains(&id) {
-            upload_timing.outcome = "skipped_unchanged";
+            unchanged_count += 1;
             continue;
+        }
+        // Unchanged candidates cannot upload or mutate progress. Do not reload
+        // the entire state for each one. Keep uncached generation fences for
+        // changed sessions and, crucially, immediately before every request.
+        let mut upload_timing = SyncTiming::new("upload");
+        if !sync_still_enabled(state.generation) {
+            upload_timing.outcome = "skipped_disabled";
+            break;
         }
         let session = match Session::load_from_path(&path) {
             Ok(s) => s,
@@ -616,7 +632,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         };
         if session.is_debug || session.messages.is_empty() {
             upload_timing.outcome = "skipped_empty_or_debug";
-            state.sessions.insert(
+            updates.insert(
                 id,
                 SessionProgress {
                     uploaded: progress.uploaded,
@@ -666,7 +682,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         if ok {
             upload_timing.outcome = "success";
             report.sessions_uploaded += 1;
-            state.sessions.insert(
+            updates.insert(
                 id,
                 SessionProgress {
                     uploaded: session.messages.len(),
@@ -699,8 +715,16 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     // overwrite another process's unrelated session progress.
     let mut commit = SyncTiming::new("progress_commit");
     commit.outcome = "error";
-    commit_progress(state.generation, &state.sessions)?;
-    commit.outcome = "success";
+    commit_progress(state.generation, &updates)?;
+    commit.outcome = if updates.is_empty() {
+        "skipped_unchanged"
+    } else {
+        "success"
+    };
+    crate::logging::info(&format!(
+        "mobile_sync candidates={candidate_count} unchanged={unchanged_count} progress_updates={}",
+        updates.len()
+    ));
     timing.outcome = if report.errors == 0 {
         "success"
     } else {
