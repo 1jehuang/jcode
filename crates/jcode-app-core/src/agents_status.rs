@@ -20,6 +20,8 @@ const DETAIL_MAX: usize = 60;
 const ERROR_BACKOFF_MIN: Duration = Duration::from_secs(30);
 const ERROR_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Unanswered error states drop out of the snapshot after this.
+pub const ERROR_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +37,8 @@ struct Entry {
     state: AgentState,
     detail: String,
     since: u64,
+    /// Monotonic time the current state began (for error expiry).
+    entered: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +110,7 @@ impl Tracker {
                 state,
                 detail: String::new(),
                 since,
+                entered: now,
             });
         if let Some(title) = title {
             let title = clip(title, TITLE_MAX);
@@ -117,6 +122,7 @@ impl Tracker {
         if entry.state != state {
             entry.state = state;
             entry.since = since;
+            entry.entered = now;
             changed = true;
         }
         let detail = clip(detail, DETAIL_MAX);
@@ -171,6 +177,25 @@ impl Tracker {
         }
     }
 
+    /// Drop error states older than [`ERROR_TTL`].
+    pub fn expire(&mut self, now: Instant) {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, e| {
+            e.state != AgentState::Error || now.saturating_duration_since(e.entered) < ERROR_TTL
+        });
+        if self.sessions.len() != before {
+            self.mark(now);
+        }
+    }
+
+    fn next_expiry(&self) -> Option<Instant> {
+        self.sessions
+            .values()
+            .filter(|e| e.state == AgentState::Error)
+            .map(|e| e.entered + ERROR_TTL)
+            .min()
+    }
+
     pub fn snapshot(&self, host: &str) -> Snapshot {
         let mut sessions: Vec<SessionStatus> = self
             .sessions
@@ -210,15 +235,20 @@ impl Tracker {
             }
             (None, None) if !self.sessions.is_empty() => Some(Instant::now()),
             _ => None,
-        }?;
-        Some(match self.backoff_until {
+        };
+        let due = due.map(|due| match self.backoff_until {
             Some(b) if b > due => b,
             _ => due,
-        })
+        });
+        match (due, self.next_expiry()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Take a snapshot if a send is due at `now`.
     pub fn take_due(&mut self, host: &str, now: Instant) -> Option<Snapshot> {
+        self.expire(now);
         if self.next_due()? > now {
             return None;
         }
@@ -472,6 +502,34 @@ mod tests {
         assert_eq!(t.next_due(), Some(t0 + DEBOUNCE + ERROR_BACKOFF_MIN));
         t.record_result(&snap, false, t0 + DEBOUNCE);
         assert_eq!(t.next_due(), Some(t0 + DEBOUNCE + ERROR_BACKOFF_MIN * 2));
+    }
+
+    #[test]
+    fn error_state_expires_after_ttl() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        t.turn_started("a", "A", t0);
+        t.turn_finished("a", Some("boom"), t0);
+        t.turn_started("b", "B", t0);
+        let snap = t.take_due("h", t0 + DEBOUNCE).unwrap();
+        t.record_result(&snap, true, t0 + DEBOUNCE);
+        assert_eq!(t.next_due(), Some(t0 + DEBOUNCE + HEARTBEAT));
+        t.last_sent = Some(t0 + ERROR_TTL);
+        assert_eq!(
+            t.next_due(),
+            Some(t0 + ERROR_TTL),
+            "expiry wakes the worker"
+        );
+        t.expire(t0 + ERROR_TTL - Duration::from_secs(1));
+        assert_eq!(t.snapshot("h").sessions.len(), 2);
+        t.expire(t0 + ERROR_TTL);
+        let snap = t.take_due("h", t0 + ERROR_TTL + DEBOUNCE).unwrap();
+        let ids: Vec<_> = snap
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["b"]);
     }
 
     #[test]

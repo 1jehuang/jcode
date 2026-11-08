@@ -153,6 +153,9 @@ pub(super) async fn cleanup_client_connection(
     } else {
         false
     };
+    if disposition == DisconnectDisposition::Closed {
+        crate::agents_status::session_closed(client_session_id);
+    }
     let originally_registered = swarm_members.read().await.contains_key(client_session_id);
 
     record_transport_closed(client_session_id, client_connection_id, client_connections).await;
