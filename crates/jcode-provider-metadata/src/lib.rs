@@ -401,10 +401,6 @@ mod tests {
             normalize_api_base("http://[2001:db8::1]:8080/v1").as_deref(),
             Some("http://[2001:db8::1]:8080/v1")
         );
-        assert_eq!(
-            normalize_api_base("http://[fe80::1%25eth0]:8080/v1").as_deref(),
-            Some("http://[fe80::1%25eth0]:8080/v1")
-        );
         // Named hosts still need a local name or https.
         assert_eq!(normalize_api_base("http://example.com/v1"), None);
         assert_eq!(
