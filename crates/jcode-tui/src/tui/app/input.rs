@@ -16,10 +16,11 @@ use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
     InputShellCompleted,
 };
+use crate::tui::terminal_events::EventStream;
 use crate::util::truncate_str;
 use anyhow::Result;
 use base64::Engine;
-use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::path::PathBuf;
 use std::process::Stdio;

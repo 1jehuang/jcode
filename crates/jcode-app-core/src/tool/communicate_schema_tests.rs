@@ -98,16 +98,7 @@ fn spawning_actions_cannot_bypass_worker_model_policy() {
         swarm_model_allowlist: vec!["claude:claude-opus-4-8".to_string()],
         ..Default::default()
     };
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-        "launch",
-        "retry",
-        "resume",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
         let input: CommunicateInput = serde_json::from_value(json!({
             "action": action, "model": "claude:claude-opus-4-8"
         }))
@@ -312,13 +303,7 @@ fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
 
 #[test]
 fn spawning_action_inputs_preserve_requested_model() {
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next"] {
         for model in [
             "z-ai/glm-5.2:free",
             "openai-api:gpt-5.5",
@@ -339,13 +324,7 @@ fn spawning_action_inputs_preserve_requested_model() {
 
 #[test]
 fn spawning_action_inputs_allow_omitted_or_null_model() {
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next"] {
         let without_model: CommunicateInput =
             serde_json::from_value(json!({"action": action, "label": "reviewer"})).unwrap();
         assert!(without_model.model.is_none());
@@ -438,7 +417,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         .filter_map(|a| a.as_str())
         .collect();
     for kept in [
-        "launch",
         "spawn",
         "message",
         "status",
@@ -463,6 +441,7 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "reject_plan",
         "assign_task",
         "assign_next",
+        "launch",
         "fill_slots",
         "run_plan",
         "resync_plan",
@@ -488,9 +467,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "phase",
         "prompt",
         "session_ids",
-        "background",
-        "concurrency_limit",
-        "retain_agents",
         "delivery",
         "wake",
     ] {

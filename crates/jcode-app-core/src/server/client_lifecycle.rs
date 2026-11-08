@@ -389,6 +389,8 @@ pub(super) async fn handle_client(
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
+    // Keep only the window preference, never a session-specific prefix fingerprint.
+    let mut recent_history_messages = None;
     let mut supports_user_response = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
@@ -1578,6 +1580,7 @@ pub(super) async fn handle_client(
                 // rather than retaining a prior pane's values.
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
+                recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
@@ -1789,7 +1792,7 @@ pub(super) async fn handle_client(
                     None,
                     supports_pdf_panels,
                     supports_turn_identity,
-                    None,
+                    recent_history_messages.map(crate::protocol::HistoryBase::recent),
             )
                 .await
                 .is_err()
@@ -1823,6 +1826,7 @@ pub(super) async fn handle_client(
             Request::GetCompactedHistory {
                 id,
                 visible_messages,
+                recent_history,
             } => {
                 if handle_get_compacted_history(
                     id,
@@ -1830,6 +1834,7 @@ pub(super) async fn handle_client(
                     &agent,
                     &writer,
                     visible_messages,
+                    recent_history,
                 )
                 .await
                 .is_err()
@@ -1890,7 +1895,7 @@ pub(super) async fn handle_client(
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
-                        None,
+                        recent_history_messages.map(crate::protocol::HistoryBase::recent),
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,
@@ -2535,6 +2540,21 @@ pub(super) async fn handle_client(
                         });
                     }
                 }
+            }
+
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = super::debug::forward_voice_activity(
+                    id,
+                    &session_id,
+                    activity,
+                    &swarm_members,
+                )
+                .await;
+                let _ = client_event_tx.send(event);
             }
 
             Request::InputShell { id, command } => {

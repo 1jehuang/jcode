@@ -352,6 +352,7 @@ pub(super) fn draw_messages(
     // the sticky previous-prompt preview, including at the top of the transcript.
     let (pinned_todo_band, pinned_todo_more_line) =
         pinned_todo_band_lines(app, text_render_area.width, render_area.height);
+    let pinned_todo_band_rows = pinned_todo_band.len() as u16;
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
@@ -428,6 +429,12 @@ pub(super) fn draw_messages(
         0u16
     };
     let pinned_todo_lines = pinned_todo_band.len() as u16;
+    publish_pinned_todo_scroll((pinned_todo_band_rows > 0).then(|| Rect {
+        x: text_render_area.x,
+        y: render_area.y.saturating_add(prompt_preview_lines),
+        width: text_render_area.width,
+        height: pinned_todo_band_rows,
+    }));
     set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
         Rect {
             x: text_render_area.x,
@@ -1448,6 +1455,7 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
     } else {
         Vec::new()
     };
+    PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
     if card_lines.is_empty() {
         return (Vec::new(), None);
     }
@@ -1471,20 +1479,104 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         )));
     } else {
         if expanded {
+            // Expanded bands get a larger budget but stay bounded so a long plan
+            // cannot swallow the transcript. Overflow scrolls with the wheel.
+            let expanded_budget = ((viewport_height as usize) * 2 / 3).max(content_budget);
+            let window = expanded_budget.saturating_sub(1).max(1);
+            let total = card_lines.len();
+            let max_offset = total.saturating_sub(window);
+            let offset = pinned_todo_scroll().min(max_offset);
+            PINNED_TODO_LAST_MAX.store(max_offset, std::sync::atomic::Ordering::Relaxed);
             more_line = Some(lines.len());
+            let label = if max_offset > 0 {
+                format!(
+                    "  ▴ Collapse todos ({}-{} of {}, scroll)",
+                    offset + 1,
+                    (offset + window).min(total),
+                    total
+                )
+            } else {
+                "  ▴ Collapse todos".to_string()
+            };
             lines.push(Line::from(Span::styled(
-                "  ▴ Collapse todos",
+                label,
                 Style::default().fg(dim_color()),
             )));
+            lines.extend(card_lines.into_iter().skip(offset).take(window));
+            return (lines, more_line);
         }
         lines.extend(card_lines);
     }
     (lines, more_line)
 }
 
+static PINNED_TODO_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PINNED_TODO_MAX_SCROLL: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Max scroll computed by the most recent band build. Only the live viewport
+/// render publishes it, since layout probes build bands at other heights.
+static PINNED_TODO_LAST_MAX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static PINNED_TODO_BAND_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+
+fn pinned_todo_scroll() -> usize {
+    PINNED_TODO_SCROLL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn publish_pinned_todo_scroll(band_area: Option<Rect>) {
+    if super::secondary_render_active() {
+        return;
+    }
+    let max = PINNED_TODO_LAST_MAX.load(std::sync::atomic::Ordering::Relaxed);
+    PINNED_TODO_MAX_SCROLL.store(max, std::sync::atomic::Ordering::Relaxed);
+    if pinned_todo_scroll() > max {
+        PINNED_TODO_SCROLL.store(max, std::sync::atomic::Ordering::Relaxed);
+    }
+    set_pinned_todo_band_area(band_area);
+}
+
+#[cfg(test)]
+pub(crate) fn publish_pinned_todo_scroll_for_test() {
+    publish_pinned_todo_scroll(None);
+}
+
+/// Scroll the expanded pinned todo band. Returns true when the offset changed.
+pub(crate) fn scroll_pinned_todos(delta: isize) -> bool {
+    let max = PINNED_TODO_MAX_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    let current = pinned_todo_scroll();
+    let next = current.saturating_add_signed(delta).min(max);
+    PINNED_TODO_SCROLL.store(next, std::sync::atomic::Ordering::Relaxed);
+    next != current
+}
+
+pub(crate) fn reset_pinned_todo_scroll() {
+    PINNED_TODO_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PINNED_TODO_MAX_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn set_pinned_todo_band_area(area: Option<Rect>) {
+    if super::secondary_render_active() {
+        return;
+    }
+    if let Ok(mut current) = PINNED_TODO_BAND_AREA.lock() {
+        *current = area;
+    }
+}
+
+/// Screen rect of the pinned todo band, when it is scrollable (expanded with overflow).
+pub(crate) fn pinned_todo_scroll_area() -> Option<Rect> {
+    if PINNED_TODO_MAX_SCROLL.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return None;
+    }
+    PINNED_TODO_BAND_AREA.lock().ok().and_then(|area| *area)
+}
+
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
 
 fn set_pinned_todo_more_area(area: Option<Rect>) {
+    if super::secondary_render_active() {
+        return;
+    }
     if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
         *current = area;
     }

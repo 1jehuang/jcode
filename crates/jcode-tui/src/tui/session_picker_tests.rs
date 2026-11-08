@@ -26,8 +26,112 @@ fn line_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
+pub(super) fn make_session_for_presence(id: &str) -> SessionInfo {
+    make_session(id, id, false, SessionStatus::Closed)
+}
+
 fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatus) -> SessionInfo {
     make_session_with_flags(id, short_name, is_debug, false, status)
+}
+
+/// Copy the highlighted session without changing selection and report failures.
+#[test]
+fn copy_session_identifier_reports_success_and_failure() {
+    let session = make_session("session_alpha", "alpha", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session]);
+    let mut copied = String::new();
+    picker.copy_selected_session_with(|id| {
+        copied = id.to_owned();
+        true
+    });
+    assert_eq!(copied, "session_alpha");
+    assert_eq!(picker.copy_notice, Some("Session ID copied"));
+    assert_eq!(picker.selected_session().unwrap().id, "session_alpha");
+    picker.copy_selected_session_with(|_| false);
+    assert_eq!(picker.copy_notice, Some("Could not copy to clipboard"));
+}
+
+/// Copy the actual external identifier and label Pi's path accurately.
+#[test]
+fn copy_external_session_uses_resume_target() {
+    let mut session = make_session("internal-id", "external", false, SessionStatus::Closed);
+    session.resume_target = ResumeTarget::PiSession {
+        session_path: "pi/session.jsonl".into(),
+    };
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.copy_selected_session_with(|id| {
+        assert_eq!(id, "pi/session.jsonl");
+        true
+    });
+    assert_eq!(picker.copy_notice, Some("Session path copied"));
+}
+
+/// Search still accepts y as text and the copy action handles an empty list.
+#[test]
+fn copy_shortcut_does_not_interfere_with_search_or_empty_picker() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.copy_notice, Some("No session selected"));
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::empty())
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.search_query, "y");
+    assert_eq!(picker.copy_notice, None);
+}
+
+/// The picker shortcut invokes the shared clipboard implementation.
+#[test]
+fn copy_shortcut_copies_highlighted_session() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let mut picker = SessionPicker::new(vec![make_session(
+        "session_alpha",
+        "alpha",
+        false,
+        SessionStatus::Closed,
+    )]);
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.copy_notice, Some("Session ID copied"));
+}
+
+/// The picker advertises the shortcut and shows the result in its footer.
+#[test]
+fn copy_shortcut_and_result_are_visible() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let mut picker = SessionPicker::new(vec![make_session(
+        "session_alpha",
+        "alpha",
+        false,
+        SessionStatus::Closed,
+    )]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("y copy ID"));
+    picker
+        .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    terminal.draw(|frame| picker.render(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Session ID copied"));
 }
 
 #[path = "session_picker_tests/identity_search.rs"]
@@ -129,7 +233,7 @@ fn cloud_filter_supports_flat_sessions_and_debug_visibility() {
     assert_eq!(picker.visible_sessions.len(), 2);
     assert_eq!(picker.hidden_test_count, 0);
     picker.cycle_filter_mode_backwards();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
 }
@@ -893,6 +997,10 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.visible_sessions.len(), 6);
 
     picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+    assert!(picker.visible_sessions.is_empty());
+
+    picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(
@@ -915,10 +1023,6 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(picker.visible_session_iter().all(|session| session.saved));
     assert_eq!(picker.items.len(), picker.visible_sessions.len());
-
-    picker.cycle_filter_mode();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
-    assert!(picker.visible_sessions.is_empty());
 
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::Active);
@@ -987,10 +1091,24 @@ fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
-    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
 
     picker
         .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+
+    // Alt+S cycles even while typing a search query, without inserting text.
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::empty())
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+    assert!(picker.search_query.is_empty());
+    picker
+        .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT)
         .unwrap();
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
 }
@@ -1328,6 +1446,15 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
     session.first_user_prompt = preview.first().map(|m| m.content.clone());
     session.messages_preview = preview;
     session
+}
+
+fn picker_buffer(picker: &mut SessionPicker, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render picker");
+    terminal.backend().buffer().clone()
 }
 
 fn buffer_text(picker: &mut SessionPicker, w: u16, h: u16) -> String {
@@ -1705,12 +1832,7 @@ fn test_preview_transcript_omits_picker_metadata() {
         text.contains("client: Metadata-monkey"),
         "the real startup header belongs to the scrolling transcript"
     );
-    for metadata in [
-        "metadata-video-title",
-        "/metadata-only-directory",
-        "▶ Active",
-        "────",
-    ] {
+    for metadata in ["metadata-video-title", "▶ Active", "────"] {
         assert!(
             !text.contains(metadata),
             "unexpected picker metadata: {text}"
@@ -2590,18 +2712,15 @@ fn search_highlights_match_in_preview_and_scrolls_to_it() {
         "matched term should be visible in the preview after scrolling"
     );
 
-    // The match should be highlighted (bold) in the cached wrapped lines.
-    let highlighted = picker
-        .preview_cache
-        .as_ref()
-        .expect("preview cache built")
-        .wrapped_lines
-        .iter()
-        .flat_map(|line| line.spans.iter())
-        .any(|s| {
-            s.content.to_lowercase().contains("flibbertigibbet")
-                && s.style.add_modifier.contains(Modifier::BOLD)
-        });
+    // The match should be highlighted (bold) where the renderer drew it.
+    let buffer = picker_buffer(&mut picker, w, h);
+    let highlighted = (0..h).any(|y| {
+        let row: String = (0..w).map(|x| buffer[(x, y)].symbol()).collect();
+        row.find("flibbertigibbet").is_some_and(|byte| {
+            let x = row[..byte].chars().count() as u16;
+            buffer[(x, y)].modifier.contains(Modifier::BOLD)
+        })
+    });
     assert!(
         highlighted,
         "matched term in preview body should be highlighted"

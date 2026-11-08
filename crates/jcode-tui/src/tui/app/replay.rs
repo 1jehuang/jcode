@@ -1,8 +1,9 @@
 use super::{App, DisplayMessage, ProcessingStatus, RunResult};
 use crate::replay::{PaneReplayInput, ReplayEvent, TimelineEvent};
 use crate::tui::backend::{RemoteEventState, ReplayRemoteState};
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect,

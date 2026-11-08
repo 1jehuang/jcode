@@ -24,6 +24,52 @@ pub struct CompanionOptions {
     pub voice: bool,
     /// Periodically update an installed browser bridge.
     pub browser_updates: bool,
+    /// Live waveform in the focused Jcode CLI during push-to-talk.
+    pub voice_waveform: bool,
+    /// Desktop notifications for push-to-talk state.
+    pub voice_notifications: bool,
+    /// Handle `open` / `reveal` requests.
+    pub open: bool,
+    /// Handle `spawn_terminal` requests.
+    pub spawn_terminal: bool,
+    /// Handle `power_activity` (lid override).
+    pub lid: bool,
+}
+
+impl CompanionOptions {
+    /// Options from `[companion]` in the config file.
+    pub fn from_config() -> Self {
+        let config = &jcode_base::config::config().companion;
+        Self {
+            socket: socket_path(),
+            voice: config.voice,
+            browser_updates: config.browser_updates,
+            voice_waveform: config.voice_waveform,
+            voice_notifications: config.voice_notifications,
+            open: config.open,
+            spawn_terminal: config.spawn_terminal,
+            lid: config.lid,
+        }
+    }
+
+    /// Capabilities advertised in `status` for these options.
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut capabilities = Vec::new();
+        if self.open {
+            capabilities.push("open".to_string());
+            capabilities.push("reveal".to_string());
+        }
+        if self.spawn_terminal {
+            capabilities.push("spawn_terminal".to_string());
+        }
+        if self.lid && cfg!(any(target_os = "macos", windows)) {
+            capabilities.push("lid".to_string());
+        }
+        if self.voice && cfg!(target_os = "linux") {
+            capabilities.push("voice".to_string());
+        }
+        capabilities
+    }
 }
 
 impl Default for CompanionOptions {
@@ -32,14 +78,23 @@ impl Default for CompanionOptions {
             socket: socket_path(),
             voice: true,
             browser_updates: true,
+            voice_waveform: true,
+            voice_notifications: true,
+            open: true,
+            spawn_terminal: true,
+            lid: true,
         }
     }
 }
+
+type TerminalLauncher =
+    dyn Fn(jcode_base::terminal_launch::TerminalCommand, PathBuf) -> Result<bool> + Send + Sync;
 
 /// Shared state for request handlers.
 pub struct Companion {
     lid: Mutex<LidState>,
     capabilities: Vec<String>,
+    terminal_launcher: Arc<TerminalLauncher>,
 }
 
 struct LidState {
@@ -49,7 +104,12 @@ struct LidState {
 
 impl Companion {
     fn new(capabilities: Vec<String>) -> Self {
-        let mut lid = LidOverride::for_current_platform();
+        // A disabled lid feature must never touch the OS setting.
+        let mut lid = if capabilities.iter().any(|c| c == "lid") {
+            LidOverride::for_current_platform()
+        } else {
+            None
+        };
         // Repair settings a crashed earlier owner left behind.
         if let Some(lid) = lid.as_mut() {
             lid.recover_stale();
@@ -60,10 +120,41 @@ impl Companion {
                 active_until: None,
             }),
             capabilities,
+            terminal_launcher: Arc::new(|command, cwd| {
+                jcode_base::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
+            }),
         }
     }
 
+    fn has(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+
     pub async fn handle(&self, request: CompanionRequest) -> CompanionResponse {
+        // Disabled features answer as an error, so clients use their local
+        // fallback (open, terminals) or skip the effect (lid).
+        let required = match &request {
+            CompanionRequest::Status => None,
+            CompanionRequest::Open { .. } => Some("open"),
+            CompanionRequest::Reveal { .. } => Some("reveal"),
+            CompanionRequest::SpawnTerminal { .. }
+            | CompanionRequest::SpawnTerminalWithRuntime { .. } => Some("spawn_terminal"),
+            CompanionRequest::PowerActivity { .. } => {
+                if cfg!(any(target_os = "macos", windows)) {
+                    Some("lid")
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(capability) = required
+            && !self.has(capability)
+        {
+            return CompanionResponse::error(format!(
+                "{capability} {}",
+                jcode_base::companion_client::DISABLED_SUFFIX
+            ));
+        }
         match request {
             CompanionRequest::Status => CompanionResponse {
                 ok: true,
@@ -82,45 +173,34 @@ impl Companion {
                     Err(error) => CompanionResponse::error(format!("{error:#}")),
                 }
             }
-            CompanionRequest::SpawnTerminal {
-                program,
-                args,
-                cwd,
-                title,
-                kind,
-                session_id,
-                env,
-                client_terminal_env,
-            } => {
-                let mut command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
-                    .client_terminal_env(client_terminal_env);
-                if let Some(title) = title {
-                    command = command.title(title);
-                }
-                if let Some(kind) = kind {
-                    command = command.kind(kind);
-                }
-                if let Some(session_id) = session_id {
-                    command = command.session_id(session_id);
-                }
-                for (key, value) in env {
-                    command = command.spawn_env(key, value);
-                }
-                let spawn = tokio::task::spawn_blocking(move || {
-                    jcode_base::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
-                })
-                .await;
-                match spawn {
-                    Ok(Ok(true)) => CompanionResponse::ok("terminal"),
-                    Ok(Ok(false)) => CompanionResponse::error("no terminal emulator found"),
-                    Ok(Err(error)) => CompanionResponse::error(format!("{error:#}")),
-                    Err(error) => CompanionResponse::error(error.to_string()),
+            request @ (CompanionRequest::SpawnTerminal { .. }
+            | CompanionRequest::SpawnTerminalWithRuntime { .. }) => {
+                match terminal_command_from_request(request) {
+                    Some((command, cwd)) => self.launch_terminal(command, cwd).await,
+                    None => {
+                        CompanionResponse::error("spawn request did not carry a launchable command")
+                    }
                 }
             }
             CompanionRequest::PowerActivity { active } => {
                 self.set_power_active(active, Instant::now());
                 CompanionResponse::ok(if active { "engaged" } else { "released" })
             }
+        }
+    }
+
+    async fn launch_terminal(
+        &self,
+        command: jcode_base::terminal_launch::TerminalCommand,
+        cwd: PathBuf,
+    ) -> CompanionResponse {
+        let terminal_launcher = self.terminal_launcher.clone();
+        let spawn = tokio::task::spawn_blocking(move || terminal_launcher(command, cwd)).await;
+        match spawn {
+            Ok(Ok(true)) => CompanionResponse::ok("terminal"),
+            Ok(Ok(false)) => CompanionResponse::error("no terminal emulator found"),
+            Ok(Err(error)) => CompanionResponse::error(format!("{error:#}")),
+            Err(error) => CompanionResponse::error(error.to_string()),
         }
     }
 
@@ -158,6 +238,94 @@ async fn open(target: &str) -> Result<String> {
     jcode_desktop_open::open_target(&target).await
 }
 
+fn terminal_command_from_parts(
+    program: PathBuf,
+    args: Vec<String>,
+    title: Option<String>,
+    kind: Option<String>,
+    session_id: Option<String>,
+    env: Vec<(String, String)>,
+    client_terminal_env: Vec<(String, String)>,
+    runtime_env: Vec<(String, String)>,
+    fresh_spawn: bool,
+) -> jcode_base::terminal_launch::TerminalCommand {
+    let mut command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
+        .client_terminal_env(client_terminal_env)
+        .runtime_env(runtime_env);
+    if fresh_spawn {
+        command = command.fresh_spawn();
+    }
+    if let Some(title) = title {
+        command = command.title(title);
+    }
+    if let Some(kind) = kind {
+        command = command.kind(kind);
+    }
+    if let Some(session_id) = session_id {
+        command = command.session_id(session_id);
+    }
+    for (key, value) in env {
+        command = command.spawn_env(key, value);
+    }
+    command
+}
+
+fn terminal_command_from_request(
+    request: CompanionRequest,
+) -> Option<(jcode_base::terminal_launch::TerminalCommand, PathBuf)> {
+    match request {
+        CompanionRequest::SpawnTerminal {
+            program,
+            args,
+            cwd,
+            title,
+            kind,
+            session_id,
+            env,
+            client_terminal_env,
+        } => Some((
+            terminal_command_from_parts(
+                program,
+                args,
+                title,
+                kind,
+                session_id,
+                env,
+                client_terminal_env,
+                Vec::new(),
+                false,
+            ),
+            cwd,
+        )),
+        CompanionRequest::SpawnTerminalWithRuntime {
+            program,
+            args,
+            cwd,
+            title,
+            kind,
+            session_id,
+            env,
+            client_terminal_env,
+            runtime_env,
+            fresh_spawn,
+        } => Some((
+            terminal_command_from_parts(
+                program,
+                args,
+                title,
+                kind,
+                session_id,
+                env,
+                client_terminal_env,
+                runtime_env,
+                fresh_spawn,
+            ),
+            cwd,
+        )),
+        _ => None,
+    }
+}
+
 /// Run the companion until SIGTERM/SIGINT. Fails if another companion already
 /// owns the socket.
 pub async fn run(options: CompanionOptions) -> Result<()> {
@@ -169,17 +337,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]
     let mut listener = listener;
-    let mut capabilities = vec![
-        "open".to_string(),
-        "reveal".to_string(),
-        "spawn_terminal".to_string(),
-    ];
-    if cfg!(any(target_os = "macos", windows)) {
-        capabilities.push("lid".to_string());
-    }
-    if options.voice && cfg!(target_os = "linux") {
-        capabilities.push("voice".to_string());
-    }
+    let capabilities = options.capabilities();
     let companion = Arc::new(Companion::new(capabilities));
     jcode_base::logging::info(&format!(
         "companion: listening on {}",
@@ -189,7 +347,10 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if options.voice {
-        crate::voice::spawn();
+        crate::voice::spawn(crate::voice::VoiceIndicators {
+            notifications: options.voice_notifications,
+            waveform: options.voice_waveform,
+        });
     }
     if options.browser_updates {
         tokio::spawn(browser_bridge_updates());
@@ -332,13 +493,48 @@ mod tests {
     use super::*;
 
     fn companion() -> Companion {
+        companion_with_terminal_launcher(Arc::new(|_, _| Ok(true)))
+    }
+
+    fn companion_with_terminal_launcher(terminal_launcher: Arc<TerminalLauncher>) -> Companion {
         Companion {
             lid: Mutex::new(LidState {
                 lid: None,
                 active_until: None,
             }),
-            capabilities: vec!["open".into()],
+            capabilities: vec!["open".into(), "reveal".into(), "spawn_terminal".into()],
+            terminal_launcher,
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_features_answer_as_unavailable_to_clients() {
+        let mut options = CompanionOptions {
+            open: false,
+            spawn_terminal: false,
+            lid: false,
+            voice: false,
+            ..Default::default()
+        };
+        assert!(options.capabilities().is_empty());
+        let disabled = Companion::new(options.capabilities());
+        let response = disabled
+            .handle(CompanionRequest::Open {
+                target: "https://example.com".into(),
+            })
+            .await;
+        assert!(!response.ok);
+        assert!(
+            response
+                .message
+                .ends_with(jcode_base::companion_client::DISABLED_SUFFIX)
+        );
+        options.open = true;
+        options.spawn_terminal = true;
+        assert_eq!(
+            options.capabilities(),
+            vec!["open".to_string(), "reveal".into(), "spawn_terminal".into()]
+        );
     }
 
     #[tokio::test]
@@ -346,7 +542,45 @@ mod tests {
         let response = companion().handle(CompanionRequest::Status).await;
         assert!(response.ok);
         assert_eq!(response.protocol, PROTOCOL_VERSION);
-        assert_eq!(response.capabilities, vec!["open".to_string()]);
+        assert_eq!(response.capabilities[0], "open");
+    }
+
+    #[test]
+    fn contextual_spawn_request_reconstructs_runtime_and_target_metadata() {
+        let request = CompanionRequest::SpawnTerminalWithRuntime {
+            program: "/usr/bin/jcode".into(),
+            args: vec!["--resume".into(), "ses_context".into()],
+            cwd: "/work".into(),
+            title: Some("context window".into()),
+            kind: Some("swarm-agent".into()),
+            session_id: Some("ses_context".into()),
+            env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())],
+            client_terminal_env: vec![("TMUX_PANE".into(), "%12".into())],
+            runtime_env: vec![
+                ("JCODE_SOCKET".into(), "/tmp/connected.sock".into()),
+                ("JCODE_API_KEY".into(), "drop".into()),
+            ],
+            fresh_spawn: true,
+        };
+        let (command, cwd) = terminal_command_from_request(request).expect("terminal request");
+        assert_eq!(command.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(command.args, ["--resume", "ses_context"]);
+        assert_eq!(command.title.as_deref(), Some("context window"));
+        assert_eq!(command.kind.as_deref(), Some("swarm-agent"));
+        assert_eq!(command.session_id.as_deref(), Some("ses_context"));
+        assert_eq!(
+            command.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())]
+        );
+        assert_eq!(
+            command.client_terminal_env,
+            [("TMUX_PANE".into(), "%12".into())]
+        );
+        assert_eq!(
+            command.runtime_env,
+            [("JCODE_SOCKET".into(), "/tmp/connected.sock".into())]
+        );
+        assert_eq!(cwd, PathBuf::from("/work"));
     }
 
     #[tokio::test]
@@ -402,6 +636,140 @@ mod tests {
         assert!(response.ok);
         assert!(response.message.starts_with("jcode companion"));
         server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contextual_spawn_crosses_socket_and_launches_with_filtered_runtime() {
+        async fn request(path: PathBuf, request: CompanionRequest) -> CompanionResponse {
+            tokio::task::spawn_blocking(move || {
+                jcode_base::companion_client::request_at(&path, &request, Duration::from_secs(2))
+            })
+            .await
+            .unwrap()
+            .unwrap()
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("jcode-companion-socket-test-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join("contextual-companion.sock");
+        let listener = bind(&path).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let launcher_capture = captured.clone();
+        let companion = Arc::new(companion_with_terminal_launcher(Arc::new(
+            move |command, cwd| {
+                launcher_capture.lock().unwrap().push((command, cwd));
+                Ok(true)
+            },
+        )));
+        let server = {
+            let companion = companion.clone();
+            tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    serve(stream, &companion).await.unwrap();
+                }
+            })
+        };
+
+        let contextual = request(
+            path.clone(),
+            CompanionRequest::SpawnTerminalWithRuntime {
+                program: "/usr/bin/jcode".into(),
+                args: vec![
+                    "--resume".into(),
+                    "ses_context".into(),
+                    "--label".into(),
+                    "work tree".into(),
+                ],
+                cwd: "/work/tree".into(),
+                title: Some("context window".into()),
+                kind: Some("swarm-agent".into()),
+                session_id: Some("ses_context".into()),
+                env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())],
+                client_terminal_env: vec![("TMUX_PANE".into(), "%12".into())],
+                runtime_env: vec![
+                    ("JCODE_SOCKET".into(), "/tmp/new-pane.sock".into()),
+                    ("JCODE_RUNTIME_DIR".into(), "/tmp/new-pane-runtime".into()),
+                    ("JCODE_API_KEY".into(), "must-not-cross".into()),
+                ],
+                fresh_spawn: true,
+            },
+        )
+        .await;
+        assert!(contextual.ok, "{}", contextual.message);
+
+        let legacy = request(
+            path.clone(),
+            CompanionRequest::SpawnTerminal {
+                program: "/usr/bin/jcode".into(),
+                args: vec!["--version".into()],
+                cwd: "/work/no-context".into(),
+                title: Some("plain window".into()),
+                kind: Some("manual".into()),
+                session_id: None,
+                env: vec![("JCODE_SPAWN_SWARM_ID".into(), "swarm-2".into())],
+                client_terminal_env: vec![("TMUX_PANE".into(), "%13".into())],
+            },
+        )
+        .await;
+        assert!(legacy.ok, "{}", legacy.message);
+        server.await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let (contextual, cwd) = &captured[0];
+        assert_eq!(contextual.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(
+            contextual.args,
+            ["--resume", "ses_context", "--label", "work tree"]
+        );
+        assert_eq!(cwd, &PathBuf::from("/work/tree"));
+        assert_eq!(contextual.title.as_deref(), Some("context window"));
+        assert_eq!(contextual.kind.as_deref(), Some("swarm-agent"));
+        assert_eq!(contextual.session_id.as_deref(), Some("ses_context"));
+        assert_eq!(
+            contextual.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-1".into())]
+        );
+        assert_eq!(
+            contextual.client_terminal_env,
+            [("TMUX_PANE".into(), "%12".into())]
+        );
+        assert!(contextual.fresh_spawn);
+        assert_eq!(
+            contextual.runtime_env,
+            [
+                ("JCODE_SOCKET".into(), "/tmp/new-pane.sock".into()),
+                ("JCODE_RUNTIME_DIR".into(), "/tmp/new-pane-runtime".into()),
+            ]
+        );
+        assert!(
+            !contextual
+                .runtime_env
+                .iter()
+                .any(|(key, _)| key == "JCODE_API_KEY")
+        );
+
+        let (legacy, cwd) = &captured[1];
+        assert_eq!(legacy.program, PathBuf::from("/usr/bin/jcode"));
+        assert_eq!(legacy.args, ["--version"]);
+        assert_eq!(cwd, &PathBuf::from("/work/no-context"));
+        assert_eq!(legacy.title.as_deref(), Some("plain window"));
+        assert_eq!(legacy.kind.as_deref(), Some("manual"));
+        assert_eq!(legacy.session_id, None);
+        assert_eq!(
+            legacy.extra_env,
+            [("JCODE_SPAWN_SWARM_ID".into(), "swarm-2".into())]
+        );
+        assert_eq!(
+            legacy.client_terminal_env,
+            [("TMUX_PANE".into(), "%13".into())]
+        );
+        assert!(!legacy.fresh_spawn);
+        assert!(legacy.runtime_env.is_empty());
     }
 
     #[cfg(unix)]

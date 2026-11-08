@@ -262,7 +262,64 @@ pub fn last_max_scroll() -> usize {
     }
 }
 
+thread_local! {
+    static SECONDARY_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SECONDARY_FRAME: std::cell::RefCell<Option<Arc<PreparedChatFrame>>> =
+        const { std::cell::RefCell::new(None) };
+    static SECONDARY_GEOMETRY: std::cell::Cell<SecondaryGeometry> =
+        const { std::cell::Cell::new(SecondaryGeometry { max_scroll: 0, scroll: 0, total_lines: 0, viewport_height: 0 }) };
+}
+
+/// Transcript geometry a secondary render resolved. The live session's
+/// globals stay untouched, so embedders read their own results from here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SecondaryGeometry {
+    pub max_scroll: usize,
+    pub scroll: usize,
+    pub total_lines: usize,
+    pub viewport_height: usize,
+}
+
+fn note_secondary_geometry(update: impl FnOnce(&mut SecondaryGeometry)) {
+    SECONDARY_GEOMETRY.with(|cell| {
+        let mut geometry = cell.get();
+        update(&mut geometry);
+        cell.set(geometry);
+    });
+}
+
+/// True while drawing a non-live view (for example the resume preview).
+/// Such renders must not publish layout, scroll, copy, or status state that
+/// the live session's input handling reads back.
+pub(crate) fn secondary_render_active() -> bool {
+    SECONDARY_RENDER.with(std::cell::Cell::get)
+}
+
+/// Run `f` with secondary-render isolation enabled on this thread.
+/// Returns the geometry the render resolved alongside `f`'s result.
+pub(crate) fn with_secondary_render<R>(f: impl FnOnce() -> R) -> (R, SecondaryGeometry) {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SECONDARY_RENDER.with(|c| c.set(self.0));
+        }
+    }
+    SECONDARY_GEOMETRY.with(|cell| cell.set(SecondaryGeometry::default()));
+    SECONDARY_FRAME.with(|slot| slot.borrow_mut().take());
+    let _reset = Reset(SECONDARY_RENDER.with(|c| c.replace(true)));
+    let result = f();
+    (result, SECONDARY_GEOMETRY.with(std::cell::Cell::get))
+}
+
+/// The prepared transcript the most recent secondary render drew.
+pub(crate) fn take_secondary_chat_frame() -> Option<Arc<PreparedChatFrame>> {
+    SECONDARY_FRAME.with(|slot| slot.borrow_mut().take())
+}
+
 fn set_last_chat_scrollbar_visible(visible: bool) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_SCROLLBAR_VISIBLE.with(|state| state.set(visible));
@@ -279,6 +336,9 @@ fn set_last_chat_scrollbar_visible(visible: bool) {
 /// instead of both the wide and narrow variants (which thrashes the prep caches
 /// on long transcripts during streaming).
 fn last_chat_scrollbar_visible() -> bool {
+    if secondary_render_active() {
+        return false;
+    }
     #[cfg(test)]
     {
         return TEST_LAST_CHAT_SCROLLBAR_VISIBLE.with(Cell::get);
@@ -328,6 +388,10 @@ pub fn last_diff_pane_max_scroll() -> usize {
 }
 
 pub(crate) fn set_last_max_scroll(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.max_scroll = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_MAX_SCROLL.with(|cell| cell.set(value));
@@ -340,6 +404,9 @@ pub(crate) fn set_last_max_scroll(value: usize) {
 }
 
 pub(crate) fn set_pinned_pane_total_lines(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PINNED_PANE_TOTAL_LINES.with(|cell| cell.set(value));
@@ -352,6 +419,9 @@ pub(crate) fn set_pinned_pane_total_lines(value: usize) {
 }
 
 pub(crate) fn set_last_diff_pane_effective_scroll(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL.with(|cell| cell.set(value));
@@ -364,6 +434,9 @@ pub(crate) fn set_last_diff_pane_effective_scroll(value: usize) {
 }
 
 pub(crate) fn set_last_diff_pane_max_scroll(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_DIFF_PANE_MAX_SCROLL.with(|cell| cell.set(value));
@@ -389,6 +462,10 @@ pub fn last_total_wrapped_lines() -> usize {
 }
 
 pub(crate) fn set_last_total_wrapped_lines(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.total_lines = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_TOTAL_WRAPPED_LINES.with(|cell| cell.set(value));
@@ -414,6 +491,10 @@ pub(crate) fn last_chat_viewport_height() -> usize {
 }
 
 pub(crate) fn set_last_chat_viewport_height(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.viewport_height = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_VIEWPORT_HEIGHT.with(|cell| cell.set(value));
@@ -428,6 +509,9 @@ pub(crate) fn set_last_chat_viewport_height(value: usize) {
 /// The chat scroll offset the renderer actually used on the most recent frame
 /// (after clamping and after resolving any pending history anchor).
 pub fn last_resolved_chat_scroll() -> usize {
+    if secondary_render_active() {
+        return 0;
+    }
     #[cfg(test)]
     {
         return TEST_LAST_RESOLVED_CHAT_SCROLL.with(Cell::get);
@@ -439,6 +523,10 @@ pub fn last_resolved_chat_scroll() -> usize {
 }
 
 pub(crate) fn set_last_resolved_chat_scroll(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.scroll = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_RESOLVED_CHAT_SCROLL.with(|cell| cell.set(value));
@@ -464,6 +552,9 @@ pub(crate) fn tail_catchup_active() -> bool {
 }
 
 pub(crate) fn set_tail_catchup_active(active: bool) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_TAIL_CATCHUP_ACTIVE.with(|cell| cell.set(active));
@@ -495,6 +586,9 @@ pub(crate) fn request_tail_follow_snap() {
 }
 
 pub(crate) fn take_tail_follow_snap_request() -> bool {
+    if secondary_render_active() {
+        return false;
+    }
     #[cfg(test)]
     {
         return TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.replace(false));
@@ -599,6 +693,9 @@ fn visible_expand_edit_badge_rect_state() -> &'static Mutex<Option<Rect>> {
 }
 
 pub(crate) fn set_visible_expand_edit_badge_rect(rect: Option<Rect>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_EXPAND_EDIT_BADGE_RECT.with(|state| state.set(rect));
@@ -629,6 +726,9 @@ pub(crate) fn visible_expand_edit_badge_at(column: u16, row: u16) -> bool {
 }
 
 pub(crate) fn set_visible_expand_edit_badge(visible: bool, line: Option<usize>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_EXPAND_EDIT_BADGE.with(|state| state.set(visible));
@@ -682,6 +782,9 @@ pub(crate) fn visible_expand_edit_badge_line() -> Option<usize> {
 }
 
 fn set_visible_copy_targets(targets: Vec<VisibleCopyTarget>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_COPY_TARGETS.with(|state| {
@@ -802,6 +905,9 @@ fn active_prompt_entry_animation(now_ms: u64) -> Option<PromptViewportAnimation>
 }
 
 fn record_prompt_viewport(visible_start: usize, visible_end: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PROMPT_VIEWPORT_STATE.with(|state| {
@@ -832,6 +938,9 @@ fn update_prompt_entry_animation(
     visible_end: usize,
     now_ms: u64,
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PROMPT_VIEWPORT_STATE.with(|state| {
@@ -1225,6 +1334,16 @@ impl BodyCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // An entry that differs only by an older `messages_version` can never
+        // be an exact hit again, and the new entry is a better incremental
+        // base for the same layout. Keeping it only holds memory.
+        self.entries.retain(|entry| {
+            !(entry.key.messages_version < key.messages_version
+                && BodyCacheKey {
+                    messages_version: key.messages_version,
+                    ..entry.key.clone()
+                } == key)
+        });
         self.entries.push_front(BodyCacheEntry {
             key,
             prepared,
@@ -1382,6 +1501,12 @@ impl FullPrepCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // A frame keyed on partial streaming text can never be hit again once
+        // the stream advances: text only grows, and the turn ending bumps
+        // `messages_version`. Holding them just pins multi-MB snapshots of the
+        // whole transcript (measured: 4 entries, 13.6 MB on one client).
+        self.entries
+            .retain(|entry| entry.key.streaming_text_len == 0);
         self.entries.push_front(FullPrepCacheEntry {
             key,
             prepared,
@@ -1486,6 +1611,9 @@ fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
 }
 
 pub(crate) fn record_status_area(area: Rect) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_STATUS_AREA.with(|snapshot| {
@@ -1530,8 +1658,8 @@ pub(crate) use frame_metrics::{
     set_frame_input_attribution, wall_clock_ms,
 };
 pub(crate) use frame_metrics::{
-    debug_draw_call_history, debug_flicker_frame_history, debug_slow_frame_history,
-    recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
+    changed_cells_wanted, debug_draw_call_history, debug_flicker_frame_history,
+    debug_slow_frame_history, recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
 };
 #[cfg(test)]
 pub(crate) use smoothness::frame_from_buffer as smoothness_frame_from_buffer;
@@ -1576,6 +1704,9 @@ pub fn record_layout_snapshot(
     diff_pane_area: Option<Rect>,
     input_area: Option<Rect>,
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_LAYOUT.with(|snapshot| {
@@ -1635,6 +1766,10 @@ fn terminal_clear_start(app: &dyn TuiState, prepared: &PreparedChatFrame) -> Opt
 
 /// Record the prepared transcript frame the renderer just drew.
 pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
+    if secondary_render_active() {
+        SECONDARY_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
@@ -1958,6 +2093,9 @@ fn copy_snapshot_for_pane(pane: crate::tui::CopySelectionPane) -> Option<CopyVie
 }
 
 pub(crate) fn clear_copy_viewport_snapshot() {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
@@ -1986,6 +2124,9 @@ fn record_copy_pane_snapshot(
     content_area: Rect,
     left_margins: &[u16],
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
@@ -2032,6 +2173,9 @@ fn record_copy_viewport_frame_snapshot(
     content_area: Rect,
     left_margins: &[u16],
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
@@ -2091,6 +2235,9 @@ pub(crate) fn record_side_pane_snapshot_precomputed(
 }
 
 fn record_link_lines(pane: crate::tui::CopySelectionPane, lines: &[Line<'static>]) {
+    if secondary_render_active() {
+        return;
+    }
     // Only retain styled lines when they contain links. The common plain-text
     // pane path should not duplicate an entire rendered document every frame.
     let lines = lines
@@ -2163,9 +2310,14 @@ pub(crate) fn line_left_margins_for_area(lines: &[Line<'static>], area_width: u1
     lines
         .iter()
         .map(|line| {
+            let alignment = line.alignment.unwrap_or(Alignment::Left);
+            if alignment == Alignment::Left {
+                // Left-aligned lines never have a margin, so skip measuring them.
+                return 0;
+            }
             let used = line.width().min(area_width as usize) as u16;
             let total_margin = area_width.saturating_sub(used);
-            match line.alignment.unwrap_or(Alignment::Left) {
+            match alignment {
                 Alignment::Left => 0,
                 Alignment::Center => total_margin / 2,
                 Alignment::Right => total_margin,
@@ -2754,7 +2906,9 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 mod overflow;
 use overflow::transcript_definitely_overflows;
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
-    record_idle_animation_area(None);
+    if !secondary_render_active() {
+        record_idle_animation_area(None);
+    }
     if let Some(frozen) = app.hibernation_frame()
         && frozen.area == frame.area()
     {
@@ -2794,7 +2948,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
             capture
                 .render_order
                 .push("frozen_hibernation_frame".to_string());
-            visual_debug::record_frame(capture.build());
+            if !secondary_render_active() {
+                visual_debug::record_frame(capture.build());
+            }
         }
         return;
     }
@@ -2816,21 +2972,27 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Classic Kitty placements must follow all text writes. Unlike Unicode
     // placeholders they survive scrolling, so finalize even an image-free frame.
-    // This also drains deferred cache-eviction deletions when no image remains.
     crate::tui::mermaid::finish_terminal_image_frame(frame.buffer_mut());
+    if !secondary_render_active() {
+        crate::tui::cloud_latency::rendered();
+    }
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
-    panel_image_preview::clear_regions();
+    let secondary = secondary_render_active();
+    if !secondary {
+        panel_image_preview::clear_regions();
+    }
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let total_start = Instant::now();
-    reset_frame_perf_stats();
-    begin_frame_resource_sample();
-
-    clear_copy_viewport_snapshot();
+    if !secondary {
+        reset_frame_perf_stats();
+        begin_frame_resource_sample();
+        clear_copy_viewport_snapshot();
+    }
 
     // Clear full frame to prevent stale cells from prior layouts.
     // This is critical on macOS terminals where ratatui's diff-based updates
@@ -3841,7 +4003,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.side_panel = crate::tui::side_panel_debug_json();
         capture.markdown = crate::tui::markdown::debug_stats_json();
         capture.theme = overlays::debug_palette_json();
-        visual_debug::record_frame(capture.build());
+        if !secondary_render_active() {
+            visual_debug::record_frame(capture.build());
+        }
     }
 
     finalize_frame_metrics(
