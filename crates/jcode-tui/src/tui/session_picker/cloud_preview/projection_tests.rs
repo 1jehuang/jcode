@@ -28,6 +28,16 @@
 // Inventory actual mmap ms 1019.11, 1507.74, 742.82: no consistent speedup.
 // Evidence: ~/.jcode/scratch/bounded-preview-final-scanner-results.jsonl and
 // paired-projection-final-results.txt, reproduced by paired-projection.py.
+// Journal follow-up, 2026-11-08 UTC, synthetic LOCAL inputs only, no cloud reads:
+// 34,662,320-byte frozen mmap journal, 220 entries x 120 ordinary messages with
+// escaped quotes/backslashes, braces and Unicode. Alternating before/after order,
+// one warmup then six measured runs per mode. Removing only the redundant outer
+// journal-entry scan: preview medians 895.38 -> 660.65 ms (-26.2%), inventory
+// 566.62 -> 284.27 ms (-49.8%). Every paired JSON output was byte-identical.
+// Snapshot/journal size, mtime_ns and SHA256 were unchanged across all runs.
+// Journal SHA256 aa9a2e05ed8a7500ed42fdf832b68995d488814752ec6abd69a5af2f91e4dafd.
+// Local reproduction: ~/.jcode/scratch/journal-paired.py, journal-before.py and
+// journal-paired-results.txt. This does not establish live-cloud/SSH latency.
 use super::*;
 use std::io::Write;
 
@@ -109,6 +119,47 @@ encoded = b'{"messages":[{"id":"old"}],"messages":[]}'
 for key,a,b in fields(encoded, message_ranges=ranges):
     pass
 assert not ranges
+# Compare exact field spans with the former outer-container scan, including
+# whitespace, adjacent entries, duplicate keys, scalars and escaped braces.
+def previous_journal_fields(data):
+    pos = 0
+    while pos < len(data):
+        pos = skip_space(data, pos)
+        if pos == len(data):
+            break
+        end = value_end(data, pos)
+        yield from fields(data, pos)
+        pos = end
+entries = [b'{}', b'{"meta":{"title":"first","title":"last"}}',
+           b'{"append_messages":[null,1,"escaped\\\"{}[]",{},[]],"append_messages":[]}',
+           json.dumps({'unknown': [{'nested': samples}]}).encode()]
+for separator in (b'', b'\n', b' \r\n\t'):
+    encoded = separator + separator.join(entries) + separator
+    assert list(journal_fields(encoded)) == list(previous_journal_fields(encoded))
+for malformed in (b'{', b'{"meta":{}} {', b'{"x":[]]', b'{"x":"unterminated}'):
+    try:
+        list(journal_fields(malformed))
+    except (ValueError, IndexError):
+        pass
+    else:
+        raise AssertionError(repr(malformed))
+import tempfile
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / 'journal.json'
+    path.write_bytes(b'{"id":"journal","messages":[],"route_api_method":"original"}')
+    journal = path.with_suffix('.journal.jsonl')
+    journal.write_bytes(b'{"meta":{"title":"first","title":"last","route_api_method":"ignored"},"append_messages":[null,1,"scalar"]}'
+                        b'{"meta":{"route_api_method_present":true,"route_api_method":"responses"},"append_messages":[]}'
+                        b'{"meta":{"route_api_method_present":true,"route_api_method_present":false,"route_api_method":"ignored"}} \n')
+    before = [(p.stat().st_size, p.stat().st_mtime_ns) for p in (path, journal)]
+    result = project(path, True)
+    assert result['title'] == 'last'
+    assert result['route_api_method'] == 'responses'
+    assert result['messages'] == [None, 1, 'scalar']
+    assert all(result[k] == [] for k in ('env_snapshots', 'memory_injections', 'replay_events'))
+    inventory = project(path, False)
+    assert inventory['title'] == 'last' and 'messages' not in inventory
+    assert before == [(p.stat().st_size, p.stat().st_mtime_ns) for p in (path, journal)]
 for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'[{]}'):
     try:
         value_end(malformed, 0)
