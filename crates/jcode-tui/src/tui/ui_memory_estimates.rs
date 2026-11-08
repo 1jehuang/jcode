@@ -170,9 +170,28 @@ fn prepared_messages_breakdown(prepared: &PreparedMessages) -> serde_json::Value
         .map(|span| span.content.len())
         .sum();
     let span_count: usize = prepared.wrapped_lines.iter().map(|l| l.spans.len()).sum();
+    let span_capacity: usize = prepared
+        .wrapped_lines
+        .iter()
+        .map(|l| l.spans.capacity())
+        .sum();
+    let max_spans_line = prepared
+        .wrapped_lines
+        .iter()
+        .max_by_key(|l| l.spans.len())
+        .map(|l| {
+            l.spans
+                .iter()
+                .take(12)
+                .map(|s| s.content.to_string())
+                .collect::<Vec<_>>()
+        });
     serde_json::json!({
         "wrapped_lines_count": prepared.wrapped_lines.len(),
         "span_count": span_count,
+        "span_capacity": span_capacity,
+        "max_spans_line_sample": max_spans_line,
+        "max_spans_line_len": prepared.wrapped_lines.iter().map(|l| l.spans.len()).max(),
         "line_headers_bytes": prepared.wrapped_lines.capacity() * std::mem::size_of::<Line<'static>>(),
         "span_structs_bytes": line_spans,
         "span_text_bytes": span_text,
