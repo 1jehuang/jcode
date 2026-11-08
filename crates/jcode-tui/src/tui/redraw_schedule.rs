@@ -23,6 +23,10 @@ pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 /// Tick cadence while a turn is live but its streamed text is fully revealed.
 /// Matches the status spinner glyph cadence so the spinner stays smooth.
 pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);
+/// Fastest tick for a client whose terminal is not focused. Nobody is looking
+/// closely at a background pane, but agent swarms keep a dozen of them
+/// streaming at once, so full-rate repaints there are pure battery cost.
+pub(crate) const REDRAW_UNFOCUSED_MIN: Duration = Duration::from_millis(100);
 
 /// Whether this session has been left alone long enough to be treated as
 /// dormant (deep idle): no stream activity *and* no user interaction for
@@ -409,6 +413,19 @@ fn actively_composing(state: &dyn TuiState) -> bool {
 /// in that case costs a full frame per tick and paints nothing; see
 /// [`idle_donut_paces_redraws`].
 pub(crate) fn redraw_interval_with_policy_and_animation(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+    animation_on_screen: bool,
+) -> Duration {
+    let interval = redraw_interval_focused_policy(state, policy, animation_on_screen);
+    if state.client_focused() || state.copy_selection_edge_autoscroll_active() {
+        interval
+    } else {
+        interval.max(REDRAW_UNFOCUSED_MIN)
+    }
+}
+
+fn redraw_interval_focused_policy(
     state: &dyn TuiState,
     policy: &crate::perf::TuiPerfPolicy,
     animation_on_screen: bool,

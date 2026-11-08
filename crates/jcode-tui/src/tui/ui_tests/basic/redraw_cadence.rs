@@ -350,3 +350,22 @@ fn fully_revealed_stream_waiting_on_the_turn_drops_to_spinner_cadence() {
         "a reveal backlog must keep the smooth fast cadence"
     );
 }
+
+/// Background panes stay live but must not repaint at full frame rate: a swarm
+/// keeps many unfocused clients streaming at once.
+#[test]
+fn unfocused_streaming_client_is_capped_but_focused_is_not() {
+    let policy = full_tier_policy();
+    let mut state = TestState {
+        status: ProcessingStatus::Streaming,
+        streaming_text: "partial reply".to_string(),
+        ..Default::default()
+    };
+    let focused = crate::tui::redraw_interval_with_policy(&state, &policy);
+    assert!(focused < crate::tui::redraw_schedule::REDRAW_UNFOCUSED_MIN);
+    state.unfocused = true;
+    assert_eq!(
+        crate::tui::redraw_interval_with_policy(&state, &policy),
+        crate::tui::redraw_schedule::REDRAW_UNFOCUSED_MIN
+    );
+}
