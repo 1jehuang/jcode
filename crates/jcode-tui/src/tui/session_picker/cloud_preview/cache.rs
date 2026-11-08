@@ -14,7 +14,7 @@ const TTL: Duration = Duration::from_secs(15);
 
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
     let mut timer = super::StageTimer::new("cache_scope");
-    let root = super::stage_result(crate::storage::jcode_dir(), "cache_directory")?;
+    let root = super::stage_result(crate::storage::jcode_dir, "cache_directory")?;
     let owner = crate::subscription_catalog::configured_api_key().unwrap_or_default();
     let endpoint = crate::subscription_api::configured_api_base();
     let path = scoped_key_path(&root, session_id, host, epoch, &owner, &endpoint);
@@ -67,14 +67,14 @@ pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
         }
         Err(_) => return None,
     };
-    if super::stage_result(file.metadata(), "cache_metadata")?.len() > MAX_BYTES as u64 {
+    if super::stage_result(|| file.metadata(), "cache_metadata")?.len() > MAX_BYTES as u64 {
         timer.outcome("oversized");
         return None;
     }
     // Do not trust metadata for allocation or bounds: the file can grow concurrently.
     let mut bytes = Vec::new();
     super::stage_result(
-        file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
+        || file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
         "cache_read_io",
     )?;
     timer.outcome(if bytes.len() <= MAX_BYTES {
@@ -88,10 +88,10 @@ pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
 pub(super) fn fresh(path: &Path) -> bool {
     let mut timer = super::StageTimer::new("cache_freshness");
     let fresh = super::stage_result(
-        fs::metadata(path).and_then(|metadata| metadata.modified()),
+        || fs::metadata(path).and_then(|metadata| metadata.modified()),
         "cache_timestamp",
     )
-    .and_then(|modified| super::stage_result(modified.elapsed(), "cache_age"))
+    .and_then(|modified| super::stage_result(|| modified.elapsed(), "cache_age"))
     .is_some_and(|age| age < TTL);
     timer.outcome(if fresh {
         "fresh"

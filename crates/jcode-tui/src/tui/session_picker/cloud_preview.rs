@@ -29,8 +29,15 @@ impl StageTimer {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static STAGE_TIMINGS: std::cell::RefCell<Vec<(&'static str, std::time::Duration)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Drop for StageTimer {
     fn drop(&mut self) {
+        #[cfg(test)]
+        STAGE_TIMINGS.with_borrow_mut(|events| events.push((self.stage, self.started.elapsed())));
         crate::logging::info(&format!(
             "[CLOUD_TIMING] stage={} outcome={} duration_ms={}",
             self.stage,
@@ -40,9 +47,9 @@ impl Drop for StageTimer {
     }
 }
 
-fn stage_result<T, E>(result: Result<T, E>, stage: &'static str) -> Option<T> {
+fn stage_result<T, E>(operation: impl FnOnce() -> Result<T, E>, stage: &'static str) -> Option<T> {
     let mut timer = StageTimer::new(stage);
-    match result {
+    match operation() {
         Ok(value) => {
             timer.outcome("success");
             Some(value)
@@ -157,7 +164,7 @@ fn parse_for_session(bytes: &[u8], session_id: &str) -> Option<CloudSnapshot> {
 
 fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
     let mut timer = StageTimer::new("ssh");
-    let config = stage_result(crate::storage::jcode_dir(), "ssh_config")?.join("cloud/ssh_config");
+    let config = stage_result(crate::storage::jcode_dir, "ssh_config")?.join("cloud/ssh_config");
     let command = crate::tui::cloud_git::compressed_script_command(
         Some(host),
         config.is_file().then_some(config.as_path()),
@@ -165,9 +172,11 @@ fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
         &projection_script("preview"),
     );
     let runtime = stage_result(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        },
         "ssh_runtime",
     )?;
     let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output(
@@ -201,7 +210,7 @@ fn parse_preview(
             timer.outcome("skipped_absent");
             None
         } else {
-            let result = stage_result(serde_json::from_slice(bytes), "telemetry_decode");
+            let result = stage_result(|| serde_json::from_slice(bytes), "telemetry_decode");
             if result.is_some() {
                 timer.outcome("success");
             }
@@ -213,25 +222,48 @@ fn parse_preview(
 
 fn parse_transcript(bytes: &[u8]) -> Option<Session> {
     let split = bytes.iter().position(|b| *b == 0)?;
-    let dir = stage_result(tempfile::tempdir(), "parse_tempdir")?;
+    let dir = stage_result(tempfile::tempdir, "parse_tempdir")?;
     let path = dir.path().join("preview.json");
     stage_result(
-        std::fs::write(&path, &bytes[..split]),
+        || std::fs::write(&path, &bytes[..split]),
         "parse_snapshot_write",
     )?;
     stage_result(
-        std::fs::write(
-            crate::session::session_journal_path_from_snapshot(&path),
-            &bytes[split + 1..],
-        ),
+        || {
+            std::fs::write(
+                crate::session::session_journal_path_from_snapshot(&path),
+                &bytes[split + 1..],
+            )
+        },
         "parse_journal_write",
     )?;
-    stage_result(Session::load_from_path(&path), "parse_hydrate")
+    stage_result(|| Session::load_from_path(&path), "parse_hydrate")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_result_times_the_operation_not_only_result_conversion() {
+        STAGE_TIMINGS.with_borrow_mut(Vec::clear);
+        let value = stage_result(
+            || {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok::<_, ()>(42)
+            },
+            "test_operation",
+        );
+        assert_eq!(value, Some(42));
+        STAGE_TIMINGS.with_borrow(|events| {
+            assert!(
+                events
+                    .iter()
+                    .any(|(stage, elapsed)| *stage == "test_operation"
+                        && *elapsed >= Duration::from_millis(10))
+            );
+        });
+    }
 
     fn wire(id: &str, title: &str) -> Vec<u8> {
         let session = Session::create_with_id(id.into(), None, Some(title.into()));
