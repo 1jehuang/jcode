@@ -147,6 +147,23 @@ in 3ms. This demonstrates removal of a pipe deadlock, not faster model turns.
 and poll wait, including errors and cancellation. The five-second poll cadence
 is unchanged.
 
+The runner now claims immediately on startup and immediately after completing a
+command. It sleeps five seconds only after an empty claim, retaining the idle
+poll rate. Errors back off for 20 seconds rather than 20 seconds plus the old
+unconditional five-second wait. This removes scheduling gaps at startup and
+between queued commands, not the up-to-five-second wait for a command arriving
+during an idle poll interval. The current API provides no long-poll or command
+notification channel, so that remaining latency needs coordinated API work.
+
+`operation=mobile_runner stage=queue_wait` records `claimed_at - created_at`
+using the two API-provided timestamps, avoiding phone/daemon clock skew. It
+includes machine wake, previous queued work and polling delays, but excludes
+claim-response transport and turn execution. Legacy responses without those
+timestamps still execute normally. Invalid or reversed timestamps omit the
+metric rather than changing command handling. Logs contain only the duration,
+not command IDs, text or timestamps. Paused-clock regression comparisons prove
+the eliminated five-second scheduling gaps, not production end-to-end latency.
+
 The separate `jcode-mobile` repository's phone transcript transport now pools
 HTTP connections too (commit `a98b496`). Eight actual list calls in a loopback
 fixture with 30ms connection setup and 8ms body delay improved from median

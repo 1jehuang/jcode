@@ -15,6 +15,9 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(test)]
+#[path = "mobile_runner_poll_tests.rs"]
+mod poll_tests;
 #[path = "mobile_runner_process.rs"]
 mod process;
 #[cfg(test)]
@@ -68,6 +71,27 @@ pub struct MobileCommand {
     pub kind: String,
     pub session_id: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub claimed_at: Option<String>,
+}
+
+impl MobileCommand {
+    // Both timestamps originate at the queue API, avoiding client clock skew.
+    // This includes wake/backlog/poll delay, not claim response transport time.
+    fn queue_wait_ms(&self) -> Option<u64> {
+        let (Ok(created), Ok(claimed)) = (
+            chrono::DateTime::parse_from_rfc3339(self.created_at.as_deref()?),
+            chrono::DateTime::parse_from_rfc3339(self.claimed_at.as_deref()?),
+        ) else {
+            return None;
+        };
+        if claimed < created {
+            return None;
+        }
+        Some(claimed.signed_duration_since(created).num_milliseconds() as u64)
+    }
 }
 
 #[derive(Deserialize)]
@@ -364,6 +388,11 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
     let Some(command) = claimed else {
         return Ok(false);
     };
+    if let Some(duration_ms) = command.queue_wait_ms() {
+        crate::logging::info(&format!(
+            "[CLOUD_TIMING] operation=mobile_runner stage=queue_wait outcome=ok duration_ms={duration_ms}"
+        ));
+    }
     let outcome = async {
         let session_id = match command.kind.as_str() {
             "transfer" => Some(
@@ -413,6 +442,28 @@ pub fn ensure_sync_enabled() {
     }
 }
 
+async fn poll_commands<F, Fut>(mut run: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    loop {
+        let delay = match run().await {
+            // A completed command is evidence of activity. Drain existing work
+            // without another five-second gap, then return to normal idle load.
+            Ok(true) => continue,
+            Ok(false) => POLL_INTERVAL,
+            Err(error) => {
+                crate::logging::warn(&format!("mobile runner: {error:#}"));
+                Duration::from_secs(20)
+            }
+        };
+        let mut timing = StageTimer::new("pollwait");
+        tokio::time::sleep(delay).await;
+        timing.outcome = "ok";
+    }
+}
+
 /// Background loop for the daemon on a Jcode Cloud machine.
 pub fn spawn_cloud_runner() {
     if !is_cloud_machine() {
@@ -421,23 +472,39 @@ pub fn spawn_cloud_runner() {
     ensure_sync_enabled();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        loop {
-            {
-                let mut timing = StageTimer::new("pollwait");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                timing.outcome = "ok";
-            }
-            if let Err(err) = run_one(&client).await {
-                crate::logging::warn(&format!("mobile runner: {err:#}"));
-                tokio::time::sleep(Duration::from_secs(20)).await;
-            }
-        }
+        poll_commands(|| run_one(&client)).await;
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_wait_uses_server_timestamps_and_accepts_legacy_commands() {
+        let legacy = serde_json::json!({
+            "command_id": "fixture", "kind": "create", "text": "test"
+        });
+        let command: MobileCommand = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(command.queue_wait_ms(), None);
+        for (created, claimed, expected) in [
+            (
+                "2026-11-08T09:00:00Z",
+                "2026-11-08T09:00:04.750Z",
+                Some(4750),
+            ),
+            ("2026-11-08T01:00:00-08:00", "2026-11-08T09:00:00Z", Some(0)),
+            ("2026-11-08T09:00:00.0005Z", "2026-11-08T09:00:00Z", None),
+            ("invalid", "2026-11-08T09:00:00Z", None),
+            ("2026-11-08T09:00:00Z", "invalid", None),
+        ] {
+            let mut wire = legacy.clone();
+            wire["created_at"] = created.into();
+            wire["claimed_at"] = claimed.into();
+            let command: MobileCommand = serde_json::from_value(wire).unwrap();
+            assert_eq!(command.queue_wait_ms(), expected);
+        }
+    }
 
     #[test]
     fn stage_timing_uses_content_free_shared_report_fields() {
@@ -512,6 +579,28 @@ mod tests {
 
     fn page(messages: serde_json::Value, more: bool) -> serde_json::Value {
         serde_json::json!({"session": {"session_id":"local-1", "source":"local"}, "messages":messages, "more":more})
+    }
+
+    #[tokio::test]
+    async fn claim_preserves_server_queue_age_without_logging_command_content() {
+        let (base, server) = transcript_server(vec![serde_json::json!({
+            "command": {"command_id":"fixture", "kind":"create", "text":"private fixture",
+                "created_at":"2026-11-08T09:00:00Z", "claimed_at":"2026-11-08T09:00:04.750Z"}
+        })])
+        .await;
+        let command = claim(&reqwest::Client::new(), &base, "fixture-key")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.queue_wait_ms(), Some(4750));
+        assert_eq!(command.text, "private fixture");
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("POST /mobile/commands/claim "));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fixture-key\r\n")
+        );
     }
 
     #[tokio::test]
