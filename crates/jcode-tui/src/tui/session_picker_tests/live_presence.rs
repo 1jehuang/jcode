@@ -43,7 +43,7 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
 }
 
 #[test]
-fn test_active_rows_render_age_without_status_badges() {
+fn test_running_rows_show_spinner_state_and_ready_rows_show_age() {
     let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
     let live_ready = make_session("session_ready", "beta", false, SessionStatus::Closed);
     let mut picker = SessionPicker::new(vec![live_working, live_ready]);
@@ -70,8 +70,8 @@ fn test_active_rows_render_age_without_status_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(working_text.contains("ago"), "{working_text}");
-    assert!(!working_text.contains("working"), "{working_text}");
+    assert!(working_text.contains("running"), "{working_text}");
+    assert!(!working_text.contains("ago"), "{working_text}");
 
     let first_frame = picker
         .render_session_item_lines_at_frame(&working, false, 0)
@@ -85,8 +85,8 @@ fn test_active_rows_render_age_without_status_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!first_frame.contains('⠋'));
-    assert!(!second_frame.contains('⠙'));
+    assert!(first_frame.contains('⠋'), "{first_frame}");
+    assert!(second_frame.contains('⠙'), "{second_frame}");
     assert!(picker.has_visible_running_sessions());
 
     let ready_lines = picker.render_session_item_lines(&ready, false);
@@ -104,7 +104,7 @@ fn test_active_rows_render_age_without_status_badges() {
         !ready_text.contains("closed"),
         "live session must not render as closed: {ready_text}"
     );
-    for row in [working_lines[1].to_string(), ready_lines[1].to_string()] {
+    for row in [ready_lines[1].to_string()] {
         for status in ["✓", "●", "▶", "active", "ready", "working"] {
             assert!(!row.contains(status), "unexpected {status}: {row}");
         }
@@ -153,7 +153,7 @@ fn test_recent_window_close_boosts_old_transcript_above_newer_messages_and_saved
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!text.contains("just closed"), "{text}");
-    assert!(text.contains("ago"), "{text}");
+    assert!(text.contains("running"), "{text}");
     assert!(!picker.session_recently_closed(picker.visible_session_iter().nth(1).unwrap()));
 }
 

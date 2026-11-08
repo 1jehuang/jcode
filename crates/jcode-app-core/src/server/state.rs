@@ -532,6 +532,13 @@ impl TurnEventChannel {
                 let Some(event) = event else {
                     return;
                 };
+                match &event {
+                    ServerEvent::ToolExec { name, .. } => {
+                        crate::agents_status::tool_started(&session_id, name)
+                    }
+                    ServerEvent::ToolDone { .. } => crate::agents_status::tool_done(&session_id),
+                    _ => {}
+                }
                 let event = ServerEvent::TurnEvent {
                     identity: identity.clone(),
                     event: Box::new(event),
@@ -810,6 +817,7 @@ impl SessionControlHandle {
             "SESSION_CANCEL_SIGNAL_FIRE session={}",
             self.session_id
         ));
+        crate::mobile_push::mark_cancelled(&self.session_id);
         self.stop_current_turn_signal.fire();
         let active_turn_signals =
             crate::turn_cancel_registry::active_turn_signals(&self.session_id);

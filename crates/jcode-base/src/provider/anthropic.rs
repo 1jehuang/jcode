@@ -18,10 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use uuid::Uuid;
 
 pub use jcode_provider_core::CredentialMode as AnthropicCredentialMode;
-use jcode_provider_core::{
-    ANTHROPIC_OAUTH_BETA_HEADERS, anthropic_effectively_1m,
-    anthropic_stainless_arch as stainless_arch, anthropic_stainless_os as stainless_os,
-};
+use jcode_provider_core::{ANTHROPIC_OAUTH_BETA_HEADERS, anthropic_effectively_1m};
 
 // 0 follows persisted configuration, 1/2 are explicit process-local overrides.
 static CACHE_TTL_1H: AtomicU8 = AtomicU8::new(0);
@@ -40,8 +37,21 @@ pub fn is_cache_ttl_1h() -> bool {
     }
 }
 
-/// User-Agent for OAuth requests, matching the official Claude Code CLI.
-pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.280 (external, sdk-cli)";
+/// User-Agent for Claude subscription (OAuth) requests.
+///
+/// This identifies Jcode honestly. It used to mimic the official Claude Code
+/// CLI (`claude-cli/x.y.z (external, sdk-cli)`) along with `x-app: cli`,
+/// `X-Stainless-*`, `X-Claude-Code-Session-Id` and
+/// `anthropic-dangerous-direct-browser-access`. Live probes on 2026-11-05
+/// showed none of those are needed: Opus and Sonnet accept OAuth requests with
+/// a plain Jcode User-Agent, bill them to the same subscription bucket
+/// (identical `anthropic-ratelimit-unified-*` headers), and cache prompts
+/// normally. The only required piece is the billing attribution system block,
+/// see `jcode_provider_anthropic::OAUTH_BILLING_HEADER` and
+/// docs/ANTHROPIC_OAUTH_IDENTITY_PROBE_2026_11_05.md.
+///
+/// The name is kept so existing call sites don't churn.
+pub const CLAUDE_CLI_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
 
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 
@@ -54,24 +64,16 @@ pub fn new_oauth_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Attach the OAuth attribution headers the official Claude CLI sends.
-/// Shared by the runtime crate's request path and base's usage probes.
+/// Attach per-request headers for Claude subscription (OAuth) calls.
+///
+/// Only a request id is sent. The Claude Code CLI impersonation headers that
+/// used to live here were not needed, see [`CLAUDE_CLI_USER_AGENT`].
+/// `_session_id` is kept for call-site compatibility.
 pub fn apply_oauth_attribution_headers(
     req: reqwest::RequestBuilder,
-    session_id: &str,
+    _session_id: &str,
 ) -> reqwest::RequestBuilder {
     req.header("x-client-request-id", new_oauth_request_id())
-        .header("x-app", "cli")
-        .header("X-Claude-Code-Session-Id", session_id)
-        .header("X-Stainless-Arch", stainless_arch())
-        .header("X-Stainless-Lang", "js")
-        .header("X-Stainless-OS", stainless_os())
-        .header("X-Stainless-Package-Version", "0.81.0")
-        .header("X-Stainless-Retry-Count", "0")
-        .header("X-Stainless-Runtime", "node")
-        .header("X-Stainless-Runtime-Version", "v24.3.0")
-        .header("X-Stainless-Timeout", "600")
-        .header("anthropic-dangerous-direct-browser-access", "true")
 }
 
 /// Available models

@@ -214,8 +214,10 @@ impl FollowUpPolicy {
         self.armed || self.default_on
     }
 
-    /// Configure `features.todo_gate_digest` (default false), independently of
-    /// report display. Changing this does not reset the current cycle.
+    /// Configure `features.todo_gate_digest` (default false). This explicitly
+    /// opts into all automatic quality reviews, including legacy confidence,
+    /// ownership, and long-session gates. Incomplete-work pokes are independent.
+    /// Changing this does not reset the current cycle.
     pub fn set_gate_digest_enabled(&mut self, enabled: bool) {
         self.gate_digest_enabled = enabled;
     }
@@ -307,7 +309,7 @@ impl FollowUpPolicy {
             return Decision::default();
         }
 
-        if !todos.is_empty() && snapshot.long_session_review_due {
+        if self.gate_digest_enabled && !todos.is_empty() && snapshot.long_session_review_due {
             return Decision::send(
                 FollowUpKind::LongSessionReview,
                 TODO_LONG_SESSION_REVIEW_MESSAGE.to_string(),
@@ -354,7 +356,8 @@ impl FollowUpPolicy {
             .with_effects(effects);
         }
 
-        let ownership_needs_followup = !completed_groups_have_sufficient_delivery(todos, goals);
+        let ownership_needs_followup =
+            self.gate_digest_enabled && !completed_groups_have_sufficient_delivery(todos, goals);
         let gate_budget_left = self.gate_attempts < MAX_GATE_ATTEMPTS;
         let ownership_message = build_todo_ownership_continuation_message(todos, goals);
         let ownership_fingerprint = Some(ownership_message.clone());
@@ -375,8 +378,10 @@ impl FollowUpPolicy {
         }
 
         let summary = ConfidenceSummary::of(todos);
-        let needs_spike_challenge = summary.spike_detected && !self.spike_challenged;
-        if (summary.needs_validation || needs_spike_challenge) && gate_budget_left {
+        let needs_spike_challenge =
+            self.gate_digest_enabled && summary.spike_detected && !self.spike_challenged;
+        let needs_validation = self.gate_digest_enabled && summary.needs_validation;
+        if (needs_validation || needs_spike_challenge) && gate_budget_left {
             self.gate_attempts = self.gate_attempts.saturating_add(1);
             let decision = if summary.needs_validation {
                 Decision::send(
@@ -394,7 +399,7 @@ impl FollowUpPolicy {
             };
             return decision.with_effects(effects);
         }
-        if (ownership_needs_followup || summary.needs_validation || needs_spike_challenge)
+        if (ownership_needs_followup || needs_validation || needs_spike_challenge)
             && !gate_budget_left
         {
             // The gate keeps failing without progress. Nudging again would

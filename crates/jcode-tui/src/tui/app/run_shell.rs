@@ -36,6 +36,8 @@ const STATUS_SPINNER_FPS: f32 = 12.5;
 const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 /// Tick cadence while the reload fast-start transcript is still rendering.
 const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Minimum spacing between non-input full frames in the remote loop (~60fps).
+const EVENT_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -305,6 +307,7 @@ fn idle_animation_fast_path_blocked_reason(
 #[derive(Default)]
 pub(super) struct StatusSpinnerRenderer {
     last_frame: Option<Buffer>,
+    last_theme: jcode_tui_style::ThemeMode,
     last_full_frame_at: Option<Instant>,
     /// Animated rectangle whose surrounding cells are currently seeded into
     /// ratatui's working buffer.
@@ -374,6 +377,9 @@ impl StatusSpinnerRenderer {
     }
 
     pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
+        if self.last_theme != jcode_tui_style::theme_mode() {
+            return false;
+        }
         let blocked = idle_animation_fast_path_blocked_reason(&IdleAnimationFastPathInputs {
             has_previous_frame: self.last_frame.is_some(),
             animation_active: crate::tui::idle_donut_active(app),
@@ -418,6 +424,9 @@ impl StatusSpinnerRenderer {
         app: &App,
         terminal: &mut DefaultTerminal,
     ) -> Result<bool> {
+        if self.last_theme != jcode_tui_style::theme_mode() {
+            return Ok(false);
+        }
         let Some(previous_frame) = self.last_frame.as_ref() else {
             return Ok(false);
         };
@@ -498,6 +507,9 @@ impl StatusSpinnerRenderer {
     ) -> Result<()> {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
+        if crate::tui::terminal_events::take_theme_redraw() {
+            app.force_full_repaint = true;
+        }
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
         app.poll_oauth_account_telemetry();
@@ -523,7 +535,10 @@ impl StatusSpinnerRenderer {
         app.force_full_redraw = false;
         app.force_full_repaint = false;
 
-        let previous_frame = self.last_frame.as_ref();
+        // Take the previous frame so its allocation can be reused below
+        // (`clone_from`) instead of allocating a whole new buffer per frame.
+        let mut stored_frame = self.last_frame.take();
+        let previous_frame = stored_frame.as_ref();
         let draw_start = Instant::now();
         let mut render_elapsed = Duration::ZERO;
         super::oauth_telemetry::begin_frame();
@@ -533,18 +548,23 @@ impl StatusSpinnerRenderer {
             render_elapsed = render_start.elapsed();
         })?;
         let total_elapsed = draw_start.elapsed();
+        // ratatui-jcode reports how many cells its own diff emitted, so there is
+        // no second full-buffer comparison here.
         let changed_cells = previous_frame
+            .filter(|_| crate::tui::ui::changed_cells_wanted())
             .filter(|previous| previous.area == completed.buffer.area)
-            .map(|previous| {
-                previous
-                    .content
-                    .iter()
-                    .zip(completed.buffer.content.iter())
-                    .filter(|(left, right)| left != right)
-                    .count()
-            });
+            .map(|_| completed.flushed_updates);
         let total_cells = Some(completed.buffer.content.len());
-        let completed_buffer = completed.buffer.clone();
+        let completed_buffer = match stored_frame.as_mut() {
+            Some(buffer) => {
+                // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
+                // reuses the existing cell storage.
+                buffer.area = completed.buffer.area;
+                buffer.content.clone_from(&completed.buffer.content);
+                stored_frame.take().unwrap_or_default()
+            }
+            None => completed.buffer.clone(),
+        };
         // `completed` borrows the terminal; it is unused past this point, so the
         // borrow ends here (NLL) before we touch the backend again below.
         let frame_released =
@@ -565,6 +585,7 @@ impl StatusSpinnerRenderer {
         if crate::tui::ui::last_idle_animation_area().is_some() {
             crate::tui::ui::note_idle_animation_full_repaint();
         }
+        self.last_theme = jcode_tui_style::theme_mode();
         self.last_frame = Some(completed_buffer);
         app.finish_idle_hibernation_frame();
         self.last_full_frame_at = Some(Instant::now());
@@ -592,6 +613,9 @@ impl StatusSpinnerRenderer {
     ) -> Result<bool> {
         let status_symbol = status_spinner_only_symbol(app);
         if status_symbol.is_none() {
+            return Ok(false);
+        }
+        if self.last_theme != jcode_tui_style::theme_mode() {
             return Ok(false);
         }
         let Some(previous_frame) = self.last_frame.as_ref() else {
@@ -917,6 +941,8 @@ impl App {
                 needs_redraw = true;
             }
 
+            let mut input_redraw = true;
+            let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
@@ -954,7 +980,19 @@ impl App {
                         || last_unfocused_draw
                             .map(|t| t.elapsed() >= UNFOCUSED_IDLE_REDRAW_MIN_INTERVAL)
                             .unwrap_or(true);
-                    if allow_redraw {
+                    // Coalesce event-driven bursts: server events can land a
+                    // few ms apart and each used to trigger a full draw that
+                    // changed nothing. Input-driven and forced redraws still
+                    // paint immediately so typing latency is unaffected.
+                    let coalesce_until =
+                        (!input_redraw && !self.force_full_redraw && !self.force_full_repaint)
+                            .then_some(status_spinner_renderer.last_full_frame_at)
+                            .flatten()
+                            .map(|at| at + EVENT_REDRAW_MIN_INTERVAL)
+                            .filter(|deadline| *deadline > Instant::now());
+                    deferred_redraw_at = coalesce_until.map(tokio::time::Instant::from_std);
+                    if allow_redraw && deferred_redraw_at.is_none() {
+                        input_redraw = false;
                         // Idle animated screen: repaint only the animation rows
                         // when nothing else is due (see the local loop).
                         if status_spinner_renderer.idle_animation_only_available(&self)
@@ -999,8 +1037,11 @@ impl App {
                     // line while a turn is running.
                     biased;
                     event = event_stream.next() => {
+                        super::wake_stats::note("terminal");
                         if event.is_some() {
-                            needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                            let event_redraw = remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                            needs_redraw |= event_redraw;
+                            input_redraw |= event_redraw;
                         } else if super::terminal_liveness::terminal_abandoned() {
                             // Input EOF with the controlling terminal gone:
                             // orphaned client (see local loop). Exit; the
@@ -1015,14 +1056,29 @@ impl App {
                         }
                     }
                     _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                        super::wake_stats::note("spinner");
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
                         }
                     }
                     _ = redraw_interval.tick() => {
+                        super::wake_stats::note("tick");
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
+                    _ = async {
+                        match deferred_redraw_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => futures::future::pending::<()>().await,
+                        }
+                    } => {
+                        super::wake_stats::note("deferred_redraw");
+                        deferred_redraw_at = None;
+                    }
                     event = remote_conn.next_event() => {
+                        match &event {
+                            crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
+                            crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                        }
                         let (outcome, event_redraw) = remote::handle_remote_event(
                             &mut self,
                             &mut terminal,
@@ -1053,6 +1109,10 @@ impl App {
                         }
                     }
                     bus_event = bus_receiver_remote.recv() => {
+                        match &bus_event {
+                            Ok(event) => super::wake_stats::note_debug("bus", event),
+                            Err(_) => super::wake_stats::note("bus:lagged"),
+                        }
                         needs_redraw |= remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
                     }
                 }

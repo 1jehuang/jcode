@@ -6,11 +6,19 @@
 //! clients. `NariSession` and `nari_pcm_channel` accept bounded mono 16 kHz PCM16
 //! from any source without the capture feature. Nari requires a caller-supplied
 //! provider key. The existing subscription APIs still need no provider key.
+//!
+//! Disable default features for a transport-only client with caller-owned PCM.
+//! The default `desktop-config` feature adds desktop settings, subscription APIs,
+//! hotkeys, and recorder processes. `voice-capture` also enables `desktop-config`.
+#[cfg(feature = "desktop-config")]
 use jcode_base::{subscription_api, subscription_catalog};
+#[cfg(feature = "desktop-config")]
 use serde::Deserialize;
 use std::{fmt, time::Duration};
 
+#[cfg(feature = "desktop-config")]
 pub mod dictation;
+#[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
 pub mod timing;
@@ -18,11 +26,15 @@ pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
 };
+#[cfg(feature = "desktop-config")]
 mod command_capture;
 #[cfg(any(feature = "voice-capture", test))]
 mod resample;
+#[cfg(feature = "desktop-config")]
 mod streaming_capture;
+#[cfg(feature = "desktop-config")]
 pub use command_capture::{RecorderCommand, detect_recorders};
+#[cfg(feature = "desktop-config")]
 pub use streaming_capture::{NariRecording, PcmRecording};
 
 /// Native (cpal) microphone capture is compiled in. Without it, voice input
@@ -89,6 +101,7 @@ impl fmt::Display for VoiceError {
 }
 impl std::error::Error for VoiceError {}
 
+#[cfg(feature = "desktop-config")]
 fn network_error(error: reqwest::Error) -> VoiceError {
     if error.is_timeout() {
         VoiceError::Timeout
@@ -97,6 +110,7 @@ fn network_error(error: reqwest::Error) -> VoiceError {
     }
 }
 
+#[cfg(feature = "desktop-config")]
 fn client() -> Result<reqwest::Client, VoiceError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -106,6 +120,7 @@ fn client() -> Result<reqwest::Client, VoiceError> {
         .map_err(network_error)
 }
 
+#[cfg(feature = "desktop-config")]
 async fn response_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, VoiceError> {
     let status = response.status();
     if !status.is_success() {
@@ -130,6 +145,7 @@ async fn response_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, Voic
     Ok(bytes)
 }
 
+#[cfg(feature = "desktop-config")]
 #[derive(Deserialize, Default)]
 struct CapabilityResponse {
     #[serde(default)]
@@ -138,6 +154,7 @@ struct CapabilityResponse {
 
 /// Fail closed for missing keys, old servers, offline errors, and denied requests.
 /// This does not capture audio, request microphone access, or cache account secrets.
+#[cfg(feature = "desktop-config")]
 pub async fn subscription_voice_available() -> bool {
     let Some(key) = subscription_catalog::configured_api_key().filter(|key| !key.trim().is_empty())
     else {
@@ -149,6 +166,7 @@ pub async fn subscription_voice_available() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "desktop-config")]
 async fn voice_available_with(
     client: &reqwest::Client,
     base: &str,
@@ -170,6 +188,7 @@ async fn voice_available_with(
 /// The server is authoritative about entitlement, so no preflight check is required.
 /// `language`, if supplied, is a lowercase ISO 639-1 code (for example `en`).
 /// Dropping the future cancels the request. Neither audio nor transcripts are logged.
+#[cfg(feature = "desktop-config")]
 pub async fn transcribe_wav(wav: Vec<u8>, language: Option<&str>) -> Result<String, VoiceError> {
     let key = subscription_catalog::configured_api_key()
         .filter(|key| !key.trim().is_empty())
@@ -185,6 +204,7 @@ pub async fn transcribe_wav(wav: Vec<u8>, language: Option<&str>) -> Result<Stri
     .await
 }
 
+#[cfg(feature = "desktop-config")]
 async fn transcribe_with(
     client: &reqwest::Client,
     base: &str,
@@ -228,6 +248,7 @@ async fn transcribe_with(
 }
 
 /// Validate the PCM16 mono WAV format emitted by capture, including duration.
+#[cfg(feature = "desktop-config")]
 fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
     let invalid = || VoiceError::InvalidAudio;
     if bytes.len() < 44
@@ -286,7 +307,7 @@ fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
     Ok(())
 }
 
-#[cfg(any(feature = "voice-capture", test))]
+#[cfg(all(feature = "desktop-config", any(feature = "voice-capture", test)))]
 fn encode_wav(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, VoiceError> {
     let len = samples
         .len()
@@ -647,7 +668,7 @@ mod capture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop-config"))]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -724,6 +745,7 @@ mod tests {
         .await
     }
 
+    #[cfg(feature = "desktop-test-support")]
     #[tokio::test]
     async fn configured_public_api_requires_key_and_uses_configured_base() {
         let _sandbox = jcode_base::auth::test_sandbox::AuthTestSandbox::new().unwrap();

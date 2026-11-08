@@ -18,11 +18,28 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 const FAILED_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+/// Repeated failures (e.g. `mcp-remote` stuck waiting for OAuth) back off
+/// exponentially up to this cap instead of respawning `npx` every 30s.
+const MAX_FAILED_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
 struct FailedConnectRecord {
     message: String,
     failed_at: Instant,
+    failures: u32,
+}
+
+impl FailedConnectRecord {
+    fn cooldown(&self) -> Duration {
+        failed_connect_cooldown(self.failures)
+    }
+}
+
+fn failed_connect_cooldown(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(10);
+    FAILED_CONNECT_RETRY_COOLDOWN
+        .saturating_mul(1 << shift)
+        .min(MAX_FAILED_CONNECT_RETRY_COOLDOWN)
 }
 
 enum ConnectAttempt {
@@ -342,11 +359,13 @@ impl SharedMcpPool {
             }
             Err(error) => {
                 let mut errors = self.last_errors.write().await;
+                let failures = errors.get(name).map_or(0, |r| r.failures) + 1;
                 errors.insert(
                     name.to_string(),
                     FailedConnectRecord {
                         message: format!("{:#}", error),
                         failed_at: Instant::now(),
+                        failures,
                     },
                 );
             }
@@ -372,7 +391,8 @@ impl SharedMcpPool {
         config: McpServerConfig,
     ) -> std::result::Result<bool, String> {
         if let Some(record) = self.recent_failure(&name).await {
-            let retry_after = FAILED_CONNECT_RETRY_COOLDOWN
+            let retry_after = record
+                .cooldown()
                 .saturating_sub(record.failed_at.elapsed())
                 .as_secs()
                 .max(1);
@@ -455,7 +475,7 @@ impl SharedMcpPool {
             .read()
             .await
             .get(name)
-            .filter(|record| record.failed_at.elapsed() < FAILED_CONNECT_RETRY_COOLDOWN)
+            .filter(|record| record.failed_at.elapsed() < record.cooldown())
             .cloned()
     }
 }
@@ -606,6 +626,22 @@ mod tests {
         assert!(
             failures.is_empty(),
             "non-shared server must be skipped, got failures: {failures:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn failed_connect_cooldown_grows_and_caps() {
+        assert_eq!(failed_connect_cooldown(1), Duration::from_secs(30));
+        assert_eq!(failed_connect_cooldown(2), Duration::from_secs(60));
+        assert_eq!(failed_connect_cooldown(4), Duration::from_secs(240));
+        assert_eq!(
+            failed_connect_cooldown(50),
+            MAX_FAILED_CONNECT_RETRY_COOLDOWN
         );
     }
 }

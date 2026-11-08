@@ -1597,13 +1597,9 @@ impl App {
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
         self.usage_report_refreshing = false;
         self.clear_usage_transient_ui();
-        self.upsert_usage_display_card(Self::format_usage_display_card(
-            &results,
-            false,
-            results.len(),
-            results.len(),
-            false,
-        ));
+        let shown = self.filter_usage_reports(&results);
+        let cards = self.usage_cards(&shown, false, results.len(), results.len(), false);
+        self.replace_usage_cards(cards);
         if results.is_empty() {
             self.set_status_notice("Usage → no connected providers");
         } else {
@@ -1617,13 +1613,15 @@ impl App {
     ) {
         self.usage_report_refreshing = !progress.done;
         self.clear_usage_transient_ui();
-        self.upsert_usage_display_card(Self::format_usage_display_card(
-            &progress.results,
+        let shown = self.filter_usage_reports(&progress.results);
+        let cards = self.usage_cards(
+            &shown,
             !progress.done,
             progress.completed,
             progress.total,
             progress.from_cache,
-        ));
+        );
+        self.replace_usage_cards(cards);
 
         if progress.done {
             if progress.results.is_empty() {
@@ -1646,13 +1644,11 @@ impl App {
 
     pub(super) fn push_usage_loading_card(&mut self) {
         self.clear_usage_transient_ui();
-        self.push_display_message(DisplayMessage::usage(Self::format_usage_display_card(
-            &[],
-            true,
-            0,
-            0,
-            false,
-        )));
+        for (title, content) in self.usage_cards(&[], true, 0, 0, false) {
+            let mut message = DisplayMessage::usage(content);
+            message.title = Some(title);
+            self.push_display_message(message);
+        }
     }
 
     fn clear_usage_transient_ui(&mut self) {
@@ -1668,158 +1664,211 @@ impl App {
         }
     }
 
-    fn upsert_usage_display_card(&mut self, content: String) {
-        let existing = self.display_messages.iter().rposition(|message| {
-            message.role == "usage" && message.title.as_deref() == Some("Usage")
+    /// Replace the most recent run of consecutive usage cards in place, so a
+    /// refresh updates its own cards instead of stacking duplicates.
+    fn replace_usage_cards(&mut self, cards: Vec<(String, String)>) {
+        // Other cards share the "usage" role (e.g. `/cache` stats), so match
+        // report cards by title or by the provider-card row protocol.
+        let is_report = |message: &DisplayMessage| {
+            message.role == "usage"
+                && (message.content.starts_with('*')
+                    || message
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| title == "Usage" || title.starts_with("Usage · ")))
+        };
+        let Some(end) = self.display_messages.iter().rposition(is_report) else {
+            for (title, content) in cards {
+                let mut message = DisplayMessage::usage(content);
+                message.title = Some(title);
+                self.push_display_message(message);
+            }
+            return;
+        };
+        let start = self.display_messages[..end]
+            .iter()
+            .rposition(|message| !is_report(message))
+            .map_or(0, |idx| idx + 1);
+        let unchanged = end + 1 - start == cards.len()
+            && self.display_messages[start..=end].iter().zip(&cards).all(
+                |(message, (title, content))| {
+                    message.title.as_deref() == Some(title.as_str()) && &message.content == content
+                },
+            );
+        if unchanged {
+            return;
+        }
+        let replacement = cards.into_iter().map(|(title, content)| {
+            let mut message = DisplayMessage::usage(content);
+            message.title = Some(title);
+            message
         });
-        if let Some(idx) = existing {
-            self.replace_display_message_title_and_content(idx, Some("Usage".to_string()), content);
-        } else {
-            self.push_display_message(DisplayMessage::usage(content));
+        self.display_messages.splice(start..=end, replacement);
+        self.bump_display_messages_version();
+    }
+
+    fn usage_status_title(&self) -> String {
+        match &self.usage_provider_filter {
+            Some(filter) => format!("Usage · {filter}"),
+            None => "Usage".to_string(),
         }
     }
 
-    fn format_usage_display_card(
+    fn filter_usage_reports(
+        &self,
         reports: &[crate::usage::ProviderUsage],
+    ) -> Vec<crate::usage::ProviderUsage> {
+        reports
+            .iter()
+            .filter(|report| {
+                self.usage_provider_filter
+                    .as_deref()
+                    .is_none_or(|filter| usage_provider_matches(&report.provider_name, filter))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// One card per provider, plus a status card while refreshing or when
+    /// nothing matches. Returns `(title, content)` pairs.
+    fn usage_cards(
+        &self,
+        shown: &[crate::usage::ProviderUsage],
         refreshing: bool,
         completed: usize,
         total: usize,
         from_cache: bool,
-    ) -> String {
-        let mut lines = Vec::new();
-
+    ) -> Vec<(String, String)> {
+        let title = self.usage_status_title();
+        let mut cards = Vec::new();
         if refreshing {
-            if total > 0 {
-                lines.push(format!(
-                    "# Refreshing usage ({}/{})",
-                    completed.min(total),
-                    total
-                ));
-            } else if from_cache {
-                lines.push("# Showing cached usage while refreshing".to_string());
+            let status = if total > 0 {
+                format!("refreshing {}/{}", completed.min(total), total)
             } else {
-                lines.push("# Refreshing usage".to_string());
-            }
-            lines.push("Checking connected provider limits...".to_string());
-            if !reports.is_empty() {
-                lines.push(String::new());
-            }
-        } else if reports.is_empty() {
-            lines.push("# No connected providers".to_string());
-            lines.push(
-                "Use `/login claude` or `/login openai`, then run `/usage` again.".to_string(),
-            );
+                "refreshing".to_string()
+            };
+            let note = if from_cache {
+                "Showing cached usage while live limits load…"
+            } else {
+                "Checking connected provider limits…"
+            };
+            cards.push((title, format!("*busy\t{status}\n- {note}")));
+        } else if shown.is_empty() {
+            let content = match &self.usage_provider_filter {
+                Some(filter) => format!(
+                    "*none\tno match\n- No connected provider matches \"{filter}\".\n- Run `/usage` to see every connected provider."
+                ),
+                None => "*none\tnot connected\n- No providers are connected yet.\n- Run `/login claude` or `/login openai`, then `/usage` again.".to_string(),
+            };
+            return vec![(title, content)];
+        }
+        cards.extend(shown.iter().map(|provider| {
+            (
+                provider.provider_name.clone(),
+                Self::format_usage_provider_card(provider),
+            )
+        }));
+        cards
+    }
+
+    /// Card body for one provider, in the row protocol that
+    /// `ui_messages::usage::ProviderCard` renders: a `*level\tstatus` header
+    /// (`*%\tpeak` for utilization), `= label\tpct\treset` gauges,
+    /// `: key\tvalue` details (`+` highlights the value), `! alert`, `- note`,
+    /// and blank spacer rows.
+    fn format_usage_provider_card(provider: &crate::usage::ProviderUsage) -> String {
+        let one_line = |text: &str| text.replace(['\t', '\n'], " ");
+        let mut lines = vec![Self::format_usage_provider_summary(provider)];
+
+        if let Some(error) = &provider.error {
+            lines.push(format!("! {}", one_line(error)));
             return lines.join("\n");
-        } else {
-            lines.push(format!("# Usage updated · {} source(s)", reports.len()));
-            lines.push(String::new());
+        }
+        if provider.hard_limit_reached {
+            lines.push("! Hard limit reached".to_string());
         }
 
-        // One width for every provider block so bars align across sections,
-        // not just within them.
-        let name_width = reports
-            .iter()
-            .flat_map(|provider| provider.limits.iter())
-            .map(|limit| limit.name.chars().count())
-            .max()
-            .unwrap_or(0);
+        for limit in &provider.limits {
+            let reset = limit
+                .resets_at
+                .as_deref()
+                .map(crate::usage::format_reset_time)
+                .unwrap_or_default();
+            lines.push(format!(
+                "= {}\t{:.0}%\t{}",
+                one_line(&limit.name),
+                limit.usage_percent.clamp(0.0, 100.0),
+                reset
+            ));
+        }
 
-        for (idx, provider) in reports.iter().enumerate() {
-            if idx > 0 {
+        let mut details = Vec::new();
+        if let Some(credits) = &provider.openai_reset_credits {
+            let marker = if credits.available_count > 0 {
+                '+'
+            } else {
+                ':'
+            };
+            details.push(format!(
+                "{marker} Banked resets\t{} available",
+                credits.available_count
+            ));
+        }
+        if let Some(offer) = &provider.anthropic_limit_reset {
+            let next = offer
+                .next_available_at
+                .as_deref()
+                .filter(|_| !offer.available)
+                .map(crate::usage::format_reset_time)
+                .map(|time| format!(" · next in {}", time))
+                .unwrap_or_default();
+            let marker = if offer.available { '+' } else { ':' };
+            details.push(format!(
+                "{marker} Session resets\t{} available{}",
+                u64::from(offer.available),
+                next
+            ));
+        }
+        for (key, value) in &provider.extra_info {
+            let mut key = one_line(key);
+            if let Some(first) = key.get(..1) {
+                key = first.to_uppercase() + &key[1..];
+            }
+            details.push(format!(": {}\t{}", key, one_line(value)));
+        }
+        if !details.is_empty() {
+            if !provider.limits.is_empty() {
                 lines.push(String::new());
             }
-            lines.push(Self::format_usage_provider_summary(provider));
-
-            if let Some(error) = &provider.error {
-                lines.push(format!("  error: {}", error));
-                continue;
-            }
-
-            if provider.hard_limit_reached {
-                lines.push("  hard limit reached".to_string());
-            }
-
-            if let Some(credits) = &provider.openai_reset_credits {
-                lines.push(format!(
-                    "  Banked resets: {} available",
-                    credits.available_count
-                ));
-            }
-            if let Some(offer) = &provider.anthropic_limit_reset {
-                let next = offer
-                    .next_available_at
-                    .as_deref()
-                    .filter(|_| !offer.available)
-                    .map(crate::usage::format_reset_time)
-                    .map(|time| format!(" · next in {}", time))
-                    .unwrap_or_default();
-                lines.push(format!(
-                    "  Session resets: {} available{}",
-                    u64::from(offer.available),
-                    next
-                ));
-            }
-
-            if provider.limits.is_empty() && provider.extra_info.is_empty() {
-                if provider.openai_reset_credits.is_none()
-                    && provider.anthropic_limit_reset.is_none()
-                {
-                    lines.push("  no usage data available".to_string());
-                }
-                continue;
-            }
-
-            for limit in &provider.limits {
-                let reset = limit
-                    .resets_at
-                    .as_deref()
-                    .map(crate::usage::format_reset_time)
-                    .map(|value| format!(" · resets in {}", value))
-                    .unwrap_or_default();
-                lines.push(format!(
-                    "  {:<width$}: {}{}",
-                    limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 14),
-                    reset,
-                    width = name_width
-                ));
-            }
-
-            for (key, value) in &provider.extra_info {
-                lines.push(format!("  {}: {}", key, value));
-            }
+            lines.extend(details);
         }
-
+        if lines.len() == 1 {
+            lines.push("- No usage data reported for this account.".to_string());
+        }
         lines.join("\n")
     }
 
     fn format_usage_provider_summary(provider: &crate::usage::ProviderUsage) -> String {
         if provider.error.is_some() {
-            return format!("! {} - error", provider.provider_name);
+            return "*crit\terror".to_string();
         }
         if provider.hard_limit_reached {
-            return format!("! {} - hard limit", provider.provider_name);
+            return "*crit\thard limit".to_string();
         }
-
-        let max_percent = provider
+        if let Some(peak) = provider
             .limits
             .iter()
             .map(|limit| limit.usage_percent)
-            .fold(0.0_f32, f32::max);
-        if max_percent >= 90.0 {
-            format!("! {} - {:.0}% used", provider.provider_name, max_percent)
-        } else if max_percent >= 70.0 {
-            format!("~ {} - {:.0}% used", provider.provider_name, max_percent)
-        } else if provider.limits.is_empty()
-            && provider.extra_info.is_empty()
+            .reduce(f32::max)
+        {
+            format!("*%\t{:.0}", peak.clamp(0.0, 100.0))
+        } else if provider.extra_info.is_empty()
             && provider.openai_reset_credits.is_none()
             && provider.anthropic_limit_reset.is_none()
         {
-            format!("{} - no data", provider.provider_name)
-        } else if max_percent > 0.0 {
-            format!("+ {} - {:.0}% used", provider.provider_name, max_percent)
+            "*none\tno data".to_string()
         } else {
-            format!("+ {} - available", provider.provider_name)
+            "*ok\tconnected".to_string()
         }
     }
 
@@ -1984,3 +2033,27 @@ impl App {
 #[path = "model_context_messages.rs"]
 mod messages;
 pub(super) use messages::*;
+
+/// Match `/usage <provider>` queries against report names such as
+/// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
+pub(super) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let name = normalize(provider_name);
+    let query = normalize(query);
+    if query.is_empty() {
+        return true;
+    }
+    let alias = match query.as_str() {
+        "claude" | "anthropic" => "anthropic",
+        "openai" | "chatgpt" | "codex" | "gpt" => "openai",
+        "gemini" | "google" => "gemini",
+        "copilot" | "github" => "copilot",
+        _ => query.as_str(),
+    };
+    name.contains(&query) || name.contains(alias)
+}

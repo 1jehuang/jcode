@@ -12,6 +12,34 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
+fn run_auto_poke_default_skips_quality_reviews_but_keeps_unfinished_work() {
+    let mut spiked = test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Speculative),
+        Some(ConfidenceState::Verified),
+    );
+    spiked.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
+    for todo in [spiked, test_todo("b", "completed", "high", None, None)] {
+        assert!(
+            build_run_auto_poke_follow_up_from_todos(
+                false,
+                &[todo],
+                false,
+                Some("stale digest".into())
+            )
+            .is_none()
+        );
+    }
+    let open = test_todo("open", "pending", "high", None, None);
+    assert!(matches!(
+        build_run_auto_poke_follow_up_from_todos(false, &[open], false, None),
+        Some(RunAutoPokeFollowUp::Incomplete { .. })
+    ));
+}
+
+#[test]
 fn run_report_names_local_profile_instead_of_openrouter_slot() {
     // Ollama/LM Studio share the OpenRouter transport slot (#804).
     assert_eq!(
@@ -429,7 +457,7 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     assert!(resumed.is_none());
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].id, "independent");
-    let followup = build_run_auto_poke_follow_up_from_todos(&actionable, false, None);
+    let followup = build_run_auto_poke_follow_up_from_todos(true, &actionable, false, None);
     let Some(RunAutoPokeFollowUp::Incomplete { count, message }) = followup else {
         panic!("independent work must remain actionable");
     };
@@ -642,7 +670,7 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         ),
     ];
 
-    let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
+    let followup = build_run_auto_poke_follow_up_from_todos(true, &todos, false, None);
 
     match followup {
         Some(RunAutoPokeFollowUp::ConfidenceSummary {
@@ -673,7 +701,7 @@ fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
     todo.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
 
     let todos = [todo];
-    match build_run_auto_poke_follow_up_from_todos(&todos, false, None) {
+    match build_run_auto_poke_follow_up_from_todos(true, &todos, false, None) {
         Some(RunAutoPokeFollowUp::ConfidenceSummary {
             message,
             confidence_spike_challenge,
@@ -684,7 +712,7 @@ fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
         }
         _ => panic!("expected confidence-spike challenge"),
     }
-    assert!(build_run_auto_poke_follow_up_from_todos(&todos, true, None).is_none());
+    assert!(build_run_auto_poke_follow_up_from_todos(true, &todos, true, None).is_none());
 }
 
 #[test]
@@ -716,7 +744,7 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
             Some(ConfidenceState::Validated),
         ),
     ];
-    assert!(build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none());
+    assert!(build_run_auto_poke_follow_up_from_todos(true, &todos, false, None).is_none());
 }
 
 #[test]
@@ -738,7 +766,7 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
         ),
     ];
 
-    let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
+    let followup = build_run_auto_poke_follow_up_from_todos(true, &todos, false, None);
 
     match followup {
         Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
@@ -763,7 +791,7 @@ fn run_auto_poke_treats_completion_synonyms_and_case_as_finished() {
             Some(ConfidenceState::Verified),
         )];
         assert!(
-            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            build_run_auto_poke_follow_up_from_todos(true, &todos, false, None).is_none(),
             "status {status:?} should not trigger an incomplete-todo poke"
         );
     }
@@ -774,7 +802,7 @@ fn run_auto_poke_treats_cancelled_spelling_variants_as_finished() {
     for status in ["cancelled", "canceled", "Cancelled"] {
         let todos = vec![test_todo("a", status, "high", None, None)];
         assert!(
-            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            build_run_auto_poke_follow_up_from_todos(true, &todos, false, None).is_none(),
             "status {status:?} should not trigger an incomplete-todo poke"
         );
     }
@@ -793,12 +821,13 @@ fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
     )];
     // Without a digest, the confidence gate is what fires.
     assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&todos, false, None),
+        build_run_auto_poke_follow_up_from_todos(true, &todos, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
     ));
     // With one, the weak points are reviewed first, since that work can change
     // the very assessments the confidence gate judges.
     match build_run_auto_poke_follow_up_from_todos(
+        true,
         &todos,
         false,
         Some("review these points".to_string()),
@@ -823,6 +852,7 @@ fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
     )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
+            true,
             &todos,
             false,
             Some("review these points".to_string())
@@ -862,6 +892,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
+            true,
             &open,
             false,
             take_run_gate_digest_if_turn_ended(session, false, &open, true),
@@ -884,6 +915,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         Some(ConfidenceState::Verified),
     )];
     match build_run_auto_poke_follow_up_from_todos(
+        true,
         &done,
         false,
         take_run_gate_digest_if_turn_ended(session, false, &done, true),
@@ -972,11 +1004,11 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(ConfidenceState::Plausible),
     )];
     assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&needs_validation, false, None),
+        build_run_auto_poke_follow_up_from_todos(true, &needs_validation, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
     ));
     assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&needs_validation, false, None),
+        build_run_auto_poke_follow_up_from_todos(true, &needs_validation, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
     ));
 
@@ -988,8 +1020,8 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(ConfidenceState::Verified),
     )];
     // A normal validation gain is not a reason to spend another model turn.
-    assert!(build_run_auto_poke_follow_up_from_todos(&validated, false, None).is_none());
-    assert!(build_run_auto_poke_follow_up_from_todos(&validated, true, None).is_none());
+    assert!(build_run_auto_poke_follow_up_from_todos(true, &validated, false, None).is_none());
+    assert!(build_run_auto_poke_follow_up_from_todos(true, &validated, true, None).is_none());
 }
 
 #[test]
