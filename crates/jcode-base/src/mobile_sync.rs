@@ -54,6 +54,68 @@ pub struct WireMessage {
     pub created_at: Option<String>,
 }
 
+/// Session metadata returned by the account's mobile transcript API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncedSession {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub source: String,
+    pub host: Option<String>,
+    pub cwd: Option<String>,
+    pub updated_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Bounded account inventory read for UI background workers.
+pub async fn discover_cloud_sessions() -> Result<Vec<SyncedSession>> {
+    let client = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(8), list_cloud_sessions(&client))
+        .await
+        .context("mobile session discovery timed out")?
+}
+
+/// List cloud sessions synced to the configured Jcode account.
+pub async fn list_cloud_sessions(client: &reqwest::Client) -> Result<Vec<SyncedSession>> {
+    let api_key = crate::subscription_catalog::configured_api_key()
+        .context("no Jcode account credential is configured")?;
+    list_cloud_sessions_with_endpoint(client, &subscription_api::configured_api_base(), &api_key)
+        .await
+}
+
+async fn list_cloud_sessions_with_endpoint(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<SyncedSession>> {
+    #[derive(Deserialize)]
+    struct SessionsResponse {
+        sessions: Vec<SyncedSession>,
+    }
+
+    let response = client
+        .get(format!(
+            "{}/mobile/sessions",
+            api_base.trim_end_matches('/')
+        ))
+        .query(&[("limit", "500")])
+        .bearer_auth(api_key)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .context("mobile session listing failed")?
+        .error_for_status()
+        .context("mobile session listing returned an error")?;
+    let response: SessionsResponse = response
+        .json()
+        .await
+        .context("invalid mobile session listing response")?;
+    Ok(response
+        .sessions
+        .into_iter()
+        .filter(|session| session.source == "cloud" && valid_session_id(&session.session_id))
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct UploadBody<'a> {
     title: Option<&'a str>,
@@ -435,6 +497,88 @@ pub fn spawn_background_sync() {
 mod tests {
     use super::*;
     use jcode_session_types::StoredMessage;
+
+    async fn mock_listing(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (base, task)
+    }
+
+    #[tokio::test]
+    async fn cloud_session_listing_filters_and_preserves_metadata() {
+        let body = serde_json::json!({"sessions": [
+            {"session_id": "cloud-1", "source": "cloud", "title": "Title",
+             "host": "worker", "cwd": "/repo", "updated_at": "updated", "created_at": "created"},
+            {"session_id": "cloud-2", "source": "cloud"},
+            {"session_id": "local-1", "source": "local"},
+            {"session_id": "../unsafe", "source": "cloud"},
+            {"session_id": "", "source": "cloud"},
+            {"session_id": "x".repeat(129), "source": "cloud"}
+        ]})
+        .to_string();
+        let (base, request) = mock_listing("200 OK", &body).await;
+        let sessions =
+            list_cloud_sessions_with_endpoint(&reqwest::Client::new(), &base, "test-key")
+                .await
+                .unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "cloud-1");
+        assert_eq!(sessions[0].title.as_deref(), Some("Title"));
+        assert_eq!(sessions[0].host.as_deref(), Some("worker"));
+        assert_eq!(sessions[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(sessions[0].updated_at.as_deref(), Some("updated"));
+        assert_eq!(sessions[0].created_at.as_deref(), Some("created"));
+        assert_eq!(sessions[1].title, None);
+        assert_eq!(sessions[1].created_at, None);
+        let request = request.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /mobile/sessions?limit=500 http/1.1\r\n"));
+        assert!(request.contains("\r\nauthorization: bearer test-key\r\n"));
+    }
+
+    #[tokio::test]
+    async fn cloud_session_listing_rejects_http_and_schema_errors() {
+        for (status, body) in [
+            ("401 Unauthorized", "{\"sessions\":[]}"),
+            ("200 OK", "not json"),
+            ("200 OK", "{}"),
+            ("200 OK", "{\"sessions\":[{\"source\":\"cloud\"}]}"),
+            ("200 OK", "{\"sessions\":[{\"session_id\":\"s1\"}]}"),
+        ] {
+            let (base, request) = mock_listing(status, body).await;
+            assert!(
+                list_cloud_sessions_with_endpoint(&reqwest::Client::new(), &base, "key")
+                    .await
+                    .is_err()
+            );
+            request.await.unwrap();
+        }
+        let (base, request) = mock_listing("200 OK", "{\"sessions\":[]}").await;
+        assert!(
+            list_cloud_sessions_with_endpoint(&reqwest::Client::new(), &base, "key")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        request.await.unwrap();
+    }
 
     fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
         StoredMessage {

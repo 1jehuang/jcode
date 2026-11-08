@@ -21,6 +21,8 @@ use super::{
     SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
 };
 
+mod mobile_inventory;
+
 use super::{ResumeTarget, SessionSource};
 
 #[cfg(test)]
@@ -348,6 +350,35 @@ pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::S
         orphans.extend(recent.into_iter().filter(|s| !loaded.contains(&s.id)));
         (groups, orphans)
     });
+    if !mobile_inventory::available() {
+        let _ = sender.send(super::SessionListUpdate::Fresh(result));
+        return;
+    }
+    // Keep local results immediately usable while account/SSH discovery runs.
+    let local = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = sender.send(super::SessionListUpdate::Fresh(Err(error)));
+            return;
+        }
+    };
+    if sender
+        .send(super::SessionListUpdate::Cached(local.clone()))
+        .is_err()
+    {
+        return;
+    }
+    let result = match mobile_inventory::refresh() {
+        Ok(true) => {
+            invalidate_session_list_cache();
+            load_sessions_grouped()
+        }
+        Ok(false) => Ok(local),
+        Err(error) => {
+            crate::logging::debug(&format!("Mobile resume discovery unavailable: {error:#}"));
+            Ok(local)
+        }
+    };
     let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
 
@@ -2779,7 +2810,8 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
     let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
         .map(|time| time.with_timezone(&chrono::Utc))
         .unwrap_or_default();
-    let title = format!("{short_name} (cloud session)");
+    let title =
+        mobile_inventory::title(id).unwrap_or_else(|| format!("{short_name} (cloud session)"));
     let search_index = build_search_index(
         id,
         &short_name,
