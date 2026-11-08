@@ -137,6 +137,12 @@ mod imp {
 /// Kill stale MCP servers and reap exited children inherited from a previous
 /// process image. Call once at daemon startup, before spawning anything.
 pub fn start() {
+    // Idempotent: process startup calls this for every mode (clients exec
+    // reload too), and the server calls it again. A second snapshot taken
+    // after this image spawned children would steal their exit statuses.
+    static ONCE: std::sync::Once = std::sync::Once::new();
     #[cfg(target_os = "linux")]
-    imp::start();
+    ONCE.call_once(imp::start);
+    #[cfg(not(target_os = "linux"))]
+    ONCE.call_once(|| {});
 }
