@@ -852,6 +852,29 @@ prevent_sleep_while_streaming = true
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
 
+[companion]
+# `jcode companion` is a per-login helper that handles desktop effects for the
+# shared server. Toggles apply when the companion starts. Restart it
+# (`systemctl --user restart jcode-companion`, or kill it and relaunch Jcode)
+# after changing them.
+# Start it in the background when a Jcode client launches and none is running.
+autostart = true
+# Copilot-key push-to-talk (Linux). Also needs [dictation] global_devices.
+voice = true
+# Live waveform and transcript in the focused Jcode CLI while recording.
+voice_waveform = true
+# Desktop notifications for voice state. When off, recording still needs the
+# waveform to be shown in a Jcode CLI as its visible indicator.
+voice_notifications = true
+# Open URLs and files for the server. Off: clients use their own opener.
+open = true
+# Open new terminal windows for the server. Off: clients launch locally.
+spawn_terminal = true
+# Lid-close override while agents work (macOS/Windows, see [power]).
+lid = true
+# Hourly browser bridge auto-update.
+browser_updates = true
+
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to
 # stop the menu bar helper (a running helper exits within a second).

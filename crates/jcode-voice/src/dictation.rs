@@ -172,6 +172,30 @@ pub fn send_transcript_blocking(
     anyhow::bail!("timed out waiting for the jcode server")
 }
 
+/// Report live push-to-talk state to a session's TUI (waveform, live text).
+#[cfg(unix)]
+pub fn send_voice_activity_blocking(
+    session_id: &str,
+    activity: jcode_base::protocol::VoiceActivity,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = debug_socket_path();
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("failed to connect to {}", path.display()))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = jcode_base::protocol::Request::VoiceActivity {
+        id: 1,
+        session_id: session_id.to_string(),
+        activity,
+    };
+    stream.write_all((serde_json::to_string(&request)? + "\n").as_bytes())?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    Ok(())
+}
+
 /// Mirrors the server's socket naming (`JCODE_SOCKET`, else the runtime dir).
 #[cfg(unix)]
 fn debug_socket_path() -> std::path::PathBuf {

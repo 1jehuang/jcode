@@ -24,6 +24,52 @@ pub struct CompanionOptions {
     pub voice: bool,
     /// Periodically update an installed browser bridge.
     pub browser_updates: bool,
+    /// Live waveform in the focused Jcode CLI during push-to-talk.
+    pub voice_waveform: bool,
+    /// Desktop notifications for push-to-talk state.
+    pub voice_notifications: bool,
+    /// Handle `open` / `reveal` requests.
+    pub open: bool,
+    /// Handle `spawn_terminal` requests.
+    pub spawn_terminal: bool,
+    /// Handle `power_activity` (lid override).
+    pub lid: bool,
+}
+
+impl CompanionOptions {
+    /// Options from `[companion]` in the config file.
+    pub fn from_config() -> Self {
+        let config = &jcode_base::config::config().companion;
+        Self {
+            socket: socket_path(),
+            voice: config.voice,
+            browser_updates: config.browser_updates,
+            voice_waveform: config.voice_waveform,
+            voice_notifications: config.voice_notifications,
+            open: config.open,
+            spawn_terminal: config.spawn_terminal,
+            lid: config.lid,
+        }
+    }
+
+    /// Capabilities advertised in `status` for these options.
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut capabilities = Vec::new();
+        if self.open {
+            capabilities.push("open".to_string());
+            capabilities.push("reveal".to_string());
+        }
+        if self.spawn_terminal {
+            capabilities.push("spawn_terminal".to_string());
+        }
+        if self.lid && cfg!(any(target_os = "macos", windows)) {
+            capabilities.push("lid".to_string());
+        }
+        if self.voice && cfg!(target_os = "linux") {
+            capabilities.push("voice".to_string());
+        }
+        capabilities
+    }
 }
 
 impl Default for CompanionOptions {
@@ -32,6 +78,11 @@ impl Default for CompanionOptions {
             socket: socket_path(),
             voice: true,
             browser_updates: true,
+            voice_waveform: true,
+            voice_notifications: true,
+            open: true,
+            spawn_terminal: true,
+            lid: true,
         }
     }
 }
@@ -53,7 +104,12 @@ struct LidState {
 
 impl Companion {
     fn new(capabilities: Vec<String>) -> Self {
-        let mut lid = LidOverride::for_current_platform();
+        // A disabled lid feature must never touch the OS setting.
+        let mut lid = if capabilities.iter().any(|c| c == "lid") {
+            LidOverride::for_current_platform()
+        } else {
+            None
+        };
         // Repair settings a crashed earlier owner left behind.
         if let Some(lid) = lid.as_mut() {
             lid.recover_stale();
@@ -70,7 +126,35 @@ impl Companion {
         }
     }
 
+    fn has(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+
     pub async fn handle(&self, request: CompanionRequest) -> CompanionResponse {
+        // Disabled features answer as an error, so clients use their local
+        // fallback (open, terminals) or skip the effect (lid).
+        let required = match &request {
+            CompanionRequest::Status => None,
+            CompanionRequest::Open { .. } => Some("open"),
+            CompanionRequest::Reveal { .. } => Some("reveal"),
+            CompanionRequest::SpawnTerminal { .. }
+            | CompanionRequest::SpawnTerminalWithRuntime { .. } => Some("spawn_terminal"),
+            CompanionRequest::PowerActivity { .. } => {
+                if cfg!(any(target_os = "macos", windows)) {
+                    Some("lid")
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(capability) = required
+            && !self.has(capability)
+        {
+            return CompanionResponse::error(format!(
+                "{capability} {}",
+                jcode_base::companion_client::DISABLED_SUFFIX
+            ));
+        }
         match request {
             CompanionRequest::Status => CompanionResponse {
                 ok: true,
@@ -253,17 +337,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]
     let mut listener = listener;
-    let mut capabilities = vec![
-        "open".to_string(),
-        "reveal".to_string(),
-        "spawn_terminal".to_string(),
-    ];
-    if cfg!(any(target_os = "macos", windows)) {
-        capabilities.push("lid".to_string());
-    }
-    if options.voice && cfg!(target_os = "linux") {
-        capabilities.push("voice".to_string());
-    }
+    let capabilities = options.capabilities();
     let companion = Arc::new(Companion::new(capabilities));
     jcode_base::logging::info(&format!(
         "companion: listening on {}",
@@ -273,7 +347,10 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if options.voice {
-        crate::voice::spawn();
+        crate::voice::spawn(crate::voice::VoiceIndicators {
+            notifications: options.voice_notifications,
+            waveform: options.voice_waveform,
+        });
     }
     if options.browser_updates {
         tokio::spawn(browser_bridge_updates());
@@ -425,9 +502,39 @@ mod tests {
                 lid: None,
                 active_until: None,
             }),
-            capabilities: vec!["open".into()],
+            capabilities: vec!["open".into(), "reveal".into(), "spawn_terminal".into()],
             terminal_launcher,
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_features_answer_as_unavailable_to_clients() {
+        let mut options = CompanionOptions {
+            open: false,
+            spawn_terminal: false,
+            lid: false,
+            voice: false,
+            ..Default::default()
+        };
+        assert!(options.capabilities().is_empty());
+        let disabled = Companion::new(options.capabilities());
+        let response = disabled
+            .handle(CompanionRequest::Open {
+                target: "https://example.com".into(),
+            })
+            .await;
+        assert!(!response.ok);
+        assert!(
+            response
+                .message
+                .ends_with(jcode_base::companion_client::DISABLED_SUFFIX)
+        );
+        options.open = true;
+        options.spawn_terminal = true;
+        assert_eq!(
+            options.capabilities(),
+            vec!["open".to_string(), "reveal".into(), "spawn_terminal".into()]
+        );
     }
 
     #[tokio::test]
@@ -435,7 +542,7 @@ mod tests {
         let response = companion().handle(CompanionRequest::Status).await;
         assert!(response.ok);
         assert_eq!(response.protocol, PROTOCOL_VERSION);
-        assert_eq!(response.capabilities, vec!["open".to_string()]);
+        assert_eq!(response.capabilities[0], "open");
     }
 
     #[test]

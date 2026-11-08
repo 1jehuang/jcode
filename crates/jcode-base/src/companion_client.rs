@@ -175,6 +175,10 @@ impl CompanionResponse {
     }
 }
 
+/// Error suffix for a request whose feature is off in `[companion]` config.
+/// Clients treat it like an absent companion.
+pub const DISABLED_SUFFIX: &str = "is disabled in [companion] config";
+
 /// `$JCODE_COMPANION_SOCKET`, else `jcode-companion.sock` in the runtime dir.
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("JCODE_COMPANION_SOCKET") {
@@ -238,6 +242,10 @@ pub fn request_at(
         .map_err(|e| CompanionError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     if response.ok {
         Ok(response)
+    } else if response.message.ends_with(DISABLED_SUFFIX) {
+        // The user turned this feature off: behave as if no companion runs,
+        // so callers use their local fallback.
+        Err(CompanionError::Unavailable)
     } else {
         Err(CompanionError::Failed(response.message))
     }

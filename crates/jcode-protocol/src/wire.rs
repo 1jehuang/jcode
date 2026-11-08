@@ -319,6 +319,15 @@ pub enum Request {
         session_id: Option<String>,
     },
 
+    /// Live push-to-talk state for a TUI session (waveform, live text).
+    /// Fire-and-forget: the server answers `Done` once it has fanned out.
+    #[serde(rename = "voice_activity")]
+    VoiceActivity {
+        id: u64,
+        session_id: String,
+        activity: VoiceActivity,
+    },
+
     /// Execute a shell command from `!cmd` in the active remote session.
     #[serde(rename = "input_shell")]
     InputShell { id: u64, command: String },

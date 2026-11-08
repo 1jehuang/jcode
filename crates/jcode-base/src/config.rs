@@ -719,6 +719,9 @@ pub struct Config {
     /// Power-management configuration (prevent sleep while streaming)
     pub power: PowerConfig,
 
+    /// `jcode companion`: per-login helper for desktop effects.
+    pub companion: CompanionConfig,
+
     /// macOS menu bar session indicator
     pub menubar: MenubarConfig,
 
@@ -993,6 +996,46 @@ impl ToolConfig {
 fn normalize_tool_name(name: &str) -> String {
     let trimmed = name.trim().trim_matches('"');
     jcode_tool_types::resolve_tool_name(trimmed).to_string()
+}
+
+/// `jcode companion` features. Each toggle is read when the companion starts,
+/// except `autostart`, which clients read when they launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CompanionConfig {
+    /// Start the companion in the background when a Jcode client launches
+    /// and none is running.
+    pub autostart: bool,
+    /// Copilot-key push-to-talk (Linux). Also needs `[dictation] global_devices`.
+    pub voice: bool,
+    /// Show a live waveform and transcript in the focused Jcode CLI while
+    /// companion push-to-talk records.
+    pub voice_waveform: bool,
+    /// Show desktop notifications for companion voice state.
+    pub voice_notifications: bool,
+    /// Open URLs and files for the server.
+    pub open: bool,
+    /// Open new terminal windows for the server.
+    pub spawn_terminal: bool,
+    /// Lid-close override while agents work (macOS/Windows).
+    pub lid: bool,
+    /// Hourly browser bridge auto-update.
+    pub browser_updates: bool,
+}
+
+impl Default for CompanionConfig {
+    fn default() -> Self {
+        Self {
+            autostart: true,
+            voice: true,
+            voice_waveform: true,
+            voice_notifications: true,
+            open: true,
+            spawn_terminal: true,
+            lid: true,
+            browser_updates: true,
+        }
+    }
 }
 
 /// External dictation / speech-to-text integration.

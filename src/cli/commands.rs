@@ -1454,7 +1454,32 @@ pub async fn run_transcript_command(
     }
 }
 
-pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+/// `jcode companion --no-*` flags. Each turns a feature off on top of the
+/// `[companion]` config. A flag can never turn on something config disables.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompanionFlags {
+    pub no_voice: bool,
+    pub no_voice_waveform: bool,
+    pub no_voice_notifications: bool,
+    pub no_open: bool,
+    pub no_spawn_terminal: bool,
+    pub no_lid: bool,
+    pub no_browser_updates: bool,
+}
+
+impl CompanionFlags {
+    pub fn apply(self, options: &mut jcode_companion::CompanionOptions) {
+        options.voice &= !self.no_voice;
+        options.voice_waveform &= !self.no_voice_waveform;
+        options.voice_notifications &= !self.no_voice_notifications;
+        options.open &= !self.no_open;
+        options.spawn_terminal &= !self.no_spawn_terminal;
+        options.lid &= !self.no_lid;
+        options.browser_updates &= !self.no_browser_updates;
+    }
+}
+
+pub async fn run_companion_command(status: bool, flags: CompanionFlags) -> Result<()> {
     use crate::companion_client::{CompanionRequest, request_async};
     if status {
         match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
@@ -1470,11 +1495,9 @@ pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
             Err(error) => anyhow::bail!("{error}"),
         }
     }
-    jcode_companion::run(jcode_companion::CompanionOptions {
-        voice: !no_voice,
-        ..Default::default()
-    })
-    .await
+    let mut options = jcode_companion::CompanionOptions::from_config();
+    flags.apply(&mut options);
+    jcode_companion::run(options).await
 }
 
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {

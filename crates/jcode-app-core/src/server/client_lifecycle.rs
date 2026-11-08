@@ -2546,6 +2546,21 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = super::debug::forward_voice_activity(
+                    id,
+                    &session_id,
+                    activity,
+                    &swarm_members,
+                )
+                .await;
+                let _ = client_event_tx.send(event);
+            }
+
             Request::InputShell { id, command } => {
                 handle_input_shell(id, command, &agent, &client_event_tx);
             }

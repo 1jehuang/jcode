@@ -70,6 +70,30 @@ pub enum TranscriptMode {
     Send,
 }
 
+/// Push-to-talk state captured outside the TUI (for example `jcode companion`),
+/// shown in the target session's status line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum VoiceActivity {
+    /// Microphone open. `levels` holds recent RMS levels (`0.0..=1.0`),
+    /// oldest first. `live` is the partial transcript so far.
+    Recording {
+        #[serde(default)]
+        elapsed_ms: u64,
+        #[serde(default)]
+        levels: Vec<f32>,
+        #[serde(default)]
+        live: String,
+    },
+    /// Key released, waiting for the final transcript.
+    Transcribing {
+        #[serde(default)]
+        live: String,
+    },
+    /// Capture ended (sent, cancelled or failed). Clears the indicator.
+    Idle,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommDeliveryMode {
@@ -846,6 +870,7 @@ impl Request {
             Request::AppletAction { id, .. } => *id,
             Request::CloseApplet { id, .. } => *id,
             Request::Transcript { id, .. } => *id,
+            Request::VoiceActivity { id, .. } => *id,
             Request::InputShell { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
             Request::RefreshModels { id } => *id,

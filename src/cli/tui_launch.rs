@@ -158,6 +158,7 @@ pub async fn run_tui_client(
     if !native_ssh {
         spawn_session_signal_watchers();
     }
+    super::companion_autostart::spawn_if_needed(native_ssh);
 
     if native_ssh {
         let host = std::env::var("JCODE_SSH_REMOTE").unwrap_or_default();

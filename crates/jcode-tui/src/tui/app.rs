@@ -1654,6 +1654,9 @@ pub struct App {
     voice_input: Option<voice_input::VoiceInput>,
     // Last voice key press, to tell a held key's auto-repeat from a new press
     voice_input_last_press: Option<Instant>,
+    // Push-to-talk captured outside this client (`jcode companion`), with the
+    // time it was last updated so a vanished sender cannot leave it stuck.
+    external_voice: Option<(crate::protocol::VoiceActivity, Instant)>,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
     // Config reload generation the keybinding snapshot above was parsed at.

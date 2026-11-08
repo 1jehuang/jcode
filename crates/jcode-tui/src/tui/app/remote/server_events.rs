@@ -3243,6 +3243,10 @@ fn handle_server_event_inner(
             apply_transcript_event(app, text, mode);
             false
         }
+        ServerEvent::VoiceActivity { activity } => {
+            app.apply_external_voice_activity(activity);
+            false
+        }
         ServerEvent::InputShellResult { result } => {
             app.push_display_message(DisplayMessage::system(
                 crate::message::format_input_shell_result_markdown(&result),

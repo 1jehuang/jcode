@@ -245,6 +245,23 @@ pub(super) async fn inject_transcript(
     Ok(ServerEvent::Done { id })
 }
 
+/// Forward live push-to-talk state to one session's clients. Best effort:
+/// a session without a live client simply has nothing to show.
+pub(super) async fn forward_voice_activity(
+    id: u64,
+    session_id: &str,
+    activity: crate::protocol::VoiceActivity,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> ServerEvent {
+    fanout_session_event(
+        swarm_members,
+        session_id,
+        ServerEvent::VoiceActivity { activity },
+    )
+    .await;
+    ServerEvent::Done { id }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "debug client wiring fans out across sessions, swarms, files, channels, jobs, and transport state"
@@ -381,6 +398,15 @@ pub(super) async fn handle_debug_client(
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
+            }
+
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = forward_voice_activity(id, &session_id, activity, &swarm_members).await;
+                writer.write_all(encode_event(&event).as_bytes()).await?;
             }
 
             Request::DebugCommand {

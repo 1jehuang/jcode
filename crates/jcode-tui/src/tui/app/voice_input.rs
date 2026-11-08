@@ -271,9 +271,31 @@ impl App {
         }
     }
 
+    /// Record push-to-talk state reported by `jcode companion`.
+    pub(crate) fn apply_external_voice_activity(
+        &mut self,
+        activity: crate::protocol::VoiceActivity,
+    ) {
+        self.external_voice = match activity {
+            crate::protocol::VoiceActivity::Idle => None,
+            activity => Some((activity, Instant::now())),
+        };
+    }
+
+    /// Companion push-to-talk status, unless stale or turned off.
+    fn external_voice_status_line(&self) -> Option<(bool, String)> {
+        if !crate::config::config().companion.voice_waveform {
+            return None;
+        }
+        let (activity, updated) = self.external_voice.as_ref()?;
+        external_voice_line(activity, updated.elapsed())
+    }
+
     /// Status-line text while voice input is active: `(recording, text)`.
     pub(crate) fn voice_input_status_line(&self) -> Option<(bool, String)> {
-        let voice = self.voice_input.as_ref()?;
+        let Some(voice) = self.voice_input.as_ref() else {
+            return self.external_voice_status_line();
+        };
         let key = self.voice_input_key_label().unwrap_or("/voice");
         let live = live_tail(&voice.live);
         Some(match voice.phase {
@@ -303,6 +325,59 @@ impl App {
                 (false, format!("◌ Transcribing…{heard} · Esc discard"))
             }
         })
+    }
+}
+
+/// Updates arrive every ~80 ms while recording. Past this, the sender is gone.
+const EXTERNAL_VOICE_STALE: Duration = Duration::from_secs(3);
+/// Transcribing can legitimately take a while with no updates.
+const EXTERNAL_TRANSCRIBING_STALE: Duration = Duration::from_secs(60);
+
+fn external_voice_line(
+    activity: &crate::protocol::VoiceActivity,
+    age: Duration,
+) -> Option<(bool, String)> {
+    use crate::protocol::VoiceActivity;
+    match activity {
+        VoiceActivity::Recording {
+            elapsed_ms,
+            levels,
+            live,
+        } => {
+            if age > EXTERNAL_VOICE_STALE {
+                return None;
+            }
+            let secs = elapsed_ms / 1000;
+            let start = levels.len().saturating_sub(METER_BARS);
+            let meter: String = levels[start..].iter().map(|l| meter_bar(*l)).collect();
+            let live = live_tail(live);
+            let heard = if live.is_empty() {
+                "listening…".to_string()
+            } else {
+                live
+            };
+            Some((
+                true,
+                format!(
+                    "● {}:{:02} {meter} {heard} · release to send",
+                    secs / 60,
+                    secs % 60
+                ),
+            ))
+        }
+        VoiceActivity::Transcribing { live } => {
+            if age > EXTERNAL_TRANSCRIBING_STALE {
+                return None;
+            }
+            let live = live_tail(live);
+            let heard = if live.is_empty() {
+                String::new()
+            } else {
+                format!(" {live}")
+            };
+            Some((false, format!("◌ Transcribing…{heard}")))
+        }
+        VoiceActivity::Idle => None,
     }
 }
 
@@ -371,6 +446,30 @@ mod tests {
         assert_eq!(meter_bar(1.0), '█');
         let speech = meter_bar(0.05);
         assert!(speech != '▁' && speech != '█', "{speech}");
+    }
+
+    #[test]
+    fn external_voice_shows_meter_and_expires() {
+        use crate::protocol::VoiceActivity;
+        let recording = VoiceActivity::Recording {
+            elapsed_ms: 65_000,
+            levels: vec![0.0; 14].into_iter().chain([1.0]).collect(),
+            live: "hello there".into(),
+        };
+        let (rec, line) = external_voice_line(&recording, Duration::ZERO).unwrap();
+        assert!(rec);
+        assert!(line.starts_with("● 1:05 "), "{line}");
+        assert_eq!(
+            line.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count(),
+            METER_BARS
+        );
+        assert!(line.contains('█') && line.contains("hello there"));
+        assert!(external_voice_line(&recording, Duration::from_secs(4)).is_none());
+        let transcribing = VoiceActivity::Transcribing {
+            live: String::new(),
+        };
+        assert!(external_voice_line(&transcribing, Duration::from_secs(4)).is_some());
+        assert!(external_voice_line(&VoiceActivity::Idle, Duration::ZERO).is_none());
     }
 
     #[test]
