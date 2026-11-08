@@ -265,7 +265,18 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 /// streaming render cost (issue #392): how long the render-into-buffer pass
 /// takes, how much of the terminal actually changed per frame, and the
 /// effective draw rate.
+static CHANGED_CELLS_WANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether per-frame changed-cell counting is wanted. Counting compares the
+/// whole screen every frame (a few % of release CPU), and only the
+/// `draw-stats` debug command reads it, so it turns on at first request.
+pub(crate) fn changed_cells_wanted() -> bool {
+    CHANGED_CELLS_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn debug_draw_call_history(limit: usize) -> serde_json::Value {
+    CHANGED_CELLS_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let history = draw_call_history()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

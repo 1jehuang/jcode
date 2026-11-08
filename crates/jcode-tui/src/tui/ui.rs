@@ -1658,8 +1658,8 @@ pub(crate) use frame_metrics::{
     set_frame_input_attribution, wall_clock_ms,
 };
 pub(crate) use frame_metrics::{
-    debug_draw_call_history, debug_flicker_frame_history, debug_slow_frame_history,
-    recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
+    changed_cells_wanted, debug_draw_call_history, debug_flicker_frame_history,
+    debug_slow_frame_history, recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
 };
 #[cfg(test)]
 pub(crate) use smoothness::frame_from_buffer as smoothness_frame_from_buffer;

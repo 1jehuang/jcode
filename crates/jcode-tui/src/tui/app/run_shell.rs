@@ -549,6 +549,7 @@ impl StatusSpinnerRenderer {
         })?;
         let total_elapsed = draw_start.elapsed();
         let changed_cells = previous_frame
+            .filter(|_| crate::tui::ui::changed_cells_wanted())
             .filter(|previous| previous.area == completed.buffer.area)
             .map(|previous| {
                 previous
@@ -988,13 +989,12 @@ impl App {
                     // few ms apart and each used to trigger a full draw that
                     // changed nothing. Input-driven and forced redraws still
                     // paint immediately so typing latency is unaffected.
-                    let coalesce_until = (!input_redraw
-                        && !self.force_full_redraw
-                        && !self.force_full_repaint)
-                        .then_some(status_spinner_renderer.last_full_frame_at)
-                        .flatten()
-                        .map(|at| at + EVENT_REDRAW_MIN_INTERVAL)
-                        .filter(|deadline| *deadline > Instant::now());
+                    let coalesce_until =
+                        (!input_redraw && !self.force_full_redraw && !self.force_full_repaint)
+                            .then_some(status_spinner_renderer.last_full_frame_at)
+                            .flatten()
+                            .map(|at| at + EVENT_REDRAW_MIN_INTERVAL)
+                            .filter(|deadline| *deadline > Instant::now());
                     deferred_redraw_at = coalesce_until.map(tokio::time::Instant::from_std);
                     if allow_redraw && deferred_redraw_at.is_none() {
                         input_redraw = false;
