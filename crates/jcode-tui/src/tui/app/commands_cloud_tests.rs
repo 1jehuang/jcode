@@ -2,6 +2,111 @@ use super::*;
 
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
+
+#[test]
+fn parses_mobile_as_a_move_to_managed_cloud() {
+    for input in ["/mobile", "/mobile ", " /mobile\t"] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Move {
+                host: Some("jcode-cloud".into()),
+            }),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn parses_mobile_cancel() {
+    for input in ["/mobile cancel", "/mobile\tcancel "] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Cancel),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn mobile_rejects_unexpected_arguments() {
+    for input in [
+        "/mobile box",
+        "/mobile --host box",
+        "/mobile --session-only",
+        "/mobile --include-session other",
+        "/mobile --dry-run",
+        "/mobile status",
+        "/mobile cancel extra",
+        "/mobile cancel cancel",
+    ] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::MoveUsage),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn mobile_does_not_match_command_prefixes() {
+    for input in ["/mobilex", "/mobilex cancel", "/mobile-cancel"] {
+        assert_eq!(parse_cloud_command(input), None, "{input}");
+    }
+}
+
+#[test]
+fn mobile_is_registered_once_and_visible_in_command_help() {
+    let app = crate::tui::app::tests::create_test_app();
+    for topic in ["mobile", "/mobile", " MOBILE "] {
+        let detailed = app
+            .command_help(topic)
+            .expect("mobile detailed help should exist");
+        assert!(detailed.contains("/mobile cancel"));
+        assert!(detailed.contains("push notification"));
+    }
+    assert_eq!(
+        crate::tui::app::registered_command_names()
+            .filter(|name| *name == "/mobile")
+            .count(),
+        1
+    );
+    let (_, help) = crate::tui::app::registered_command_entries()
+        .find(|(name, _)| *name == "/mobile")
+        .expect("/mobile should be discoverable in command help");
+    assert!(!help.is_empty());
+    assert!(!crate::tui::app::registered_command_names().any(|name| name == "/mobilex"));
+}
+
+#[test]
+#[cfg(unix)]
+fn mobile_push_feedback_is_visible_without_failing_cloud_status() {
+    for result in [
+        Ok("Mobile notification sent".to_string()),
+        Err("No mobile devices registered".to_string()),
+    ] {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let tx = fake_job(&mut app, CloudCommand::Where);
+        app.cloud_job.as_mut().unwrap().trimmed = "/mobile".into();
+        let expected = result
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or_else(|error| error.as_str())
+            .to_string();
+        tx.send(CloudEvent::MobilePushResult(result)).unwrap();
+        tx.send(CloudEvent::Done(Ok(output(true, "session is on cloud"))))
+            .unwrap();
+        assert!(app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|message| message.content.contains(&expected))
+        );
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
+}
+
 #[test]
 fn parses_explicit_group_selection_without_treating_flags_as_hosts() {
     assert_eq!(
@@ -1152,6 +1257,18 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Where)
     );
     assert_eq!(
+        parse_cloud_command("/cloud reload"),
+        Some(CloudCommand::Reload { force: false })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload --force"),
+        Some(CloudCommand::Reload { force: true })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload now"),
+        Some(CloudCommand::MoveUsage)
+    );
+    assert_eq!(
         parse_cloud_command("/cloud cancel"),
         Some(CloudCommand::Cancel)
     );
@@ -1166,7 +1283,8 @@ fn parses_cloud_commands() {
 fn queued_system_reminders_reach_agent_before_handoff() {
     let mut app = crate::tui::app::tests::create_test_app();
     let session = super::super::commands::active_session_id(&app);
-    app.hidden_queued_system_messages.push("bg task done".into());
+    app.hidden_queued_system_messages
+        .push("bg task done".into());
     handle_cloud_command(&mut app, "/local", &session);
     assert!(app.pending_cloud_handoff.is_some());
     // Reminders still dispatch while the handoff waits.
@@ -1174,7 +1292,10 @@ fn queued_system_reminders_reach_agent_before_handoff() {
     assert!(app.poll_cloud_job());
     assert!(app.pending_queued_dispatch);
     assert!(app.cloud_job.is_none());
-    assert_eq!(app.hidden_queued_system_messages, vec!["bg task done".to_string()]);
+    assert_eq!(
+        app.hidden_queued_system_messages,
+        vec!["bg task done".to_string()]
+    );
     assert!(app.pending_cloud_handoff.is_some());
 
     // Once delivered, the handoff proceeds and blocks new work again.
@@ -1182,4 +1303,25 @@ fn queued_system_reminders_reach_agent_before_handoff() {
     app.hidden_queued_system_messages.clear();
     assert!(app.cloud_handoff_blocks_work());
     assert!(app.take_ready_cloud_handoff().is_some());
+}
+
+#[test]
+fn prepared_handoff_interrupts_running_turn_once() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = super::super::commands::active_session_id(&app);
+    let mut request = pending(CloudCommand::Move { host: None }, &session);
+    app.is_processing = true;
+    app.pending_cloud_handoff = Some(request.clone());
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.cancel_requested, "unprepared host must not interrupt");
+
+    request.prepared = true;
+    app.pending_cloud_handoff = Some(request);
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(app.cancel_requested, "ready host interrupts the turn");
+    assert!(app.take_cloud_remote_interrupt());
+    assert!(!app.cancel_requested, "remote mode clears the local flag");
+
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.take_cloud_remote_interrupt(), "interrupts only once");
 }

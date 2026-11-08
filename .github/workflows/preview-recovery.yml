@@ -1,0 +1,41 @@
+name: Preview Recovery
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  schedule:
+    # Off the hour. Reconcile transient builder failures without another push.
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: preview-recovery-master
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository == '1jehuang/jcode' &&
+      vars.JCODE_V1_PREVIEW_ENABLED != 'false' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Never execute a PR head, workflow_run artifact, or caller-controlled ref
+      # with this token. Recovery only reads trusted default-branch source.
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          persist-credentials: false
+      - name: Reconcile unpublished master preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/reconcile_preview_release.py

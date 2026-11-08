@@ -72,6 +72,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
+pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
@@ -1019,9 +1020,17 @@ impl Default for WidgetsState {
 
 /// Global widget state (for polling across frames)
 static WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
+/// Separate widget state for secondary renders (resume preview) so their
+/// placements and animations never disturb the live session's widgets.
+static SECONDARY_WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
 
 fn get_or_init_state() -> std::sync::MutexGuard<'static, Option<WidgetsState>> {
-    let mut guard = WIDGETS_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = if super::ui::secondary_render_active() {
+        &SECONDARY_WIDGETS_STATE
+    } else {
+        &WIDGETS_STATE
+    };
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(WidgetsState::default());
     }

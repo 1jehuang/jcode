@@ -211,15 +211,28 @@ impl McpClient {
         // its process environment, and blindly inheriting them exposes those
         // credentials to every configured MCP executable (issue #771).
         let inherited: HashMap<String, String> = std::env::vars().collect();
-        let env = mcp_child_env(inherited, &config.env);
+        let mut env = mcp_child_env(inherited, &config.env);
+        let interactive = INTERACTIVE_CONNECT.try_with(|v| *v).unwrap_or(false);
+        if !interactive {
+            suppress_browser_launch(&mut env, &config.env);
+        }
 
         let mut command = Command::new(&config.command);
+        if !interactive {
+            command.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+        }
         command
             .args(&config.args)
             .envs(&env)
+            .env(crate::inherited_children::MCP_CHILD_MARKER_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // Own process group so shutdown also stops `npx` wrapper descendants
+        // (node), which otherwise outlive the wrapper and keep running.
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
@@ -561,6 +574,7 @@ impl McpClient {
 
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+                kill_process_group(child);
                 let _ = child.kill().await;
             }
             Backend::Remote(connection) => connection.shutdown().await,
@@ -587,6 +601,34 @@ impl McpClient {
 
     pub async fn refresh_tools(&self) -> Result<()> {
         self.handle.refresh_tools().await
+    }
+}
+
+tokio::task_local! {
+    /// Set while a user explicitly asked to connect a server. Background
+    /// auto-connects (daemon startup, session start) leave it unset.
+    static INTERACTIVE_CONNECT: bool;
+}
+
+/// Run `fut` as a user-initiated connect, allowing MCP children (for example
+/// `mcp-remote`) to open an OAuth browser window.
+pub async fn interactive_connect<F: std::future::Future>(fut: F) -> F::Output {
+    INTERACTIVE_CONNECT.scope(true, fut).await
+}
+
+/// Background auto-connects must never pop browser windows. `mcp-remote` and
+/// similar wrappers open an OAuth page whenever tokens are missing, which made
+/// every reboot spawn a pile of sign-in tabs. Hide the graphical session and
+/// point `BROWSER` at a no-op so openers fail and the server reports an auth
+/// error instead. Explicitly configured env values are respected.
+fn suppress_browser_launch(env: &mut HashMap<String, String>, explicit: &HashMap<String, String>) {
+    for key in ["DISPLAY", "WAYLAND_DISPLAY"] {
+        if !explicit.contains_key(key) {
+            env.remove(key);
+        }
+    }
+    if !explicit.contains_key("BROWSER") {
+        env.insert("BROWSER".to_string(), "true".to_string());
     }
 }
 
@@ -621,9 +663,22 @@ fn mcp_child_env(
 impl Drop for McpClient {
     fn drop(&mut self) {
         if let Backend::Stdio(child) = &mut self.backend {
+            kill_process_group(child);
             let _ = child.start_kill();
         }
     }
+}
+
+fn kill_process_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: the child leads its own process group (process_group(0)).
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 #[cfg(all(test, unix))]
@@ -631,6 +686,30 @@ mod tests {
     use super::{McpClient, is_sensitive_inherited_env_key, mcp_child_env};
     use crate::mcp::protocol::McpServerConfig;
     use std::collections::HashMap;
+
+    #[test]
+    fn background_connect_env_cannot_open_browser() {
+        let mut env: HashMap<String, String> = [
+            ("DISPLAY", ":0"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("PATH", "/usr/bin"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        super::suppress_browser_launch(&mut env, &HashMap::new());
+        assert!(!env.contains_key("DISPLAY"));
+        assert!(!env.contains_key("WAYLAND_DISPLAY"));
+        assert_eq!(env.get("BROWSER").map(String::as_str), Some("true"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+
+        let explicit: HashMap<String, String> = [("DISPLAY".to_string(), ":1".to_string())]
+            .into_iter()
+            .collect();
+        let mut env = explicit.clone();
+        super::suppress_browser_launch(&mut env, &explicit);
+        assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":1"));
+    }
 
     #[test]
     fn inherited_mcp_env_scrubs_provider_credentials() {

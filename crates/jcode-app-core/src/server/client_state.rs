@@ -25,6 +25,11 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+#[path = "history_timing.rs"]
+mod history_timing;
+use history_timing::Timing;
+pub(super) use history_timing::send_resume_todos;
+
 /// Do not probe any identity until telemetry is enabled. Only the provider
 /// may identify its effective OAuth credential. An API-key route must not expose the email
 /// of an unrelated saved subscription account.
@@ -183,6 +188,7 @@ pub(super) async fn handle_get_history(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("history", Some(id), client_session_id);
     let history_start = Instant::now();
     let activity =
         session_activity_snapshot(client_connections, client_session_id, client_is_processing)
@@ -196,7 +202,8 @@ pub(super) async fn handle_get_history(
             "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
             client_session_id
         ));
-        send_history_from_persisted_session(
+        timing.stage("persisted");
+        let result = send_history_from_persisted_session(
             id,
             client_session_id,
             provider,
@@ -211,7 +218,9 @@ pub(super) async fn handle_get_history(
             supports_turn_identity,
             history_base,
         )
-        .await?;
+        .await;
+        timing.result(&result);
+        result?;
         crate::logging::info(&format!(
             "[TIMING] handle_get_history: session={}, persisted_fallback total={}ms",
             client_session_id,
@@ -220,7 +229,8 @@ pub(super) async fn handle_get_history(
         return Ok(());
     };
 
-    send_history_with_guard(
+    timing.stage("live");
+    let result = send_history_with_guard(
         id,
         client_session_id,
         agent_guard,
@@ -237,7 +247,9 @@ pub(super) async fn handle_get_history(
         supports_turn_identity,
         history_base,
     )
-    .await?;
+    .await;
+    timing.result(&result);
+    result?;
     let send_history_ms = history_start.elapsed().as_millis();
 
     let prefetch_start = Instant::now();
@@ -454,71 +466,115 @@ pub(super) async fn handle_get_model_catalog(
     Ok(())
 }
 
-pub(super) async fn handle_get_compacted_history(
-    id: u64,
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    writer: &Arc<Mutex<WriteHalf>>,
-    visible_messages: usize,
-) -> Result<()> {
-    let started = Instant::now();
-    let (messages, images, compacted_info, source) = match agent.try_lock() {
-        Ok(agent_guard) => {
-            let (messages, images, info) = agent_guard
-                .get_history_and_rendered_images_with_compacted_history(visible_messages);
-            (messages, images, info, "live")
-        }
-        Err(_) => {
-            let session = crate::session::Session::load_for_remote_startup(session_id)
-                .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
-            let (rendered_messages, images, info) =
-                crate::session::render_messages_and_images_with_compacted_history(
-                    &session,
-                    visible_messages,
-                );
-            (
-                rendered_messages
-                    .into_iter()
-                    .map(rendered_to_history_message)
-                    .collect(),
-                images,
-                info,
-                "persisted",
-            )
-        }
+#[path = "history_paging.rs"]
+mod history_paging;
+pub(super) use history_paging::handle_get_compacted_history;
+
+/// Window canonical rendered entries, not raw provider messages. Images follow
+/// their rendered entry and the synthetic marker occupies its own index.
+pub(super) fn recent_history_window(
+    mut messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    visible: usize,
+) -> (
+    Vec<HistoryMessage>,
+    Vec<crate::session::RenderedImage>,
+    crate::session::RenderedCompactedHistoryInfo,
+) {
+    let total = messages.len();
+    let start = total.saturating_sub(visible.max(1));
+    let archived_prompts = messages
+        .iter()
+        .filter(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with("Earlier conversation compacted - ")
+        })
+        .filter_map(|message| {
+            message
+                .content
+                .split("Hidden user prompts: ")
+                .nth(1)?
+                .split('.')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .sum::<usize>();
+    let is_prompt = |message: &&HistoryMessage| {
+        message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
     };
-
-    let compacted_info = compacted_info.unwrap_or(crate::session::RenderedCompactedHistoryInfo {
-        total_messages: 0,
-        visible_messages: 0,
-        remaining_messages: 0,
-        hidden_user_prompts: 0,
+    let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
+    let hidden_user_prompts = archived_prompts + excluded_prompts;
+    let info = crate::session::RenderedCompactedHistoryInfo {
+        total_messages: total,
+        visible_messages: total - start,
+        remaining_messages: start,
+        hidden_user_prompts,
+    };
+    if start == 0 {
+        return (messages, images, info);
+    }
+    messages = messages.split_off(start);
+    messages.insert(0, HistoryMessage {
+        response_stats: None,
+        role: "system".to_owned(),
+        content: format!("{}{start} older historical messages hidden. Showing {} of {total} messages. Scroll to the top to load more. Hidden user prompts: {hidden_user_prompts}.", crate::protocol::RECENT_HISTORY_MARKER_PREFIX, info.visible_messages),
+        tool_calls: None,
+        tool_data: None,
     });
-    crate::logging::info(&format!(
-        "[TIMING] get_compacted_history: session={}, source={}, requested={}, visible={}, remaining={}, messages={}, total={}ms",
-        session_id,
-        source,
-        visible_messages,
-        compacted_info.visible_messages,
-        compacted_info.remaining_messages,
-        messages.len(),
-        started.elapsed().as_millis(),
-    ));
+    let visible_prompts = messages.iter().filter(is_prompt).count();
+    let images = images
+        .into_iter()
+        .filter_map(|mut image| {
+            match &mut image.anchor {
+                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => {
+                    *ordinal = ordinal.checked_sub(excluded_prompts)?;
+                    if *ordinal >= visible_prompts {
+                        return None;
+                    }
+                }
+                Some(crate::session::RenderedImageAnchor::ToolCall { id }) => {
+                    if !messages.iter().any(|message| {
+                        message
+                            .tool_data
+                            .as_ref()
+                            .is_some_and(|tool| &tool.id == id)
+                    }) {
+                        return None;
+                    }
+                }
+                None if image.history_message_index.is_none() => return None,
+                None => {}
+            }
+            if let Some(index) = image.history_message_index {
+                if index < start || index > total {
+                    return None;
+                }
+                image.history_message_index = Some(index - start + 1);
+            }
+            Some(image)
+        })
+        .collect();
+    (messages, images, info)
+}
 
-    write_event(
-        writer,
-        &ServerEvent::CompactedHistory {
-            id,
-            session_id: session_id.to_string(),
-            messages,
-            images,
-            compacted_total: compacted_info.total_messages,
-            compacted_visible: compacted_info.visible_messages,
-            compacted_remaining: compacted_info.remaining_messages,
-            compacted_hidden_prompts: compacted_info.hidden_user_prompts,
-        },
-    )
-    .await
+fn apply_recent_history_base(
+    messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+    messages_base_count: Option<usize>,
+) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
+    if messages_base_count.is_none()
+        && let Some(visible) = history_base
+            .filter(|base| base.count == 0)
+            .and_then(|base| base.recent_messages)
+    {
+        let (messages, images, _) = recent_history_window(messages, images, visible);
+        return (messages, images);
+    }
+    (messages, images)
 }
 
 /// Trim History to the messages after the client's verified prefix.
@@ -742,6 +798,7 @@ async fn send_history_from_persisted_session(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("persisted_history", Some(id), session_id);
     let loaded = super::run_blocking_io(|| {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))
@@ -762,8 +819,12 @@ async fn send_history_from_persisted_session(
             // Do not save this synthetic snapshot or mask other I/O errors.
             Session::create_with_id(session_id.to_string(), None, None)
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            timing.result(&Err::<(), _>(()));
+            return Err(error);
+        }
     };
+    timing.stage("render");
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
@@ -791,6 +852,8 @@ async fn send_history_from_persisted_session(
         .map(rendered_to_history_message)
         .collect();
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),
@@ -861,15 +924,23 @@ async fn send_history_from_persisted_session(
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
+    timing.stage("encode");
     let json = encode_event(&history_event);
+    timing.stage("writer_lock");
     let mut writer_guard = writer.lock().await;
+    timing.stage("write");
     if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
-        writer_guard
+        let sent = writer_guard
             .write_all(encode_event(&state).as_bytes())
-            .await?;
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
     }
-    writer_guard.write_all(json.as_bytes()).await?;
-    Ok(())
+    let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
+    result.map_err(Into::into)
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -923,6 +994,7 @@ async fn send_history_with_guard(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("live_history", Some(id), session_id);
     let history_start = Instant::now();
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
@@ -1124,6 +1196,8 @@ async fn send_history_with_guard(
             )
         });
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),
@@ -1171,6 +1245,7 @@ async fn send_history_with_guard(
         applets,
     };
     let build_ms = build_start.elapsed().as_millis();
+    timing.stage("encode");
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -1178,16 +1253,23 @@ async fn send_history_with_guard(
     drop(history_event);
     let json_len = json.len();
     let encode_ms = encode_start.elapsed().as_millis();
+    timing.stage("writer_lock");
     let writer_lock_start = Instant::now();
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
+    timing.stage("write");
     let write_start = Instant::now();
     if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
-        writer_guard
+        let sent = writer_guard
             .write_all(encode_event(&state).as_bytes())
-            .await?;
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
     }
     let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
     // only needs the captured length).

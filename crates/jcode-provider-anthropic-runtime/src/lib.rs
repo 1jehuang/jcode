@@ -1050,9 +1050,13 @@ impl AnthropicProvider {
                 "claude",
                 &fresh_creds.refresh_token,
             ) {
-                anyhow::bail!(
-                    "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-                );
+                if fresh_creds.expires_at <= now {
+                    anyhow::bail!(
+                        "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+                    );
+                }
+                // Rejection blocks refresh, not a still-live access token.
+                return Ok((fresh_creds.access_token, true));
             }
 
             jcode_base::logging::info(
@@ -2319,6 +2323,7 @@ async fn stream_response(
     // Parse SSE stream
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
     let mut sse_state = SseStreamState {
         requested_model_base,
         ..SseStreamState::default()
@@ -2342,8 +2347,7 @@ async fn stream_response(
                 );
             }
         };
-        let chunk_str = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&chunk_str);
+        buffer.push_str(&utf8.decode(&chunk));
 
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
@@ -2686,3 +2690,29 @@ mod account_failover_tests;
 
 #[cfg(test)]
 mod account_binding_tests;
+
+#[cfg(test)]
+mod sse_utf8_chunk_tests {
+    use super::parse_sse_event;
+
+    /// Regression for #2087: a multibyte character split across transport
+    /// chunks must not decode to U+FFFD.
+    #[test]
+    fn multibyte_char_split_across_chunks_decodes_cleanly() {
+        let payload = "event: content_block_delta\ndata: {\"text\":\"你好世界\"}\n\n";
+        let bytes = payload.as_bytes();
+        let split = payload.find('你').unwrap() + 1; // inside the 3-byte char
+        let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
+        let mut buffer = String::new();
+        for chunk in [
+            &bytes[..split],
+            &bytes[split..split + 3],
+            &bytes[split + 3..],
+        ] {
+            buffer.push_str(&utf8.decode(chunk));
+        }
+        let event = parse_sse_event(&mut buffer).expect("complete event");
+        assert!(!event.data.contains('\u{FFFD}'));
+        assert!(event.data.contains("你好世界"));
+    }
+}
