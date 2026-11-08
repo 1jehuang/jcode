@@ -189,6 +189,13 @@ impl Cell {
         self
     }
 
+    /// ratatui-jcode: true when the symbol is empty or a single byte, which
+    /// guarantees display width <= 1 without a width lookup.
+    #[inline]
+    pub(crate) fn symbol_len_le1(&self) -> bool {
+        self.symbol.as_ref().is_none_or(|s| s.len() <= 1)
+    }
+
     /// Resets the cell to the empty state.
     pub fn reset(&mut self) {
         *self = Self::EMPTY;

@@ -509,7 +509,26 @@ impl Buffer {
         let mut to_skip: usize = 0;
         // ratatui-jcode: measure each symbol once per cell (upstream measured
         // the current symbol up to three times) and use the ASCII fast path.
-        for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
+        // ratatui-jcode: whole-row fast path. When no wide-grapheme state
+        // carries into a row and every cell is unchanged and at most one byte
+        // wide (so width <= 1 and the state stays zero), the row produces no
+        // updates and can be skipped without the per-cell width logic.
+        let row_width = usize::from(self.area.width).max(1);
+        let len = next_buffer.len().min(previous_buffer.len());
+        let mut i = 0;
+        while i < len {
+            if i % row_width == 0 && invalidated == 0 && to_skip == 0 {
+                let end = (i + row_width).min(len);
+                let unchanged = next_buffer[i..end]
+                    .iter()
+                    .zip(&previous_buffer[i..end])
+                    .all(|(c, p)| c.symbol_len_le1() && c == p);
+                if unchanged {
+                    i = end;
+                    continue;
+                }
+            }
+            let (current, previous) = (&next_buffer[i], &previous_buffer[i]);
             let current_width = crate::fast::symbol_width(current.symbol());
             if !current.skip && (invalidated > 0 || current != previous) && to_skip == 0 {
                 let (x, y) = self.pos_of(i);
@@ -545,6 +564,7 @@ impl Buffer {
             };
             let affected_width = cmp::max(current_width, previous_width);
             invalidated = cmp::max(affected_width, invalidated).saturating_sub(1);
+            i += 1;
         }
         updates
     }
