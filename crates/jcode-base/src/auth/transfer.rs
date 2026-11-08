@@ -24,6 +24,14 @@ use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
 
+// Unix-only cloud store helpers. Every caller lives in a cfg(unix) import or
+// export block; the Windows fallbacks never touch them.
+#[cfg(unix)]
+#[path = "transfer_unix.rs"]
+mod transfer_unix;
+#[cfg(unix)]
+use transfer_unix::{cloud_expiry, cloud_store, identity_hints_match, identity_hints_present};
+
 pub const MAX_TRANSFER_BYTES: usize = 64 * 1024;
 const MAX_STORE_BYTES: usize = 1024 * 1024;
 const TRANSFER_VERSION: u32 = 1;
@@ -761,42 +769,6 @@ fn parse_cloud(
     Ok(envelope)
 }
 
-// Only the unix import/export paths read and rewrite the cloud store; the
-// Windows fallbacks never touch these helpers.
-#[cfg(unix)]
-fn cloud_store(
-    bytes: &[u8],
-    provider: TransferProvider,
-) -> Result<serde_json::Value, TransferError> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| TransferError::InvalidStore)?;
-    if !value.is_object() {
-        return Err(TransferError::InvalidStore);
-    }
-    let (accounts, active, _, _) = cloud_keys(provider);
-    if let Some(selection) = value.get(active)
-        && !selection.is_null()
-        && !selection.as_str().is_some_and(valid_cloud_label)
-    {
-        return Err(TransferError::InvalidStore);
-    }
-    if let Some(entries) = value.get(accounts) {
-        let entries = entries.as_array().ok_or(TransferError::InvalidStore)?;
-        let mut labels = std::collections::HashSet::new();
-        for entry in entries {
-            let label = entry["label"]
-                .as_str()
-                .filter(|s| valid_cloud_label(s))
-                .ok_or(TransferError::InvalidStore)?;
-            if !labels.insert(label) {
-                return Err(TransferError::InvalidStore);
-            }
-            cloud_account(provider, entry).map_err(|_| TransferError::InvalidStore)?;
-        }
-    }
-    Ok(value)
-}
-
 /// Export an exact named account, or the runtime-selected/stored-active/first
 /// Jcode-owned account. No external discovery, migration, refresh or writes.
 pub fn export_cloud_local(
@@ -966,57 +938,6 @@ pub fn import_cloud_local(
 ) -> Result<(), TransferError> {
     let home = crate::storage::jcode_dir().map_err(|_| TransferError::Io)?;
     import_cloud_at(&home, provider, expected_label, bytes)
-}
-
-#[cfg(unix)]
-fn identity_hints_match(
-    provider: TransferProvider,
-    old: &serde_json::Value,
-    new: &serde_json::Value,
-) -> bool {
-    let fields: &[&str] = match provider {
-        TransferProvider::OpenAi => &["account_id", "email"],
-        TransferProvider::Claude => &["email"],
-    };
-    let present = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.trim().is_empty());
-    // A hint missing on either side is not evidence of a different account:
-    // older refreshes dropped `email` when the grant omitted id_token. Any hint
-    // present on both sides must still match exactly, and at least one hint
-    // must be shared so an identity-less entry cannot absorb another account.
-    let mut shared = false;
-    for key in fields {
-        let (a, b) = (&old[*key], &new[*key]);
-        if present(a) && present(b) {
-            if a != b {
-                return false;
-            }
-            shared = true;
-        }
-    }
-    shared || fields.iter().all(|key| old[*key] == new[*key])
-}
-
-#[cfg(unix)]
-fn identity_hints_present(provider: TransferProvider, account: &serde_json::Value) -> bool {
-    let fields: &[&str] = match provider {
-        TransferProvider::OpenAi => &["account_id", "email"],
-        TransferProvider::Claude => &["email"],
-    };
-    fields
-        .iter()
-        .any(|key| account[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
-}
-
-#[cfg(unix)]
-fn cloud_expiry(provider: TransferProvider, account: &serde_json::Value) -> Option<i64> {
-    match provider {
-        TransferProvider::Claude => account["expires"].as_i64(),
-        TransferProvider::OpenAi => account["expires_at"].as_i64().or_else(|| {
-            account["access_token"]
-                .as_str()
-                .and_then(super::codex::expires_at_from_access_token)
-        }),
-    }
 }
 
 fn import_cloud_inner(

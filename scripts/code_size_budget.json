@@ -29,7 +29,7 @@
     "crates/jcode-base/src/auth/lifecycle.rs": 2882,
     "crates/jcode-base/src/auth/mod.rs": 1585,
     "crates/jcode-base/src/auth/oauth.rs": 1469,
-    "crates/jcode-base/src/auth/transfer.rs": 2185,
+    "crates/jcode-base/src/auth/transfer.rs": 2112,
     "crates/jcode-base/src/background.rs": 1657,
     "crates/jcode-base/src/browser.rs": 1545,
     "crates/jcode-base/src/compaction.rs": 1874,
