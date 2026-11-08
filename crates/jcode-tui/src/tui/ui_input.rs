@@ -671,10 +671,13 @@ fn append_batch_progress_spans(
     }
 }
 
+#[path = "compact_status.rs"]
+mod compact_status;
 #[path = "stable_status.rs"]
 mod stable_status;
+pub(super) use compact_status::composer_processing_status_line;
 
-/// Compact live activity for todo-lane observers. The composer uses stable_status.
+/// Compact live activity for todo-lane observers. The composer uses compact_status.
 /// No provider or worker state is inferred here: absent telemetry stays absent.
 pub(super) fn live_processing_status_line(
     status: &crate::protocol::SwarmLiveStatus,

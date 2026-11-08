@@ -138,6 +138,12 @@ struct TestState {
     status_elapsed: Option<Duration>,
     status_rate_limit: Option<Duration>,
     status_background: Vec<crate::tui::BackgroundTaskRow>,
+    status_tool_calls: Vec<ToolCall>,
+    status_tokens: (u64, u64),
+    status_tps: Option<f32>,
+    status_transport: Option<String>,
+    status_upstream: Option<String>,
+    status_subagent: Option<String>,
     queue_mode: bool,
     active_skill: Option<String>,
     centered_mode: bool,
@@ -249,13 +255,13 @@ impl crate::tui::TuiState for TestState {
             .unwrap_or_else(|| "mock-model".to_string())
     }
     fn upstream_provider(&self) -> Option<String> {
-        None
+        self.status_upstream.clone()
     }
     fn connection_type(&self) -> Option<String> {
         None
     }
     fn status_detail(&self) -> Option<String> {
-        None
+        self.status_transport.clone()
     }
     fn mcp_servers(&self) -> Vec<(String, usize)> {
         Vec::new()
@@ -264,16 +270,16 @@ impl crate::tui::TuiState for TestState {
         Vec::new()
     }
     fn streaming_tokens(&self) -> (u64, u64) {
-        (0, 0)
+        self.status_tokens
     }
     fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>) {
         (None, None)
     }
     fn output_tps(&self) -> Option<f32> {
-        None
+        self.status_tps
     }
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
-        Vec::new()
+        self.status_tool_calls.clone()
     }
     fn elapsed(&self) -> Option<Duration> {
         self.status_elapsed
@@ -288,7 +294,7 @@ impl crate::tui::TuiState for TestState {
         self.active_skill.clone()
     }
     fn subagent_status(&self) -> Option<String> {
-        None
+        self.status_subagent.clone()
     }
     fn batch_progress(&self) -> Option<crate::bus::BatchProgress> {
         self.batch_progress.clone()
