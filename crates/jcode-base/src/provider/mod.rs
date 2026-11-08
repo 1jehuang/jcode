@@ -1067,15 +1067,8 @@ impl MultiProvider {
 
         match provider {
             ActiveProvider::Claude => {
-                let switching_from_named_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
-                    .ok()
-                    .and_then(|name| crate::config::config().providers.get(&name))
-                    .is_some_and(|profile| {
-                        matches!(
-                            profile.provider_type,
-                            crate::config::NamedProviderType::AnthropicCompatible
-                        )
-                    });
+                let switching_from_named_anthropic =
+                    Self::active_named_anthropic_profile().is_some();
                 if switching_from_named_anthropic {
                     crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
                     crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
@@ -1645,6 +1638,10 @@ impl MultiProvider {
         }
         let prefix = match active {
             ActiveProvider::Claude => {
+                // The fork must reopen this profile to keep its base URL and key.
+                if let Some(profile_id) = Self::active_named_anthropic_profile() {
+                    return format!("{profile_id}:{current_model}");
+                }
                 if let Some(anthropic) = self.anthropic_provider() {
                     // OAuth/ApiKey emit their canonical model prefix; Auto keeps
                     // the bare provider key (route without pinning a credential).

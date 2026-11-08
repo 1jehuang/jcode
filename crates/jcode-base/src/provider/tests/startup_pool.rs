@@ -423,6 +423,63 @@ id = "claude-opus-4-6"
 }
 
 #[test]
+fn fork_keeps_named_anthropic_profile_transport_and_key() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        let path =
+            std::path::PathBuf::from(std::env::var_os("JCODE_HOME").unwrap()).join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.gateway]
+type = "anthropic-compatible"
+base_url = "https://gateway.example.com/v1"
+auth = "bearer"
+api_key_env = "FORK_GATEWAY_TEST_KEY"
+[[providers.gateway.models]]
+id = "claude-opus-4-6"
+"#,
+        )
+        .unwrap();
+        crate::env::set_var("FORK_GATEWAY_TEST_KEY", "gateway-secret");
+        crate::config::invalidate_config_cache();
+        crate::config::Config::set_default_model(Some("gateway:claude-opus-4-6"), None).unwrap();
+        // Record the base URL and key name in effect at each Anthropic runtime build.
+        let built = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&built);
+        external::register_external_provider(external::ANTHROPIC_RUNTIME, move || {
+            record.lock().unwrap().push((
+                std::env::var("JCODE_ANTHROPIC_API_BASE").ok(),
+                std::env::var("JCODE_ANTHROPIC_API_KEY_NAME").ok(),
+            ));
+            test_anthropic_runtime() as Arc<dyn Provider>
+        });
+        let router = MultiProvider::new_fast();
+        assert_eq!(router.active_provider(), ActiveProvider::Claude);
+        built.lock().unwrap().clear();
+
+        let fork = router.fork();
+
+        assert_eq!(fork.model(), "claude-opus-4-6");
+        assert_eq!(
+            built.lock().unwrap().last().cloned(),
+            Some((
+                Some("https://gateway.example.com/v1".to_string()),
+                Some("FORK_GATEWAY_TEST_KEY".to_string())
+            ))
+        );
+        assert_eq!(
+            std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("gateway")
+        );
+        crate::env::remove_var("FORK_GATEWAY_TEST_KEY");
+    });
+}
+
+#[test]
 fn startup_pool_bare_default_rotates_ready_accounts_without_changing_saved_login() {
     for hint in [None, Some("OpenAI"), Some(" openai "), Some("openai-oauth")] {
         with_clean_provider_test_env(|| {
