@@ -523,7 +523,10 @@ impl StatusSpinnerRenderer {
         app.force_full_redraw = false;
         app.force_full_repaint = false;
 
-        let previous_frame = self.last_frame.as_ref();
+        // Take the previous frame so its allocation can be reused below
+        // (`clone_from`) instead of allocating a whole new buffer per frame.
+        let mut stored_frame = self.last_frame.take();
+        let previous_frame = stored_frame.as_ref();
         let draw_start = Instant::now();
         let mut render_elapsed = Duration::ZERO;
         super::oauth_telemetry::begin_frame();
@@ -544,7 +547,13 @@ impl StatusSpinnerRenderer {
                     .count()
             });
         let total_cells = Some(completed.buffer.content.len());
-        let completed_buffer = completed.buffer.clone();
+        let completed_buffer = match stored_frame.as_mut() {
+            Some(buffer) => {
+                buffer.clone_from(completed.buffer);
+                stored_frame.take().unwrap_or_default()
+            }
+            None => completed.buffer.clone(),
+        };
         // `completed` borrows the terminal; it is unused past this point, so the
         // borrow ends here (NLL) before we touch the backend again below.
         let frame_released =

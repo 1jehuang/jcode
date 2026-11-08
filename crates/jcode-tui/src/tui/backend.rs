@@ -245,6 +245,11 @@ pub struct BackendInfo {
 pub struct RemoteConnection {
     reader: BufReader<crate::transport::ReadHalf>,
     writer: Arc<Mutex<WriteHalf>>,
+    /// FIFO outbound queue drained by a dedicated writer task. The UI event
+    /// loop must never await socket writes: if the daemon's receive buffer is
+    /// full while the daemon is itself blocked writing to us, awaiting the
+    /// write here would stop us reading and deadlock both ends.
+    outbound: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
@@ -416,6 +421,7 @@ impl RemoteConnection {
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
+            outbound: std::sync::Mutex::new(None),
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
@@ -610,25 +616,17 @@ impl RemoteConnection {
 
         let mut timing = super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
-        let writer_wait_start = Instant::now();
-        let mut w = self.writer.lock().await;
-        let writer_wait_ms = writer_wait_start.elapsed().as_millis();
-        let write_start = Instant::now();
-        let result = w.write_all(json.as_bytes()).await;
+        let result = self.enqueue_outbound(json.into_bytes());
         if let Some(fields) = &interrupt_log {
             match &result {
                 Ok(()) => crate::logging::info(&format!(
-                    "REMOTE_INTERRUPT_SEND_OK {} writer_wait_ms={} write_ms={} total_ms={}",
+                    "REMOTE_INTERRUPT_SEND_OK {} queued total_ms={}",
                     fields,
-                    writer_wait_ms,
-                    write_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis()
                 )),
                 Err(error) => crate::logging::warn(&format!(
-                    "REMOTE_INTERRUPT_SEND_ERR {} writer_wait_ms={} write_ms={} total_ms={} error={}",
+                    "REMOTE_INTERRUPT_SEND_ERR {} total_ms={} error={}",
                     fields,
-                    writer_wait_ms,
-                    write_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis(),
                     error
                 )),
@@ -640,6 +638,30 @@ impl RemoteConnection {
         result?;
         self.request_timings.request_sent(&request);
         Ok(())
+    }
+
+    /// Queue bytes for the connection writer task, spawning it on first use.
+    /// Never waits on the socket, so the caller keeps draining server events.
+    fn enqueue_outbound(&self, bytes: Vec<u8>) -> Result<()> {
+        let mut slot = self.outbound.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_none_or(|tx| tx.is_closed()) {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let writer = Arc::clone(&self.writer);
+            tokio::spawn(async move {
+                while let Some(bytes) = rx.recv().await {
+                    let mut w = writer.lock().await;
+                    if let Err(error) = w.write_all(&bytes).await {
+                        crate::logging::warn(&format!("Remote writer task stopped: {error}"));
+                        break;
+                    }
+                }
+            });
+            *slot = Some(tx);
+        }
+        slot.as_ref()
+            .expect("outbound sender initialized")
+            .send(bytes)
+            .map_err(|_| anyhow::anyhow!("remote connection writer closed"))
     }
 
     async fn send_request(&self, request: Request) -> Result<()> {
@@ -1508,6 +1530,7 @@ impl RemoteConnection {
         Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
+            outbound: std::sync::Mutex::new(None),
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,

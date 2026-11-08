@@ -806,3 +806,21 @@ fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
     ));
     assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
 }
+
+#[tokio::test]
+async fn request_send_does_not_block_ui_when_server_stops_reading() {
+    // Regression: the TUI awaited socket writes inline, so when the daemon's
+    // receive buffer filled while it was blocked writing to us, the UI loop
+    // stopped reading and both ends deadlocked (frozen session).
+    let mut remote = RemoteConnection::dummy();
+    let writer = remote.writer();
+    let _guard = writer.lock().await;
+
+    let result = tokio::time::timeout(Duration::from_millis(200), async {
+        for _ in 0..64 {
+            remote.request_todos().await.expect("queued");
+        }
+    })
+    .await;
+    assert!(result.is_ok(), "request sends must not wait on the socket writer");
+}
