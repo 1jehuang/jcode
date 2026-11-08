@@ -118,3 +118,40 @@ command to inventory. The report counts HTTP/read/load errors, output bounds,
 identity mismatches, and nonzero exits as failures, not normal cache misses/skips.
 Do not claim a cold VM wake or a full end-to-end cloud resume is subsecond just
 because one stage or a synthetic fixture is subsecond.
+
+## Mobile and workspace follow-up measurements
+
+Read-only samples over an existing managed SSH master on November 8, 2026
+measured machine status at 6.4–7.1ms, directory status at 6.85–6.90ms (27
+entries), and the selected active repository's git probe at 179–226ms. These
+did not reproduce the historical 8-second workspace outliers. They are remote
+stage timings, not cold connection or end-to-end UI latency.
+
+The bounded authoritative directory scanner also has a worst-case synthetic
+benchmark: an identical frozen 97MB snapshot fell from 3.575s to 1.190s, and
+journal metadata scanning from 0.675s to 0.078s, with identical metadata. This
+does not establish that scanning caused the observed live outliers.
+
+Mobile push now reuses the shared HTTP client while retaining its five-second
+request deadline and delivery semantics. Eight loopback pushes with an
+artificial 60ms connection setup delay improved from 622ms/eight connections
+to 71ms/one connection. This is not an APNs delivery measurement. Static
+`operation=mobile_push` timings cover total, HTTP send and body processing.
+The report counts `rejected` and `undelivered` as failures, but not `no_devices`.
+
+Mobile command execution drains stdout and bounded stderr concurrently and
+supervises the whole child lifetime. An isolated child emitting 1.4MB of
+Unicode stderr previously hit the fixture's 301ms timeout and now completes
+in 3ms. This demonstrates removal of a pipe deadlock, not faster model turns.
+`operation=mobile_runner` timings cover claim, transfer, turn, sync, complete
+and poll wait, including errors and cancellation. The five-second poll cadence
+is unchanged.
+
+The separate `jcode-mobile` repository's phone transcript transport now pools
+HTTP connections too (commit `a98b496`). Eight actual list calls in a loopback
+fixture with 30ms connection setup and 8ms body delay improved from median
+315.039ms/eight connections to 97.462ms/one connection. All 85 phone-core tests
+passed. See that repository's `docs/MOBILE_SYNC_LATENCY.md` for reproduction,
+account/origin isolation and timing boundaries. A new mobile app build and
+installation are required before this source change affects a device. No live
+phone, push service, or production API was used for these benchmarks.

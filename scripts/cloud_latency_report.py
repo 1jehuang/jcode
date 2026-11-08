@@ -18,6 +18,7 @@ FAILURE_OUTCOMES = {
     "error", "failed", "dropped", "timeout", "cancelled", "expired",
     "error_or_cancelled", "http_error", "load_error", "read_error",
     "size_limit", "oversized", "identity_mismatch", "exit_failure",
+    "rejected", "undelivered",
 }
 
 
