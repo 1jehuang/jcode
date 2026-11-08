@@ -38,6 +38,7 @@ mod benchmark_io;
 #[cfg(test)]
 mod benchmark_matrix;
 mod canvas;
+mod cloud_presence;
 mod cloud_preview;
 mod filter;
 mod identity_search;
@@ -359,6 +360,8 @@ pub struct SessionPicker {
     recent_window_closures: HashMap<String, chrono::DateTime<chrono::Utc>>,
     /// When `live_presence` was last snapshotted (throttles periodic refresh).
     live_presence_refreshed_at: Option<std::time::Instant>,
+    /// Running turns on cloud hosts, polled off the render thread.
+    cloud_presence: cloud_presence::CloudPresence,
     /// ID of the session the picker was opened from, labeled "current" in the
     /// list so the user can orient themselves in the Active view.
     current_session_id: Option<String>,
@@ -427,6 +430,7 @@ impl SessionPicker {
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
+            cloud_presence: Default::default(),
             current_session_id: None,
             pending_claude_takeover: None,
         };
@@ -487,6 +491,7 @@ impl SessionPicker {
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
+            cloud_presence: Default::default(),
             current_session_id: None,
             pending_claude_takeover: None,
         }
@@ -579,6 +584,7 @@ impl SessionPicker {
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
+            cloud_presence: Default::default(),
             current_session_id: None,
             pending_claude_takeover: None,
         };

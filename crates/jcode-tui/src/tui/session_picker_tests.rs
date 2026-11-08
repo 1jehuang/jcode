@@ -26,6 +26,10 @@ fn line_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
+pub(super) fn make_session_for_presence(id: &str) -> SessionInfo {
+    make_session(id, id, false, SessionStatus::Closed)
+}
+
 fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatus) -> SessionInfo {
     make_session_with_flags(id, short_name, is_debug, false, status)
 }

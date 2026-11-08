@@ -26,6 +26,7 @@ impl SessionPicker {
             crate::session::recent_window_closures(std::time::Duration::from_secs(
                 crate::config::config().display.resume_recent_close_seconds,
             ));
+        self.merge_cloud_presence();
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
     }
 
@@ -38,11 +39,12 @@ impl SessionPicker {
         if self.loading_message.is_some() {
             return false;
         }
+        let cloud_changed = self.maybe_refresh_cloud_presence();
         let due = self
             .live_presence_refreshed_at
             .is_none_or(|at| at.elapsed() >= LIVE_PRESENCE_REFRESH_INTERVAL);
         if !due {
-            return false;
+            return cloud_changed;
         }
         let before = std::mem::take(&mut self.live_presence);
         let closures_before = std::mem::take(&mut self.recent_window_closures);
@@ -52,7 +54,7 @@ impl SessionPicker {
         if closures_changed || (changed && self.filter_mode == SessionFilterMode::Active) {
             self.rebuild_items();
         }
-        changed
+        changed || cloud_changed
     }
 
     /// A recent final-client EOF, not recent messages or a daemon-owned Agent.
