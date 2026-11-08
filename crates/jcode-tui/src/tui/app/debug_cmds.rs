@@ -1146,6 +1146,8 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
         "redraw_schedule".to_string(),
         serde_json::json!({
             "interval_ms": crate::tui::redraw_interval(app).as_millis() as u64,
+            "tail_catchup_active": crate::tui::ui::tail_catchup_active(),
+            "stream_reveal_pending": crate::tui::TuiState::stream_reveal_pending(app),
             "animation_fps": policy.animation_fps,
             "redraw_fps": policy.redraw_fps,
             "tier": format!("{:?}", policy.tier),
