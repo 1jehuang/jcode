@@ -189,22 +189,38 @@ the command. The backend logs static `mobile_command_events` notify durations
 and outcomes without payloads. No queue data is stored in the socket object.
 Actual production hibernation/eviction and billing have not been measured.
 
-**Rollout is gated.** The backend's `MOBILE_COMMAND_EVENTS_ENABLED` remains false.
-Backend commits `f3f1dd8` and `6e87e1d` are on the pre-existing
-`feat/browser-code-subscribe` branch in `solosystems-backend`, not a production
-deployment or permission to merge unrelated branch changes. Integrate only
-those reviewed commits, deploy the binding/migration with the flag disabled,
-validate account isolation, then explicitly enable it and monitor queue wait.
-Update the managed daemon only when idle and after resolving its existing
-pending runtime. Do not replace a separately staged package or force a busy
-daemon restart for a benchmark.
+**Backend enabled November 8, 2026.** A guarded additive patch of the actual
+live Worker, not a rebuild or merge of the unrelated backend branch, deployed
+the binding/migration with the flag disabled, validated it, then enabled version
+`60e72d1d-f8ca-400d-80c6-26a3c81a0482` at 100 percent (deployment
+`c38bece8-bd66-4be1-9a6f-93f8c8ed4787`). All 43 pre-existing bindings and unrelated
+modules/settings were preserved. Disabled version
+`ebb4fc7f-f578-4204-aea2-c5a186db4414` is the forward-compatible rollback target.
+Backend commit `4220a15` records exact preservation hashes, tests, and rollback in
+`solosystems-backend/docs/MOBILE_COMMAND_WAKEUP_ROLLOUT_2026_11_08.md`.
 
-On November 8, 2026, read-only rollout checks found one active cloud turn and
-an already-pending runtime, so neither was modified. No Apple USB device was
-present and usbmuxd was inactive, preventing real-device install/paint timing.
-The configured account's read-only command history request returned HTTP 403,
-so no historical queue percentile is claimed. These are rollout/measurement
-limitations, not evidence that the new event path is active in production.
+Independent read-only production acceptance passed: health, sessions, and
+commands returned 200, anonymous events returned 401, authorized non-upgrade
+returned 426, and the authenticated WebSocket handshake returned 101 with a
+verified accept header. No commands were created/claimed and no notifications
+or model turns were requested.
+
+The combined portable cloud package built from source `5ca28ecf7` includes both
+the wakeup client and the prior emoji change. Its immutable package SHA-256 is
+`b468432330a561081b312cadeaf051aa404ffe7dab7af142b7c4292fcb2fe317`.
+It is staged, with the previous package retained, and activation waits for idle
+turns without `--force`. Duplicate older restart watchers were retired. The
+reload client now fails closed if activity status is missing, malformed, or the
+probe fails, rather than treating that failure as zero streaming turns. Four
+hosted runtime tests, including execution of the shell idle gate, passed.
+
+The ordinary account's command inventory subsequently returned 200. Eight
+existing mixed-version records had queue-wait p50 1,916ms and maximum 2,999,318ms.
+This tiny historical sample mixes old clients and may include downtime or backlog.
+It is not a post-rollout benchmark or evidence of a wakeup speedup. No Apple USB
+device was connected and
+usbmuxd was inactive. Real-device install/paint and end-to-end command timing
+remain excluded from this rollout.
 
 The separate `jcode-mobile` repository's phone transcript transport now pools
 HTTP connections too (commit `a98b496`). Eight actual list calls in a loopback
