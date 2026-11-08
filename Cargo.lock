@@ -4471,6 +4471,7 @@ dependencies = [
  "anyhow",
  "jcode-applet-types",
  "jcode-harness-api",
+ "jcode-logging",
  "jcode-provider-metadata",
  "jcode-todo-policy",
  "jcode-transport",
