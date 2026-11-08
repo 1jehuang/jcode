@@ -90,14 +90,39 @@ pub fn focused_jcode_session() -> Result<Option<String>> {
 /// Session of the Jcode CLI (TUI) client in the focused window, if the focused
 /// window is a terminal running one. Jcode Desktop windows never match: their
 /// own chats handle voice in-app.
+///
+/// Polled several times a second by the companion, so the full `/proc` walk
+/// is cached per focused PID until the client registry changes or 10s pass.
 pub fn focused_cli_session() -> Result<Option<String>> {
     let Some(window) = focused_window_niri()? else {
         return Ok(None);
     };
-    if window_is_desktop(&window) {
-        return Ok(None);
+    let registry_stamp = jcode_base::storage::jcode_dir()
+        .ok()
+        .and_then(|dir| std::fs::metadata(dir.join("client_sessions")).ok())
+        .and_then(|meta| meta.modified().ok());
+    let key = (window.pid, registry_stamp);
+    static CACHE: std::sync::Mutex<
+        Option<(
+            (u32, Option<std::time::SystemTime>),
+            std::time::Instant,
+            Option<String>,
+        )>,
+    > = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_key, at, session)) = cache.as_ref()
+        && *cached_key == key
+        && at.elapsed() < std::time::Duration::from_secs(10)
+    {
+        return Ok(session.clone());
     }
-    Ok(resolve_session_for_window(&window))
+    let session = if window_is_desktop(&window) {
+        None
+    } else {
+        resolve_session_for_window(&window)
+    };
+    *cache = Some((key, std::time::Instant::now(), session.clone()));
+    Ok(session)
 }
 
 fn window_is_desktop(window: &NiriFocusedWindow) -> bool {
@@ -248,7 +273,35 @@ struct NiriFocusedWindow {
     _app_id: Option<String>,
 }
 
+/// Ask niri over its IPC socket directly. Spawning `niri msg` costs a fork,
+/// exec and dynamic link per call, which dominated the companion's idle CPU.
+fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = std::env::var_os("NIRI_SOCKET")?;
+    let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
+    let limit = Some(std::time::Duration::from_millis(500));
+    stream.set_read_timeout(limit).ok()?;
+    stream.set_write_timeout(limit).ok()?;
+    stream.write_all(b"\"FocusedWindow\"\n").ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    #[derive(Deserialize)]
+    enum Reply {
+        Ok(Inner),
+    }
+    #[derive(Deserialize)]
+    enum Inner {
+        FocusedWindow(Option<NiriFocusedWindow>),
+    }
+    match serde_json::from_str::<Reply>(&line).ok()? {
+        Reply::Ok(Inner::FocusedWindow(window)) => Some(window),
+    }
+}
+
 fn focused_window_niri() -> Result<Option<NiriFocusedWindow>> {
+    if let Some(window) = focused_window_niri_socket() {
+        return Ok(window);
+    }
     let output = Command::new("niri")
         .args(["msg", "-j", "focused-window"])
         .output();
