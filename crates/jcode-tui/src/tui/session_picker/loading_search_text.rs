@@ -138,6 +138,68 @@ pub(crate) fn search_index_header(
     combined
 }
 
+/// Classifies one external transcript record into per-source samples. The
+/// walker reads role and block type tags, so a Claude Code tool result inside a
+/// `user` message lands in tool output instead of with the user's prompts.
+pub(crate) fn classify_json_into(
+    buckets: &mut SourceBuckets,
+    value: &serde_json::Value,
+    source: Source,
+) {
+    use serde::de::DeserializeSeed;
+    let mut sink = BucketSink {
+        buckets,
+        total: SEARCH_CONTENT_BUDGET_BYTES,
+    };
+    let walk = Walk {
+        sink: &mut sink,
+        source,
+    };
+    // `serde_json::Value` sorts object keys, which would visit `content`
+    // before the `type`/`role` tag that classifies it. Re-emit tags first so
+    // the streaming walker sees the same order a transcript file has.
+    let mut json = String::new();
+    write_tags_first(value, &mut json);
+    let mut de = serde_json::Deserializer::from_str(&json);
+    if let Err(error) = walk.deserialize(&mut de) {
+        crate::logging::debug(&format!("Invalid external search content: {error}"));
+    }
+}
+
+fn write_tags_first(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            out.push('{');
+            let tags = map
+                .iter()
+                .filter(|(key, _)| matches!(key.as_str(), "role" | "type"));
+            let rest = map
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "role" | "type"));
+            for (index, (key, value)) in tags.chain(rest).enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                out.push(':');
+                write_tags_first(value, out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_tags_first(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
+}
+
 pub(crate) fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {
     if budget == 0 {
         return None;

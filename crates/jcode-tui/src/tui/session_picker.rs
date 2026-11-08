@@ -220,6 +220,9 @@ struct PreviewExtras {
 struct LoadedSessionPreview {
     messages: Vec<PreviewMessage>,
     extras: PreviewExtras,
+    /// Source-classified search text for external transcripts, whose preview
+    /// messages flatten tool blocks into the surrounding role.
+    search: Option<loading::SourceBuckets>,
 }
 
 /// Fingerprint of every input that affects the *content* of the preview pane
@@ -1063,6 +1066,7 @@ impl SessionPicker {
             let (messages, hidden_prompts) = build_messages_preview_with_offset(&session);
             return Some(LoadedSessionPreview {
                 messages,
+                search: None,
                 extras: PreviewExtras {
                     hidden_prompts,
                     todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
@@ -1071,9 +1075,10 @@ impl SessionPicker {
                 },
             });
         }
-        Self::load_external_preview_for_target(resume_target, external_path).map(|messages| {
+        Self::load_external_preview_for_target(resume_target, external_path).map(|preview| {
             LoadedSessionPreview {
-                messages,
+                messages: preview.messages,
+                search: Some(preview.search),
                 extras: PreviewExtras::default(),
             }
         })
@@ -1082,49 +1087,71 @@ impl SessionPicker {
     fn load_external_preview_for_target(
         resume_target: ResumeTarget,
         external_path: Option<String>,
-    ) -> Option<Vec<PreviewMessage>> {
+    ) -> Option<loading::ExternalPreview> {
         match resume_target {
             ResumeTarget::JcodeSession { session_id } => {
                 let Ok(session) = Session::load(&session_id) else {
                     return None;
                 };
-                Some(build_messages_preview(&session))
+                Some(loading::ExternalPreview {
+                    messages: build_messages_preview(&session),
+                    search: Default::default(),
+                })
             }
             ResumeTarget::ClaudeCodeSession { session_id, .. } => external_path
                 .as_deref()
                 .and_then(|path| {
-                    loading::load_claude_code_preview_from_path(std::path::Path::new(path))
+                    loading::load_claude_code_external_preview(std::path::Path::new(path))
                 })
-                .or_else(|| loading::load_claude_code_preview(&session_id)),
+                .or_else(|| loading::load_claude_code_external_preview_by_id(&session_id)),
             ResumeTarget::CodexSession { session_id, .. } => external_path
                 .as_deref()
-                .and_then(|path| loading::load_codex_preview_from_path(std::path::Path::new(path)))
-                .or_else(|| loading::load_codex_preview(&session_id)),
+                .and_then(|path| loading::load_codex_external_preview(std::path::Path::new(path)))
+                .or_else(|| loading::load_codex_external_preview_by_id(&session_id)),
             ResumeTarget::PiSession { session_path } => {
-                loading::load_pi_preview_from_path(std::path::Path::new(&session_path))
+                loading::load_pi_external_preview(std::path::Path::new(&session_path))
             }
             ResumeTarget::OpenCodeSession { .. } => external_path.as_deref().and_then(|path| {
-                loading::load_opencode_preview_from_path(std::path::Path::new(path))
+                loading::load_opencode_external_preview(std::path::Path::new(path))
             }),
-            ResumeTarget::CursorSession { .. } => external_path.as_deref().and_then(|path| {
-                loading::load_cursor_preview_from_path(std::path::Path::new(path))
-            }),
+            ResumeTarget::CursorSession { .. } => external_path
+                .as_deref()
+                .and_then(|path| loading::load_cursor_external_preview(std::path::Path::new(path))),
         }
     }
 
     fn apply_session_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
+        self.apply_session_preview_with_search(session_id, preview, None);
+    }
+
+    fn apply_session_preview_with_search(
+        &mut self,
+        session_id: &str,
+        preview: Vec<PreviewMessage>,
+        search: Option<loading::SourceBuckets>,
+    ) {
         let Some(session_ref) = self.session_ref_for_id(session_id) else {
             return;
         };
         if let Some(s) = self.session_by_ref_mut(session_ref) {
-            s.search_index = build_search_index(
-                &s.id,
-                &s.short_name,
-                &s.title,
-                s.working_dir.as_deref(),
-                s.save_label.as_deref(),
-                &preview,
-            );
+            s.search_index = match search.filter(|search| !search.is_empty()) {
+                Some(search) => loading::build_classified_search_index(
+                    &s.id,
+                    &s.short_name,
+                    &s.title,
+                    s.working_dir.as_deref(),
+                    s.save_label.as_deref(),
+                    &search,
+                ),
+                None => build_search_index(
+                    &s.id,
+                    &s.short_name,
+                    &s.title,
+                    s.working_dir.as_deref(),
+                    s.save_label.as_deref(),
+                    &preview,
+                ),
+            };
             s.messages_preview = preview;
         }
     }
@@ -1148,7 +1175,11 @@ impl SessionPicker {
                 self.preview_load_failures.remove(&session_id);
                 self.preview_extras
                     .insert(session_id.clone(), preview.extras);
-                self.apply_session_preview(&session_id, preview.messages);
+                self.apply_session_preview_with_search(
+                    &session_id,
+                    preview.messages,
+                    preview.search,
+                );
                 true
             }
             Ok(None) => {
@@ -1268,7 +1299,7 @@ impl SessionPicker {
         if let Some(preview) = Self::load_preview_for_target(resume_target, external_path) {
             self.preview_extras
                 .insert(session_id.clone(), preview.extras);
-            self.apply_session_preview(&session_id, preview.messages);
+            self.apply_session_preview_with_search(&session_id, preview.messages, preview.search);
         }
     }
 

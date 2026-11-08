@@ -152,6 +152,7 @@ fn deliver(picker: &mut SessionPicker, messages: Vec<PreviewMessage>) {
     sender
         .send(Some(LoadedSessionPreview {
             messages,
+            search: None,
             extras: PreviewExtras {
                 hidden_prompts: 7,
                 ..Default::default()

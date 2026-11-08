@@ -247,6 +247,7 @@ fn completed_empty_preview_is_not_loaded_again() {
     });
     tx.send(Some(LoadedSessionPreview {
         messages: vec![],
+        search: None,
         extras: PreviewExtras::default(),
     }))
     .unwrap();

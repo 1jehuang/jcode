@@ -1627,3 +1627,60 @@ fn summary_tracks_newest_message_timestamp_across_roles() {
         Some("2026-01-02T00:00:00+00:00".to_string())
     );
 }
+
+#[test]
+fn external_previews_index_tool_blocks_at_their_own_weight() {
+    use crate::tui::session_picker::transcript_search::source::{Source, metadata_sources};
+    let temp = tempfile::tempdir().expect("temp dir");
+    let claude = temp.path().join("claude.jsonl");
+    std::fs::write(
+        &claude,
+        concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"please fix kiwiflake\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"bash\",\"input\":{\"command\":\"grep mangoroot\",\"intent\":\"find papayaplan\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"zebradump output\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_claude_code_external_preview(&claude).expect("preview");
+    let index = build_classified_search_index("claude:x", "x", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "papayaplan", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::Intent),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+
+    let codex = temp.path().join("codex.jsonl");
+    std::fs::write(
+        &codex,
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"c\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"kiwiflake please\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"mangoroot\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"zebradump\"}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_codex_external_preview(&codex).expect("preview");
+    let index = build_classified_search_index("codex:c", "c", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+}
