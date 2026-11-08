@@ -286,6 +286,7 @@ impl SessionPicker {
                             &[title, label, prompt],
                             &session.search_index,
                             &tokens,
+                            self.transcript_search.idf(),
                         ))
                     };
                     (

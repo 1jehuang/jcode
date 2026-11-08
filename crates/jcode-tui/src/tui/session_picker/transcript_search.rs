@@ -32,10 +32,12 @@ const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct SearchRank {
     opening_prompt: usize,
-    literal: bool,
-    /// Sum of per-token origin weights: user prompts beat replies, which beat
-    /// tool calls, tool output, and reasoning.
+    /// Sum of per-token origin weights scaled by word rarity: user prompts
+    /// beat replies, which beat tool calls, tool output, and reasoning, and a
+    /// rare word outweighs ones found in most sessions. Ranked above literal
+    /// so a single typo cannot sink a session with strong, distinctive hits.
     source_weight: u32,
+    literal: bool,
     intent_terms: usize,
     exact_field: bool,
     metadata_terms: usize,
@@ -72,8 +74,8 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
     }
     SearchRank {
         opening_prompt: 0,
-        literal: metadata_terms == tokens.len(),
         source_weight: 0,
+        literal: metadata_terms == tokens.len(),
         intent_terms: 0,
         exact_field: false,
         metadata_terms,
@@ -164,8 +166,9 @@ pub(super) fn metadata_source_weight(
     intent_fields: &[&str],
     index: &str,
     tokens: &[String],
+    idf: &[u32],
 ) -> u32 {
-    source::source_weight(&source::metadata_sources(intent_fields, index, tokens))
+    source::weighted_source_weight(&source::metadata_sources(intent_fields, index, tokens), idf)
 }
 
 /// Transcript evidence: the first-match fuzzy score plus per-token origins.
@@ -182,6 +185,7 @@ fn prioritize_candidates(
     candidates: Vec<Candidate>,
     phrase: &Option<PhraseQuery>,
     tokens: &[String],
+    idf: &[u32],
     cancel: &AtomicBool,
 ) -> Vec<(Candidate, SearchRank)> {
     let phrase = phrase.as_ref();
@@ -202,7 +206,7 @@ fn prioritize_candidates(
         drop(intent);
         let mut candidate = candidate;
         candidate.prior = prior;
-        rank.source_weight = source::source_weight(&candidate.prior);
+        rank.source_weight = source::weighted_source_weight(&candidate.prior, idf);
         ranked.push((candidate, rank));
     }
     ranked.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
@@ -371,6 +375,8 @@ pub(super) struct TranscriptSearch {
     cancel: Arc<AtomicBool>,
     ranks: HashMap<String, SearchRank>,
     defer_metadata: bool,
+    /// Per-token rarity weights, computed by the worker before any rank.
+    idf: Arc<std::sync::OnceLock<Vec<u32>>>,
 }
 
 impl Drop for TranscriptSearch {
@@ -476,6 +482,11 @@ impl TranscriptSearch {
             .map_or_else(SearchRank::default, |rank| *rank)
     }
 
+    /// Rarity weights for the current query, once the worker computed them.
+    pub(super) fn idf(&self) -> &[u32] {
+        self.idf.get().map_or(&[], Vec::as_slice)
+    }
+
     pub(super) fn defers_metadata(&self) -> bool {
         self.defer_metadata
     }
@@ -492,6 +503,7 @@ impl TranscriptSearch {
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
             let query = self.query.clone();
+            let shared_idf = self.idf.clone();
             let (sender, receiver) = mpsc::channel();
             match std::thread::Builder::new()
                 .name("jcode-transcript-search".into())
@@ -505,11 +517,20 @@ impl TranscriptSearch {
                     // prompt rather than a sampled tool dump or reasoning.
                     let mut classify = Vec::new();
                     let phrase = PhraseQuery::new(&query);
+                    // Document frequency over every candidate's metadata index.
+                    // Off the render thread: this touches every session.
+                    let idf = source::idf_weights(
+                        &tokens,
+                        candidates
+                            .iter()
+                            .map(|candidate| candidate.search_index.as_str()),
+                    );
+                    let _ = shared_idf.set(idf.clone());
                     // Sessions whose later user prompts may contain the query
                     // as a retyped phrase, checked after cheaper evidence.
                     let mut phrase_jobs = Vec::new();
                     for (mut candidate, priority) in
-                        prioritize_candidates(candidates, &phrase, &tokens, &cancel)
+                        prioritize_candidates(candidates, &phrase, &tokens, &idf, &cancel)
                     {
                         if cancel.load(Ordering::Relaxed) {
                             return;
@@ -610,7 +631,10 @@ impl TranscriptSearch {
                                         candidate.id,
                                         SearchRank {
                                             literal: true,
-                                            source_weight: source::source_weight(&evidence.sources),
+                                            source_weight: source::weighted_source_weight(
+                                                &evidence.sources,
+                                                &idf,
+                                            ),
                                             ..rank
                                         },
                                     ))
@@ -640,7 +664,10 @@ impl TranscriptSearch {
                                         candidate.id,
                                         SearchRank {
                                             score: rank.score + evidence.score,
-                                            source_weight: source::source_weight(&evidence.sources),
+                                            source_weight: source::weighted_source_weight(
+                                                &evidence.sources,
+                                                &idf,
+                                            ),
                                             ..rank
                                         },
                                     ))
@@ -671,7 +698,10 @@ impl TranscriptSearch {
                                     candidate.id,
                                     SearchRank {
                                         literal: true,
-                                        source_weight: source::source_weight(&evidence.sources),
+                                        source_weight: source::weighted_source_weight(
+                                            &evidence.sources,
+                                            &idf,
+                                        ),
                                         ..rank
                                     },
                                 ))
@@ -698,7 +728,7 @@ impl TranscriptSearch {
                             ScanMode::Classify,
                             &mut scores,
                         ) {
-                            let weight = source::source_weight(&evidence.sources);
+                            let weight = source::weighted_source_weight(&evidence.sources, &idf);
                             if weight > rank.source_weight
                                 && sender
                                     .send((candidate.id, rank.with_source_weight(weight)))
@@ -725,7 +755,10 @@ impl TranscriptSearch {
                         ) {
                             let rank = SearchRank {
                                 score: rank.score + evidence.score,
-                                source_weight: source::source_weight(&evidence.sources),
+                                source_weight: source::weighted_source_weight(
+                                    &evidence.sources,
+                                    &idf,
+                                ),
                                 ..rank
                             };
                             if sender.send((candidate.id, rank)).is_err() {
@@ -747,9 +780,12 @@ impl TranscriptSearch {
                                         id,
                                         SearchRank {
                                             opening_prompt: matched,
-                                            source_weight: priority
-                                                .source_weight
-                                                .max(Source::User.weight() * tokens.len() as u32),
+                                            source_weight: priority.source_weight.max(
+                                                source::weighted_source_weight(
+                                                    &vec![Some(Source::User); tokens.len()],
+                                                    &idf,
+                                                ),
+                                            ),
                                             ..priority
                                         },
                                     ))

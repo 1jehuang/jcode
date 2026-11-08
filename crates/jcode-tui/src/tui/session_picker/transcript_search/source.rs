@@ -51,6 +51,45 @@ pub(crate) fn source_weight(best: &[Option<Source>]) -> u32 {
     best.iter().flatten().map(|source| source.weight()).sum()
 }
 
+/// Like [`source_weight`], but scaled by how rare each query word is, so a
+/// distinctive word counts for much more than one found in most sessions.
+pub(crate) fn weighted_source_weight(best: &[Option<Source>], idf: &[u32]) -> u32 {
+    best.iter()
+        .enumerate()
+        .filter_map(|(index, source)| {
+            source.map(|source| source.weight() * idf.get(index).copied().unwrap_or(UNIFORM_IDF))
+        })
+        .sum()
+}
+
+/// Weight used for every word before document frequencies are known.
+pub(crate) const UNIFORM_IDF: u32 = 100;
+
+/// Per-token rarity weights from how many sessions mention each token.
+/// Words found nearly everywhere ("do", "that") keep a small floor so they
+/// still break ties, while a word in a handful of sessions dominates.
+pub(crate) fn idf_weights<'a>(
+    tokens: &[String],
+    indexes: impl Iterator<Item = &'a str>,
+) -> Vec<u32> {
+    let mut df = vec![0usize; tokens.len()];
+    let mut total = 0usize;
+    for index in indexes {
+        total += 1;
+        for (count, token) in df.iter_mut().zip(tokens) {
+            if index.contains(token.as_str()) {
+                *count += 1;
+            }
+        }
+    }
+    df.into_iter()
+        .map(|count| {
+            let idf = ((total as f64 + 1.0) / (count as f64 + 1.0)).ln();
+            10 + (idf * 100.0).round() as u32
+        })
+        .collect()
+}
+
 /// Keep the stronger of two per-token observations.
 pub(crate) fn stronger(a: Option<Source>, b: Option<Source>) -> Option<Source> {
     match (a, b) {

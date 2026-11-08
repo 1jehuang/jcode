@@ -410,6 +410,7 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
         candidates,
         &PhraseQuery::new(query),
         &search_query_tokens(query),
+        &[],
         &AtomicBool::new(false),
     );
     assert_eq!(

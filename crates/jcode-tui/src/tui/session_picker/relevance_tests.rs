@@ -469,3 +469,39 @@ fn retyped_later_user_prompt_beats_scattered_literal_hits() {
         );
     }
 }
+
+#[test]
+fn typo_in_user_prompt_beats_literal_words_scattered_in_tool_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let user = |text: &str| {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{text}\"}}]}}}}\n"
+        )
+    };
+    let tool = |text: &str| {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"c\",\"output\":\"{text}\"}}}}\n"
+        )
+    };
+    let mut sessions = Vec::new();
+    // Every word appears literally, but "zanzibar" only in a tool dump.
+    for index in 0..8 {
+        let path = temp.path().join(format!("common{index}.jsonl"));
+        std::fs::write(&path, user("build the app") + &tool("zanzibar")).unwrap();
+        sessions.push(session(
+            &format!("common{index}"),
+            "unrelated",
+            index,
+            &path,
+        ));
+    }
+    // The user typed the distinctive word, with a typo in a common one.
+    let path = temp.path().join("rare.jsonl");
+    std::fs::write(&path, user("biuld the zanzibar parser")).unwrap();
+    sessions.push(session("rare", "unrelated", 500, &path));
+    let mut picker = SessionPicker::new(sessions);
+    picker.search_query = "build the zanzibar".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker).first().map(String::as_str), Some("rare"));
+}
