@@ -66,6 +66,11 @@ pub(crate) fn ssh_config_path() -> Result<PathBuf> {
     Ok(dir()?.join("ssh_config"))
 }
 
+/// Prepare only local SSH files. Do not provision, wake, authorize, or connect.
+pub(crate) fn prepare_ssh() -> Result<()> {
+    ssh_args().map(|_| ())
+}
+
 /// Ensure the client key and private SSH config exist. Returns `-F <config>`
 /// arguments for an `ssh` invocation targeting [`HOST`].
 pub(crate) fn ssh_args() -> Result<Vec<String>> {
@@ -810,6 +815,100 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_ssh_cli_is_hidden_and_only_prepares_local_files() {
+        use super::super::args::{Args, CloudCommand, CloudMachineAction};
+        use clap::{Parser, ValueEnum};
+
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("https://{}/v1", listener.local_addr().unwrap());
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => crate::env::set_var(name, value),
+                        None => crate::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            ["JCODE_HOME", "JCODE_API_KEY", "JCODE_API_BASE"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_API_KEY", "offline-test-account");
+        crate::env::set_var("JCODE_API_BASE", &base);
+
+        let args = Args::try_parse_from([
+            "jcode",
+            "--no-update",
+            "--no-selfdev",
+            "cloud",
+            "machine",
+            "prepare-ssh",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(super::super::args::Command::Cloud(CloudCommand::Machine {
+                action: CloudMachineAction::PrepareSsh
+            }))
+        ));
+        assert!(
+            CloudMachineAction::PrepareSsh
+                .to_possible_value()
+                .unwrap()
+                .is_hide_set()
+        );
+
+        super::super::cloud_move::run_cli(CloudCommand::Machine {
+            action: CloudMachineAction::PrepareSsh,
+        })
+        .unwrap();
+        let config = ssh_config_path().unwrap();
+        let original_key = std::fs::read(key_path().unwrap()).unwrap();
+        assert!(key_path().unwrap().with_extension("pub").is_file());
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("cloud proxy")
+        );
+        assert!(!known_hosts_path().unwrap().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [
+                (dir().unwrap(), 0o700),
+                (config.clone(), 0o600),
+                (key_path().unwrap(), 0o600),
+            ] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
+        std::fs::write(&config, "stale config").unwrap();
+        prepare_ssh().unwrap();
+        assert!(
+            std::fs::read_to_string(config)
+                .unwrap()
+                .contains("Host jcode-cloud")
+        );
+        assert_eq!(std::fs::read(key_path().unwrap()).unwrap(), original_key);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn proxy_executable_survives_replaced_binary() {

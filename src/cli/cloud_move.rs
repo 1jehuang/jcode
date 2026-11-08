@@ -2249,6 +2249,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Machine { action } => {
             use super::args::CloudMachineAction as A;
             let reply = match action {
+                A::PrepareSsh => return super::cloud_managed::prepare_ssh(),
                 A::Status => super::cloud_managed::status()?,
                 A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
                 A::Stop => super::cloud_managed::stop()?,

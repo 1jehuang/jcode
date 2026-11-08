@@ -1049,6 +1049,9 @@ pub(crate) enum CloudMachineAction {
     Status,
     Wake,
     Stop,
+    /// Internal: prepare local managed SSH credentials without contacting cloud.
+    #[value(hide = true)]
+    PrepareSsh,
 }
 
 #[derive(Parser, Debug, Clone, Default)]
