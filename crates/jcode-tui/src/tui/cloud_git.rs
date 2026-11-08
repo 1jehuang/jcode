@@ -84,6 +84,10 @@ fn script_command_inner(
 ) -> tokio::process::Command {
     let mut cmd = if let Some(host) = host {
         let mut cmd = tokio::process::Command::new("ssh");
+        let managed_config = host == "jcode-cloud"
+            && config.is_some_and(|path| {
+                crate::storage::jcode_dir().is_ok_and(|home| path == home.join("cloud/ssh_config"))
+            });
         if compressed {
             cmd.arg("-C");
         }
@@ -116,8 +120,6 @@ fn script_command_inner(
             "SessionType=default",
             "-o",
             "ControlMaster=no",
-            "-S",
-            "none",
             "-o",
             "ConnectTimeout=8",
             "-o",
@@ -125,6 +127,11 @@ fn script_command_inner(
             "-o",
             "ServerAliveCountMax=1",
         ]);
+        // Borrow the account-scoped managed master without owning or stopping
+        // it. Custom SSH configurations remain isolated from arbitrary muxes.
+        if !managed_config {
+            cmd.args(["-S", "none"]);
+        }
         cmd.arg("--")
             .arg(host)
             .arg(format!("sh -c {} sh {}", quote(script), quote(dir)));
@@ -487,6 +494,33 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "StrictHostKeyChecking=yes")
         );
+    }
+
+    #[test]
+    fn managed_cloud_reads_borrow_mux_but_custom_transports_remain_isolated() {
+        let _lock = crate::storage::lock_test_env();
+        let home = crate::storage::jcode_dir().unwrap();
+        let managed = home.join("cloud/ssh_config");
+        for (host, config, borrow) in [
+            ("jcode-cloud", managed.as_path(), true),
+            ("custom-host", managed.as_path(), false),
+            (
+                "jcode-cloud",
+                std::path::Path::new("/private/config"),
+                false,
+            ),
+        ] {
+            let cmd = compressed_script_command(Some(host), Some(config), "session", "true");
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy())
+                .collect();
+            assert_eq!(args.iter().any(|a| a == "-S"), !borrow);
+            assert!(args.iter().any(|a| a == "ControlMaster=no"));
+            assert!(!args.iter().any(|a| a == "ControlMaster=auto"));
+            assert!(args.iter().any(|a| a == "ClearAllForwardings=yes"));
+        }
     }
 
     #[test]
