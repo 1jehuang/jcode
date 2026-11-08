@@ -380,6 +380,10 @@ impl Visitor<'_> for KeySeed {
             }
             "toolUseResult" | "tool_use_result" | "output" | "tool_output" | "stdout"
             | "stderr" => Key::Force(Source::ToolOutput),
+            // Tool-call intent labels are the agent's own one-line summary of
+            // what it is doing, so they rank with assistant prose rather than
+            // with the raw arguments around them.
+            "intent" => Key::Force(Source::Assistant),
             "meta" | "metadata" => Key::Force(Source::Other),
             _ => Key::Plain,
         })
@@ -472,6 +476,10 @@ mod tests {
         assert_eq!(source_of(json, "THOUGHT"), Source::Thinking);
         assert_eq!(source_of(json, "REPLY"), Source::Assistant);
         assert_eq!(source_of(json, "CMD"), Source::ToolInput);
+        let with_intent = r#"{"role":"assistant","content":[
+                {"type":"tool_use","id":"t","name":"bash","input":{"command":"CMD","intent":"WHY"}}]}"#;
+        assert_eq!(source_of(with_intent, "WHY"), Source::Assistant);
+        assert_eq!(source_of(with_intent, "CMD"), Source::ToolInput);
         assert_eq!(source_of(json, "OUT"), Source::ToolOutput);
         // Identifiers beside a prompt are not something the user typed.
         assert_eq!(source_of(json, "m1"), Source::Other);
