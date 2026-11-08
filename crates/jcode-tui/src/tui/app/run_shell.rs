@@ -549,7 +549,10 @@ impl StatusSpinnerRenderer {
         let total_cells = Some(completed.buffer.content.len());
         let completed_buffer = match stored_frame.as_mut() {
             Some(buffer) => {
-                buffer.clone_from(completed.buffer);
+                // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
+                // reuses the existing cell storage.
+                buffer.area = completed.buffer.area;
+                buffer.content.clone_from(&completed.buffer.content);
                 stored_frame.take().unwrap_or_default()
             }
             None => completed.buffer.clone(),
