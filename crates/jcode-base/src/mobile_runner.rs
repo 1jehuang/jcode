@@ -23,24 +23,39 @@ mod process_tests;
 
 struct StageTimer {
     stage: &'static str,
+    outcome: &'static str,
     start: std::time::Instant,
 }
 impl StageTimer {
     fn new(stage: &'static str) -> Self {
         Self {
             stage,
+            outcome: "error_or_cancelled",
             start: std::time::Instant::now(),
         }
+    }
+
+    fn record(&self, duration_ms: u128) -> String {
+        format!(
+            "[CLOUD_TIMING] operation=mobile_runner stage={} outcome={} duration_ms={}",
+            self.stage, self.outcome, duration_ms
+        )
     }
 }
 impl Drop for StageTimer {
     fn drop(&mut self) {
-        crate::logging::info(&format!(
-            "mobile runner timing stage={} elapsed_ms={}",
-            self.stage,
-            self.start.elapsed().as_millis()
-        ));
+        crate::logging::info(&self.record(self.start.elapsed().as_millis()));
     }
+}
+
+async fn timed_stage<T>(
+    stage: &'static str,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut timing = StageTimer::new(stage);
+    let result = future.await;
+    timing.outcome = if result.is_ok() { "ok" } else { "error" };
+    result
 }
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -209,11 +224,13 @@ async fn import_local_session(
     key: &str,
     id: &str,
 ) -> Result<String> {
-    let _timing = StageTimer::new("transfer");
-    let (metadata, messages) = fetch_local_transcript(client, base, key, id).await?;
-    let mut session = transfer_session(&metadata, messages, &workspace_dir())?;
-    session.save()?;
-    Ok(session.id)
+    timed_stage("transfer", async {
+        let (metadata, messages) = fetch_local_transcript(client, base, key, id).await?;
+        let mut session = transfer_session(&metadata, messages, &workspace_dir())?;
+        session.save()?;
+        Ok(session.id)
+    })
+    .await
 }
 
 /// True on a managed Jcode Cloud machine.
@@ -323,13 +340,15 @@ async fn run_turn(command: &MobileCommand, session_id: Option<&str>) -> Result<S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let _timing = StageTimer::new("turn");
-    process::run(
-        cmd,
-        session_id,
-        busy_marker(),
-        TURN_TIMEOUT,
-        BUSY_TOUCH_INTERVAL,
+    timed_stage(
+        "turn",
+        process::run(
+            cmd,
+            session_id,
+            busy_marker(),
+            TURN_TIMEOUT,
+            BUSY_TOUCH_INTERVAL,
+        ),
     )
     .await
 }
@@ -341,10 +360,7 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
     let base = subscription_api::configured_api_base()
         .trim_end_matches('/')
         .to_string();
-    let claimed = {
-        let _timing = StageTimer::new("claim");
-        claim(client, &base, &key).await?
-    };
+    let claimed = timed_stage("claim", claim(client, &base, &key)).await?;
     let Some(command) = claimed else {
         return Ok(false);
     };
@@ -374,17 +390,15 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
         run_turn(&command, session_id.as_deref()).await
     }
     .await;
-    let sync_result = {
-        let _timing = StageTimer::new("sync");
-        mobile_sync::sync_once(client).await
-    };
+    let sync_result = timed_stage("sync", mobile_sync::sync_once(client)).await;
     if let Err(error) = sync_result {
         crate::logging::warn(&format!("mobile runner transcript sync failed: {error:#}"));
     }
-    {
-        let _timing = StageTimer::new("complete");
-        complete(client, &base, &key, &command.command_id, &outcome).await?;
-    }
+    timed_stage(
+        "complete",
+        complete(client, &base, &key, &command.command_id, &outcome),
+    )
+    .await?;
     outcome.map(|_| true)
 }
 
@@ -409,8 +423,9 @@ pub fn spawn_cloud_runner() {
         let client = reqwest::Client::new();
         loop {
             {
-                let _timing = StageTimer::new("pollwait");
+                let mut timing = StageTimer::new("pollwait");
                 tokio::time::sleep(POLL_INTERVAL).await;
+                timing.outcome = "ok";
             }
             if let Err(err) = run_one(&client).await {
                 crate::logging::warn(&format!("mobile runner: {err:#}"));
@@ -423,6 +438,41 @@ pub fn spawn_cloud_runner() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_timing_uses_content_free_shared_report_fields() {
+        for stage in ["claim", "transfer", "turn", "sync", "complete", "pollwait"] {
+            let mut timing = StageTimer::new(stage);
+            assert_eq!(
+                timing.record(17),
+                format!(
+                    "[CLOUD_TIMING] operation=mobile_runner stage={stage} outcome=error_or_cancelled duration_ms=17"
+                )
+            );
+            for outcome in ["ok", "error"] {
+                timing.outcome = outcome;
+                let record = timing.record(23);
+                assert_eq!(
+                    record,
+                    format!(
+                        "[CLOUD_TIMING] operation=mobile_runner stage={stage} outcome={outcome} duration_ms=23"
+                    )
+                );
+                // These are exactly the fixed-label fields consumed by cloud_latency_report.
+                assert_eq!(record.split_whitespace().count(), 5);
+                assert!(!record.contains("elapsed_ms="));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_stage_preserves_success_and_error_results() {
+        assert_eq!(timed_stage("claim", async { Ok(7) }).await.unwrap(), 7);
+        let error = timed_stage::<()>("claim", async { anyhow::bail!("synthetic failure") })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "synthetic failure");
+    }
 
     async fn transcript_server(
         pages: Vec<serde_json::Value>,
