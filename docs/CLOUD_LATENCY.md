@@ -164,6 +164,48 @@ metric rather than changing command handling. Logs contain only the duration,
 not command IDs, text or timestamps. Paused-clock regression comparisons prove
 the eliminated five-second scheduling gaps, not production end-to-end latency.
 
+### Optional command wakeups
+
+The daemon can subscribe to `GET /v1/mobile/commands/events` using its normal
+account bearer header over a WebSocket. The only accepted application frame is
+`{"type":"commands_available"}`. It is a hint to perform the existing atomic
+HTTP claim, never an executable command. Initial subscription triggers a queue
+recheck to cover commands queued between an empty claim and socket registration.
+Bursts coalesce in a bounded watch channel. Messages/frames are capped at 4KiB.
+
+The five-second claim fallback remains active even with a socket, protecting
+against lost hints, service restart and unsupported APIs. Error backoff still
+cannot be bypassed by a hint. Connection attempts have a two-second deadline,
+network retry cooldown, and a five-minute cooldown for disabled/old endpoints.
+Endpoint and credential changes discard the old socket. Cancellation aborts the
+socket task. Fixed `event_connect` and `event_connection` records contain no
+credentials, endpoint, account, command text or raw network error.
+
+The corresponding backend candidate uses an account-scoped Durable Object with
+the WebSocket Hibernation API and at most four sockets per account. D1 remains
+the queue authority. A committed enqueue publishes a bounded best-effort hint
+before the existing host wake step. Failed publication cannot lose or invalidate
+the command. The backend logs static `mobile_command_events` notify durations
+and outcomes without payloads. No queue data is stored in the socket object.
+Actual production hibernation/eviction and billing have not been measured.
+
+**Rollout is gated.** The backend's `MOBILE_COMMAND_EVENTS_ENABLED` remains false.
+Backend commits `f3f1dd8` and `6e87e1d` are on the pre-existing
+`feat/browser-code-subscribe` branch in `solosystems-backend`, not a production
+deployment or permission to merge unrelated branch changes. Integrate only
+those reviewed commits, deploy the binding/migration with the flag disabled,
+validate account isolation, then explicitly enable it and monitor queue wait.
+Update the managed daemon only when idle and after resolving its existing
+pending runtime. Do not replace a separately staged package or force a busy
+daemon restart for a benchmark.
+
+On November 8, 2026, read-only rollout checks found one active cloud turn and
+an already-pending runtime, so neither was modified. No Apple USB device was
+present and usbmuxd was inactive, preventing real-device install/paint timing.
+The configured account's read-only command history request returned HTTP 403,
+so no historical queue percentile is claimed. These are rollout/measurement
+limitations, not evidence that the new event path is active in production.
+
 The separate `jcode-mobile` repository's phone transcript transport now pools
 HTTP connections too (commit `a98b496`). Eight actual list calls in a loopback
 fixture with 30ms connection setup and 8ms body delay improved from median

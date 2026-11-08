@@ -15,6 +15,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+#[path = "mobile_runner_events.rs"]
+mod events;
 #[cfg(test)]
 #[path = "mobile_runner_poll_tests.rs"]
 mod poll_tests;
@@ -442,10 +444,40 @@ pub fn ensure_sync_enabled() {
     }
 }
 
-async fn poll_commands<F, Fut>(mut run: F)
+trait PollWait {
+    fn wait(&mut self, delay: Duration) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl PollWait for events::Wakeups {
+    async fn wait(&mut self, delay: Duration) {
+        events::Wakeups::wait(self, delay).await;
+    }
+}
+
+#[cfg(test)]
+struct SleepWait;
+
+#[cfg(test)]
+impl PollWait for SleepWait {
+    async fn wait(&mut self, delay: Duration) {
+        tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(test)]
+async fn poll_commands<F, Fut>(run: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
+{
+    poll_commands_with_wait(run, SleepWait).await;
+}
+
+async fn poll_commands_with_wait<F, Fut, W>(mut run: F, mut wait: W)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+    W: PollWait,
 {
     loop {
         let delay = match run().await {
@@ -459,7 +491,7 @@ where
             }
         };
         let mut timing = StageTimer::new("pollwait");
-        tokio::time::sleep(delay).await;
+        wait.wait(delay).await;
         timing.outcome = "ok";
     }
 }
@@ -472,7 +504,7 @@ pub fn spawn_cloud_runner() {
     ensure_sync_enabled();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        poll_commands(|| run_one(&client)).await;
+        poll_commands_with_wait(|| run_one(&client), events::spawn()).await;
     });
 }
 
