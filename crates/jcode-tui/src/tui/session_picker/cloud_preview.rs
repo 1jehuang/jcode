@@ -179,10 +179,11 @@ fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
         },
         "ssh_runtime",
     )?;
-    let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output(
+    let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output_for(
         command,
         Duration::from_secs(15),
         cache::MAX_BYTES,
+        crate::tui::cloud_git::WorkspaceOperation::Preview,
     ))?;
     if !status.success() {
         timer.outcome("exit_failure");

@@ -1,5 +1,58 @@
 use super::*;
 use crate::tui::cloud_git::{bounded_output, script_command};
+
+#[test]
+fn workspace_operations_are_static_and_all_production_paths_are_assigned() {
+    use crate::tui::cloud_git::WorkspaceOperation::*;
+    assert!(include_str!("cloud_git.rs").contains("timing.operation(operation.label())"));
+    assert_eq!(
+        [
+            GitProbe,
+            InventoryPrepare,
+            InventoryProjection,
+            Preview,
+            CloudStatus,
+            CloudStatusDirectories
+        ]
+        .map(|operation| operation.label()),
+        [
+            "git_probe",
+            "inventory_prepare",
+            "inventory_projection",
+            "preview",
+            "cloud_status",
+            "cloud_status_directories"
+        ]
+    );
+    // These source contracts cover cfg(not(test)) workers too, without making
+    // live SSH calls or putting any workspace/session content in timing labels.
+    for (source, operations) in [
+        (include_str!("cloud_git.rs"), &["GitProbe"][..]),
+        (
+            include_str!("cloud_status.rs"),
+            &["CloudStatus", "CloudStatusDirectories"][..],
+        ),
+        (
+            include_str!("session_picker/cloud_preview.rs"),
+            &["Preview"][..],
+        ),
+        (
+            include_str!("session_picker/loading/mobile_inventory.rs"),
+            &["InventoryPrepare", "InventoryProjection"][..],
+        ),
+    ] {
+        let boundary = if operations == ["Preview"] {
+            "fn parse_preview("
+        } else {
+            "#[cfg(test)]"
+        };
+        let production = source.split(boundary).next().unwrap();
+        assert!(!production.contains("bounded_output("));
+        for operation in operations {
+            assert!(production.contains(&format!("WorkspaceOperation::{operation}")));
+        }
+    }
+}
 use std::time::Duration;
 
 const SAFE: &str = "[CLOUD_TIMING] stage=projection outcome=success duration_ms=17";

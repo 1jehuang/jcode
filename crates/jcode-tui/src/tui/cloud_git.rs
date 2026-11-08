@@ -168,7 +168,7 @@ pub(crate) async fn probe_workspace(
 }
 
 async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration) -> RepoState {
-    match bounded_output(command, deadline, 1024 * 1024).await {
+    match bounded_output_for(command, deadline, 1024 * 1024, WorkspaceOperation::GitProbe).await {
         Some((status, _)) if status.code() == Some(42) => RepoState::NoRepository,
         Some((status, bytes)) if status.success() => parse(&bytes)
             .map(RepoState::Ready)
@@ -177,12 +177,47 @@ async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration
     }
 }
 
+/// Fixed vocabulary only: never include paths, commands, hosts, or session content.
+#[derive(Clone, Copy)]
+pub(crate) enum WorkspaceOperation {
+    GitProbe,
+    InventoryPrepare,
+    InventoryProjection,
+    Preview,
+    CloudStatus,
+    CloudStatusDirectories,
+}
+
+impl WorkspaceOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::GitProbe => "git_probe",
+            Self::InventoryPrepare => "inventory_prepare",
+            Self::InventoryProjection => "inventory_projection",
+            Self::Preview => "preview",
+            Self::CloudStatus => "cloud_status",
+            Self::CloudStatusDirectories => "cloud_status_directories",
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn bounded_output(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     deadline: Duration,
     limit: usize,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    bounded_output_for(command, deadline, limit, WorkspaceOperation::GitProbe).await
+}
+
+pub(crate) async fn bounded_output_for(
+    mut command: tokio::process::Command,
+    deadline: Duration,
+    limit: usize,
+    operation: WorkspaceOperation,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
     let mut timing = super::cloud_latency::Span::new("workspace_command");
+    timing.operation(operation.label());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

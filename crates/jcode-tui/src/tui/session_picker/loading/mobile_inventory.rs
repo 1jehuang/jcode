@@ -63,10 +63,14 @@ pub(super) fn refresh() -> Result<bool> {
             &super::super::cloud_preview::projection_script("inventory"),
         );
         let mut fetch = StageTimer::new("inventory_ssh");
-        let (status, bytes) =
-            crate::tui::cloud_git::bounded_output(command, Duration::from_secs(10), 1024 * 1024)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("cloud inventory verification unavailable"))?;
+        let (status, bytes) = crate::tui::cloud_git::bounded_output_for(
+            command,
+            Duration::from_secs(10),
+            1024 * 1024,
+            crate::tui::cloud_git::WorkspaceOperation::InventoryProjection,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("cloud inventory verification unavailable"))?;
         anyhow::ensure!(status.success(), "cloud inventory verification failed");
         fetch.outcome("success");
         drop(fetch);
@@ -125,9 +129,14 @@ async fn prepare_ssh_config(config: &Path) -> Result<()> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let (status, _) = crate::tui::cloud_git::bounded_output(command, Duration::from_secs(8), 4096)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("cloud SSH setup unavailable"))?;
+    let (status, _) = crate::tui::cloud_git::bounded_output_for(
+        command,
+        Duration::from_secs(8),
+        4096,
+        crate::tui::cloud_git::WorkspaceOperation::InventoryPrepare,
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("cloud SSH setup unavailable"))?;
     anyhow::ensure!(
         status.success() && config.is_file(),
         "cloud SSH setup failed"
