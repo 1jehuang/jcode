@@ -404,9 +404,19 @@ impl Buffer {
     pub fn set_style<S: Into<Style>>(&mut self, area: Rect, style: S) {
         let style = style.into();
         let area = self.area.intersection(area);
+        if area.is_empty() {
+            return;
+        }
+        // ratatui-jcode: walk row slices instead of a 2D index per cell, and skip
+        // the work entirely for the common no-op `Style::default()`.
+        if style == Style::default() {
+            return;
+        }
+        let width = usize::from(area.width);
         for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                self[(x, y)].set_style(style);
+            let start = self.index_of(area.left(), y);
+            for cell in &mut self.content[start..start + width] {
+                cell.set_style(style);
             }
         }
     }

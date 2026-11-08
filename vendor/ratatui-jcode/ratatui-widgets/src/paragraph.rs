@@ -459,6 +459,16 @@ fn render_lines<'a, C: LineComposer<'a>>(mut composer: C, area: Rect, buf: &mut 
 
 fn render_line(wrapped: &WrappedLine<'_, '_>, area: Rect, buf: &mut Buffer, y: u16) {
     let mut x = get_line_offset(wrapped.width, area.width, wrapped.alignment);
+    // ratatui-jcode: resolve the row once and index cells by offset rather than
+    // through the 2D `Index<Position>` bounds check per grapheme.
+    let row_y = area.top() + y;
+    if !buf.area.contains(Position::new(area.left(), row_y)) {
+        return;
+    }
+    let row_start = buf.index_of(buf.area.left(), row_y);
+    let row_end = row_start + usize::from(buf.area.width);
+    let row = &mut buf.content[row_start..row_end];
+    let base = usize::from(area.left() - buf.area.left());
     for StyledGrapheme { symbol, style } in wrapped.graphemes {
         // ratatui-jcode: printable-ASCII width fast path.
         let width = ratatui_core::fast::str_width(symbol);
@@ -467,8 +477,10 @@ fn render_line(wrapped: &WrappedLine<'_, '_>, area: Rect, buf: &mut Buffer, y: u
         }
         // Make sure to overwrite any previous character with a space (rather than a zero-width)
         let symbol = if symbol.is_empty() { " " } else { symbol };
-        let position = Position::new(area.left() + x, area.top() + y);
-        buf[position].set_symbol(symbol).set_style(*style);
+        let Some(cell) = row.get_mut(base + usize::from(x)) else {
+            break;
+        };
+        cell.set_symbol(symbol).set_style(*style);
         x += u16::try_from(width).unwrap_or(u16::MAX);
     }
 }
