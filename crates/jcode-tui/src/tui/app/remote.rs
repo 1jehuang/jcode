@@ -410,7 +410,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         app.pending_queued_dispatch = true;
         needs_redraw = true;
     } else if !app.is_processing && !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
+        let mut queued_messages = std::mem::take(&mut app.queued_messages);
+        super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
@@ -424,7 +425,15 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             app.push_display_message(DisplayMessage::system(msg));
         }
         for msg in &messages {
-            app.push_display_message(DisplayMessage::user(msg.clone()));
+            // Synthetic continuations are for the model, not user prompts.
+            let display = match crate::todo::auto_poke_display_summary(msg) {
+                Some(summary) => DisplayMessage::system(summary.to_string()),
+                None => DisplayMessage::user(msg.clone()),
+            };
+            app.push_display_message(display);
+        }
+        if messages.is_empty() && reminder.is_none() {
+            return true;
         }
         if begin_remote_send(
             app,
@@ -1683,10 +1692,14 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             }
         }
     } else if !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
+        let mut queued_messages = std::mem::take(&mut app.queued_messages);
+        super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        if messages.is_empty() && reminder.is_none() {
+            return;
+        }
         let combined = messages.join("\n\n");
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
         let auto_retry = reminder.is_some() && messages.is_empty();
