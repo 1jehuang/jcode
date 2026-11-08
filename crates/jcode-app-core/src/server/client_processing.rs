@@ -340,10 +340,13 @@ pub(super) async fn start_processing_message(
                 id, error
             )),
         }
-        let (completion_report, push_title) = {
+        let (completion_report, push_body, push_title) = {
             let agent = report_agent.lock().await;
             (
                 agent.recent_assistant_output_tail_after(start_message_index),
+                agent
+                    .final_assistant_text_after(start_message_index)
+                    .unwrap_or_default(),
                 agent.session_display_title_or_name(),
             )
         };
@@ -361,7 +364,7 @@ pub(super) async fn start_processing_message(
                         crate::mobile_push::PushKind::TurnDone,
                         &push_session_id,
                         Some(&push_title),
-                        completion_report.as_deref().unwrap_or_default(),
+                        &push_body,
                         Some(id),
                     );
                 }
