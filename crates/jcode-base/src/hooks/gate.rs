@@ -6,6 +6,12 @@ use super::*;
 /// Maximum bytes of `additionalContext` accepted from one pre_tool hook.
 const GATE_CONTEXT_LIMIT: usize = 8 * 1024;
 
+/// Maximum bytes of stdout accepted from one `pre_tool` gate. A gate may
+/// legitimately return a large `updatedInput`, so this is far above the small
+/// default capture limit. Output beyond it blocks the call instead of being
+/// parsed as a silently cut-off document.
+const GATE_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -217,6 +223,8 @@ pub async fn transform_tool_input(
 ///   (see [`parse_gate_stdout`]) that can deny, rewrite input, or add context
 /// - exit 2: block it; stderr becomes the error shown to the model
 /// - anything else (other exits, timeout, spawn failure): fail open
+/// - exit 0 with stdout beyond the gate output limit: block, because the
+///   verdict cannot be read and silently allowing would drop a deny or rewrite
 pub async fn run_pre_tool_gate(
     session_id: &str,
     working_dir: Option<&str>,
@@ -281,11 +289,12 @@ async fn run_pre_tool_command(
 
     let timeout =
         std::time::Duration::from_millis(crate::config::config().hooks.pre_tool_timeout_ms.max(1));
-    let output = match sync_runner::run_command(
+    let output = match sync_runner::run_command_with_limit(
         std_cmd,
         tool_input_json.as_bytes(),
         timeout,
         StderrMode::Capture,
+        GATE_OUTPUT_LIMIT,
     )
     .await
     {
@@ -307,6 +316,15 @@ async fn run_pre_tool_command(
 
     match output.status.code() {
         Some(0) => {
+            if output.stdout_truncated {
+                let reason = format!(
+                    "pre_tool hook output exceeded {GATE_OUTPUT_LIMIT} bytes and could not be read"
+                );
+                crate::logging::warn(&format!(
+                    "Hook 'pre_tool' command '{command_line}' {reason} (blocking tool '{tool_name}')"
+                ));
+                return CommandVerdict::block(reason);
+            }
             let verdict = parse_gate_stdout(&String::from_utf8_lossy(&output.stdout));
             if let Some(reason) = &verdict.block {
                 crate::logging::info(&format!(

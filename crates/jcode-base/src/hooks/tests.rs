@@ -346,9 +346,102 @@ async fn pre_tool_gate_timeout_is_not_held_open_by_grandchild_stdout() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     if alive {
-        let _ = std::process::Command::new("kill").args(["-9", &pid]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid])
+            .status();
     }
     assert!(!alive, "grandchild {pid} survived the gate timeout");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pre_tool_gate_honours_large_updated_input() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // Valid JSON well over the default 1 MiB capture limit.
+    let script = write_executable_script(
+        temp.path(),
+        "large.sh",
+        "#!/bin/sh\nprintf '{\"hookSpecificOutput\":{\"updatedInput\":{\"command\":\"'\nhead -c 2097152 /dev/zero | tr '\\0' 'a'\nprintf '\"}}}'\n",
+    );
+    let _env = gate_test_config(&script.to_string_lossy(), 20_000);
+    let outcome = run_pre_tool_gate("ses_g", None, "bash", "{}").await;
+    assert_eq!(outcome.decision, GateDecision::Allow);
+    let updated = outcome.updated_input.expect("large updatedInput honoured");
+    assert_eq!(updated["command"].as_str().map(str::len), Some(2_097_152));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pre_tool_gate_blocks_when_output_exceeds_limit() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // Exit 0 with more output than the gate limit: never an ordinary allow.
+    let script = write_executable_script(
+        temp.path(),
+        "huge.sh",
+        "#!/bin/sh\nhead -c 70000000 /dev/zero | tr '\\0' 'a'\n",
+    );
+    let _env = gate_test_config(&script.to_string_lossy(), 30_000);
+    let outcome = run_pre_tool_gate("ses_g", None, "bash", "{}").await;
+    assert!(
+        matches!(outcome.decision, GateDecision::Block { .. }),
+        "oversized gate output must fail safe, got {:?}",
+        outcome.decision
+    );
+    assert_eq!(outcome.updated_input, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_run_future_kills_grandchild_process_group() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let pid_file = temp.path().join("grandchild.pid");
+    let script = write_executable_script(
+        temp.path(),
+        "spawn.sh",
+        &format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
+            pid_file.display()
+        ),
+    );
+    let std_cmd = build_hook_process(
+        &script.to_string_lossy(),
+        &HookEvent::new("pre_tool").session_id("ses_g"),
+    )
+    .expect("build hook process");
+    let run = sync_runner::run_command(
+        std_cmd,
+        b"{}",
+        std::time::Duration::from_secs(60),
+        sync_runner::StderrMode::Capture,
+    );
+    // Cancel the run once the grandchild exists.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1500), run).await;
+
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("grandchild pid written")
+        .trim()
+        .parse()
+        .expect("pid");
+    let mut gone = false;
+    for _ in 0..50 {
+        // SAFETY: signal 0 only probes for process existence.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        // A killed grandchild may linger briefly as a zombie until reaped.
+        let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| stat.contains(") Z"))
+            .unwrap_or(false);
+        if !alive || zombie {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        gone,
+        "grandchild must be killed when the run future is dropped"
+    );
 }
 
 #[test]
