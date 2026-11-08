@@ -1805,6 +1805,12 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 
 #[test]
 fn test_preview_transcript_omits_picker_metadata() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    // The startup header renders an "Updates" box when this machine has unseen
+    // changelog entries, and its border would trip the border-glyph assertion.
+    // Force it empty so the transcript only contains real session content.
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
     session.title = "metadata-video-title".to_string();
     session.working_dir = Some("/metadata-only-directory".to_string());
