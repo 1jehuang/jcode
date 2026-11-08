@@ -230,13 +230,32 @@ pub(super) async fn inject_transcript(
     )
     .await?;
 
-    let delivered = fanout_session_event(
-        swarm_members,
-        &session_id,
-        ServerEvent::Transcript { text, mode },
-    )
-    .await
-        > 0;
+    // Every attached client submits a transcript it receives, so a session
+    // open in two windows would send it twice. Deliver to the most recently
+    // active attachment only, falling back to fanout when none is known.
+    let event = ServerEvent::Transcript { text, mode };
+    let newest_connection = client_connections
+        .read()
+        .await
+        .values()
+        .filter(|info| info.session_id == session_id)
+        .max_by_key(|info| info.last_seen)
+        .map(|info| info.client_id.clone());
+    let single_target = match newest_connection {
+        Some(connection_id) => {
+            let members = swarm_members.read().await;
+            members
+                .get(&session_id)
+                .and_then(|member| member.event_txs.get(&connection_id))
+                .filter(|tx| !tx.is_closed())
+                .cloned()
+        }
+        None => None,
+    };
+    let delivered = match single_target {
+        Some(tx) if tx.send(event.clone()).is_ok() => true,
+        _ => fanout_session_event(swarm_members, &session_id, event).await > 0,
+    };
 
     if !delivered {
         anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);
