@@ -189,3 +189,12 @@ priority = -1
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dev-dependencies.pretty_assertions]
+version = "1"
+
+[dev-dependencies.rstest]
+version = "0.26"
+
+[dev-dependencies.serde_json]
+version = "1"

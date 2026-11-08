@@ -308,11 +308,24 @@ impl<'a> Span<'a> {
         base_style: S,
     ) -> impl Iterator<Item = StyledGrapheme<'a>> {
         let style = base_style.into().patch(self.style);
-        self.content
-            .as_ref()
-            .graphemes(true)
-            .filter(|g| !g.contains(char::is_control))
-            .map(move |g| StyledGrapheme { symbol: g, style })
+        let content: &'a str = self.content.as_ref();
+        // ratatui-jcode: printable ASCII is one grapheme per byte, so skip the
+        // Unicode segmentation state machine.
+        if crate::fast::is_printable_ascii(content) {
+            itertools::Either::Left(
+                (0..content.len()).map(move |i| StyledGrapheme {
+                    symbol: &content[i..=i],
+                    style,
+                }),
+            )
+        } else {
+            itertools::Either::Right(
+                content
+                    .graphemes(true)
+                    .filter(|g| !g.contains(char::is_control))
+                    .map(move |g| StyledGrapheme { symbol: g, style }),
+            )
+        }
     }
 
     /// Converts this Span into a left-aligned [`Line`]
@@ -378,7 +391,8 @@ impl<'a> Span<'a> {
 
 impl UnicodeWidthStr for Span<'_> {
     fn width(&self) -> usize {
-        self.content.width()
+        // ratatui-jcode: printable-ASCII fast path.
+        crate::fast::str_width(&self.content)
     }
 
     fn width_cjk(&self) -> usize {
@@ -429,7 +443,7 @@ impl Widget for &Span<'_> {
         }
         let Rect { mut x, y, .. } = area;
         for (i, grapheme) in self.styled_graphemes(Style::default()).enumerate() {
-            let symbol_width = grapheme.symbol.width();
+            let symbol_width = crate::fast::symbol_width(grapheme.symbol);
             let next_x = x.saturating_add(symbol_width as u16);
             if next_x > area.right() {
                 break;

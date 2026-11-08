@@ -202,20 +202,20 @@ impl PartialEq for Cell {
     /// single space symbol. This is to ensure that empty cells are treated uniformly,
     /// regardless of how they were created
     fn eq(&self, other: &Self) -> bool {
-        // Treat None and Some(" ") as equal
-        let symbols_eq = self.symbol() == other.symbol();
-
+        // ratatui-jcode: compare the cheap fixed-size fields before the symbol
+        // string so mismatches short-circuit early.
         #[cfg(feature = "underline-color")]
         let underline_color_eq = self.underline_color == other.underline_color;
         #[cfg(not(feature = "underline-color"))]
         let underline_color_eq = true;
 
-        symbols_eq
-            && underline_color_eq
+        self.skip == other.skip
+            && self.modifier == other.modifier
             && self.fg == other.fg
             && self.bg == other.bg
-            && self.modifier == other.modifier
-            && self.skip == other.skip
+            && underline_color_eq
+            // Treat None and Some(" ") as equal
+            && self.symbol() == other.symbol()
     }
 }
 

@@ -74,6 +74,8 @@ extern crate std;
 
 pub mod backend;
 pub mod buffer;
+// ratatui-jcode: ASCII fast paths for width and grapheme iteration.
+pub mod fast;
 pub mod layout;
 pub mod style;
 pub mod symbols;

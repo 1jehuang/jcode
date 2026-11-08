@@ -97,6 +97,8 @@ members = [
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
+    "vendor/ratatui-jcode/ratatui-core",
+    "vendor/ratatui-jcode/ratatui-widgets",
 ]
 
 [lib]
