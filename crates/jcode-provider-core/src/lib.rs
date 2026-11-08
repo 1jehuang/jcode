@@ -25,8 +25,7 @@ pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
     anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
-    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
-    anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_strip_1m_suffix,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -202,6 +201,13 @@ pub trait Provider: Send + Sync {
     /// The explicitly bound OAuth account, independent of the global active login.
     fn oauth_account_label(&self) -> Option<String> {
         None
+    }
+
+    /// Saved OAuth account this runtime's cached credential actually belongs
+    /// to, bound or not. For display and usage attribution only; an unbound
+    /// session keeps the login it loaded even after the global account moves.
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        self.oauth_account_label()
     }
 
     /// Email belonging to this runtime's actual cached OAuth credential.

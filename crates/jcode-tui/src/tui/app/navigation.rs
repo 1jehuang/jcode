@@ -1,3 +1,5 @@
+#[path = "navigation_diagram_fit.rs"]
+mod diagram_fit;
 use super::*;
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
@@ -134,47 +136,6 @@ impl App {
         );
     }
 
-    fn current_visible_diagram_hash(&self) -> Option<u64> {
-        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned
-            || !self.diagram_pane_enabled
-        {
-            return None;
-        }
-        if self.side_panel.focused_page().is_some()
-            && self.diagram_pane_position == crate::config::DiagramPanePosition::Side
-        {
-            return None;
-        }
-        let diagrams = crate::tui::mermaid::get_active_diagrams();
-        diagrams
-            .get(self.diagram_index.min(diagrams.len().saturating_sub(1)))
-            .map(|diagram| diagram.hash)
-    }
-
-    pub(super) fn reset_diagram_view_to_fit(&mut self) {
-        self.diagram_scroll_x = 0;
-        self.diagram_scroll_y = 0;
-        self.diagram_zoom = 100;
-    }
-
-    pub(super) fn sync_diagram_fit_context(&mut self) {
-        let current_hash = self.current_visible_diagram_hash();
-        if current_hash != self.last_visible_diagram_hash {
-            self.reset_diagram_view_to_fit();
-            self.last_visible_diagram_hash = current_hash;
-        }
-    }
-
-    pub(super) fn handle_diagram_geometry_change(&mut self) {
-        self.reset_diagram_view_to_fit();
-        if self.side_panel.focused_page().is_some() {
-            self.diff_pane_scroll_x = 0;
-        }
-        crate::tui::mermaid::clear_image_state();
-        crate::tui::clear_side_panel_render_caches();
-        self.last_visible_diagram_hash = self.current_visible_diagram_hash();
-    }
-
     /// If a left-click landed on an inline image's `expand` badge or on the
     /// rendered image itself, cycle that image's size and return `true`.
     /// Returns `false` (so the click can fall through to link/selection
@@ -188,6 +149,12 @@ impl App {
         else {
             return false;
         };
+        // A collapsed tool-image label is also a show action. Honor it even
+        // when the global image visibility preference was previously off.
+        if !self.inline_images_visible {
+            self.inline_images_visible = true;
+            super::ui_prefs::save_inline_images_visible(true);
+        }
         let level = self.cycle_image_expand(image_id);
         let size = match level {
             crate::tui::ui::inline_image_ui::ImageExpandLevel::Fit => "fit",
@@ -326,7 +293,8 @@ impl App {
             });
             return true;
         }
-        let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(target) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -423,7 +391,8 @@ impl App {
         F: FnMut(&str) -> Result<(), E>,
         E: std::fmt::Display,
     {
-        let Some(url) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(url) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -559,8 +528,11 @@ impl App {
         }
     }
 
+    /// Mirrors the renderer: a File diff pane is only drawn once an edit exists.
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !crate::tui::TuiState::swarm_panel_full_page(self)
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -1147,9 +1119,14 @@ impl App {
             .get(&image_id)
             .copied()
             .unwrap_or_default();
-        let next = ImageExpandLevel::from_index(
+        let mut next = ImageExpandLevel::from_index(
             crate::tui::mermaid::next_distinct_mermaid_inline_level(image_id, current as u8),
         );
+        // Fit is also the default collapsed state for tool images. Even a
+        // width-bound image with identical size caps must be able to open.
+        if current == ImageExpandLevel::Fit && next == ImageExpandLevel::Fit {
+            next = ImageExpandLevel::Large;
+        }
         if matches!(next, ImageExpandLevel::Fit) {
             self.expanded_images.remove(&image_id);
         } else {
@@ -1487,6 +1464,16 @@ impl App {
         let mut terminal_width: u16 = 0;
         let mut terminal_height: u16 = 0;
         if let Some(layout) = layout {
+            if crate::tui::TuiState::status_notice(self).as_deref()
+                == Some(super::super::ui::SIDE_PANEL_DISMISSED_HINT)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && super::super::ui::side_panel_restore_area().is_some_and(|area| {
+                    super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                })
+            {
+                self.toggle_side_panel();
+                finish_mouse_event!(false, "side_panel_restore");
+            }
             if self.side_panel.focused_page().is_some()
                 && !crate::tui::TuiState::swarm_panel_full_page(self)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

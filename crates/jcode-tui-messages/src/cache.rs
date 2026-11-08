@@ -1,5 +1,5 @@
 use crate::DisplayMessage;
-use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode};
+use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode};
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +18,8 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    latex_rendering: LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Default)]
@@ -81,6 +83,8 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    pub latex_rendering: LatexRenderingMode,
+    pub show_link_urls: bool,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -132,6 +136,8 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        latex_rendering: context.latex_rendering,
+        show_link_urls: context.show_link_urls,
     };
 
     let mut cache = match message_cache().lock() {
@@ -165,7 +171,23 @@ mod tests {
             show_agentgrep_output: true,
             show_bash_output: true,
             tool_call_details: true,
+            latex_rendering: LatexRenderingMode::Image,
+            show_link_urls: false,
         };
+        let mut isolated_cache = MessageCacheState::default();
+        isolated_cache.insert(key.clone(), vec![Line::from("image")]);
+        let unicode_key = MessageCacheKey {
+            latex_rendering: LatexRenderingMode::Unicode,
+            show_link_urls: false,
+            ..key.clone()
+        };
+        assert!(isolated_cache.get(&unicode_key).is_none());
+        let link_urls_key = MessageCacheKey {
+            show_link_urls: true,
+            ..key.clone()
+        };
+        assert!(isolated_cache.get(&link_urls_key).is_none());
+        assert!(isolated_cache.get(&key).is_some());
         let weak = {
             let mut cache = message_cache().lock().unwrap();
             cache.insert(key.clone(), vec![Line::from("derived text".repeat(100))]);

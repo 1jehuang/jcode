@@ -76,7 +76,11 @@ concurrently would make the shared plan incoherent.
 ### Agents
 
 - Execute tasks in parallel.
-- Receive the full plan plus their scoped instructions on spawn.
+- Receive their assigned todo lane, prepopulated and rendered before work starts.
+  The existing lane is the source of truth and syncs only with that worker.
+  The spawn `prompt` is optional extra context, so coordinators need not repeat
+  lane tasks or details in a long prompt. A missing lane is created from the
+  prompt or label. The spawn result confirms the lane and seeded item count.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
@@ -102,23 +106,19 @@ concurrently would make the shared plan incoherent.
   shutdown, or mark complete).
 - Lifecycle updates drive the swarm info widget status indicators.
 
-## Completion Report Policy
+## Automatic Worker Output
 
-- Spawned or assigned agents owned by a coordinator (`report_back_to_session_id`) must
-  finish each prompted work turn with a useful final assistant response. The server
-  automatically forwards that final response to the owning coordinator as the
-  completion report.
-- A completion report should include outcome/status, changes or findings, validation
-  performed, and blockers or follow-ups. It should not be just `done`, a lifecycle
-  status change, or a tool transcript.
-- Reports are required for spawn prompts, assigned plan tasks, and explicit
-  start/wake/resume/retry task-control runs. If a worker fails before producing a
-  final response, the coordinator still receives the failure lifecycle notification.
-- Reports are not required for idle spawn-without-prompt sessions, user-created peers
-  that have no report-back owner, ordinary status broadcasts while work is still
-  running, or intentional cleanup/stop of an idle worker.
-- Agents should avoid sending a separate final-report DM unless they need interactive
-  coordination before finishing; the automatic forwarded report is the default path.
+- When an owned worker finishes a prompted turn, the server automatically forwards
+  a bounded tail of its output to the owning coordinator. Workers do not need a
+  reporting tool call, a special completion format, or a separate final-report DM.
+- Automatic output delivery covers spawn prompts, assigned plan tasks, and explicit
+  start/wake/resume/retry task-control runs. Lifecycle notifications still communicate
+  failures and status changes independently of the captured output.
+- Idle spawn-without-prompt sessions and user-created peers without a report-back
+  owner do not create completion deliveries.
+- Ordinary messages remain available for interactive coordination while work is
+  underway. The legacy explicit reporting action is retained only for compatibility
+  with old transcripts and scripts, and is not advertised to models.
 
 ## User Interaction
 

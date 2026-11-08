@@ -211,9 +211,16 @@ impl McpClient {
         // its process environment, and blindly inheriting them exposes those
         // credentials to every configured MCP executable (issue #771).
         let inherited: HashMap<String, String> = std::env::vars().collect();
-        let env = mcp_child_env(inherited, &config.env);
+        let mut env = mcp_child_env(inherited, &config.env);
+        let interactive = INTERACTIVE_CONNECT.try_with(|v| *v).unwrap_or(false);
+        if !interactive {
+            suppress_browser_launch(&mut env, &config.env);
+        }
 
         let mut command = Command::new(&config.command);
+        if !interactive {
+            command.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+        }
         command
             .args(&config.args)
             .envs(&env)
@@ -590,6 +597,34 @@ impl McpClient {
     }
 }
 
+tokio::task_local! {
+    /// Set while a user explicitly asked to connect a server. Background
+    /// auto-connects (daemon startup, session start) leave it unset.
+    static INTERACTIVE_CONNECT: bool;
+}
+
+/// Run `fut` as a user-initiated connect, allowing MCP children (for example
+/// `mcp-remote`) to open an OAuth browser window.
+pub async fn interactive_connect<F: std::future::Future>(fut: F) -> F::Output {
+    INTERACTIVE_CONNECT.scope(true, fut).await
+}
+
+/// Background auto-connects must never pop browser windows. `mcp-remote` and
+/// similar wrappers open an OAuth page whenever tokens are missing, which made
+/// every reboot spawn a pile of sign-in tabs. Hide the graphical session and
+/// point `BROWSER` at a no-op so openers fail and the server reports an auth
+/// error instead. Explicitly configured env values are respected.
+fn suppress_browser_launch(env: &mut HashMap<String, String>, explicit: &HashMap<String, String>) {
+    for key in ["DISPLAY", "WAYLAND_DISPLAY"] {
+        if !explicit.contains_key(key) {
+            env.remove(key);
+        }
+    }
+    if !explicit.contains_key("BROWSER") {
+        env.insert("BROWSER".to_string(), "true".to_string());
+    }
+}
+
 /// Secrets that an MCP child must not receive merely because jcode has them.
 ///
 /// This intentionally applies only to inherited values. A server can still be
@@ -631,6 +666,30 @@ mod tests {
     use super::{McpClient, is_sensitive_inherited_env_key, mcp_child_env};
     use crate::mcp::protocol::McpServerConfig;
     use std::collections::HashMap;
+
+    #[test]
+    fn background_connect_env_cannot_open_browser() {
+        let mut env: HashMap<String, String> = [
+            ("DISPLAY", ":0"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("PATH", "/usr/bin"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        super::suppress_browser_launch(&mut env, &HashMap::new());
+        assert!(!env.contains_key("DISPLAY"));
+        assert!(!env.contains_key("WAYLAND_DISPLAY"));
+        assert_eq!(env.get("BROWSER").map(String::as_str), Some("true"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+
+        let explicit: HashMap<String, String> = [("DISPLAY".to_string(), ":1".to_string())]
+            .into_iter()
+            .collect();
+        let mut env = explicit.clone();
+        super::suppress_browser_launch(&mut env, &explicit);
+        assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":1"));
+    }
 
     #[test]
     fn inherited_mcp_env_scrubs_provider_credentials() {

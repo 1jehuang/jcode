@@ -377,7 +377,7 @@ impl<S> DeflateStream<S> {
             }
             let frame = cursor..cursor + frame_len;
             cursor += frame_len;
-            let is_data = matches!(header.opcode, 0x0 | 0x1 | 0x2);
+            let is_data = matches!(header.opcode, 0x0..=0x2);
             if header.opcode != 0x0 && is_data {
                 self.inbound_message_compressed = header.rsv1;
                 self.inbound_message_size = 0;

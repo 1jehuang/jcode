@@ -62,6 +62,8 @@ pub struct DialectTransforms {
     /// depth. Needed by validators that accept `allOf` syntactically without
     /// intersecting it.
     pub merge_all_of_branches: bool,
+    /// Encode type unions for Gemini's scalar protobuf type field.
+    pub scalar_types: bool,
 }
 
 /// A provider's accepted JSON Schema subset plus the rewrites needed to reach
@@ -242,6 +244,9 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
                 }
             }
 
+            if spec.transforms.scalar_types {
+                normalize_type_union(&mut out);
+            }
             if spec.transforms.prune_dangling_required {
                 prune_dangling_required(&mut out);
             }
@@ -259,6 +264,41 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
     }
 }
 
+/// The Gemini schema proto requires a scalar type, with nullability separate.
+fn normalize_type_union(out: &mut Map<String, Value>) {
+    let Some(Value::Array(types)) = out.get("type") else {
+        return;
+    };
+    let nullable = types.iter().any(|t| t.as_str() == Some("null"));
+    let types: Vec<Value> = types
+        .iter()
+        .filter(|t| t.as_str().is_some_and(|t| t != "null"))
+        .cloned()
+        .collect();
+    out.remove("type");
+    if nullable {
+        out.insert("nullable".into(), Value::Bool(true));
+    }
+    match types.as_slice() {
+        [single] => {
+            out.insert("type".into(), single.clone());
+        }
+        [] => {}
+        _ => {
+            let branches = types
+                .into_iter()
+                .map(|ty| {
+                    let mut branch = out.clone();
+                    branch.insert("type".into(), ty);
+                    Value::Object(branch)
+                })
+                .collect();
+            out.clear();
+            out.insert("anyOf".into(), Value::Array(branches));
+        }
+    }
+}
+
 fn is_object_typed(map: &Map<String, Value>) -> bool {
     match map.get("type") {
         Some(Value::String(t)) => t == "object",
@@ -269,10 +309,11 @@ fn is_object_typed(map: &Map<String, Value>) -> bool {
 
 /// Drop `required` names the same object does not declare (#655).
 fn prune_dangling_required(out: &mut Map<String, Value>) {
-    let Some(Value::Object(properties)) = out.get("properties") else {
-        return;
-    };
-    let defined: Vec<String> = properties.keys().cloned().collect();
+    let defined: Vec<String> = out
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default();
     if let Some(Value::Array(required)) = out.get_mut("required") {
         required.retain(|name| {
             name.as_str()
@@ -459,11 +500,12 @@ fn merge_all_of_branches(out: &mut Map<String, Value>) {
         return;
     };
 
-    let mut properties = out
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    // Only object-valued property declarations contribute to the union.
+    // An absent (or structurally invalid) declaration contributes no names.
+    let mut properties = match out.get("properties") {
+        Some(Value::Object(properties)) => properties.clone(),
+        _ => Map::new(),
+    };
     let mut required: Vec<String> = out
         .get("required")
         .and_then(Value::as_array)

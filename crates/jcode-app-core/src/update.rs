@@ -239,6 +239,13 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     Ok(release)
 }
 
+#[path = "update_preview.rs"]
+mod update_preview;
+pub use update_preview::{check_for_update_with_channel_blocking, fetch_latest_preview_blocking};
+use update_preview::{
+    prepare_preview_update_blocking, prepare_stable_update_blocking, preview_number,
+};
+
 fn github_api_request(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -290,7 +297,15 @@ fn platform_asset(release: &GitHubRelease) -> Result<&GitHubAsset> {
     release
         .assets
         .iter()
-        .find(|a| a.name.starts_with(asset_name))
+        .find(|a| {
+            if preview_number(&release.tag_name).is_some() {
+                (a.name == asset_name || a.name == format!("{asset_name}.tar.gz"))
+                    && a._size > 0
+                    && !a.browser_download_url.is_empty()
+            } else {
+                a.name.starts_with(asset_name)
+            }
+        })
         .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))
 }
 
@@ -305,6 +320,9 @@ fn verify_asset_checksum_if_available(
     bytes: &[u8],
 ) -> Result<()> {
     let Some(checksum_asset) = checksum_asset(release) else {
+        if preview_number(&release.tag_name).is_some() {
+            anyhow::bail!("Preview release is missing SHA256SUMS");
+        }
         crate::logging::info(&format!(
             "Release {} does not include SHA256SUMS; skipping checksum verification",
             release.tag_name
@@ -368,15 +386,8 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
+fn prepare_release_update(release: GitHubRelease) -> Result<PreparedUpdate> {
     let current_version = jcode_build_meta::version();
-    let release = fetch_latest_release_blocking()?;
-
-    if !release_is_update(&release)? {
-        return Ok(PreparedUpdate::None {
-            current: current_version.to_string(),
-        });
-    }
 
     let Ok(asset) = platform_asset(&release) else {
         return Ok(PreparedUpdate::None {
@@ -480,6 +491,7 @@ pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
         crate::config::UpdateChannel::Stable => prepare_stable_update_blocking(),
+        crate::config::UpdateChannel::Preview => prepare_preview_update_blocking(),
     }
 }
 
@@ -588,29 +600,7 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
-    let channel = crate::config::config().features.update_channel;
-    match channel {
-        crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
-        crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
-    }
-}
-
-fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
-    let release = fetch_latest_release_blocking()?;
-
-    if release_is_update(&release)? {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-
-        if has_asset {
-            return Ok(Some(release));
-        }
-    }
-
-    Ok(None)
+    check_for_update_with_channel_blocking(None)
 }
 
 /// Check for updates on the main branch (cutting edge channel).
@@ -972,12 +962,7 @@ pub fn download_and_install_blocking_with_progress(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf> {
     let started = Instant::now();
-    let asset_name = get_asset_name();
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.starts_with(asset_name))
-        .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))?;
+    let asset = platform_asset(release)?;
 
     let download_url = asset.browser_download_url.clone();
 

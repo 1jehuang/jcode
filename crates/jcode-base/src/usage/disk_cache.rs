@@ -327,6 +327,51 @@ pub(super) fn store_error_with_hint(key: &str, error: &str, hint: Option<&str>) 
     entry_usage(&entry)
 }
 
+/// Last good limits only, for shipping to another machine. Backoff and error
+/// state stay local because they describe this machine's request history.
+pub fn export_last_good() -> Vec<u8> {
+    let map: HashMap<String, Entry> = load()
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let good = entry
+                .last_good
+                .filter(|good| age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE)?;
+            Some((
+                key,
+                Entry {
+                    last_good: Some(good),
+                    ..Default::default()
+                },
+            ))
+        })
+        .collect();
+    serde_json::to_vec(&map).unwrap_or_default()
+}
+
+/// Adopt imported limits only where they are newer than what this machine has.
+pub fn import_last_good(bytes: &[u8]) {
+    let Ok(incoming) = serde_json::from_slice::<HashMap<String, Entry>>(bytes) else {
+        return;
+    };
+    let Some(path) = path() else { return };
+    let Ok(_lock) = map_lock(&path) else { return };
+    let mut map = load();
+    for (key, entry) in incoming {
+        let Some(good) = entry.last_good else {
+            continue;
+        };
+        let local = map.entry(key).or_default();
+        if local
+            .last_good
+            .as_ref()
+            .is_none_or(|have| have.fetched_unix_ms < good.fetched_unix_ms)
+        {
+            local.last_good = Some(good);
+        }
+    }
+    let _ = crate::storage::write_json_secret(&path, &map);
+}
+
 /// Forget persisted data for a login after a limit reset.
 pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
     let Some(path) = path() else { return };

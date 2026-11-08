@@ -124,3 +124,168 @@ fn copy_badge_alt_label_uses_trimmed_config_override() {
     );
     assert_eq!(super::copy_badge_alt_label_from_config("⌥"), "⌥");
 }
+
+#[test]
+fn expanded_prompt_preview_lists_recent_offscreen_prompts_oldest_first() {
+    let starts: Vec<usize> = (0..10).map(|i| i * 10).collect();
+    let texts: Vec<String> = (0..10).map(|i| format!("prompt  {i}\nline")).collect();
+    // Scroll 75: prompts 0..=7 start above the viewport.
+    let items = super::expanded_prompt_preview_items(&starts, &texts, 75, 0);
+    assert_eq!(items.len(), super::EXPANDED_PROMPT_PREVIEW_COUNT);
+    assert_eq!(items.first().unwrap().0, "3");
+    assert_eq!(
+        items.last().unwrap(),
+        &("8".to_string(), "prompt 7 line".to_string())
+    );
+}
+#[test]
+fn expand_badge_uses_footer_for_inline_and_tool_row_for_hidden_diffs() {
+    let active = super::ActiveFileDiffContext {
+        edit_index: 1,
+        msg_index: 0,
+        file_path: "src/main.rs".into(),
+        start_line: 10,
+        end_line: 25,
+        expandable: true,
+    };
+    assert_eq!(super::expand_badge_target_line(&active, true), 24);
+    assert_eq!(super::expand_badge_target_line(&active, false), 10);
+    // The footer remains the target even when the tool row has scrolled away.
+    let scroll = 20;
+    assert!(super::expand_badge_target_line(&active, true) >= scroll);
+    assert!(super::expand_badge_target_line(&active, false) < scroll);
+}
+
+#[test]
+fn compact_expand_badge_reserves_exact_display_cells() {
+    use unicode_width::UnicodeWidthStr;
+    for suffix in [" expand", " ✓ Expanded"] {
+        let rendered = format!(" [{}⇧E]{suffix}", super::copy_badge_alt_label());
+        assert_eq!(super::expand_badge_reserved_width(suffix), rendered.width());
+        let previous = format!(" [{}] [⇧] [E]{suffix}", super::copy_badge_alt_label());
+        assert!(rendered.width() < previous.width());
+    }
+}
+
+#[test]
+fn compact_shortcut_badge_matches_reserved_width_and_preserves_styles() {
+    use ratatui::{
+        style::{Color, Style},
+        text::Line,
+    };
+    let alt = Style::default().fg(Color::Yellow);
+    let shift = Style::default().fg(Color::Green);
+    let key = Style::default().fg(Color::Blue);
+    let spans = super::shortcut_badge_spans('a', alt, shift, key);
+    assert_chrome_has_explicit_foregrounds(&spans);
+    assert_eq!(spans[1].style, alt);
+    assert_eq!(spans[2].style, shift);
+    assert_eq!(spans[3].style, key);
+    let line = Line::from(spans.to_vec());
+    assert_eq!(
+        line.to_string(),
+        format!("[{}⇧A]", super::copy_badge_alt_label())
+    );
+    assert_eq!(line.width() + 1, super::copy_badge_shortcut_width("A"));
+}
+
+#[test]
+fn exact_width_expand_badge_leaves_no_content_or_ellipsis() {
+    let mut line = ratatui::text::Line::from("╰─");
+    super::truncate_line_for_copy_badge(&mut line, 0);
+    assert_eq!(line.width(), 0);
+    assert!(line.spans.is_empty());
+}
+
+// Chrome must own its visible colors instead of relying on a terminal default.
+// Whitespace can inherit because it does not draw a foreground glyph.
+fn assert_chrome_has_explicit_foregrounds(spans: &[ratatui::text::Span<'_>]) {
+    for span in spans.iter().filter(|span| !span.content.trim().is_empty()) {
+        assert!(
+            span.style
+                .fg
+                .is_some_and(|fg| fg != ratatui::style::Color::Reset),
+            "unstyled UI chrome: {:?}",
+            span.content,
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "unstyled UI chrome")]
+fn chrome_style_guard_rejects_raw_punctuation() {
+    assert_chrome_has_explicit_foregrounds(&[ratatui::text::Span::raw("[")]);
+}
+
+#[test]
+#[should_panic(expected = "unstyled UI chrome")]
+fn chrome_style_guard_rejects_terminal_default_foreground() {
+    assert_chrome_has_explicit_foregrounds(&[ratatui::text::Span::styled(
+        "]",
+        ratatui::style::Style::default().fg(ratatui::style::Color::Reset),
+    )]);
+}
+
+#[test]
+fn expand_badge_all_states_have_explicit_chrome_colors() {
+    for alt_label in ["Alt", "⌥", "Option"] {
+        for state in 0..16 {
+            let alt = state & 1 != 0;
+            let shift = state & 2 != 0;
+            let key = state & 4 != 0;
+            let expanded = state & 8 != 0;
+            let spans = super::expand_badge_spans(alt_label, alt, shift, key, expanded);
+            assert_chrome_has_explicit_foregrounds(&spans);
+            for span in spans
+                .iter()
+                .filter(|span| matches!(span.content.as_ref(), "[" | "]"))
+            {
+                assert_eq!(span.style.fg, Some(super::dim_color()));
+                assert!(
+                    !span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+                );
+            }
+            assert_eq!(
+                spans[2].style.fg,
+                Some(if alt {
+                    super::queued_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[3].style.fg,
+                Some(if shift {
+                    super::queued_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[4].style.fg,
+                Some(if key {
+                    super::accent_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            assert_eq!(
+                spans[6].style.fg,
+                Some(if expanded {
+                    super::ai_color()
+                } else {
+                    super::dim_color()
+                })
+            );
+            let rendered = spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let suffix = if expanded { " ✓ Expanded" } else { " expand" };
+            assert_eq!(rendered, format!(" [{alt_label}⇧E]{suffix}"));
+        }
+    }
+}

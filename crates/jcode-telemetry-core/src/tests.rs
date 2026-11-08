@@ -1809,3 +1809,28 @@ fn desktop_update_sanitizes_tokens() {
         );
     }
 }
+
+#[test]
+fn telemetry_categories_gate_events_independently() {
+    let _guard = lock_test_env();
+    set_category_settings([false, true, false, true, true, true]);
+    assert!(is_enabled());
+    assert!(!TelemetryCategory::Crashes.enabled());
+    assert!(TelemetryCategory::Usage.enabled());
+    assert!(!categories::payload_allowed(
+        &serde_json::json!({"event": "session_crash"})
+    ));
+    assert!(!categories::payload_allowed(
+        &serde_json::json!({"event": "transcript"})
+    ));
+    assert!(categories::payload_allowed(
+        &serde_json::json!({"event": "session_start"})
+    ));
+    assert_eq!(category_settings(), [false, true, false, true, true, true]);
+
+    set_category_settings([false; 6]);
+    assert!(!is_enabled());
+    set_category_settings([true; 6]);
+    assert!(content_sharing_enabled());
+    assert_eq!(category_settings(), [true; 6]);
+}

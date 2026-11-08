@@ -46,7 +46,7 @@ fn grep_input(query: &str, max_regions: Option<usize>) -> AgentGrepInput {
 
 #[tokio::test]
 async fn foreground_budget_returns_fast_search_result_directly() {
-    let handle = tokio::spawn(async { Ok(ToolOutput::new("fast result")) });
+    let handle = spawn_cancellable_search(|| Ok(ToolOutput::new("fast result")));
     let output = await_or_background_search(
         handle,
         std::time::Duration::from_secs(1),
@@ -80,6 +80,12 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
     assert_eq!(metadata["timeout_promoted"], true);
     assert_eq!(metadata["foreground_timeout_ms"], 1);
     assert!(output.output.contains("continuing in background"));
+    assert!(
+        output
+            .output
+            .contains(crate::tool::BACKGROUND_WAIT_GUIDANCE)
+    );
+    assert!(!output.output.contains("Use `bg"));
 
     // The adopted handle must remain alive after the foreground call returns.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -88,6 +94,125 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
         .await
         .expect("background manager should persist the eventual result");
     assert!(saved.contains("eventual search result"));
+}
+
+// Repeat real linked searches until the shared scope rejects work. Unlike a
+// token mock, this proves the dependency observes the worker's installed scope.
+fn repeating_search(
+    root: PathBuf,
+) -> (
+    tokio::task::JoinHandle<Result<ToolOutput>>,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Receiver<String>,
+) {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let handle = spawn_cancellable_search(move || {
+        let mut started = Some(started_tx);
+        loop {
+            match execute_linked_agentgrep(&grep_input("needle", None), &test_ctx(&root), None) {
+                Ok(_) => {
+                    if let Some(tx) = started.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                Err(error) => {
+                    let _ = stopped_tx.send(error.to_string());
+                    return Err(error);
+                }
+            }
+        }
+    });
+    (handle, started_rx, stopped_rx)
+}
+
+async fn assert_search_stopped(stopped: tokio::sync::oneshot::Receiver<String>) {
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), stopped)
+        .await
+        .expect("blocking linked search must terminate promptly")
+        .expect("blocking worker must report its cancellation");
+    assert!(error.contains("cancel"), "unexpected failure: {error}");
+}
+
+#[tokio::test]
+async fn search_cancellation_foreground_future_stops_linked_search() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
+    let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
+    let foreground = tokio::spawn(await_or_background_search(
+        handle,
+        std::time::Duration::from_secs(60),
+        "cancel foreground".into(),
+        "agentgrep-cancel-foreground".into(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    foreground.abort();
+    let _ = foreground.await;
+    assert_search_stopped(stopped).await;
+}
+
+#[tokio::test]
+async fn search_cancellation_dropping_owner_stops_linked_search() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
+    let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
+    let owner = SearchTaskOwner(Some(handle));
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(owner);
+    assert_search_stopped(stopped).await;
+}
+
+#[tokio::test]
+async fn search_cancellation_promoted_search_lives_until_background_cancel() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
+    let (handle, started, mut stopped) = repeating_search(root.path().to_path_buf());
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    let output = await_or_background_search(
+        handle,
+        std::time::Duration::from_millis(1),
+        "promoted cancellation".into(),
+        "agentgrep-promoted-cancel".into(),
+    )
+    .await
+    .unwrap();
+    // Let the async owner and blocking worker run after handoff. An accidental
+    // abort during promotion must be observed before we request cancellation.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(matches!(
+        stopped.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let metadata = output.metadata.unwrap();
+    let task_id = metadata["task_id"].as_str().unwrap();
+    assert!(crate::background::global().cancel(task_id).await.unwrap());
+    assert_search_stopped(stopped).await;
+}
+
+#[tokio::test]
+async fn search_cancellation_background_reload_stops_linked_search() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
+    let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let manager =
+        crate::background::BackgroundTaskManager::with_output_dir(output_dir.path().to_path_buf());
+    manager.adopt("agentgrep", "reload-search", handle).await;
+    assert_eq!(manager.abort_live_tasks_for_reload().await, 1);
+    assert_search_stopped(stopped).await;
 }
 
 #[test]

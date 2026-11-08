@@ -1,6 +1,5 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::append_swarm_completion_report_instructions;
 use super::swarm::{
     now_unix_ms, swarm_task_heartbeat_interval, swarm_task_stale_after, touch_swarm_task_progress,
 };
@@ -12,9 +11,9 @@ use super::swarm_mutation_state::{
 use super::{
     ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
-    broadcast_swarm_plan_with_previous, broadcast_swarm_status, fanout_session_event,
-    persist_swarm_state_for, queue_soft_interrupt_for_session, record_swarm_event,
-    set_member_task_label, truncate_detail, update_member_status, update_member_status_with_report,
+    broadcast_swarm_plan_with_previous, broadcast_swarm_status, persist_swarm_state_for,
+    queue_soft_interrupt_for_session, record_swarm_event, set_member_task_label, truncate_detail,
+    update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::plan::{
@@ -29,151 +28,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
-/// Eligible auto-assignment targets for a swarm task.
-///
-/// Auto-pick must only land on sessions that will actually *execute* the work
-/// without further human action. In a shared swarm there can be many foreign
-/// members: independent human TUIs and stale "zombie" sessions left over from
-/// other runs. Assigning to those silently strands the task (a human session is
-/// never auto-driven; a zombie has no live agent at all) and stalls `run_plan`.
-///
-/// So a member is only a free worker for *automatic* selection when it is a
-/// worker this run owns and can drive:
-///
-/// - `is_headless`: a spawned in-process worker (always auto-driven), or
-/// - owned by the requester (`report_back_to_session_id == req`): a worker this
-///   coordinator spawned, including reusable ones that already returned `ready`.
-///
-/// Everything else (foreign humans, zombies) must be addressed with an explicit
-/// `target_session`, which bypasses this filter; this only governs auto-pick.
-fn filter_swarm_agent_candidates<'a>(
-    members: &'a HashMap<String, SwarmMember>,
-    req_session_id: &str,
-    swarm_id: &str,
-) -> Vec<&'a SwarmMember> {
-    members
-        .values()
-        .filter(|member| {
-            member.session_id != req_session_id
-                && member.swarm_id.as_deref() == Some(swarm_id)
-                && member.role == "agent"
-                && matches!(member.status.as_str(), "ready" | "completed")
-                && is_drivable_auto_worker(member, req_session_id)
-        })
-        .collect()
-}
-
-/// Whether `member` can be auto-assigned a task and be relied on to run it.
-/// See [`filter_swarm_agent_candidates`] for the rationale.
-fn is_drivable_auto_worker(member: &SwarmMember, req_session_id: &str) -> bool {
-    member.is_headless || member.report_back_to_session_id.as_deref() == Some(req_session_id)
-}
-
-/// Whether a candidate already holds an incomplete plan assignment.
-///
-/// Auto-pick must treat such a member as busy rather than reusable: assigning
-/// more work to it queues large tasks serially on one agent while the swarm
-/// still has spawn capacity (`spawn_if_needed` exists precisely to spawn a
-/// fresh agent in that case). `loads` counts non-terminal plan items per
-/// assignee (see [`assignment_loads`]).
-fn member_has_active_assignment(session_id: &str, loads: &HashMap<String, usize>) -> bool {
-    loads.get(session_id).copied().unwrap_or(0) > 0
-}
-
-/// Safety-net expiry for auto-pick claims that never reach an explicit
-/// release (e.g. a request that dies between the pick and the plan write).
-const AUTO_ASSIGN_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// In-process claims for auto-picked assignment targets, keyed by
-/// `swarm_id\nsession_id`.
-///
-/// The busy check reads the *plan* (`assignment_loads`), but the plan only
-/// records an assignment at a write that happens several awaits after the
-/// target is picked. Concurrent `assign_task`/`assign_next` requests resolve
-/// their targets inside that window (observed live: three auto-picks within
-/// ~100ms all stacking onto the same worker), so the pick itself must be a
-/// claim: the first resolver wins the member, later ones skip it and fall
-/// back to another candidate or to `spawn_if_needed`. Claims are released
-/// once the plan write records (or abandons) the assignment; the TTL only
-/// reaps leaked claims.
-fn auto_assign_claims() -> &'static std::sync::Mutex<HashMap<String, std::time::Instant>> {
-    static CLAIMS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
-        std::sync::OnceLock::new();
-    CLAIMS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn auto_assign_claim_key(swarm_id: &str, session_id: &str) -> String {
-    format!("{swarm_id}\n{session_id}")
-}
-
-/// Claim `session_id` as an auto-pick target. Returns false when another
-/// in-flight request already picked it (and that claim has not expired).
-fn try_claim_auto_assign_target(swarm_id: &str, session_id: &str) -> bool {
-    let mut claims = auto_assign_claims()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let now = std::time::Instant::now();
-    claims.retain(|_, claimed_at| now.duration_since(*claimed_at) < AUTO_ASSIGN_CLAIM_TTL);
-    match claims.entry(auto_assign_claim_key(swarm_id, session_id)) {
-        std::collections::hash_map::Entry::Occupied(_) => false,
-        std::collections::hash_map::Entry::Vacant(vacant) => {
-            vacant.insert(now);
-            true
-        }
-    }
-}
-
-fn release_auto_assign_claim(swarm_id: &str, session_id: &str) {
-    let mut claims = auto_assign_claims()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    claims.remove(&auto_assign_claim_key(swarm_id, session_id));
-}
-
-/// Error for an auto-pick that found no assignable worker. The leading
-/// sentence is a stable contract: `spawn_if_needed`/`run_plan` match on it to
-/// decide to spawn a fresh agent instead of failing the assignment.
-fn no_auto_target_error(busy_skipped: usize) -> String {
-    let mut message =
-        "No ready or completed swarm agents are available for automatic task assignment."
-            .to_string();
-    if busy_skipped > 0 {
-        message.push_str(&format!(
-            " Skipped {busy_skipped} worker(s) that already have an active assignment or an \
-             in-flight pick; spawn a fresh agent (spawn_if_needed/prefer_spawn) or wait for one \
-             to finish."
-        ));
-    }
-    message
-}
-
-/// Pick the first idle, unclaimed candidate from `candidates` (already ranked
-/// by the caller) and claim it.
-///
-/// Members that already hold an incomplete plan assignment are skipped, as are
-/// members another in-flight request just picked, so repeated auto-assignments
-/// fan out across workers (or trigger a fresh spawn) instead of stacking
-/// serially on one agent.
-fn select_and_claim_auto_target(
-    swarm_id: &str,
-    candidates: &[&SwarmMember],
-    loads: &HashMap<String, usize>,
-) -> Result<String, String> {
-    let mut busy_skipped = 0usize;
-    for member in candidates {
-        if member_has_active_assignment(&member.session_id, loads) {
-            busy_skipped += 1;
-            continue;
-        }
-        if try_claim_auto_assign_target(swarm_id, &member.session_id) {
-            return Ok(member.session_id.clone());
-        }
-        busy_skipped += 1;
-    }
-    Err(no_auto_target_error(busy_skipped))
-}
+#[path = "assignment_targets.rs"]
+mod assignment_targets;
+use assignment_targets::{
+    filter_swarm_agent_candidates, release_auto_assign_claim, select_and_claim_auto_target,
+};
+#[cfg(test)]
+use assignment_targets::{is_drivable_auto_worker, member_has_active_assignment};
 
 /// A double-assignment conflict: the task is already assigned and its
 /// assignee shows recent activity.
@@ -324,12 +187,14 @@ async fn active_swarm_member(
     members.get(session_id).cloned()
 }
 
+/// Live agent for `session_id`, restoring a headless worker from disk when its
+/// agent is not loaded (for example a worker that failed before a reload).
 async fn task_agent_session(
     session_id: &str,
     sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
-    let guard = sessions.read().await;
-    guard.get(session_id).cloned()
+    super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await
 }
 
 async fn resolve_assignment_target_session(
@@ -552,8 +417,24 @@ fn spawn_assigned_task_run(
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
-    let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
     crate::runtime_activity::spawn(async move {
+        let mut agent = agent_arc.lock().await;
+        let turn_lease = match agent.claim_server_turn() {
+            Ok(lease) => lease,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Assigned task {task_id} could not reserve {target_session}: {error}"
+                ));
+                return;
+            }
+        };
+        let (fallback, _) = mpsc::unbounded_channel();
+        let events = Arc::new(super::state::TurnEventChannel::new(
+            target_session.clone(),
+            Arc::clone(&swarm_members),
+            fallback,
+            &turn_lease,
+        ));
         {
             let now_ms = now_unix_ms();
             let mut plans = swarm_plans.write().await;
@@ -653,7 +534,7 @@ fn spawn_assigned_task_run(
             })
         };
 
-        let event_tx = task_progress_event_sender(
+        let progress_events = task_progress_event_sender(
             target_session.clone(),
             swarm_id.clone(),
             task_id.clone(),
@@ -664,27 +545,30 @@ fn spawn_assigned_task_run(
             Arc::clone(&event_history),
             Arc::clone(&event_counter),
             swarm_event_tx.clone(),
+            Arc::clone(&events),
+            turn_lease.publication_pin(),
         );
-        let start_message_index = {
-            let agent = agent_arc.lock().await;
-            agent.message_count()
-        };
-        let result = super::client_lifecycle::process_message_streaming_mpsc(
-            Arc::clone(&agent_arc),
+        let event_tx = progress_events.sender();
+        let start_message_index = agent.message_count();
+        let result = super::turn_failover::process_reserved_locked_message_with_server_failover(
+            &mut agent,
+            &turn_lease,
             &assignment_text,
             vec![],
             None,
             event_tx,
         )
         .await;
-        let completion_report = if result.is_ok() {
-            let agent = agent_arc.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
-        };
-        let _ = heartbeat_stop_tx.send(true);
-        let _ = heartbeat_task.await;
+        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
+        // The lease preserves ownership without holding Agent across queue drains.
+        drop(agent);
+        if let Err(error) = heartbeat_stop_tx.send(true) {
+            crate::logging::debug(&format!("Task heartbeat already stopped: {error}"));
+        }
+        if let Err(error) = heartbeat_task.await {
+            crate::logging::warn(&format!("Task heartbeat failed: {error}"));
+        }
+        progress_events.finish().await;
 
         match result {
             Ok(_) => {
@@ -749,6 +633,7 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                let _ = events.sender().send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
                 {
@@ -785,10 +670,11 @@ fn spawn_assigned_task_run(
                     &swarms_by_id,
                 )
                 .await;
-                update_member_status(
+                update_member_status_with_report(
                     &target_session,
                     "failed",
                     Some(truncate_detail(&error.to_string(), 120)),
+                    completion_report,
                     &swarm_members,
                     &swarms_by_id,
                     Some(&event_history),
@@ -796,8 +682,17 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                let _ = events.sender().send(ServerEvent::Error {
+                    id: 0,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
             }
         }
+        let events =
+            Arc::try_unwrap(events).unwrap_or_else(|_| unreachable!("progress tap drained"));
+        events.finish().await;
+        drop(turn_lease);
     });
 }
 
@@ -836,6 +731,35 @@ fn format_salvage_message(
     output
 }
 
+/// A cancellation-safe progress tap. Its task retains the scoped channel and a
+/// publication pin until every accepted raw event is forwarded.
+struct TaskProgressEvents {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TaskProgressEvents {
+    fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Task progress event drain failed: {error}"));
+        }
+    }
+}
+
+impl Drop for TaskProgressEvents {
+    fn drop(&mut self) {
+        self.close.take();
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "task progress fanout needs plan state, swarm membership, and event sinks together"
@@ -851,10 +775,24 @@ fn task_progress_event_sender(
     event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
-) -> mpsc::UnboundedSender<ServerEvent> {
+    events: Arc<super::state::TurnEventChannel>,
+    publication: crate::agent::TurnPublicationPin,
+) -> TaskProgressEvents {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
+    let (close, mut closed) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _publication = publication;
+        let output = events.sender();
+        let mut closing = false;
+        while let Some(event) = if closing {
+            rx.recv().await
+        } else {
+            tokio::select! {
+                biased;
+                _ = &mut closed => { closing = true; rx.close(); rx.recv().await }
+                event = rx.recv() => event,
+            }
+        } {
             let (detail, checkpoint_summary) = match &event {
                 ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
                 ServerEvent::ToolStart { name, .. } => {
@@ -910,10 +848,16 @@ fn task_progress_event_sender(
                 }
             }
 
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
+            let _ = output.send(event);
         }
+        // Keep the scoped channel alive through the tap drain, including abort.
+        drop(events);
     });
-    tx
+    TaskProgressEvents {
+        tx,
+        close: Some(close),
+        task: Some(task),
+    }
 }
 
 #[expect(
@@ -1388,6 +1332,14 @@ async fn handle_comm_assign_task_with_mode(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(&swarm_id, &swarm_state).await;
+    // Mirror the assignment onto the requesting coordinator's matching todo so
+    // the pinned todo band shows this worker's emoji on that row.
+    super::swarm_todo_link::link_assignment(
+        &req_session_id,
+        &selected_task_id,
+        &content,
+        &target_session,
+    );
 
     broadcast_swarm_plan(
         &swarm_id,
@@ -1417,7 +1369,9 @@ async fn handle_comm_assign_task_with_mode(
             .get(&req_session_id)
             .and_then(|member| member.friendly_name.clone())
     };
-    let notification = if let Some(ref extra) = message {
+    let brief =
+        super::swarm_todo_link::assignment_brief(&req_session_id, &selected_task_id, &content);
+    let mut notification = if let Some(ref extra) = message {
         format!(
             "Task assigned to you by coordinator: {} — {}",
             content, extra
@@ -1425,7 +1379,10 @@ async fn handle_comm_assign_task_with_mode(
     } else {
         format!("Task assigned to you by coordinator: {}", content)
     };
-    let queued_task_prompt = append_swarm_completion_report_instructions(&notification);
+    if let Some(brief) = brief.as_deref() {
+        notification.push_str("\n\n");
+        notification.push_str(brief);
+    }
     let assignment_text = combine_assignment_text(&content, message.as_deref());
     set_member_task_label(&target_session, &assignment_text, swarm_members).await;
     update_member_status(
@@ -1440,13 +1397,10 @@ async fn handle_comm_assign_task_with_mode(
     )
     .await;
 
-    let target_agent = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(&target_session).cloned()
-    };
+    let target_agent = task_agent_session(&target_session, sessions, swarm_members).await;
     let _ = queue_soft_interrupt_for_session(
         &target_session,
-        queued_task_prompt,
+        notification.clone(),
         false,
         SoftInterruptSource::System,
         soft_interrupt_queues,
@@ -1612,6 +1566,7 @@ pub(super) async fn handle_comm_assign_next(
             match super::comm_session::spawn_swarm_agent(
                 &req_session_id,
                 &swarm_id,
+                None,
                 working_dir.clone(),
                 None,
                 None,
@@ -1761,6 +1716,39 @@ pub(super) async fn handle_comm_task_control(
         return;
     };
 
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // their owner still needs a reliable way to rouse an idle or failed one.
+    // The spawner (any ancestor in the report-back chain) owns its subtree,
+    // exactly like `stop`, so it may wake/resume/retry its own workers even
+    // when it does not hold the swarm coordinator slot. That slot can be lost
+    // across a server reload, which used to strand every worker with
+    // "Only the coordinator can control assigned tasks".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && let Some(owner_swarm_id) =
+            requester_owns_target(&req_session_id, target, swarm_members).await
+        && !target_has_plan_assignment(&owner_swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &owner_swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
+
     let swarm_id = match require_plan_driver_swarm(
         id,
         &req_session_id,
@@ -1775,6 +1763,34 @@ pub(super) async fn handle_comm_task_control(
         Some(swarm_id) => swarm_id,
         None => return,
     };
+
+    // Workers spawned directly (without a plan) have no task to resume, but
+    // the coordinator still needs a reliable way to rouse an idle one. Treat
+    // wake/resume/start on a target session with no plan-assigned task as a
+    // direct session wake instead of failing with "No swarm plan exists".
+    if task_id.trim().is_empty()
+        && action_wakes_without_plan(action)
+        && let Some(target) = target_session.as_deref()
+        && !target_has_plan_assignment(&swarm_id, target, swarm_members, swarm_plans).await
+    {
+        wake_session_without_plan(
+            id,
+            &req_session_id,
+            &swarm_id,
+            target,
+            message.as_deref(),
+            client_event_tx,
+            sessions,
+            soft_interrupt_queues,
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        return;
+    }
 
     let task_id = if task_id.trim().is_empty() {
         let Some(target_session) = target_session.as_deref() else {
@@ -1879,7 +1895,8 @@ pub(super) async fn handle_comm_task_control(
             // first and only then discover the agent was missing or busy,
             // leaving a live task falsely queued with its run history mangled
             // even though the request was rejected.
-            let Some(agent_arc) = task_agent_session(&assignee, sessions).await else {
+            let Some(agent_arc) = task_agent_session(&assignee, sessions, swarm_members).await
+            else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: format!(
@@ -1967,7 +1984,6 @@ pub(super) async fn handle_comm_task_control(
             }
 
             if action == TaskControlAction::Wake {
-                let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
                 let wake_message = format!(
                     "Coordinator requested you wake and continue task '{}'.\n\n{}",
                     task_id, assignment_text
@@ -2107,16 +2123,17 @@ pub(super) async fn handle_comm_task_control(
                 let prior_name = active_swarm_member(&assignee, swarm_members)
                     .await
                     .and_then(|member| member.friendly_name);
-                let summaries =
-                    if let Some(agent_arc) = task_agent_session(&assignee, sessions).await {
-                        if let Ok(agent) = agent_arc.try_lock() {
-                            agent.get_tool_call_summaries(12)
-                        } else {
-                            vec![]
-                        }
+                let summaries = if let Some(agent_arc) =
+                    task_agent_session(&assignee, sessions, swarm_members).await
+                {
+                    if let Ok(agent) = agent_arc.try_lock() {
+                        agent.get_tool_call_summaries(12)
                     } else {
                         vec![]
-                    };
+                    }
+                } else {
+                    vec![]
+                };
                 let mut salvage = format_salvage_message(
                     &assignee,
                     prior_name.as_deref(),
@@ -2244,6 +2261,207 @@ pub(super) fn handle_client_debug_response(
     let _ = client_debug_response_tx.send((id, output));
 }
 
+/// Resolve a target given as a session id or unique friendly name within
+/// `swarm_id`.
+async fn resolve_swarm_member_target(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<String, String> {
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.swarm_id.as_deref() == Some(swarm_id) {
+            return Ok(target.to_string());
+        }
+        return Err(format!("Session '{target}' is not in this swarm."));
+    }
+    let mut matches: Vec<&str> = members
+        .values()
+        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id))
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .map(|member| member.session_id.as_str())
+        .collect();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!(
+            "Unknown target '{target}' - use an exact session_id or a unique friendly name within the swarm."
+        )),
+        many => Err(format!(
+            "Friendly name '{target}' is ambiguous in swarm. Use an exact session id instead. Matches: {}",
+            many.join(", ")
+        )),
+    }
+}
+
+/// Task-control actions that, on a target with no plan task, mean "wake this
+/// session and let it continue". Retry is included: a spawned worker whose
+/// turn failed has no plan task to re-dispatch, so retrying means waking it.
+fn action_wakes_without_plan(action: TaskControlAction) -> bool {
+    matches!(
+        action,
+        TaskControlAction::Wake
+            | TaskControlAction::Resume
+            | TaskControlAction::Start
+            | TaskControlAction::Retry
+    )
+}
+
+/// When `req_session_id` is a spawner (any ancestor) of `target`, return the
+/// target's swarm id. Ownership follows the report-back chain, the same rule
+/// `stop` uses, so it survives losing the coordinator slot.
+async fn requester_owns_target(
+    req_session_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Option<String> {
+    let members = swarm_members.read().await;
+    let swarm_id = members.get(req_session_id)?.swarm_id.clone()?;
+    let target_id = if members.contains_key(target) {
+        target.to_string()
+    } else {
+        let mut matches = members
+            .values()
+            .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
+            .filter(|member| member.friendly_name.as_deref() == Some(target))
+            .map(|member| member.session_id.clone());
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        first
+    };
+    if target_id == req_session_id {
+        return None;
+    }
+    let target_member = members.get(&target_id)?;
+    if target_member.swarm_id.as_deref() != Some(swarm_id.as_str()) {
+        return None;
+    }
+    super::swarm_is_self_or_ancestor(&members, req_session_id, &target_id).then_some(swarm_id)
+}
+
+/// Whether `target` (session id or friendly name) owns any task in the swarm
+/// plan. Targets without plan tasks are woken directly instead.
+async fn target_has_plan_assignment(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+) -> bool {
+    let resolved = resolve_swarm_member_target(swarm_id, target, swarm_members)
+        .await
+        .unwrap_or_else(|_| target.to_string());
+    let plans = swarm_plans.read().await;
+    plans.get(swarm_id).is_some_and(|plan| {
+        plan.items.iter().any(|item| {
+            matches!(item.assigned_to.as_deref(), Some(owner) if owner == target || owner == resolved)
+        })
+    })
+}
+
+/// Wake an idle swarm member that has no plan task to resume.
+///
+/// Starts a tracked live turn immediately when the agent is idle. When it is
+/// busy, the message is queued as a soft interrupt, which a running turn
+/// drains at its next safe point.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "direct wake needs the same swarm bookkeeping handles as task control"
+)]
+async fn wake_session_without_plan(
+    id: u64,
+    req_session_id: &str,
+    swarm_id: &str,
+    target: &str,
+    message: Option<&str>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &super::SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let session_id = match resolve_swarm_member_target(swarm_id, target, swarm_members).await {
+        Ok(session_id) => session_id,
+        Err(message) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    if session_id == req_session_id {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Coordinator cannot wake itself.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if task_agent_session(&session_id, sessions, swarm_members)
+        .await
+        .is_none()
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Session '{}' has no live agent on the server. Spawn a replacement instead.",
+                session_id
+            ),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    let wake_message = match message.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("Coordinator requested you wake and continue.\n\n{text}"),
+        None => "Coordinator requested you wake and continue your assigned work.".to_string(),
+    };
+
+    let woke = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        &wake_message,
+        None,
+        sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        ),
+    )
+    .await;
+    let status = if woke {
+        "running"
+    } else {
+        let _ = queue_soft_interrupt_for_session(
+            &session_id,
+            wake_message,
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        "queued"
+    };
+
+    let _ = client_event_tx.send(ServerEvent::CommTaskControlResponse {
+        id,
+        action: "wake".to_string(),
+        task_id: "(no plan task)".to_string(),
+        target_session: Some(session_id),
+        status: status.to_string(),
+        summary: PlanGraphStatus::empty_for_swarm(swarm_id),
+    });
+}
+
 /// Authorize a session to drive task dispatch for its swarm plan.
 ///
 /// Only the swarm coordinator may drive dispatch. Returns the swarm id when the
@@ -2254,7 +2472,7 @@ async fn require_plan_driver_swarm(
     permission_error: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    _swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Option<String> {
     let swarm_id = {

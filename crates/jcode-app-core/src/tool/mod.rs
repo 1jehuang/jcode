@@ -1,3 +1,5 @@
+pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
+
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
@@ -30,9 +32,8 @@ pub mod applet;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
-mod invalid;
 mod jcode_docs;
-mod ls;
+pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
 mod name_suggestions;
@@ -40,10 +41,10 @@ mod open;
 mod panel;
 mod patch;
 mod read;
-mod replace;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
+pub(crate) mod session_http;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
@@ -64,10 +65,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) fn tool_name_is_allowed(allowed: &HashSet<String>, name: &str) -> bool {
-    allowed.contains(name)
-        || (allowed.contains("mcp") && is_mcp_tool_name(name))
-        || (is_fixed_mcp_tool(name) && allowed.iter().any(|tool| tool.starts_with("mcp__")))
+#[path = "name_policy.rs"]
+mod name_policy;
+pub(crate) use name_policy::tool_name_is_allowed;
+/// The unified schema may be exposed for a restricted MCP allowlist. That
+/// must not grant management privileges or bypass a disabled legacy surface.
+fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {
+    if let Some(policy) = session_tool_policy(session_id) {
+        let allowed = policy.allowed_tools.as_ref().is_none_or(|allowed| {
+            if surface == "mcp" {
+                allowed.contains("mcp")
+            } else {
+                tool_name_is_allowed(allowed, surface)
+            }
+        });
+        anyhow::ensure!(allowed, "MCP action '{}' is not allowed", surface);
+        anyhow::ensure!(
+            !tool_name_is_disabled(&policy.disabled_tools, surface),
+            "MCP action '{}' is disabled",
+            surface
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn tool_name_is_disabled(disabled: &HashSet<String>, name: &str) -> bool {
@@ -290,6 +309,7 @@ pub struct Registry {
 ///
 /// A tool cannot strongly own the registry containing it without creating an
 /// Arc cycle. Upgrade this handle only for the duration of a tool call.
+#[derive(Clone)]
 pub(super) struct WeakRegistry {
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
@@ -412,14 +432,12 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.
-            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
                 "apply_patch",
                 apply_patch::ApplyPatchTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
             Self::insert_tool_timed(
                 &mut m,
@@ -448,7 +466,6 @@ impl Registry {
                 "websearch",
                 websearch::WebSearchTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
@@ -558,7 +575,7 @@ impl Registry {
                 codemode::CodemodeTool::new(registry.downgrade()),
             );
         }
-        // Integration discovery is on by default (opt-out); when disabled the
+        // Integration discovery is opt-in via `[sponsors] enabled = true`; when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
         if crate::config::config().sponsors.enabled {
@@ -594,6 +611,7 @@ impl Registry {
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
+            .filter(|(_, tool)| tool.model_visible())
             .filter(|(name, _)| allowed_tools.is_none_or(|set| self.tool_is_allowed(set, name)))
             .map(|(name, tool)| {
                 let mut def = tool.to_definition();
@@ -619,8 +637,9 @@ impl Registry {
 
     /// Tool definitions a session may call, honoring its registered allow and
     /// deny policy. Per-server MCP tools are always listed individually and
-    /// the fixed `mcp_search`/`mcp_call` surface is omitted, because scripts
-    /// address MCP tools directly. Used by `codemode`.
+    /// legacy `mcp_search`/`mcp_call` aliases stay hidden. Scripts may use
+    /// unified `mcp` discovery/calls or address server tools directly.
+    /// Used by `codemode`.
     pub(crate) async fn definitions_for_session(&self, session_id: &str) -> Vec<ToolDefinition> {
         let policy = session_tool_policy(session_id);
         let allowed = policy.as_ref().and_then(|p| p.allowed_tools.clone());
@@ -968,7 +987,8 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
@@ -1060,17 +1080,28 @@ impl Registry {
         .await;
 
         // User-configured pre_tool gate: external policy hook that can block
-        // this call (exit 2). Skipped entirely when not configured.
+        // this call (exit 2 or JSON deny), rewrite its input, or attach
+        // context for the model. Skipped entirely when not configured.
+        let mut input = input;
+        let mut gate_context: Vec<String> = Vec::new();
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let decision = crate::hooks::run_pre_tool_gate(
+            let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),
                 resolved_name,
                 &input_json,
             )
             .await;
-            if let crate::hooks::GateDecision::Block { reason } = decision {
+            gate_context = outcome.additional_context;
+            if let Some(updated) = outcome.updated_input {
+                input = updated;
+            }
+            if let crate::hooks::GateDecision::Block { mut reason } = outcome.decision {
+                for context in &gate_context {
+                    reason.push_str("\n\n[pre_tool context]\n");
+                    reason.push_str(context);
+                }
                 let mut fields =
                     Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
                 fields.push(("block_reason".to_string(), reason.clone()));
@@ -1101,10 +1132,23 @@ impl Registry {
                 fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
                 fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
                 crate::logging::event_warn("TOOL_LIFECYCLE", fields);
-                return Err(error);
+                if gate_context.is_empty() {
+                    return Err(error);
+                }
+                return Err(anyhow::anyhow!(
+                    "{error:#}\n\n[pre_tool context]\n{}",
+                    gate_context.join("\n")
+                ));
             }
         };
 
+        for context in &gate_context {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str("\n[pre_tool context]\n");
+            output.output.push_str(context);
+        }
         Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
@@ -1873,33 +1917,8 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod mcp_allow_list_tests {
-    use super::{tool_name_is_allowed, tool_name_is_disabled};
-    use std::collections::HashSet;
-
-    #[test]
-    fn allowing_mcp_also_allows_dynamic_server_tools() {
-        let allowed = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_allowed(&allowed, "mcp"));
-        assert!(tool_name_is_allowed(&allowed, "mcp__filesystem__read_file"));
-        assert!(!tool_name_is_allowed(&allowed, "mcpish"));
-        assert!(!tool_name_is_allowed(&allowed, "bash"));
-    }
-
-    #[test]
-    fn disabling_mcp_also_disables_dynamic_server_tools() {
-        let disabled = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_disabled(&disabled, "mcp"));
-        assert!(tool_name_is_disabled(
-            &disabled,
-            "mcp__filesystem__read_file"
-        ));
-        assert!(!tool_name_is_disabled(&disabled, "mcpish"));
-        assert!(!tool_name_is_disabled(&disabled, "bash"));
-    }
-}
+#[path = "registry_mcp_allow_list_tests.rs"]
+mod mcp_allow_list_tests;
 
 #[cfg(test)]
 mod tests;

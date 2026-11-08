@@ -320,3 +320,33 @@ fn a_notice_screen_left_alone_still_reaches_deep_idle() {
         "a dormant notice screen must tick at the deep-idle crawl"
     );
 }
+
+/// A turn that already streamed text and is now thinking or running a tool
+/// shows a fully revealed transcript. Repainting it at the fast cadence redrew
+/// identical cells 66 times a second on a live client (about 0.2 cores per
+/// waiting session). Only the spinner and timer change, so it must drop to the
+/// spinner cadence, while a pending reveal backlog keeps the fast cadence.
+#[test]
+fn fully_revealed_stream_waiting_on_the_turn_drops_to_spinner_cadence() {
+    let policy = full_tier_policy();
+    let fast_interval = Duration::from_millis(1000 / u64::from(policy.redraw_fps.max(1)));
+
+    let mut waiting = static_chrome_state(None);
+    waiting.status = ProcessingStatus::Streaming;
+    waiting.streaming_text = "partial assistant answer".to_string();
+    waiting.stream_reveal_pending = Some(false);
+    // TestState::is_processing derives from status.
+    assert_eq!(
+        crate::tui::redraw_interval_with_policy(&waiting, &policy),
+        crate::tui::REDRAW_STATIC_STREAM,
+        "fully revealed streamed text must not repaint at the fast cadence"
+    );
+
+    let mut revealing = waiting.clone();
+    revealing.stream_reveal_pending = Some(true);
+    assert_eq!(
+        crate::tui::redraw_interval_with_policy(&revealing, &policy),
+        fast_interval,
+        "a reveal backlog must keep the smooth fast cadence"
+    );
+}

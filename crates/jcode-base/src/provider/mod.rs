@@ -6,6 +6,7 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
 mod catalog_memo;
+mod catalog_refresh;
 mod catalog_routes;
 pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
@@ -66,7 +67,8 @@ pub use jcode_provider_core::{
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    oauth_account_label, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -332,6 +334,7 @@ pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
 use self::dispatch::CompletionMode;
 
 mod session_restore;
+pub use self::models::begin_forced_anthropic_model_catalog_refresh_for_scope;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
@@ -1928,6 +1931,18 @@ impl Provider for MultiProvider {
         self.selected_account_for_provider(self.active_provider())
     }
 
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|runtime| runtime.serving_oauth_account_label()),
+            _ => None,
+        }
+    }
+
     fn active_oauth_account_email(&self) -> Option<String> {
         let runtime = match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider(),
@@ -2320,132 +2335,19 @@ impl Provider for MultiProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let anthropic = self.anthropic_provider();
-        let openai = self.openai_provider();
-        let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let antigravity = self.antigravity_provider();
-        let gemini = self.gemini_provider();
-        let cursor = self.cursor_provider();
-        let bedrock = self.bedrock_provider();
+        self.refresh_catalogs(false).await
+    }
 
-        let (
-            anthropic_result,
-            openai_result,
-            openrouter_result,
-            copilot_result,
-            antigravity_result,
-            gemini_result,
-            cursor_result,
-            bedrock_result,
-        ) = tokio::join!(
-            async {
-                match anthropic {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openrouter {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match copilot {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match antigravity {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match gemini {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match cursor {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match bedrock {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-        );
-
-        let active_provider = self.active_provider();
-        let mut errors = Vec::new();
-        let mut optional_errors = Vec::new();
-        for (provider_name, result) in [
-            ("anthropic", anthropic_result),
-            ("openai", openai_result),
-            ("openrouter", openrouter_result),
-            ("copilot", copilot_result),
-            ("antigravity", antigravity_result),
-            ("gemini", gemini_result),
-            ("cursor", cursor_result),
-            ("bedrock", bedrock_result),
-        ] {
-            if let Err(err) = result {
-                let is_active = matches!(
-                    (active_provider, provider_name),
-                    (ActiveProvider::Claude, "anthropic" | "claude")
-                        | (ActiveProvider::OpenAI, "openai")
-                        | (ActiveProvider::OpenRouter, "openrouter")
-                        | (ActiveProvider::Copilot, "copilot")
-                        | (ActiveProvider::Antigravity, "antigravity")
-                        | (ActiveProvider::Gemini, "gemini")
-                        | (ActiveProvider::Cursor, "cursor")
-                        | (ActiveProvider::Bedrock, "bedrock")
-                );
-                if !is_active || matches!(provider_name, "bedrock") {
-                    optional_errors.push(format!("{provider_name}: {err}"));
-                } else {
-                    errors.push(format!("{provider_name}: {err}"));
-                }
-            }
-        }
-
-        if !optional_errors.is_empty() {
-            crate::logging::warn(&format!(
-                "Optional model catalog refresh failed: {}",
-                optional_errors.join("; ")
-            ));
-        }
-
-        // Bedrock's built-in default is a 2024 model; once its catalog (live
-        // or cached) is known, land on the newest usable Claude flagship.
-        if let Some(bedrock) = self.bedrock_provider() {
-            promote_bedrock_placeholder_default(&bedrock);
-        }
-
-        if !errors.is_empty() {
-            return Err(anyhow!("{}", errors.join("; ")));
-        }
-
-        // Fresh catalogs may have arrived; retire every memoized copy.
-        self.invalidate_routes_memo_globally();
-        Ok(())
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalogs(true).await?;
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn on_auth_changed(&self) {
@@ -3128,13 +3030,13 @@ mod bedrock_placeholder_default_tests {
         let routes = vec![
             route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
             route("anthropic.claude-sonnet-4-20250514-v1:0", true),
-            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("us.anthropic.claude-opus-6-v1", true),
             route("amazon.nova-pro-v1:0", true),
         ];
         assert_eq!(
             bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
                 .as_deref(),
-            Some("us.anthropic.claude-opus-4-6-v1")
+            Some("us.anthropic.claude-opus-6-v1")
         );
     }
 
@@ -3190,7 +3092,7 @@ mod bedrock_placeholder_default_tests {
                 "models": [
                     "anthropic.claude-3-5-sonnet-20241022-v2:0",
                     "anthropic.claude-sonnet-4-20250514-v1:0",
-                    "anthropic.claude-opus-4-20250514-v1:0",
+                    "anthropic.claude-opus-6-v1:0",
                 ],
                 "inference_profiles": [],
                 "region": null,
@@ -3213,13 +3115,13 @@ mod bedrock_placeholder_default_tests {
                 None => crate::env::remove_var(key),
             }
         }
-        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(promoted, "anthropic.claude-opus-6-v1:0");
         assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
     }
 
     #[test]
     fn bedrock_explicit_model_is_never_replaced() {
-        let routes = vec![route("us.anthropic.claude-opus-4-6-v1", true)];
+        let routes = vec![route("us.anthropic.claude-opus-6-v1", true)];
         assert_eq!(
             bedrock_promoted_default("anthropic.claude-sonnet-4-20250514-v1:0", &routes),
             None

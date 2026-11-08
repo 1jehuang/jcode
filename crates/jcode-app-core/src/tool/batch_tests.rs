@@ -123,11 +123,12 @@ async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
 }
 
 #[test]
-fn description_includes_parallel_tool_call_example() {
+fn description_is_compact_and_explains_flat_parallel_calls() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool_calls": ["#));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool": "read""#));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool": "agentgrep""#));
+    assert!(BATCH_DESCRIPTION.contains("sibling fields"));
+    assert!(BATCH_DESCRIPTION.contains("tool, intent"));
+    assert!(BATCH_DESCRIPTION.contains("Do not batch dependent calls or nest batch"));
+    assert!(BATCH_DESCRIPTION.len() <= 200);
 }
 
 #[test]

@@ -7,6 +7,9 @@ impl App {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
             }
+            "mobile" => {
+                "/mobile\nMove this session and its swarm to your managed Jcode Cloud host, then send a push notification. Tap it in the mobile app to open this session. If already on cloud, only the notification is sent.\n\nSign in to the same Jcode account in the CLI and app, and enable app notifications. Push failures do not undo a successful cloud move.\n\n/mobile cancel\nCancel a queued handoff. An already-running transfer cannot be cancelled here."
+            }
             "compact" => {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }
@@ -136,6 +139,7 @@ impl App {
                 /poke or /poke on arms auto-poke and immediately pokes if work remains.\n\
                 /poke off disarms auto-poke and clears any queued poke follow-ups.\n\
                 /poke status shows whether auto-poke is currently armed.\n\
+                Explicit todo waiting_on pauses only those todos while their background tasks run, uses no retry budget, and wakes on completion.\n\
                 If a turn is currently running, the poke is queued and sent right after that turn finishes.\n\
                 Injects a reminder with the number of incomplete todos and prompts the model to either\n\
                 finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."
@@ -175,7 +179,7 @@ impl App {
                 "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
             }
             "usage" => {
-                "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
+                "/usage [provider]\nFetch and display usage limits for connected providers. Pass a provider (claude, openai, copilot, cursor, gemini, ...) to show a card for just that provider. This command only reports real connected-provider usage windows and reset times."
             }
             "subscription" => {
                 "/subscription\nCompatibility alias for /hosted status. Shows hosted-model usage, your monthly spending limit, billing status, and router configuration."
@@ -198,6 +202,9 @@ impl App {
             "show-agentgrep-output" => {
                 "/show-agentgrep-output\nShow whether full agentgrep search output renders inline in the transcript.\n\n/show-agentgrep-output on\nRender the full agentgrep search results inline beneath each agentgrep call instead of just the one-line summary.\n\n/show-agentgrep-output off\nShow only the compact one-line agentgrep summary."
             }
+            "latex" => {
+                "/latex\nShow the current LaTeX math rendering mode.\n\n/latex status\nShow the current mode.\n\n/latex on|off\nEnable image rendering or disable it in favor of Unicode text.\n\n/latex none|unicode|image\nnone keeps the raw $...$ source. unicode converts supported notation to terminal-friendly text math. image typesets each formula to a PNG and shows it with the terminal image protocol (needs latex+dvipng or pdflatex+pdftocairo installed).\n\nAliases: raw for none, text/terminal for unicode, png/images for image. The choice is saved to config.toml and applies to the session immediately. JCODE_LATEX_RENDERING overrides it when set."
+            }
             "tool-call-details" => {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }
@@ -211,7 +218,7 @@ impl App {
                 "/account\nOpen the inline account picker showing both Claude and OpenAI accounts together. It lists saved accounts plus new/replace actions for each provider.\n\n/account claude  or  /account openai\nOpen the inline picker filtered to that provider.\n\n/account <provider> settings\nShow provider-specific account/settings details.\n\n/account <provider> login\nStart or refresh credentials for a provider.\n\n/account claude add  or  /account openai add\nCreate the next numbered OAuth account directly.\n\n/account <provider> switch <label>\nSwitch the active account for multi-account providers.\n\n/account <provider> remove <label>\nRemove a saved account.\n\n/account default-provider <provider|auto>\nSet the preferred default provider for future sessions.\n\n/account default-model <model|clear>\nSet the preferred default model for future sessions.\n\nOpenAI-specific settings:\n  /account openai transport ...\n  /account openai effort ...\n  /account openai fast on|off\n\nCustom provider settings:\n  /account openai-compatible api-base ...\n  /account openai-compatible api-key-name ...\n  /account openai-compatible env-file ...\n  /account openai-compatible default-model ..."
             }
             "save" => {
-                "/save\nBookmark the current session so it appears at the top of /resume.\n\n/save <label>\nBookmark with a custom label for easy identification.\n\nSaved sessions are shown in a dedicated \"Saved\" section in the session picker."
+                "/save\nBookmark the current session for the Saved filter in /resume. Recently used bookmarks also appear at the top of All for 7 days after their last resume-menu selection.\n\n/save <label>\nBookmark with a custom label for easy identification.\n\nSaved sessions remain in the Saved filter even after their temporary top placement in All expires."
             }
             "rename" => {
                 "/rename <session name>\nSet a custom display title for the current session. This updates the window title and /resume display.\n\n/rename --clear\nClear the custom name and return to the generated session title."

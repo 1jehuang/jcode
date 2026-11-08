@@ -58,6 +58,25 @@ fn save_account(label: &str, token: &str, refresh: &str, identity: &str) -> Stri
 }
 
 #[tokio::test]
+async fn cloud_import_replaces_live_daemon_cached_bearer() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let label = save_account("cloud-account", "old-access", "old-refresh", "same-id");
+    let provider =
+        OpenAIProvider::new(jcode_base::auth::codex::load_credentials_for_account(&label).unwrap());
+    provider.set_oauth_account(Some(&label)).unwrap();
+    save_account(&label, "imported-access", "imported-refresh", "same-id");
+    let token = openai_access_token(provider.refresh_account_label(), &provider.credentials)
+        .await
+        .unwrap();
+    assert_eq!(token, "imported-access");
+    assert_eq!(
+        provider.credentials.read().await.refresh_token,
+        "imported-refresh"
+    );
+}
+
+#[tokio::test]
 async fn service_tier_catalog_is_scoped_across_account_mode_reload_and_fork() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();
@@ -122,6 +141,55 @@ async fn service_tier_catalog_is_scoped_across_account_mode_reload_and_fork() {
         vec!["priority", "ultrafast", "flex"]
     );
     assert_eq!(fork.available_service_tiers(), vec!["ultrafast", "flex"]);
+}
+
+#[tokio::test]
+async fn unbound_catalog_follows_loaded_credentials_across_global_switch_reload_and_fork() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    // Auto mode preserves supplied credentials instead of loading the global login.
+    jcode_base::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    let eligible = save_account("eligible", "eligible-token", "refresh-a", "id-a");
+    let ineligible = save_account("ineligible", "ineligible-token", "refresh-b", "id-b");
+    let model = "gpt-6-astra";
+    for (scope, tier, effort) in [
+        (&eligible, "ultrafast", "high"),
+        (&ineligible, "priority", "low"),
+    ] {
+        let mut catalog = jcode_base::provider::OpenAIModelCatalog::default();
+        catalog.available_models.push(model.into());
+        catalog
+            .service_tiers
+            .insert(model.into(), vec![tier.into()]);
+        catalog
+            .reasoning_efforts
+            .insert(model.into(), vec![effort.into()]);
+        jcode_base::provider::persist_openai_model_catalog_for_scope(scope, &catalog);
+    }
+    jcode_base::auth::codex::set_active_account(&ineligible).unwrap();
+    let provider = OpenAIProvider::new(
+        jcode_base::auth::codex::load_credentials_for_account(&eligible).unwrap(),
+    );
+    *provider.model.try_write().unwrap() = model.into();
+    *provider.service_tier.write().unwrap() = Some("ultrafast".into());
+    assert_eq!(provider.oauth_account_label(), None);
+    assert_eq!(provider.catalog_scope(), eligible);
+    assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+    for active in [&eligible, &ineligible] {
+        jcode_base::auth::codex::set_active_account(active).unwrap();
+        provider.reload_cached_reasoning_efforts();
+        let fork = provider.fork();
+        assert_eq!(provider.catalog_scope(), eligible);
+        assert_eq!(
+            provider.model_reasoning_efforts.read().unwrap().get(model),
+            Some(&vec!["high".to_string()])
+        );
+        for runtime in [&provider as &dyn Provider, fork.as_ref()] {
+            assert_eq!(runtime.oauth_account_label(), None);
+            assert_eq!(runtime.available_service_tiers(), vec!["ultrafast", "flex"]);
+            assert_eq!(runtime.service_tier().as_deref(), Some("ultrafast"));
+        }
+    }
 }
 
 #[tokio::test]

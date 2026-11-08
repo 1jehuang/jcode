@@ -1,3 +1,4 @@
+use super::state_ui_history_marker::parse_compacted_history_marker;
 use super::state_ui_storage::{
     compact_display_message_tool_data, compact_display_messages_for_storage,
 };
@@ -7,8 +8,11 @@ use std::time::{Duration, Instant};
 
 const COMPACTED_HISTORY_CHUNK_MESSAGES: usize = 64;
 const COMPACTED_HISTORY_LOAD_SCROLL_THRESHOLD: usize = 2;
-const COMPACTED_HISTORY_MARKER_PREFIX: &str = "Earlier conversation compacted - ";
 const OVERNIGHT_CARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+#[path = "state_ui_reminder_tests.rs"]
+mod reminder_tests;
 
 fn display_message_from_stored_message(
     message: &crate::session::StoredMessage,
@@ -100,9 +104,32 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
 }
 
 impl App {
+    /// Keep explicit provider overload notices in chat, while transport details
+    /// remain transient. Check the current turn to deduplicate replayed notices
+    /// even after another detail has replaced the status label.
+    pub(super) fn apply_status_detail(&mut self, detail: String) {
+        const OVERLOAD_PREFIX: &str = "OpenAI reported server overload";
+        if detail.starts_with(OVERLOAD_PREFIX)
+            && !self
+                .display_messages
+                .iter()
+                .rev()
+                .take_while(|message| message.role != "user")
+                .any(|message| {
+                    message.role == "system" && message.content.starts_with(OVERLOAD_PREFIX)
+                })
+        {
+            self.push_display_message(DisplayMessage::system(detail.clone()));
+        }
+        self.status_detail = Some(detail);
+    }
+
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         if is_background_task_lifecycle_message(&message.content) {
             return;
+        }
+        if message.role == "tool" && message.duration_secs.is_none() {
+            message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
         }
         compact_display_message_tool_data(&mut message);
         // Keep Ctrl+L's spacer as a clear boundary when new content arrives.
@@ -137,6 +164,11 @@ impl App {
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
+        for message in &mut messages {
+            if message.role == "tool" && message.duration_secs.is_none() {
+                message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
+            }
+        }
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
         self.attempt_committed_assistant_messages = 0;
@@ -175,6 +207,18 @@ impl App {
         }
     }
 
+    pub(super) fn set_latest_tool_duration(&mut self, tool_call_id: &str, seconds: f32) {
+        if let Some(message) = self.display_messages.iter_mut().rev().find(|message| {
+            message
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.id == tool_call_id)
+        }) {
+            message.duration_secs = Some(seconds);
+            self.bump_display_messages_version();
+        }
+    }
+
     pub(super) fn replace_latest_tool_display_message(
         &mut self,
         tool_call_id: &str,
@@ -202,6 +246,87 @@ impl App {
 
     pub(super) fn background_task_rows_ref(&self) -> &[crate::tui::BackgroundTaskRow] {
         &self.background_task_rows
+    }
+
+    /// User-only blockers and live waits suppress all automatic continuations.
+    /// Disk state survives a TUI reload and overrides stale retained UI rows.
+    pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
+        crate::todo::todo_completely_blocked(todo)
+            || crate::todo::todo_has_external_blocker(todo)
+            || crate::todo::todo_waits_on_running_task(todo, |task_id| {
+                self.running_todo_await_dependency(task_id)
+                    || self.running_todo_background_dependency(task_id).is_some()
+            })
+    }
+
+    pub(super) fn running_todo_await_dependency(&self, task_id: &str) -> bool {
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::await_dependency::running(&crate::storage::runtime_dir(), task_id, session_id)
+    }
+
+    pub(super) fn running_todo_background_dependency(
+        &self,
+        task_id: &str,
+    ) -> Option<crate::background::TaskStatusFile> {
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        if std::path::Path::new(task_id)
+            .file_name()
+            .and_then(|s| s.to_str())
+            != Some(task_id)
+        {
+            return None;
+        }
+        if self.background_task_rows.iter().any(|row| {
+            row.task_id == task_id && row.status != crate::tui::BackgroundTaskRowStatus::Running
+        }) {
+            return None;
+        }
+        let bytes = match std::fs::read(crate::background::global().status_path_for(task_id)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot read background dependency status: {error}"
+                ));
+                return None;
+            }
+        };
+        let status: crate::background::TaskStatusFile = match serde_json::from_slice(&bytes) {
+            Ok(status) => status,
+            Err(error) => {
+                crate::logging::warn(&format!("Invalid background dependency status: {error}"));
+                return None;
+            }
+        };
+        // UI rows are history, not proof that an owner survived a crash.
+        let owner = if status.detached {
+            status.pid
+        } else {
+            status.owner_pid.or(status.pid)
+        };
+        if owner.is_none_or(|pid| {
+            pid == 0 || pid > i32::MAX as u32 || !crate::platform::is_process_running(pid)
+        }) {
+            return None;
+        }
+        (status.task_id == task_id
+            && status.session_id == session_id
+            && status.status == crate::bus::BackgroundTaskStatus::Running)
+            .then_some(status)
+    }
+
+    pub(super) fn all_open_todos_are_paused(&self) -> bool {
+        let open = super::commands::incomplete_poke_todos(self);
+        !open.is_empty()
+            && open
+                .iter()
+                .all(|todo| self.todo_is_paused_for_auto_followup(todo))
     }
 
     fn retain_latest_background_tasks(&mut self) {
@@ -404,6 +529,20 @@ impl App {
         true
     }
 
+    /// Move a live status message (such as a progress checklist) to the end of
+    /// the transcript so it stays next to the composer while later output
+    /// arrives. Returns the message's new index.
+    pub(super) fn move_display_message_to_end(&mut self, idx: usize) -> usize {
+        let last = self.display_messages.len().saturating_sub(1);
+        if idx >= last {
+            return idx;
+        }
+        let message = self.display_messages.remove(idx);
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+        last
+    }
+
     pub(super) fn remove_display_message(&mut self, idx: usize) -> Option<DisplayMessage> {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);
@@ -588,7 +727,9 @@ impl App {
         remaining_messages: usize,
         hidden_user_prompts: usize,
     ) {
+        let recent_history = self.recent_history_window_active();
         compact_display_messages_for_storage(&mut messages);
+        carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
         self.remote_side_pane_images = images;
         self.invalidate_side_pane_images_signature();
@@ -599,6 +740,11 @@ impl App {
             hidden_user_prompts,
             pending_request_visible: None,
         };
+        if recent_history {
+            // Once the current transcript is fully visible, its original
+            // compaction marker (if any) becomes the next lazy history source.
+            self.sync_compacted_history_lazy_from_display_messages();
+        }
         self.auto_scroll_paused = true;
         // Older messages are prepended above the current view. If the reader had
         // an anchor captured (they scrolled up to trigger this load), leave the
@@ -757,6 +903,9 @@ impl App {
     }
 
     pub(super) fn maybe_queue_compacted_history_load_with_overshoot(&mut self, overshoot: usize) {
+        if self.recent_history_paging.request.is_some() {
+            return;
+        }
         if !self.auto_scroll_paused {
             return;
         }
@@ -795,7 +944,7 @@ impl App {
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);
             self.set_status_notice(format!(
-                "Loading older compacted history… {} of {}",
+                "Loading older history… {} of {}",
                 next_visible, self.compacted_history_lazy.total_messages
             ));
         } else {
@@ -804,7 +953,79 @@ impl App {
     }
 
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
+        if self
+            .recent_history_paging
+            .retry_at
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return None;
+        }
+        self.recent_history_paging.retry_at = None;
         self.compacted_history_lazy.pending_request_visible.take()
+    }
+
+    pub(super) fn recent_history_window_active(&self) -> bool {
+        self.display_messages.first().is_some_and(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with(crate::protocol::RECENT_HISTORY_MARKER_PREFIX)
+        })
+    }
+
+    /// A response computed before a live append or rewind must not discard it.
+    /// Retry against the new generation while retaining the viewport anchor.
+    pub(super) fn accept_recent_history_response(&mut self, id: u64) -> bool {
+        let Some((expected, version, visible)) = self.recent_history_paging.request else {
+            return !self.recent_history_window_active();
+        };
+        if id != expected {
+            return false;
+        }
+        self.recent_history_paging.request = None;
+        if version != self.display_messages_version {
+            if self.recent_history_window_active() {
+                self.restore_pending_compacted_history_load(visible);
+                self.recent_history_paging.retry_at =
+                    Some(Instant::now() + Duration::from_millis(250));
+            }
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn recent_history_page_contains_visible_tail(
+        &mut self,
+        messages: &mut [DisplayMessage],
+        visible: usize,
+    ) -> bool {
+        if !self.recent_history_window_active() {
+            return true;
+        }
+        compact_display_messages_for_storage(messages);
+        // A busy agent may supply a persisted snapshot. Generation fencing
+        // alone cannot detect a snapshot already stale when we sent the request.
+        // Require its real transcript tail to include the rows on screen, while
+        // ignoring local status notices which are never part of server history.
+        let meaningful = |role: &str| matches!(role, "user" | "assistant" | "tool");
+        let current: Vec<_> = self
+            .display_messages
+            .iter()
+            .filter(|m| meaningful(&m.role))
+            .collect();
+        let incoming: Vec<_> = messages.iter().filter(|m| meaningful(&m.role)).collect();
+        let matches = current.is_empty()
+            || incoming.windows(current.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(&current)
+                    .all(|(new, old)| new.role == old.role && new.content == old.content)
+            });
+        if !matches {
+            self.restore_pending_compacted_history_load(visible);
+            self.recent_history_paging.retry_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        matches
     }
 
     /// Whether there are older compacted-history messages not yet loaded into the
@@ -828,11 +1049,23 @@ impl App {
             .first()
             .and_then(parse_compacted_history_marker)
             .unwrap_or_default();
-        // The marker text does not encode how many prompts are hidden, so derive
-        // it from the session render info when a compacted window is in effect.
-        // This keeps prompt numbering absolute (the first visible prompt keeps
-        // its real turn number).
-        if lazy.remaining_messages > 0 || lazy.total_messages > 0 {
+        let marker_hidden_prompts = self
+            .display_messages
+            .first()
+            .filter(|message| parse_compacted_history_marker(message).is_some())
+            .and_then(|message| {
+                message
+                    .content
+                    .rsplit_once(" Hidden user prompts: ")
+                    .and_then(|(_, count)| count.strip_suffix('.'))
+                    .and_then(|count| count.parse::<usize>().ok())
+            });
+        // New servers include the authoritative offset. A remote startup stub
+        // has no transcript, and a retained local snapshot may be stale.
+        // Derive it locally only for legacy markers without that metadata.
+        if let Some(hidden) = marker_hidden_prompts {
+            lazy.hidden_user_prompts = hidden;
+        } else if lazy.remaining_messages > 0 || lazy.total_messages > 0 {
             let visible = if lazy.remaining_messages == 0 {
                 usize::MAX
             } else {
@@ -881,59 +1114,35 @@ impl App {
     }
 }
 
-fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedHistoryLazyState> {
-    if message.role != "system" {
-        return None;
+/// History pages do not carry tool durations, but the already-loaded tail
+/// often learned them from live tool-finish events. Tool durations are part of
+/// the message cache hash, so dropping them made every reloaded tool row look
+/// changed: the prepend could not reuse the prepared tail and re-rendered the
+/// whole transcript on the scroll frame (hundreds of ms on long sessions), and
+/// the visible duration badges vanished. Restore them by tool call id.
+fn carry_over_tool_durations(previous: &[DisplayMessage], incoming: &mut [DisplayMessage]) {
+    let known: std::collections::HashMap<&str, f32> = previous
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| {
+            let tool = message.tool_data.as_ref()?;
+            let seconds = message.duration_secs?;
+            (!tool.id.is_empty()).then_some((tool.id.as_str(), seconds))
+        })
+        .collect();
+    if known.is_empty() {
+        return;
     }
-    let rest = message
-        .content
-        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)?;
-
-    if let Some(rest) = rest.strip_prefix("showing all ") {
-        let (total, _) = parse_leading_usize(rest)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: total,
-            remaining_messages: 0,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
+    for message in incoming.iter_mut() {
+        if message.role != "tool" || message.duration_secs.is_some() {
+            continue;
+        }
+        if let Some(seconds) = message
+            .tool_data
+            .as_ref()
+            .and_then(|tool| known.get(tool.id.as_str()))
+        {
+            message.duration_secs = Some(*seconds);
+        }
     }
-
-    let (first, after_first) = parse_leading_usize(rest)?;
-    if after_first.starts_with(" older historical messages hidden. Showing ") {
-        let showing = after_first.strip_prefix(" older historical messages hidden. Showing ")?;
-        let (visible, after_visible) = parse_leading_usize(showing)?;
-        let after_visible = after_visible.strip_prefix(" of ")?;
-        let (total, _) = parse_leading_usize(after_visible)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: visible,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    if after_first.starts_with(" historical messages hidden") {
-        return Some(CompactedHistoryLazyState {
-            total_messages: first,
-            visible_messages: 0,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    None
-}
-
-fn parse_leading_usize(text: &str) -> Option<(usize, &str)> {
-    let end = text
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .last()?;
-    let value = text[..end].parse().ok()?;
-    Some((value, &text[end..]))
 }

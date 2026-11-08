@@ -8,10 +8,13 @@ mod account_fetch;
 pub use account_fetch::fetch_oauth_account_usage;
 mod anthropic_reset;
 mod api_keys;
+mod banked;
+pub use banked::{AccountBankedResets, cached_account_banked_resets};
 mod cache;
 mod disk_cache;
 mod display;
 mod flight;
+mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_reset;
@@ -26,7 +29,12 @@ pub use anthropic_reset::{
 };
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
-pub use cache::{cached_account_usage_snapshot, cached_account_usage_status_snapshot};
+pub use cache::{
+    account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+};
+pub use disk_cache::{
+    export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
+};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{
@@ -36,9 +44,13 @@ pub use openai_reset::{
 };
 use provider_fetch::*;
 pub use remote_accounts::{
-    clear_remote_account_usage, remote_account_usage_received, set_remote_account_usage,
+    clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
+    remote_account_usage_received, set_remote_account_usage,
 };
-pub use startup_snapshot::{AccountUsageStartupPublisher, hydrate_remote_account_usage};
+pub use startup_snapshot::{
+    AccountUsageStartupPublisher, hydrate_remote_account_usage,
+    hydrate_remote_account_usage_for_generation,
+};
 
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};
@@ -64,6 +76,19 @@ const ANTHROPIC_CACHE_DURATION: Duration = Duration::from_secs(900);
 
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Network/transport failures (no HTTP response) are usually momentary, so
+/// retry them much sooner than auth or API errors.
+const TRANSPORT_ERROR_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How long a last-good OpenAI snapshot may stand in for a failed transport probe.
+const TRANSPORT_LAST_GOOD_MAX_AGE: Duration = Duration::from_secs(900);
+
+/// Prefix of OpenAI usage errors where the request never got an HTTP response.
+const TRANSPORT_ERROR_PREFIX: &str = "Failed to fetch: ";
+
+/// In-request retry delays for transport failures before giving up.
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 2] = [500, 1500];
 
 /// Rate limit backoff duration (wait 15 minutes before retrying after 429 errors)
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(900);
@@ -102,7 +127,7 @@ async fn fetch_anthropic_usage_data_uncached(
                 crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
             )
             .header("Authorization", format!("Bearer {}", access_token))
-            .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219"),
+            .header("anthropic-beta", "oauth-2025-04-20"),
         &crate::provider::anthropic::new_oauth_request_id(),
     )
     .send()
@@ -264,13 +289,13 @@ where
     let openai_generation = openai_usage_generation();
 
     let now = Instant::now();
-    let cached_results = if let Ok(map) = cache.lock() {
-        let mut cached = map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>();
-        sort_reports_most_recent_first(&mut cached);
-        cached
+    let mut cached_results = if let Ok(map) = cache.lock() {
+        map.values().map(|(_, r)| r.clone()).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    local_activity::refresh_cached_oauth_activity(&mut cached_results);
+    sort_reports_most_recent_first(&mut cached_results);
     let all_fresh = if let Ok(map) = cache.lock() {
         !map.is_empty()
             && map
@@ -382,12 +407,27 @@ fn sort_reports_most_recent_first(results: &mut [ProviderUsage]) {
 }
 
 /// Stamp a report with last-used recency from the activity ledger: sets the
-/// sort key and appends human-readable activity details. OpenAI OAuth totals
+/// sort key and appends human-readable activity details. OAuth totals
 /// are attached after fetching (including cached/error reports), so local usage
 /// never waits for the provider quota cache to expire.
 fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
-    if let Some(label) = source_key.strip_prefix("openai:oauth:") {
-        let mut details = crate::provider_activity::openai_oauth_usage_summary(label);
+    let oauth_details = source_key
+        .strip_prefix("openai:oauth:")
+        .map(|label| {
+            (
+                label,
+                crate::provider_activity::openai_oauth_usage_summary(label),
+            )
+        })
+        .or_else(|| {
+            source_key.strip_prefix("claude:oauth:").map(|label| {
+                (
+                    label,
+                    crate::provider_activity::anthropic_oauth_usage_summary(label),
+                )
+            })
+        });
+    if let Some((label, mut details)) = oauth_details {
         details.push(("Account label".to_string(), label.to_string()));
         // Replace rather than duplicate local values if a caller reattaches.
         report
@@ -395,6 +435,7 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
             .retain(|(key, _)| !details.iter().any(|(local_key, _)| local_key == key));
         report.extra_info.extend(details);
     }
+    report.extra_info.retain(|(key, _)| key != "Last used");
     if let Some(used) = crate::provider_activity::last_used_unix_secs(source_key) {
         report.last_used_unix_secs = Some(used);
         report.extra_info.push((
@@ -493,6 +534,12 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "cursor" => auth::cursor::has_cursor_native_auth(),
         "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
+            // The native Muse subscription stores its credential outside the env
+            // files, so it needs its own check; without it the subscription is
+            // reported twice and the generic entry wins with an empty snapshot.
+            if source_key == format!("openai-compatible:{}", crate::auth::muse::PROFILE_ID) {
+                return crate::auth::muse::has_cached_auth();
+            }
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
             source_key

@@ -14,6 +14,36 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{RwLock, broadcast};
 
+/// Publication before a transfer already owns a reservation in the bus
+/// envelope. Publication during its fence is queued without one, so dispatch
+/// waits and then checks durable ownership before touching runtime state.
+pub(super) async fn admit_runtime_delivery(
+    event: &crate::bus::BusEvent,
+) -> Option<crate::runtime_activity::ActivityReservation> {
+    let activity = match event.runtime_session_id() {
+        Some(session) => {
+            crate::runtime_activity::global()
+                .enter_session(session)
+                .await
+        }
+        None => crate::runtime_activity::global().enter_global().await,
+    };
+    if let Some(session) = event.runtime_session_id() {
+        match super::group_transfer::read_transfer_lease(session) {
+            Ok(None) => {}
+            Ok(Some(lease)) if lease.is_here() => {}
+            Ok(Some(_)) => return None,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot admit runtime callback for {session}: {error}"
+                ));
+                return None;
+            }
+        }
+    }
+    Some(activity)
+}
+
 async fn emit_external_wake(
     session_id: &str,
     reason: &str,
@@ -23,6 +53,13 @@ async fn emit_external_wake(
     if crate::config::config().server.wake_mode != crate::config::WakeMode::External {
         return false;
     }
+    crate::mobile_push::notify(
+        crate::mobile_push::PushKind::Wake,
+        session_id,
+        None,
+        notification,
+        None,
+    );
     let _ = fanout_session_event(
         swarm_members,
         session_id,
@@ -52,23 +89,29 @@ pub(super) async fn dispatch_background_task_completion(
 ) {
     let notification = format_background_task_notification_markdown(task);
 
-    if task.notify
-        && fanout_session_event(
-            swarm_members,
-            &task.session_id,
-            ServerEvent::Notification {
-                from_session: "background_task".to_string(),
-                from_name: Some("background task".to_string()),
-                notification_type: NotificationType::Message {
-                    scope: Some("background_task".to_string()),
-                    channel: None,
-                    tldr: None,
-                },
-                message: notification.clone(),
+    if fanout_session_event(
+        swarm_members,
+        &task.session_id,
+        ServerEvent::Notification {
+            from_session: "background_task".to_string(),
+            from_name: Some("background task".to_string()),
+            notification_type: NotificationType::Message {
+                scope: Some(
+                    if task.notify {
+                        "background_task"
+                    } else {
+                        "background_activity"
+                    }
+                    .to_string(),
+                ),
+                channel: None,
+                tldr: None,
             },
-        )
-        .await
-            == 0
+            message: notification.clone(),
+        },
+    )
+    .await
+        == 0
     {
         crate::logging::warn(&format!(
             "Failed to notify attached clients for background task completion on session {}",
@@ -296,6 +339,55 @@ pub(super) async fn dispatch_swarm_await_completion(
     }
 }
 
+/// Completion is actionable even without an explicit await. Keep the UI card
+/// emitted by the status transition, but deliver the full report to the model.
+pub(super) async fn dispatch_swarm_worker_report(
+    event: &crate::bus::SwarmWorkerReported,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm: LiveTurnSwarmContext,
+) {
+    // Do not revive a coordinator that the user explicitly stopped.
+    if swarm
+        .members
+        .read()
+        .await
+        .get(&event.session_id)
+        .is_none_or(|member| matches!(member.status.as_str(), "stopped" | "crashed" | "failed"))
+    {
+        return;
+    }
+    if emit_external_wake(
+        &event.session_id,
+        "swarm_worker_reported",
+        &event.notification,
+        &swarm.members,
+    )
+    .await
+    {
+        return;
+    }
+    if !run_live_turn_if_idle(
+        &event.session_id,
+        &event.notification,
+        Some("A worker has reported back. Integrate its result and check the remaining todo plan. Reassign available workers to actionable work, or explicitly stop them if no work remains. Do not end coordination with an unfinished actionable plan just because this worker finished its chunk. Respect user cancellation and genuine external blockers.".to_string()),
+        sessions,
+        swarm,
+    ).await {
+        let queued = queue_soft_interrupt_for_session(
+            &event.session_id,
+            format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        ).await;
+        if !queued {
+            crate::logging::warn("Could not queue worker report for coordinator session");
+        }
+    }
+}
+
 pub(super) async fn dispatch_background_task_progress(
     task: &crate::bus::BackgroundTaskProgressEvent,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -368,6 +460,7 @@ pub(super) async fn dispatch_swarm_todo_progress(
         Some((completed, total))
     };
     let mut items = compact_todo_items(&event.todos);
+    let (statuses, blocked_reason) = todo_runtime_projection(&event.todos);
 
     let swarm_id = {
         let mut members = swarm_members.write().await;
@@ -386,11 +479,17 @@ pub(super) async fn dispatch_swarm_todo_progress(
         {
             new.tool_intents = old.tool_intents.clone();
         }
-        if member.todo_progress == progress && member.todo_items == items {
+        if member.todo_progress == progress
+            && member.todo_items == items
+            && member.runtime.todo_statuses == statuses
+            && member.runtime.todo_blocked_reason == blocked_reason
+        {
             return; // no change, skip the broadcast
         }
         member.todo_progress = progress;
         member.todo_items = items;
+        member.runtime.todo_statuses = statuses;
+        member.runtime.todo_blocked_reason = blocked_reason;
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
@@ -551,11 +650,47 @@ const SWARM_TODO_CONTENT_CAP: usize = 120;
 const SWARM_TOOL_INTENTS_CAP: usize = 3;
 const SWARM_TOOL_INTENT_CAP: usize = 120;
 
+fn todo_display_status(todo: &crate::todo::TodoItem) -> String {
+    if crate::todo::todo_completely_blocked(todo) {
+        "completely_blocked".into()
+    } else {
+        todo.status.clone()
+    }
+}
+
+/// A complete blocker applies to the worker only when every unfinished item
+/// is completely blocked. Independent pending/running work must remain actionable.
+pub(super) fn todo_runtime_projection(
+    todos: &[crate::todo::TodoItem],
+) -> (Vec<String>, Option<String>) {
+    let statuses = todos.iter().map(todo_display_status).collect();
+    let unfinished: Vec<_> = todos
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .collect();
+    let reason = (!unfinished.is_empty()
+        && unfinished
+            .iter()
+            .all(|todo| crate::todo::todo_completely_blocked(todo)))
+    .then(|| {
+        unfinished
+            .iter()
+            .filter_map(|todo| todo.completely_blocked.as_ref())
+            .map(|required| required.reason.trim().to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+    .map(|reason| format!("Completely blocked: {reason}"));
+    (statuses, reason)
+}
+
 /// Build the capped, display-only todo snapshot that crosses the swarm
 /// boundary. Prefers showing the active window: everything from the first
 /// non-completed item onward, then backfills with the most recent completed
 /// items if there is room left in the cap.
-fn compact_todo_items(todos: &[crate::todo::TodoItem]) -> Vec<crate::protocol::SwarmTodoItem> {
+pub(super) fn compact_todo_items(
+    todos: &[crate::todo::TodoItem],
+) -> Vec<crate::protocol::SwarmTodoItem> {
     let first_open = todos
         .iter()
         .position(|t| t.status != "completed")
@@ -568,7 +703,7 @@ fn compact_todo_items(todos: &[crate::todo::TodoItem]) -> Vec<crate::protocol::S
         .take(SWARM_TODO_ITEMS_CAP)
         .map(|t| crate::protocol::SwarmTodoItem {
             content: cap_chars(&t.content, SWARM_TODO_CONTENT_CAP),
-            status: t.status.clone(),
+            status: todo_display_status(t),
             tool_intents: Vec::new(),
         })
         .collect()
@@ -622,6 +757,173 @@ pub(super) async fn dispatch_ui_activity(
 mod tests {
     use super::*;
     use crate::bus::{BatchProgress, ToolEvent, ToolStatus};
+
+    #[tokio::test]
+    async fn silent_background_completion_fanouts_lifecycle_only() {
+        let (event_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: "silent-session".into(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "idle".into(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: std::time::Instant::now(),
+            last_status_change: std::time::Instant::now(),
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: Default::default(),
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([(
+            "silent-session".into(),
+            member,
+        )])));
+        let sessions = Arc::new(super::super::session_manager::SessionManager::new());
+        let queues = Arc::new(RwLock::new(HashMap::new()));
+        let (swarm_tx, _) = broadcast::channel(8);
+        let task = crate::bus::BackgroundTaskCompleted {
+            task_id: "silent-completion".into(),
+            tool_name: "bash".into(),
+            display_name: None,
+            session_id: "silent-session".into(),
+            status: crate::bus::BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "done".into(),
+            output_file: "silent.output".into(),
+            duration_secs: 1.0,
+            notify: false,
+            wake: false,
+        };
+        dispatch_background_task_completion(
+            &task,
+            &sessions,
+            &queues,
+            &members,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(VecDeque::new())),
+            &Arc::new(AtomicU64::new(0)),
+            &swarm_tx,
+        )
+        .await;
+        let ServerEvent::Notification {
+            notification_type,
+            message,
+            ..
+        } = events
+            .try_recv()
+            .expect("silent lifecycle must reach attached client")
+        else {
+            panic!("expected lifecycle notification");
+        };
+        assert!(
+            matches!(notification_type, NotificationType::Message { scope: Some(scope), .. } if scope == "background_activity")
+        );
+        let completed =
+            crate::message::parse_background_task_notification_markdown(&message).unwrap();
+        assert_eq!(completed.task_id, task.task_id);
+        assert!(
+            events.try_recv().is_err(),
+            "silent completion must not request wake"
+        );
+        assert!(queues.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn swarm_todo_statuses_include_items_outside_detail_window() {
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: "worker".into(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "running".into(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: std::time::Instant::now(),
+            last_status_change: std::time::Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: Default::default(),
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([("worker".into(), member)])));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let mut event = crate::bus::TodoEvent {
+            session_id: "worker".into(),
+            todos: (0..20)
+                .map(|i| crate::todo::TodoItem {
+                    id: i.to_string(),
+                    content: format!("Step {i}"),
+                    status: "pending".into(),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        {
+            let guard = members.read().await;
+            let worker = &guard["worker"];
+            assert_eq!(worker.todo_items.len(), SWARM_TODO_ITEMS_CAP);
+            assert_eq!(worker.runtime.todo_statuses.len(), 20);
+        }
+        // Same counts and same capped detail snapshot, but a different status
+        // outside the window must still reach clients.
+        event.todos[19].status = "in_progress".into();
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        assert_eq!(
+            members.read().await["worker"].runtime.todo_statuses[19],
+            "in_progress"
+        );
+        for todo in &mut event.todos {
+            todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+                reason: "Required data is permanently unavailable".into(),
+            });
+        }
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        {
+            let members = members.read().await;
+            let runtime = &members["worker"].runtime;
+            assert!(
+                runtime
+                    .todo_statuses
+                    .iter()
+                    .all(|s| s == "completely_blocked")
+            );
+            assert!(
+                runtime
+                    .todo_blocked_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("Required data is permanently unavailable")
+            );
+            assert_eq!(members["worker"].todo_items[0].status, "completely_blocked");
+        }
+        event.todos[19].completely_blocked = None;
+        dispatch_swarm_todo_progress(&event, &members, &swarms).await;
+        assert!(
+            members.read().await["worker"]
+                .runtime
+                .todo_blocked_reason
+                .is_none(),
+            "independent in-progress work prevents a worker-wide pause"
+        );
+    }
 
     fn tool(id: &str, intent: &str, status: ToolStatus) -> ToolEvent {
         ToolEvent {

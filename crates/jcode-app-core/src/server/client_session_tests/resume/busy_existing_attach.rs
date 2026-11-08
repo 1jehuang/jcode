@@ -36,10 +36,12 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (target_session_id.to_string(), Arc::clone(&existing_agent)),
-        (temp_session_id.to_string(), Arc::clone(&new_agent)),
-    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([
+            (target_session_id.to_string(), Arc::clone(&existing_agent)),
+            (temp_session_id.to_string(), Arc::clone(&new_agent)),
+        ]),
+    ));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
@@ -136,6 +138,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         &event_counter,
         &swarm_event_tx,
         false,
+        false,
     )
     .await?;
 
@@ -169,6 +172,8 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             &event_history,
             &event_counter,
             &swarm_event_tx,
+            &sessions,
+            &soft_interrupt_queues,
         ),
     )
     .await
@@ -211,6 +216,27 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     )
     .await
     .expect("history should be written promptly")?;
+    let event: ServerEvent = serde_json::from_str(line.trim())?;
+    match event {
+        ServerEvent::Todos {
+            session_id,
+            payload,
+        } => {
+            assert_eq!(session_id, target_session_id);
+            let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            assert!(payload["todos"].is_array());
+        }
+        other => {
+            panic!("authoritative todos must precede the potentially huge History, got {other:?}")
+        }
+    }
+    line.clear();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::io::AsyncBufReadExt::read_line(&mut peer_reader, &mut line),
+    )
+    .await
+    .expect("history follows the early todo snapshot")?;
     let event: ServerEvent = serde_json::from_str(line.trim())?;
     match event {
         ServerEvent::History {

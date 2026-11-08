@@ -689,6 +689,17 @@ pub(crate) fn switched_model_account_suffix(
     }
 }
 
+/// Notice after switching the active saved account. The switch rebinds this
+/// session and becomes the default for new sessions, but other sessions that
+/// are already running keep the credentials they loaded.
+#[cfg(test)]
+pub(super) fn account_switch_notice(provider: &str, label: &str) -> String {
+    format!(
+        "Switched {provider} account to `{label}` for this session and new sessions. \
+         Other running sessions keep their current account until they reload."
+    )
+}
+
 pub(super) fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
     let Some((local, domain)) = trimmed.split_once('@') else {
@@ -715,6 +726,11 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Spawn a new terminal window that resumes a jcode session.
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
+    if let Some(lease) = crate::storage::read_session_lease(session_id)
+        && let Some(host) = lease.away_host
+    {
+        return remote_resume_invocation_args(session_id, &host, lease.repo_root.as_deref());
+    }
     let mut args = vec![
         "--fresh-spawn".to_string(),
         "--resume".to_string(),
@@ -724,6 +740,22 @@ fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String>
         args.push("--socket".to_string());
         args.push(socket.to_string());
     }
+    args
+}
+
+fn remote_resume_invocation_args(
+    session_id: &str,
+    host: &str,
+    working_dir: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["--fresh-spawn".into(), "--ssh".into(), host.into()];
+    if let Ok(binary) = std::env::var("JCODE_CLOUD_REMOTE_BINARY") {
+        args.extend(["--ssh-binary".into(), binary]);
+    }
+    if let Some(dir) = working_dir {
+        args.extend(["--remote-working-dir".into(), dir.into()]);
+    }
+    args.extend(["--resume".into(), session_id.into()]);
     args
 }
 
@@ -812,8 +844,14 @@ fn spawn_command_in_new_terminal(
         // tests is the libtest harness and would pop up a broken window.
         return Ok(false);
     }
-    let command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
+    let mut command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
         .title(title.to_string());
+    if args.iter().any(|arg| arg == "--ssh") {
+        // Resuming is an attachment, never a request to start another turn.
+        command = command
+            .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+            .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    }
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
@@ -1266,8 +1304,9 @@ pub(crate) fn prime_git_info(budget: Duration) {
 }
 
 /// Fetch a session's todos plus its goal-level assessments through the same
-/// stale-while-revalidate cache, so the info widget can render goal metadata
+/// stale-while-revalidate cache for consumers that need goal metadata
 /// (closed feedback loop and objectives) without extra disk reads per frame.
+#[cfg(test)]
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
@@ -1762,27 +1801,5 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
 }
 
 #[cfg(test)]
-mod switched_model_account_suffix_tests {
-    use super::switched_model_account_suffix;
-
-    #[test]
-    fn email_is_masked() {
-        assert_eq!(
-            switched_model_account_suffix(Some("OAuth"), Some("jeremy@gmail.com")),
-            " (via OAuth · j***y@gmail.com)"
-        );
-        assert_eq!(
-            switched_model_account_suffix(Some("OAuth"), Some("me@example.com")),
-            " (via OAuth · m*@example.com)"
-        );
-    }
-
-    #[test]
-    fn no_email_keeps_existing_suffix() {
-        assert_eq!(
-            switched_model_account_suffix(Some("API key"), None),
-            " (via API key)"
-        );
-        assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
-    }
-}
+#[path = "helpers/account_notice_tests.rs"]
+mod account_notice_tests;

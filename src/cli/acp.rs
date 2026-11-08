@@ -91,6 +91,12 @@ struct DaemonSession {
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
     ui_state: Mutex<SessionUiState>,
+    /// Workspace root reported by the ACP client, used to compose the
+    /// project-local skill overlay for slash-skill resolution.
+    working_dir: Option<PathBuf>,
+    /// Sticky skill selection, resent with every prompt. The daemon treats a
+    /// missing `active_skill` as "clear the selection", mirroring the TUI.
+    active_skill: Mutex<Option<String>>,
 }
 
 /// Session-scoped provider/model state used to surface ACP `configOptions`
@@ -110,9 +116,39 @@ struct TurnUsage {
     output_tokens: u64,
     cached_read_tokens: Option<u64>,
     cached_write_tokens: Option<u64>,
+    call_snapshot: (u64, u64, Option<u64>, Option<u64>),
 }
 
 impl TurnUsage {
+    fn begin_call(&mut self) {
+        self.call_snapshot = (0, 0, None, None);
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    ) {
+        let previous = self.call_snapshot;
+        self.add(
+            input.saturating_sub(previous.0),
+            output.saturating_sub(previous.1),
+            cache_read.map(|value| value.saturating_sub(previous.2.unwrap_or(0))),
+            cache_write.map(|value| value.saturating_sub(previous.3.unwrap_or(0))),
+        );
+        self.call_snapshot = (
+            input.max(previous.0),
+            output.max(previous.1),
+            cache_read
+                .map(|value| value.max(previous.2.unwrap_or(0)))
+                .or(previous.2),
+            cache_write
+                .map(|value| value.max(previous.3.unwrap_or(0)))
+                .or(previous.3),
+        );
+    }
     fn add(
         &mut self,
         input_tokens: u64,
@@ -208,7 +244,23 @@ impl DaemonSession {
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
             ui_state: Mutex::new(SessionUiState::default()),
+            working_dir: None,
+            active_skill: Mutex::new(None),
         }
+    }
+
+    fn with_working_dir(self, working_dir: PathBuf) -> Self {
+        Self {
+            working_dir: Some(working_dir),
+            ..self
+        }
+    }
+
+    /// Effective skills for this session: global skills plus the workspace's
+    /// project-local overlay, loaded fresh so newly installed skills resolve.
+    fn skills(&self) -> crate::skill::SkillRegistry {
+        crate::skill::SkillRegistry::load_for_working_dir(self.working_dir.as_deref())
+            .unwrap_or_default()
     }
 
     fn with_ui_state(self, state: SessionUiState) -> Self {
@@ -240,7 +292,7 @@ impl DaemonSession {
         }
         let event = serde_json::from_str(&line)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
-        Ok(event)
+        Ok(super::commands::unwrap_turn_event(event))
     }
 }
 
@@ -485,6 +537,7 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
+        let explicit_skill = explicit_skill_from_params(&message.params);
         let (text, images) = match prompt_from_params(&message.params) {
             Ok(prompt) => prompt,
             Err(err) => {
@@ -523,7 +576,9 @@ impl AcpRuntime {
 
         let runtime = self.clone();
         tokio::spawn(async move {
-            let result = runtime.run_prompt(id.clone(), session, text, images).await;
+            let result = runtime
+                .run_prompt(id.clone(), session, text, images, explicit_skill)
+                .await;
             if let Err(err) = result {
                 let _ = runtime
                     .write_error_value(
@@ -728,13 +783,20 @@ impl AcpRuntime {
     }
 
     async fn write_available_commands(&self, session_id: &str) -> Result<()> {
+        let skills = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(session_id).map(|session| session.skills())
+        }
+        .unwrap_or_default();
+        let mut commands = acp_available_commands();
+        commands.extend(acp_skill_commands(&skills));
         self.write_notification(
             "session/update",
             json!({
                 "sessionId": session_id,
                 "update": {
                     "sessionUpdate": "available_commands_update",
-                    "availableCommands": acp_available_commands(),
+                    "availableCommands": commands,
                 }
             }),
         )
@@ -761,6 +823,15 @@ impl AcpRuntime {
 
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
+        self.create_new_session_connected(cwd, reader, writer).await
+    }
+
+    async fn create_new_session_connected(
+        &self,
+        cwd: PathBuf,
+        reader: ReadHalf,
+        writer: WriteHalf,
+    ) -> Result<DaemonSession> {
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let subscribe_id = 1;
         session
@@ -768,7 +839,8 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_server_failover: false,
+                supports_server_failover: true,
+                supports_turn_identity: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -780,6 +852,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
@@ -809,7 +882,8 @@ impl AcpRuntime {
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
         )
-        .with_ui_state(ui_state))
+        .with_ui_state(ui_state)
+        .with_working_dir(cwd))
     }
 
     async fn attach_existing_session(
@@ -819,6 +893,24 @@ impl AcpRuntime {
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
+        self.attach_existing_session_connected(
+            target_session_id,
+            cwd,
+            replay_history,
+            reader,
+            writer,
+        )
+        .await
+    }
+
+    async fn attach_existing_session_connected(
+        &self,
+        target_session_id: String,
+        cwd: PathBuf,
+        replay_history: bool,
+        reader: ReadHalf,
+        writer: WriteHalf,
+    ) -> Result<DaemonSession> {
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let resume_id = 1;
         session
@@ -826,7 +918,8 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_server_failover: false,
+                supports_server_failover: true,
+                supports_turn_identity: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -838,6 +931,7 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                client_name: None,
             })
             .await?;
 
@@ -886,7 +980,8 @@ impl AcpRuntime {
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
         )
-        .with_ui_state(ui_state))
+        .with_ui_state(ui_state)
+        .with_working_dir(cwd))
     }
 
     async fn replay_history(
@@ -924,6 +1019,7 @@ impl AcpRuntime {
         session: Arc<DaemonSession>,
         text: String,
         images: Vec<(String, String)>,
+        explicit_skill: Option<String>,
     ) -> Result<()> {
         if let Some(command) = parse_acp_slash_command(&text) {
             let response = match command {
@@ -945,6 +1041,53 @@ impl AcpRuntime {
             return Ok(());
         }
 
+        // Explicit client metadata wins. Otherwise resolve `/skill [prompt]`
+        // (or `$skill [prompt]`, as some ACP hosts serialize command names)
+        // against the session's registry. Unknown or path-like slash text is
+        // passed through to the model unchanged.
+        let mut text = text;
+        let skills = session.skills();
+        let selected_skill = match explicit_skill {
+            Some(name) => Some(name),
+            None => match resolve_acp_skill_invocation(&skills, &text) {
+                Some((name, prompt)) => {
+                    text = prompt.unwrap_or_default();
+                    Some(name)
+                }
+                None => None,
+            },
+        };
+        if let Some(name) = selected_skill {
+            let Some(skill) = skills.get(&name) else {
+                cleanup_prompt_state(&session).await;
+                self.write_error_value(
+                    rpc_id,
+                    JSONRPC_INVALID_PARAMS,
+                    format!("Unknown skill: {name}"),
+                )
+                .await?;
+                return Ok(());
+            };
+            let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
+            *session.active_skill.lock().await = Some(name);
+            self.write_notification(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id,
+                    "update": agent_message_chunk(format!("{notice}\n\n")),
+                }),
+            )
+            .await?;
+            if text.trim().is_empty() && images.is_empty() {
+                // Bare `/skill`: select it for the following prompts, like the TUI.
+                cleanup_prompt_state(&session).await;
+                self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
+                    .await?;
+                return Ok(());
+            }
+        }
+        let active_skill = session.active_skill.lock().await.clone();
+
         let prompt_id = session.next_id();
         {
             let mut active = session.active_prompt_id.lock().await;
@@ -957,7 +1100,7 @@ impl AcpRuntime {
                 content: text,
                 images,
                 system_reminder: None,
-                active_skill: None,
+                active_skill,
                 no_reply: false,
             })
             .await;
@@ -993,13 +1136,22 @@ impl AcpRuntime {
                         .await?;
                     return Ok(());
                 }
+                ServerEvent::KvCacheRequest { .. } | ServerEvent::RetryRollback { .. } => {
+                    turn_usage.begin_call();
+                }
                 ServerEvent::TokenUsage {
                     input,
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    ..
                 } => {
-                    turn_usage.add(input, output, cache_read_input, cache_creation_input);
+                    turn_usage.observe_snapshot(
+                        input,
+                        output,
+                        cache_read_input,
+                        cache_creation_input,
+                    );
                     let (provider_name, context_limit) = {
                         let state = session.ui_state.lock().await;
                         (
@@ -1375,7 +1527,7 @@ impl EventMapper {
     }
 
     fn map_event(&mut self, event: ServerEvent) -> Vec<Value> {
-        match event {
+        match super::commands::unwrap_turn_event(event) {
             ServerEvent::TextDelta { text } => vec![agent_message_chunk(text)],
             ServerEvent::TextReplace { text } => vec![agent_message_chunk(text)],
             // ACP chunks cannot retract prior output. Surface the corrected
@@ -1394,22 +1546,22 @@ impl EventMapper {
                     "status": "pending",
                 })]
             }
-            ServerEvent::ToolInput { delta, .. } => {
-                let Some(tool_id) = self.current_tool_id.clone() else {
+            ServerEvent::ToolInput { id, delta } => {
+                // Older daemons omit the ID. Only those events should use the
+                // most recently started tool, since keyed streams can overlap.
+                let Some(tool_id) = id.or_else(|| self.current_tool_id.clone()) else {
                     return Vec::new();
                 };
                 let buffer = self.tool_inputs.entry(tool_id.clone()).or_default();
                 buffer.push_str(&delta);
-                let mut update = json!({
+                let Some(raw_input) = parse_json_object(buffer) else {
+                    return Vec::new();
+                };
+                vec![json!({
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": tool_id,
-                });
-                if let Some(raw_input) = parse_json_object(buffer)
-                    && let Some(object) = update.as_object_mut()
-                {
-                    object.insert("rawInput".to_string(), raw_input);
-                }
-                vec![update]
+                    "rawInput": raw_input,
+                })]
             }
             ServerEvent::ToolExec { id, name } => {
                 self.current_tool_id = Some(id.clone());
@@ -1608,6 +1760,68 @@ fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
     }
 }
 
+/// Read an explicit skill selection from ACP prompt metadata. Accepts
+/// `_meta.jcode.skill`, `_meta.jcode.activeSkill`, `_meta.skill`, and
+/// `_meta.activeSkill`.
+fn explicit_skill_from_params(params: &Value) -> Option<String> {
+    let meta = params.get("_meta")?;
+    [meta.get("jcode"), Some(meta)]
+        .into_iter()
+        .flatten()
+        .flat_map(|object| ["skill", "activeSkill", "active_skill"].map(|key| object.get(key)))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|name| name.trim().trim_start_matches(['/', '$']).trim())
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve `/name [prompt]` or `$name [prompt]` to a registered skill. Returns
+/// `None` for unknown names and path-like text so it reaches the model as-is.
+fn resolve_acp_skill_invocation(
+    skills: &crate::skill::SkillRegistry,
+    text: &str,
+) -> Option<(String, Option<String>)> {
+    let trimmed = text.trim_end();
+    // Like built-in commands, a leading space escapes skill interpretation.
+    let normalized = if let Some(rest) = trimmed.strip_prefix('$') {
+        format!("/{rest}")
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+    let invocation = skills.resolve_invocation(&normalized)?;
+    skills.get(invocation.name)?;
+    Some((
+        invocation.name.to_string(),
+        invocation.prompt.map(str::to_string),
+    ))
+}
+
+/// ACP `availableCommands` entries for installed skills. Skills whose names
+/// contain whitespace or shadow built-in commands are not advertised (they can
+/// still be invoked by typing the slash command).
+fn acp_skill_commands(skills: &crate::skill::SkillRegistry) -> Vec<Value> {
+    const BUILTIN: [&str; 3] = ["model", "models", "effort"];
+    skills
+        .list()
+        .into_iter()
+        .filter(|skill| {
+            !skill.name.is_empty()
+                && !skill.name.contains(char::is_whitespace)
+                && !BUILTIN.contains(&skill.name.as_str())
+        })
+        .map(|skill| {
+            json!({
+                "name": skill.name,
+                "description": skill.description,
+                "input": { "hint": "request for this skill (optional)" },
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum AcpSlashCommand {
     Model(Option<String>),
@@ -1781,319 +1995,59 @@ pub(crate) async fn run_acp_command(
 }
 
 #[cfg(test)]
-mod tests {
+mod turn_envelope_tests {
     use super::*;
-    use std::path::Path;
+    use crate::protocol::TurnIdentity;
 
-    #[test]
-    fn acp_tool_kind_maps_core_tools() {
-        assert_eq!(tool_kind("read"), "read");
-        assert_eq!(tool_kind("apply_patch"), "edit");
-        assert_eq!(tool_kind("bash"), "execute");
-        assert_eq!(tool_kind("agentgrep"), "search");
-        assert_eq!(tool_kind("webfetch"), "fetch");
-        assert_eq!(tool_kind("swarm"), "other");
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
     }
 
     #[test]
-    fn json_rpc_parse_errors_use_standard_codes() {
-        let (code, _) = JsonRpcMessage::parse("not json").unwrap_err();
-        assert_eq!(code, JSONRPC_PARSE_ERROR);
-
-        let (code, message) = JsonRpcMessage::parse(r#"{"method":"initialize"}"#).unwrap_err();
-        assert_eq!(code, JSONRPC_INVALID_REQUEST);
-        assert!(message.contains("jsonrpc"));
+    fn mapper_preserves_explicit_wrapped_text_and_tool_events() {
+        for event in [
+            ServerEvent::TextDelta {
+                text: "hello".into(),
+            },
+            ServerEvent::ToolStart {
+                id: "tool-1".into(),
+                name: "read".into(),
+            },
+        ] {
+            let plain =
+                EventMapper::new("session".into(), AcpProfile::Standard).map_event(event.clone());
+            let wrapped = EventMapper::new("session".into(), AcpProfile::Standard)
+                .map_event(envelope(envelope(event)));
+            assert!(!plain.is_empty());
+            assert_eq!(wrapped, plain);
+        }
     }
 
-    #[test]
-    fn prompt_from_params_accepts_text_images_and_resources() {
-        let params = json!({
-            "sessionId": "s1",
-            "prompt": [
-                {"type": "text", "text": "hello"},
-                {"type": "image", "mimeType": "image/png", "data": "abc"},
-                {"type": "resource", "resource": {"uri": "file:///tmp/a.rs", "text": "fn main(){}"}},
-                {"type": "resource_link", "uri": "file:///tmp/b.rs", "name": "b.rs"}
-            ]
-        });
-        let (text, images) = prompt_from_params(&params).unwrap();
-        assert!(text.contains("hello"));
-        assert!(text.contains("Embedded resource: file:///tmp/a.rs"));
-        assert!(text.contains("Resource link: b.rs"));
-        assert_eq!(images, vec![("image/png".to_string(), "abc".to_string())]);
-    }
-
-    #[test]
-    fn prompt_response_reports_usage_accumulated_across_the_turn() {
-        let mut usage = TurnUsage::default();
-        usage.add(10, 2, Some(4), Some(5));
-        usage.add(20, 3, Some(6), Some(7));
-
-        assert_eq!(
-            prompt_response("end_turn", &usage),
-            json!({
-                "stopReason": "end_turn",
-                "usage": {
-                    "totalTokens": 57,
-                    "inputTokens": 30,
-                    "outputTokens": 5,
-                    "cachedReadTokens": 10,
-                    "cachedWriteTokens": 12,
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn prompt_response_omits_unreported_usage_and_cache_fields() {
-        assert_eq!(
-            prompt_response("end_turn", &TurnUsage::default()),
-            json!({ "stopReason": "end_turn" })
-        );
-
-        let mut usage = TurnUsage::default();
-        usage.add(10, 2, None, None);
-        assert_eq!(
-            prompt_response("cancelled", &usage),
-            json!({
-                "stopReason": "cancelled",
-                "usage": {
-                    "totalTokens": 12,
-                    "inputTokens": 10,
-                    "outputTokens": 2,
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn initialize_standard_omits_jcode_meta() {
-        let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Standard);
-        assert_eq!(result["protocolVersion"], 1);
-        assert!(result["agentCapabilities"].get("_meta").is_none());
-        assert_eq!(result["agentCapabilities"]["loadSession"], true);
-    }
-
-    #[test]
-    fn initialize_full_advertises_jcode_extension_meta() {
-        let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Full);
-        assert_eq!(
-            result["agentCapabilities"]["_meta"]["jcode"]["profile"],
-            "full"
-        );
-    }
-
-    #[test]
-    fn event_mapper_maps_tool_lifecycle() {
-        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
-        let start = mapper.map_event(ServerEvent::ToolStart {
-            id: "tool1".to_string(),
-            name: "bash".to_string(),
-        });
-        assert_eq!(start[0]["sessionUpdate"], "tool_call");
-        assert_eq!(start[0]["kind"], "execute");
-
-        let input = mapper.map_event(ServerEvent::ToolInput {
-            id: None,
-            delta: "{\"command\":\"true\"}".to_string(),
-        });
-        assert_eq!(input[0]["rawInput"]["command"], "true");
-
-        let done = mapper.map_event(ServerEvent::ToolDone {
-            id: "tool1".to_string(),
-            name: "bash".to_string(),
-            output: "ok".to_string(),
-            error: None,
-        });
-        assert_eq!(done[0]["status"], "completed");
-        assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
-    }
-
-    #[test]
-    fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
-        let params = json!({"mcpServers": [{"name": "fs"}]});
-        assert!(validate_acp_mcp_servers(&params).is_ok());
-
-        let params = json!({"mcpServers": []});
-        assert!(validate_acp_mcp_servers(&params).is_ok());
-    }
-
-    #[test]
-    fn advertised_commands_cover_all_acp_daemon_model_controls() {
-        let commands = acp_available_commands();
-        let names: Vec<&str> = commands
-            .iter()
-            .map(|command| command["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(names, ["model", "models", "effort"]);
-        assert_eq!(commands[0]["input"]["hint"], "model id (optional)");
-        assert!(commands[1].get("input").is_none());
-        assert!(
-            commands[2]["input"]["hint"]
-                .as_str()
-                .unwrap()
-                .contains("high")
-        );
-    }
-
-    #[test]
-    fn advertised_commands_parse_to_real_dispatch_variants() {
-        assert_eq!(
-            parse_acp_slash_command("/model claude-sonnet-4-5")
-                .unwrap()
-                .unwrap(),
-            AcpSlashCommand::Model(Some("claude-sonnet-4-5".to_string()))
-        );
-        assert_eq!(
-            parse_acp_slash_command("/model ").unwrap().unwrap(),
-            AcpSlashCommand::Model(None)
-        );
-        assert_eq!(
-            parse_acp_slash_command("/models").unwrap().unwrap(),
-            AcpSlashCommand::Models
-        );
-        assert_eq!(
-            parse_acp_slash_command("/effort xhigh").unwrap().unwrap(),
-            AcpSlashCommand::Effort(Some("xhigh".to_string()))
-        );
-        assert!(parse_acp_slash_command("/models now").unwrap().is_err());
-        assert!(parse_acp_slash_command("/not-advertised").is_none());
-        assert!(parse_acp_slash_command(" /model literal").is_none());
-        assert!(parse_acp_slash_command("ordinary prompt").is_none());
-    }
-
-    #[test]
-    fn compatibility_methods_accept_host_field_names_and_aliases() {
-        assert_eq!(
-            compatibility_option_value(
-                &json!({"modelId": "deepseek-v4-flash"}),
-                &["modelId", "model"],
-                "session/set_model"
-            )
-            .unwrap(),
-            "deepseek-v4-flash"
-        );
-        assert_eq!(
-            compatibility_option_value(
-                &json!({"reasoningEffort": "high"}),
-                &["effort", "reasoningEffort"],
-                "session/set_reasoning_effort"
-            )
-            .unwrap(),
-            "high"
-        );
-        assert!(
-            compatibility_option_value(
-                &json!({"effort": ""}),
-                &["effort", "reasoningEffort"],
-                "session/set_reasoning_effort"
-            )
-            .unwrap_err()
-            .contains("non-empty")
-        );
-    }
-
-    #[test]
-    fn cwd_must_be_absolute() {
-        let params = json!({"cwd": "relative"});
-        assert!(cwd_from_params(&params).is_err());
-        let params = json!({"cwd": "/tmp"});
-        assert_eq!(cwd_from_params(&params).unwrap(), Path::new("/tmp"));
-    }
-
-    #[test]
-    fn config_options_include_model_selector_and_effort_ladder() {
-        let state = SessionUiState {
-            provider_name: Some("openai".to_string()),
-            model: Some("gpt-5.2".to_string()),
-            available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
-            reasoning_effort: Some("high".to_string()),
-        };
-        let options = session_config_options(&state);
-        assert_eq!(options.len(), 2);
-
-        let model = &options[0];
-        assert_eq!(model["id"], CONFIG_ID_MODEL);
-        assert_eq!(model["category"], "model");
-        assert_eq!(model["type"], "select");
-        assert_eq!(model["currentValue"], "gpt-5.2");
-        assert_eq!(model["options"].as_array().unwrap().len(), 2);
-
-        let effort = &options[1];
-        assert_eq!(effort["id"], CONFIG_ID_EFFORT);
-        assert_eq!(effort["category"], "thought_level");
-        assert_eq!(effort["currentValue"], "high");
-        let effort_values: Vec<&str> = effort["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|option| option["value"].as_str().unwrap())
-            .collect();
-        assert!(effort_values.contains(&"medium"));
-        assert!(
-            !effort_values.iter().any(|value| value.starts_with("swarm")),
-            "swarm sentinels are TUI-only and must not leak over ACP: {effort_values:?}"
-        );
-    }
-
-    #[test]
-    fn config_options_current_model_prepended_when_not_listed() {
-        let state = SessionUiState {
-            provider_name: Some("anthropic".to_string()),
-            model: Some("claude-opus-4-6".to_string()),
-            available_models: vec!["claude-sonnet-4-5".to_string()],
-            reasoning_effort: None,
-        };
-        let options = session_config_options(&state);
-        let model_values: Vec<&str> = options[0]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|option| option["value"].as_str().unwrap())
-            .collect();
-        assert_eq!(model_values[0], "claude-opus-4-6");
-        assert!(model_values.contains(&"claude-sonnet-4-5"));
-    }
-
-    #[test]
-    fn legacy_models_catalog_is_emitted_alongside_config_options() {
-        let state = SessionUiState {
-            provider_name: Some("deepseek".to_string()),
-            model: Some("deepseek-v4-flash".to_string()),
-            available_models: vec!["deepseek-v4-pro".to_string()],
-            reasoning_effort: Some("high".to_string()),
-        };
-        let mut result = json!({"sessionId": "s1"});
-        insert_session_configuration(&mut result, &state);
-
-        assert!(result["configOptions"].is_array());
-        assert_eq!(result["models"]["currentModelId"], "deepseek-v4-flash");
-        let ids: Vec<&str> = result["models"]["availableModels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|model| model["modelId"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, ["deepseek-v4-flash", "deepseek-v4-pro"]);
-    }
-
-    #[test]
-    fn config_options_empty_without_model_state() {
-        let options = session_config_options(&SessionUiState::default());
-        assert!(options.is_empty());
-    }
-
-    #[test]
-    fn context_limit_falls_back_to_default_for_unknown_models() {
-        let state = SessionUiState {
-            provider_name: Some("mystery".to_string()),
-            model: Some("mystery-model-9000".to_string()),
-            available_models: Vec::new(),
-            reasoning_effort: None,
-        };
-        assert_eq!(
-            state.context_limit(),
-            crate::provider::DEFAULT_CONTEXT_LIMIT as u64
-        );
+    #[tokio::test]
+    async fn reader_unwraps_terminal_events_before_request_waiters() {
+        let (client, peer) = crate::transport::stream_pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let session = DaemonSession::new("session".into(), reader, writer, 1);
+        let (_, mut peer_writer) = peer.into_split();
+        let event = envelope(envelope(ServerEvent::Done { id: 42 }));
+        let mut json = serde_json::to_string(&event).unwrap();
+        json.push('\n');
+        peer_writer.write_all(json.as_bytes()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_done(&session, 42),
+        )
+        .await
+        .expect("wrapped Done must terminate request waiter")
+        .unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests;

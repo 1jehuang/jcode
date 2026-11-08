@@ -33,6 +33,7 @@ pub mod catchup;
 pub mod channel;
 pub use jcode_base::external_auth;
 pub mod mission;
+pub mod mobile_push;
 pub mod network_retry;
 pub mod notifications;
 pub mod overnight;
@@ -43,6 +44,7 @@ pub mod running_tool_registry;
 pub mod server;
 pub mod server_spawn;
 pub mod session_effort;
+pub mod session_env;
 pub mod session_launch;
 pub mod session_rebuild;
 pub mod setup_hints;
@@ -51,6 +53,7 @@ pub mod startup_profile;
 pub mod tool;
 pub mod turn_cancel_registry;
 pub mod update;
+pub mod wait_registry;
 
 use std::sync::Mutex;
 

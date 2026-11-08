@@ -16,7 +16,21 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
         auth_method: None,
         effort: None,
         elapsed_secs: None,
+        context_tokens: None,
+        context_limit: None,
+        output_tokens: None,
     }
+}
+
+#[test]
+fn waiting_worker_has_stable_clock_and_is_not_idle_or_actively_spinning() {
+    for frame in 0..STRIP_SPINNER_FRAMES.len() {
+        assert_eq!(status_glyph("waiting", frame), "◷");
+    }
+    assert_eq!(card_status_glyph("waiting"), "◷");
+    assert_eq!(card_status_label("waiting"), "Waiting");
+    assert!(!is_active_status("waiting"));
+    assert!(status_rank("waiting") < status_rank("ready"));
 }
 
 #[test]
@@ -301,6 +315,41 @@ fn vertical_strip_falls_back_to_name_without_icon() {
     assert!(plain_line(&lines[0]).contains("zeta"));
 }
 
+fn todo(content: &str, status: &str) -> GalleryTodo {
+    GalleryTodo {
+        content: content.to_string(),
+        status: status.to_string(),
+        tool_intents: Vec::new(),
+    }
+}
+
+#[test]
+fn vertical_strip_prefers_active_todo_over_spawn_prompt() {
+    let mut working = member("zeta", "running", None, &[]);
+    working.task = Some("the original spawn prompt".to_string());
+    working.todo = Some((1, 3));
+    working.todo_items = vec![
+        todo("read the code", "completed"),
+        todo("wire the renderer", "in_progress"),
+        todo("write tests", "pending"),
+    ];
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    let row = plain_line(&lines[0]);
+    assert!(row.contains("wire the renderer"), "active todo: {row:?}");
+    assert!(!row.contains("spawn prompt"), "prompt hidden: {row:?}");
+
+    // Finished agents fall back to what they were spawned for.
+    working.status = "completed".to_string();
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
+
+    // Agents without a todo list keep showing the spawn label.
+    working.status = "running".to_string();
+    working.todo_items.clear();
+    let lines = render_swarm_strip_vertical(&[working], 0, false, &[], None, 0, 80, 4, 12);
+    assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
+}
+
 #[test]
 fn vertical_strip_caps_rows_and_reports_overflow() {
     let members: Vec<GalleryMember> = (0..7)
@@ -531,9 +580,15 @@ fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
         !all.contains("reviewer"),
         "compact strip should not repeat the animal name: {all}"
     );
+    // The compact row names the active step in place of the spawn prompt,
+    // but stays a single row: the full todo card is chat/focus-only.
     assert!(
-        !all.contains("test token refresh flow"),
-        "details leaked: {all}"
+        all.contains("test token refresh flow"),
+        "active step: {all}"
+    );
+    assert!(
+        !all.contains("review authentication changes"),
+        "spawn prompt should yield to the active todo: {all}"
     );
 }
 
@@ -1040,110 +1095,5 @@ fn compact_is_width_and_height_bounded_at_all_sizes() {
     }
 }
 
-#[test]
-fn dock_lists_agents_with_header_and_selected_tail() {
-    let mut m1 = member(
-        "researcher",
-        "thinking",
-        Some("coordinator"),
-        &["tracing refresh path", "· 2s ago"],
-    );
-    m1.todo = Some((2, 5));
-    let m2 = member("implementer", "running", None, &["building"]);
-    let m3 = member("reviewer", "completed", None, &["LGTM"]);
-    let lines = render_swarm_dock(&[m1, m2, m3], 0, false, Some((3, 7)), 0, 34, 12);
-    let all: Vec<String> = lines.iter().map(plain_line).collect();
-    let joined = all.join("\n");
-    assert!(joined.contains("2/3 active"), "got:\n{joined}");
-    assert!(joined.contains("plan 3/7"), "got:\n{joined}");
-    for name in ["researcher", "implementer", "reviewer"] {
-        assert!(joined.contains(name), "missing {name} in:\n{joined}");
-    }
-    // Selected (coordinator, sorts first) shows its live tail with gutter.
-    assert!(joined.contains("│ tracing refresh path"), "got:\n{joined}");
-    // Meta age line stays out of the tail.
-    assert!(!joined.contains("2s ago"), "got:\n{joined}");
-    // Todo counter on the row.
-    assert!(joined.contains("2/5"), "got:\n{joined}");
-    // Unfocused: no hint line.
-    assert!(!joined.contains("j/k"), "got:\n{joined}");
-}
-
-#[test]
-fn dock_focused_shows_hints_and_attention_count() {
-    let members = vec![
-        member("a", "running", None, &["working"]),
-        member("b", "blocked", None, &["stuck"]),
-        member("c", "failed", None, &["boom"]),
-    ];
-    let lines = render_swarm_dock(&members, 1, true, None, 0, 34, 14);
-    let joined: String = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
-    assert!(joined.contains("⚠2"), "got:\n{joined}");
-    assert!(joined.contains("j/k"), "got:\n{joined}");
-    // Selected row marked.
-    let sel = lines
-        .iter()
-        .map(plain_line)
-        .find(|l| l.contains('▸'))
-        .expect("selected row");
-    assert!(sel.contains('b'), "got: {sel}");
-}
-
-#[test]
-fn dock_windows_list_and_reports_overflow() {
-    let members: Vec<GalleryMember> = (0..12)
-        .map(|i| member(&format!("agent-{i:02}"), "running", None, &["w"]))
-        .collect();
-    // Budget: header + 5 rows -> 7 hidden.
-    let lines = render_swarm_dock(&members, 11, false, None, 0, 30, 7);
-    assert!(lines.len() <= 7, "got {} lines", lines.len());
-    let joined: String = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
-    // Selection stays visible even at the end of the list.
-    assert!(joined.contains("agent-11"), "got:\n{joined}");
-    assert!(joined.contains("+7 more"), "got:\n{joined}");
-}
-
-#[test]
-fn dock_is_display_width_bounded_at_all_widths() {
-    use unicode_width::UnicodeWidthStr;
-    let mut members: Vec<GalleryMember> = (0..6)
-        .map(|i| {
-            member(
-                &format!("agent-🐝-{i}"),
-                "running",
-                None,
-                &["line 一二三四五"],
-            )
-        })
-        .collect();
-    members[0].role = Some("coordinator".into());
-    members[0].todo = Some((3, 9));
-    for width in 8..=60 {
-        for focused in [false, true] {
-            for height in [0usize, 1, 2, 3, 8, 20] {
-                let lines = render_swarm_dock(
-                    &members,
-                    3,
-                    focused,
-                    Some((2, 9)),
-                    usize::MAX / 2,
-                    width,
-                    height,
-                );
-                assert!(
-                    lines.len() <= height.max(1),
-                    "width {width} height {height}: {} lines",
-                    lines.len()
-                );
-                for line in &lines {
-                    let text = plain_line(line);
-                    let w = text.as_str().width();
-                    assert!(
-                        w <= width,
-                        "width {width} focused {focused}: line overflows ({w}): {text:?}"
-                    );
-                }
-            }
-        }
-    }
-}
+#[path = "swarm_gallery_dock_tests.rs"]
+mod dock;

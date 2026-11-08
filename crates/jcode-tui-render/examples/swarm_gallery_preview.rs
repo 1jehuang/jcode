@@ -141,6 +141,9 @@ fn main() {
         auth_method: None,
         effort: None,
         elapsed_secs: None,
+        context_tokens: None,
+        context_limit: None,
+        output_tokens: None,
     };
     let panel_members = vec![
         gm(

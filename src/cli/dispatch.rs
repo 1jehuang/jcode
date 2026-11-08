@@ -364,6 +364,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             super::args::AccountCommand::Manage => account::run_manage()?,
             super::args::AccountCommand::Logout => account::run_logout().await?,
         },
+        Some(Command::Mobile { action }) => account::run_mobile(action).await?,
         Some(Command::Repl) => {
             let (provider, registry) =
                 provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
@@ -371,8 +372,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
-        Some(Command::Update) => {
-            hot_exec::run_update()?;
+        Some(Command::Update { channel }) => {
+            hot_exec::run_update(channel.as_deref())?;
         }
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
@@ -666,31 +667,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
 /// Anthropic Messages runtime with the profile's base URL and auth, while
 /// `AnthropicApi` would pin an Anthropic API-key credential the profile may
 /// not have (e.g. `auth = "none"`).
-fn provider_choice_for_named_profile(profile_name: &str) -> ProviderChoice {
-    // Same source as `apply_named_provider_profile_env`, which already
-    // validated that the profile exists.
-    match crate::config::Config::load_strict() {
-        Ok(config) => provider_choice_for_named_profile_in(profile_name, &config),
-        Err(_) => provider_choice_for_named_profile_in(profile_name, crate::config::config()),
-    }
-}
-
-fn provider_choice_for_named_profile_in(
-    profile_name: &str,
-    config: &crate::config::Config,
-) -> ProviderChoice {
-    match config.providers.get(profile_name) {
-        Some(profile)
-            if matches!(
-                profile.provider_type,
-                crate::config::NamedProviderType::AnthropicCompatible
-            ) =>
-        {
-            ProviderChoice::Auto
-        }
-        _ => ProviderChoice::OpenaiCompatible,
-    }
-}
+#[path = "dispatch/named_profiles.rs"]
+mod named_profiles;
+use named_profiles::provider_choice_for_named_profile;
+#[cfg(test)]
+use named_profiles::provider_choice_for_named_profile_in;
 
 fn auth_doctor_provider_arg<'a>(
     positional_provider: Option<&'a str>,
@@ -927,6 +908,12 @@ async fn run_default_command(args: Args) -> Result<()> {
         // can never disturb a running server.
         if server::reap_stale_socket_if_dead(&server::socket_path()).await {
             output::stderr_info("Removed a stale jcode socket from a previous server.");
+        }
+        // Dead servers leave their registry entries behind, the Windows analog
+        // of a stale socket file (issue #1887). Prune them before the spawn so
+        // this cannot race the new server's own registration.
+        if let Ok(mut registry) = crate::registry::ServerRegistry::load().await {
+            let _ = registry.cleanup_stale().await;
         }
 
         maybe_prompt_server_bootstrap_login(&args.provider).await?;
@@ -1464,6 +1451,20 @@ async fn spawn_server_with_lifetime(
     Ok(())
 }
 
+/// True when the shared server accepts a fresh connection and answers a ping.
+///
+/// A Ping is a one-shot control request, so sending it over the held keepalive
+/// connection would make the server close that connection after replying.
+/// Probe through a short-lived client instead.
+async fn keepalive_server_answers_ping() -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut probe = server::Client::connect().await?;
+        probe.ping().await
+    })
+    .await
+    .is_ok_and(|result| result.unwrap_or(false))
+}
+
 async fn run_server_keepalive(
     provider_choice: &ProviderChoice,
     model: Option<&str>,
@@ -1481,6 +1482,7 @@ async fn run_server_keepalive(
     });
     let mut client: Option<server::Client> = None;
     let mut first_attempt = true;
+    let mut unhealthy_server_hold_skip = false;
 
     loop {
         let delay = if first_attempt {
@@ -1495,25 +1497,28 @@ async fn run_server_keepalive(
             _ = &mut owner_closed => return Ok(()),
             _ = tokio::time::sleep(delay) => {
                 if client.is_some() {
-                    // A Ping is a one-shot control request, so sending it over
-                    // the held connection would make the server close that
-                    // connection after replying. Probe through a short-lived
-                    // client instead and leave the counted keepalive connected.
-                    let healthy = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        async {
-                            let mut probe = server::Client::connect().await?;
-                            probe.ping().await
-                        },
-                    )
-                    .await
-                    .is_ok_and(|result| result.unwrap_or(false));
-                    if healthy {
+                    if keepalive_server_answers_ping().await {
                         continue;
                     }
+                    // Release the hold before anything else. A server that has
+                    // a listener but no longer answers must not be pinned: the
+                    // held connection is what kept such zombies alive for days
+                    // (issue #1887). Without it the server's idle exit can run.
                     client = None;
+                    unhealthy_server_hold_skip = true;
                 }
-                if spawn_server(provider_choice, model, provider_profile).await.is_ok()
+                if !server::has_live_listener(&server::socket_path()).await {
+                    unhealthy_server_hold_skip = false;
+                    if spawn_server(provider_choice, model, provider_profile).await.is_err() {
+                        continue;
+                    }
+                } else if unhealthy_server_hold_skip {
+                    // Give the unresponsive server one full interval with no
+                    // hold so it can idle-exit before we probe it again.
+                    unhealthy_server_hold_skip = false;
+                    continue;
+                }
+                if keepalive_server_answers_ping().await
                     && let Ok(connected) = server::Client::connect().await
                 {
                     client = Some(connected);

@@ -18,7 +18,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const DB = "jcode-telemetry";
 const args = process.argv.slice(2);
 const asJson = args.includes("--json");
 const file = args.find((a) => !a.startsWith("--"));
@@ -29,6 +28,8 @@ if (!file) {
 }
 
 const sql = readFileSync(file, "utf8");
+// A `-- db: <name>` line picks the database (e.g. jcode-telemetry-bulk).
+const DB = sql.match(/^--\s*db:\s*(\S+)/m)?.[1] ?? "jcode-telemetry";
 
 const raw = execFileSync(
   "npx",

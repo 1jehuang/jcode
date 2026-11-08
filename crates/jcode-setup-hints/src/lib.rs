@@ -120,6 +120,11 @@ pub struct SetupHintsState {
     /// small number of spaced repetitions.
     #[serde(default)]
     pub cli_launch_hint_shown_count: HashMap<String, u64>,
+    /// Set once the first-run onboarding start choice ("Find bugs in my most
+    /// active repo" / "Start a new session") has been shown. Onboarding never
+    /// auto-starts again after this.
+    #[serde(default)]
+    pub onboarding_start_choice_shown: bool,
 }
 
 /// Serde default helper: fields documented as "true by default".
@@ -149,6 +154,7 @@ impl Default for SetupHintsState {
             launch_hotkey_usage: HashMap::new(),
             cli_launch_hint_last_shown: HashMap::new(),
             cli_launch_hint_shown_count: HashMap::new(),
+            onboarding_start_choice_shown: false,
         }
     }
 }

@@ -1,3 +1,5 @@
+#[path = "auth_account_picker/account_center.rs"]
+mod account_center;
 #[path = "auth_account_add_replace.rs"]
 mod add_replace;
 
@@ -7,327 +9,214 @@ use super::auth_account_picker_saved_accounts::{
 use super::*;
 
 impl App {
-    pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
-        use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
-
-        crate::telemetry::record_setup_step_once("account_center_opened");
-
-        let status = crate::auth::AuthStatus::check_fast();
-        let validation = crate::auth::validation::load_all();
-        let cfg = crate::config::Config::load();
-        let providers: Vec<_> = match provider_filter {
-            Some(provider_id) => match resolve_account_provider_descriptor(provider_id) {
-                Some(provider) => vec![provider],
-                None => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider {}.",
-                        provider_id
-                    )));
-                    self.set_status_notice("Account center unavailable");
-                    return;
+    /// Cycle only switchable accounts, never login/add/remove management rows.
+    pub(crate) fn cycle_account(&mut self, forward: bool) {
+        use crate::tui::{AccountPickerAction, PickerAction};
+        let remote = self.is_remote || crate::tui::is_ssh_remote();
+        let (accounts, current): (Vec<AccountPickerAction>, Option<usize>) = if remote {
+            let Some((claude, openai)) = crate::usage::remote_account_list() else {
+                self.set_status_notice("Remote account inventory has not arrived yet");
+                return;
+            };
+            let accounts: Vec<_> = [("claude", claude), ("openai", openai)]
+                .into_iter()
+                .flat_map(|(provider, accounts)| {
+                    accounts
+                        .into_iter()
+                        .map(move |account| AccountPickerAction::Switch {
+                            provider_id: provider.to_string(),
+                            label: account.label,
+                        })
+                })
+                .collect();
+            let current = accounts.iter().position(|action| {
+                let AccountPickerAction::Switch { provider_id, label } = action else {
+                    return false;
+                };
+                self.remote_provider_oauth_account_label.as_deref() == Some(label.as_str())
+                    && self.remote_resolved_credential
+                        != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    && self
+                        .remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint)
+                        == jcode_provider_core::parse_provider_hint(provider_id)
+            });
+            (accounts, current)
+        } else {
+            let (entries, _) = self.build_all_inline_account_picker();
+            let provider = self.provider.name();
+            let session_account = self.kv_cache_account();
+            let mut accounts = Vec::new();
+            let mut current = None;
+            for entry in entries {
+                if let PickerAction::Account(action @ AccountPickerAction::Switch { .. }) =
+                    entry.action
+                {
+                    let AccountPickerAction::Switch {
+                        ref provider_id,
+                        ref label,
+                    } = action
+                    else {
+                        unreachable!()
+                    };
+                    if session_account
+                        .as_deref()
+                        .map_or(entry.is_current, |active| active == label)
+                        && jcode_provider_core::parse_provider_hint(provider)
+                            == jcode_provider_core::parse_provider_hint(provider_id)
+                        && self.provider.active_resolved_credential()
+                            != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    {
+                        current = Some(accounts.len());
+                    }
+                    accounts.push(action);
                 }
-            },
-            None => crate::provider_catalog::login_providers().to_vec(),
+            }
+            (accounts, current)
         };
-
-        let mut items = Vec::new();
-        let mut summary = crate::tui::account_picker::AccountPickerSummary {
-            provider_count: providers.len(),
-            default_provider: cfg.provider.default_provider.clone(),
-            default_model: cfg.provider.default_model.clone(),
-            ..Default::default()
+        // Keep repeated presses moving while a busy daemon is still applying
+        // earlier requests. The visible header remains on confirmed identity.
+        let current = self
+            .pending_account_switch_target
+            .as_ref()
+            .and_then(|target| accounts.iter().position(|account| account == target))
+            .or(current);
+        let Some(index) = account_cycle_index(accounts.len(), current, forward) else {
+            self.set_status_notice("No saved OAuth accounts to switch");
+            return;
         };
-
-        let provider_scope = provider_filter.map(|value| value.to_string());
-        let claude_accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-        let openai_accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let add_replace_scope_supports_multi_account = match provider_scope.as_deref() {
-            None => true,
-            Some("claude" | "anthropic" | "openai") => true,
-            Some(_) => false,
-        };
-
-        if add_replace_scope_supports_multi_account {
-            let scoped_saved_accounts = match provider_scope.as_deref() {
-                Some("claude" | "anthropic") => claude_accounts.len(),
-                Some("openai") => openai_accounts.len(),
-                _ => claude_accounts.len() + openai_accounts.len(),
-            };
-            let detail = if scoped_saved_accounts == 0 {
-                "choose provider, add a new account, or replace an existing saved one".to_string()
-            } else {
-                format!(
-                    "choose provider; {} Claude and {} OpenAI account(s) available",
-                    claude_accounts.len(),
-                    openai_accounts.len()
-                )
-            };
-            items.push(AccountPickerItem::action(
-                "account-flow",
-                "Add / Replace",
-                "Add or replace account",
-                detail,
-                AccountPickerCommand::OpenAddReplaceFlow {
-                    provider_filter: provider_scope.clone(),
-                },
-            ));
+        if current == Some(index) {
+            self.set_status_notice("Only one saved OAuth account");
+            return;
         }
+        self.handle_account_picker_selection(accounts[index].clone());
+    }
 
-        items.push(AccountPickerItem::action(
-            provider_scope.as_deref().unwrap_or("auth-doctor"),
-            provider_scope
-                .as_deref()
-                .unwrap_or("Authentication")
-                .to_string(),
-            "Diagnose login",
-            if provider_scope.is_some() {
-                "review status, validation, and recommended next steps".to_string()
-            } else {
-                "review all configured providers and recovery steps".to_string()
-            },
-            AccountPickerCommand::SubmitInput(match provider_scope.as_deref() {
-                Some(provider_id) => format!("/account {} doctor", provider_id),
-                None => "/auth doctor".to_string(),
-            }),
+    pub(crate) fn remote_account_management_notice(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "Remote accounts: only daemon-reported Claude/OpenAI OAuth account inventory and switching are supported here. Account creation/replacement/removal, diagnostics, provider settings and saved defaults must be managed directly on the remote host. For SSH login use /login <provider>. No local credentials or settings were accessed.",
         ));
+    }
 
-        for provider in providers {
-            let assessment = status.assessment_for_provider(provider);
-            let auth_state = assessment.state;
-            let method_detail = assessment.method_detail.as_str();
-            let validation_detail = validation
-                .get(provider.id)
-                .map(crate::auth::validation::format_record_label)
-                .unwrap_or_else(|| "not validated".to_string());
-            match auth_state {
-                crate::auth::AuthState::Available => summary.ready_count += 1,
-                crate::auth::AuthState::Expired => summary.attention_count += 1,
-                crate::auth::AuthState::NotConfigured => summary.setup_count += 1,
-            }
-
-            match provider.id {
-                "claude" => summary.named_account_count += claude_accounts.len(),
-                "openai" => summary.named_account_count += openai_accounts.len(),
-                _ if !matches!(auth_state, crate::auth::AuthState::NotConfigured) => {
-                    summary.named_account_count += 1;
-                }
-                _ => {}
-            }
-
-            let state_label = match auth_state {
-                crate::auth::AuthState::Available => "ready",
-                crate::auth::AuthState::Expired => "needs attention",
-                crate::auth::AuthState::NotConfigured => "setup needed",
-            };
-
-            if !matches!(auth_state, crate::auth::AuthState::NotConfigured) {
-                items.push(AccountPickerItem::action(
-                    provider.id,
-                    provider.display_name,
-                    "Saved auth entry",
-                    format!(
-                        "{} - {} - {}",
-                        state_label, method_detail, validation_detail
-                    ),
-                    AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
-                ));
-            }
-
-            items.push(AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                if provider.id == "openai" {
-                    "Usage & provider settings"
-                } else {
-                    "Provider settings"
-                },
-                format!(
-                    "{} - {} - {}",
-                    state_label, method_detail, validation_detail
-                ),
-                AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
-            ));
-            items.push(AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                "Login / refresh",
-                provider.menu_detail,
-                AccountPickerCommand::SubmitInput(format!("/account {} login", provider.id)),
-            ));
-            items.push(AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                "Diagnose login",
-                format!("{} - {}", state_label, validation_detail),
-                AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
-            ));
-
-            match provider.id {
-                "claude" => self.append_anthropic_account_picker_items(&mut items, provider),
-                "openai" => {
-                    self.append_openai_account_picker_items(&mut items, provider);
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Transport",
-                        cfg.provider.openai_transport.as_deref().unwrap_or("auto"),
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Enter OpenAI transport: auto, https, or websocket."
-                                .to_string(),
-                            command_prefix: "/account openai transport".to_string(),
-                            empty_value: Some("auto".to_string()),
-                            status_notice: "Account: editing OpenAI transport...".to_string(),
-                        },
-                    ));
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Reasoning effort",
-                        cfg.provider
-                            .openai_reasoning_effort
-                            .as_deref()
-                            .unwrap_or("(provider default)"),
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Enter OpenAI reasoning effort: none, minimal, low, medium, high, xhigh, max, or clear.".to_string(),
-                            command_prefix: "/account openai effort".to_string(),
-                            empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing OpenAI effort...".to_string(),
-                        },
-                    ));
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Fast mode",
-                        if cfg.provider.openai_service_tier.as_deref() == Some("priority") {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        AccountPickerCommand::SubmitInput(format!(
-                            "/account openai fast {}",
-                            if cfg.provider.openai_service_tier.as_deref() == Some("priority") {
-                                "off"
-                            } else {
-                                "on"
-                            }
-                        )),
-                    ));
-                }
-                "openai-compatible" => {
-                    let compat = crate::provider_catalog::resolve_openai_compatible_profile(
-                        crate::provider_catalog::OPENAI_COMPAT_PROFILE,
-                    );
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Step 1: API base URL",
-                        compat.api_base,
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Step 1/2: enter the OpenAI-compatible API base URL, for example https://llm.example.com/v1.".to_string(),
-                            command_prefix: "/account openai-compatible api-base".to_string(),
-                            empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing OpenAI-compatible API base URL (step 1/2)...".to_string(),
-                        },
-                    ));
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Step 2: API key variable",
-                        compat.api_key_env,
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Step 2/2: enter the env var name that stores the API key, for example OPENAI_API_KEY.".to_string(),
-                            command_prefix: "/account openai-compatible api-key-name".to_string(),
-                            empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing OpenAI-compatible API key variable (step 2/2)...".to_string(),
-                        },
-                    ));
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Env file",
-                        compat.env_file,
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Enter the env file name for this profile.".to_string(),
-                            command_prefix: "/account openai-compatible env-file".to_string(),
-                            empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing env file...".to_string(),
-                        },
-                    ));
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Default model hint",
-                        compat
-                            .default_model
-                            .unwrap_or_else(|| "(unset)".to_string()),
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Enter the default model hint for this profile.".to_string(),
-                            command_prefix: "/account openai-compatible default-model".to_string(),
-                            empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing default model hint...".to_string(),
-                        },
-                    ));
-                }
-                "copilot" => {
-                    items.push(AccountPickerItem::action(
-                        provider.id,
-                        provider.display_name,
-                        "Premium requests",
-                        cfg.provider.copilot_premium.as_deref().unwrap_or("normal"),
-                        AccountPickerCommand::PromptValue {
-                            prompt: "Enter Copilot premium mode: normal, one, or zero.".to_string(),
-                            command_prefix: "/account copilot premium".to_string(),
-                            empty_value: Some("normal".to_string()),
-                            status_notice: "Account: editing Copilot premium mode...".to_string(),
-                        },
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        items.push(AccountPickerItem::action(
-            "defaults",
-            "Global defaults",
-            "Default provider",
-            cfg.provider.default_provider.as_deref().unwrap_or("auto"),
-            AccountPickerCommand::PromptValue {
-                prompt: "Enter the default provider: claude, openai, copilot, gemini, openrouter, or auto.".to_string(),
-                command_prefix: "/account default-provider".to_string(),
-                empty_value: Some("auto".to_string()),
-                status_notice: "Account: editing default provider...".to_string(),
-            },
-        ));
-        items.push(AccountPickerItem::action(
-            "defaults",
-            "Global defaults",
-            "Default model",
-            cfg.provider
-                .default_model
-                .as_deref()
-                .unwrap_or("(provider default)"),
-            AccountPickerCommand::PromptValue {
-                prompt: "Enter the default model, or clear to unset it.".to_string(),
-                command_prefix: "/account default-model".to_string(),
-                empty_value: Some("clear".to_string()),
-                status_notice: "Account: editing default model...".to_string(),
-            },
-        ));
-
-        let title = match provider_filter {
-            Some(provider_id) => format!(" {} account center ", provider_id),
-            None => " Accounts ".to_string(),
-        };
-        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::with_summary(
-            title, items, summary,
-        )));
+    /// AccountUsage contains named OAuth inventory, not a complete auth catalog.
+    /// Never fill missing/pending remote data from the client's auth store.
+    pub(crate) fn open_remote_account_picker(&mut self, provider_filter: Option<&str>) {
+        self.account_picker_overlay = None;
         self.inline_interactive_state = None;
+        let Some(scope) = self.inline_account_picker_scope_key(provider_filter) else {
+            self.remote_account_management_notice();
+            return;
+        };
+        let Some((claude, openai)) = crate::usage::remote_account_list() else {
+            self.push_display_message(DisplayMessage::system(
+                "Remote account inventory has not arrived. Retry /accounts after the daemon responds. No local accounts were read.",
+            ));
+            return;
+        };
+        let mut entries = Vec::new();
+        for (provider_id, display, accounts) in
+            [("claude", "Claude", claude), ("openai", "OpenAI", openai)]
+        {
+            if scope != "all" && scope != provider_id {
+                continue;
+            }
+            for account in accounts {
+                let mut entry = Self::account_credential_entry(
+                    account_picker_display_name(
+                        display,
+                        &account.label,
+                        2,
+                        account.email.as_deref(),
+                    ),
+                    display.to_string(),
+                    "remote OAuth".to_string(),
+                    "Daemon-reported account. Enter requests a switch on the remote host."
+                        .to_string(),
+                    crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                        provider_id: provider_id.to_string(),
+                        label: account.label.clone(),
+                    }),
+                );
+                entry.is_current = self.remote_provider_oauth_account_label.as_deref()
+                    == Some(account.label.as_str())
+                    && self.remote_resolved_credential
+                        != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                    && self
+                        .remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint)
+                        == jcode_provider_core::parse_provider_hint(provider_id);
+                entries.push(entry);
+            }
+        }
+        if entries.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "The remote daemon reports no named OAuth accounts in this scope. API-key and other provider credentials are not included in this inventory. Manage accounts on the remote host, or use /login <provider> for SSH login.",
+            ));
+            return;
+        }
+        let selected = entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        self.inline_view_state = None;
+        self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
+            kind: crate::tui::PickerKind::Account,
+            filtered: (0..entries.len()).collect(),
+            entries,
+            selected,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose an action");
+        self.set_status_notice("Remote OAuth accounts: Enter requests switch, Esc closes. Management requires the remote host.");
+    }
+
+    pub(crate) fn edit_selected_account_priority(&mut self, code: KeyCode) -> Result<()> {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Saving account priorities") {
+            return Ok(());
+        }
+        let Some(key) = self.inline_interactive_state.as_ref().and_then(|picker| {
+            let index = *picker.filtered.get(picker.selected)?;
+            picker.entries.get(index)?.account_pool_key()
+        }) else {
+            self.set_status_notice("Select a credential to edit its priority");
+            return Ok(());
+        };
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        let automatic = !matches!(code, KeyCode::Char('[' | ']'));
+        match code {
+            KeyCode::Char('[') => pool.set_priority(&key, pool.priority(&key).saturating_sub(1)),
+            KeyCode::Char(']') => pool.set_priority(&key, pool.priority(&key).saturating_add(1)),
+            _ => pool.clear_priority(&key),
+        }
+        if let Err(error) = pool.save() {
+            self.set_status_notice(format!("Could not save account priority: {error}"));
+            return Ok(());
+        }
+        if let Some(picker) = self.inline_interactive_state.as_mut() {
+            for entry in &mut picker.entries {
+                if let Some(key) = entry.account_pool_key() {
+                    entry.recommendation_rank = pool.priority(&key) as usize;
+                }
+            }
+        }
+        self.set_status_notice(format!(
+            "{} → priority {} (auto-switch membership unchanged)",
+            key,
+            if automatic { "automatic" } else { "saved" },
+        ));
+        Ok(())
     }
 
     pub(crate) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
+        if crate::tui::is_ssh_remote() {
+            self.open_remote_account_picker(provider_filter);
+            return;
+        }
         let Some(scope_key) = self.inline_account_picker_scope_key(provider_filter) else {
             if let Some(provider_id) = provider_filter {
                 self.push_display_message(DisplayMessage::system(format!(
@@ -380,12 +269,25 @@ impl App {
         } else {
             self.provider.active_resolved_credential()
         };
+        let pool = crate::auth::account_pool::AccountPool::load();
+        let session_account = self.kv_cache_account();
         for (index, entry) in models.iter_mut().enumerate() {
+            if let Some(key) = entry.account_pool_key() {
+                entry.recommendation_rank = pool.priority(&key) as usize;
+                if let Some(plan) = crate::auth::account_pool::subscription_label(&key) {
+                    entry.name.push_str(&format!(" · {}", plan));
+                } else if key.contains(':') || matches!(key.as_str(), "claude" | "openai") {
+                    entry.name.push_str(" · unknown plan");
+                }
+            }
             match &entry.action {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     provider_id,
-                    ..
+                    label,
                 }) => {
+                    if let Some(current) = session_account.as_deref() {
+                        entry.is_current = current == label;
+                    }
                     entry.is_current &= jcode_provider_core::parse_provider_hint(&current_name)
                         == jcode_provider_core::parse_provider_hint(provider_id)
                         && credential != Some(jcode_provider_core::ResolvedCredential::ApiKey);
@@ -437,7 +339,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (↑↓ or j/k, Enter to select)",
+            "Account → {} (↑↓ or j/k, Enter select, [/] priority, Ctrl+R auto)",
             provider_label
         ));
     }
@@ -1301,5 +1203,34 @@ impl App {
                 Ok(Some(command))
             }
         }
+    }
+}
+
+fn account_cycle_index(len: usize, current: Option<usize>, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current.filter(|index| *index < len) {
+        Some(index) if forward => (index + 1) % len,
+        Some(index) => (index + len - 1) % len,
+        None if forward => 0,
+        None => len - 1,
+    })
+}
+
+#[cfg(test)]
+mod account_cycle_tests {
+    use super::account_cycle_index;
+
+    #[test]
+    fn cycles_in_both_directions_and_wraps() {
+        assert_eq!(account_cycle_index(3, Some(0), true), Some(1));
+        assert_eq!(account_cycle_index(3, Some(2), true), Some(0));
+        assert_eq!(account_cycle_index(3, Some(1), false), Some(0));
+        assert_eq!(account_cycle_index(3, Some(0), false), Some(2));
+        assert_eq!(account_cycle_index(0, None, true), None);
+        assert_eq!(account_cycle_index(1, Some(0), false), Some(0));
+        assert_eq!(account_cycle_index(3, None, true), Some(0));
+        assert_eq!(account_cycle_index(3, None, false), Some(2));
     }
 }

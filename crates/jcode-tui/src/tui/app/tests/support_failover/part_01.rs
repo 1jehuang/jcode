@@ -189,7 +189,13 @@ pub(crate) fn create_test_app() -> App {
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Keep background-task semantics without allocating a host-sized worker
+    // pool per fixture (hosted machines can expose dozens of CPU cores).
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -203,7 +209,11 @@ fn create_named_provider_test_app(name: &'static str, model: &'static str) -> Ap
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(NamedMockProvider { name, model });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -229,7 +239,11 @@ fn create_refresh_summary_test_app(summary: crate::provider::ModelCatalogRefresh
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(RefreshSummaryProvider { summary });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -246,7 +260,11 @@ fn create_openrouter_spec_capture_test_app() -> (App, StdArc<StdMutex<Vec<String
     let provider: Arc<dyn Provider> = Arc::new(OpenRouterSpecCaptureProvider {
         set_model_calls: set_model_calls.clone(),
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -316,6 +334,27 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
             .unwrap_or(&Vec::new())
             .is_empty()
     );
+}
+
+#[test]
+fn debug_state_exposes_pending_interrupt_lifecycle() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.current_message_id = Some(88);
+    app.pending_soft_interrupts = vec!["correction".to_string()];
+    app.pending_soft_interrupt_requests = vec![(89, "correction".to_string())];
+    app.pending_queued_dispatch = true;
+    app.remote_session_id = Some("session_test".to_string());
+
+    let state: serde_json::Value =
+        serde_json::from_str(&app.handle_debug_command("state")).unwrap();
+    assert_eq!(state["processing"], true);
+    assert_eq!(state["current_message_id"], 88);
+    assert_eq!(state["pending_soft_interrupts"], 1);
+    assert_eq!(state["pending_soft_interrupt_requests"], 1);
+    assert_eq!(state["pending_queued_dispatch"], true);
+    assert_eq!(state["remote_session_id"], "session_test");
+    assert!(state["processing_status"].is_string());
 }
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
@@ -443,6 +482,7 @@ impl Drop for EnvRestoreGuard {
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
+    let _provider_env = ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
     let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
     crate::env::set_var("JCODE_HOME", temp.path());

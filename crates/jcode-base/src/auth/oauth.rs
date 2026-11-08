@@ -60,7 +60,7 @@ pub struct OAuthTokens {
 
 fn parse_oauth_scopes(scope: Option<&str>) -> Vec<String> {
     scope
-        .unwrap_or_default()
+        .unwrap_or("")
         .split_whitespace()
         .filter(|scope| !scope.trim().is_empty())
         .map(ToOwned::to_owned)
@@ -129,306 +129,13 @@ pub fn generate_state_public() -> String {
 
 const CALLBACK_READ_TIMEOUT_SECS: u64 = 5;
 
-fn bad_request_response(message: &str) -> String {
-    let body = format!(
-        "<html><body><h1>Authentication not completed</h1><p>{}</p><p>You can close this tab and return to jcode.</p></body></html>",
-        message
-    );
-    format!(
-        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
+#[path = "oauth_callback_io.rs"]
+mod callback_io;
 
-fn is_socket_read_timeout(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    )
-}
-
-fn read_http_request_line_blocking<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
-    let mut request_line = String::new();
-    match reader.read_line(&mut request_line) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(request_line)),
-        Err(err) if is_socket_read_timeout(&err) => Ok(None),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn drain_http_headers_blocking<R: BufRead>(reader: &mut R) -> Result<bool> {
-    let mut header_line = String::new();
-    loop {
-        header_line.clear();
-        match reader.read_line(&mut header_line) {
-            Ok(0) => return Ok(false),
-            Ok(_) if header_line.trim().is_empty() => return Ok(true),
-            Ok(_) => {}
-            Err(err) if is_socket_read_timeout(&err) => return Ok(false),
-            Err(err) => return Err(err.into()),
-        }
-    }
-}
-
-async fn read_http_request_line_async<R>(
-    reader: &mut tokio::io::BufReader<R>,
-) -> Result<Option<String>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut request_line = String::new();
-    match tokio::time::timeout(
-        Duration::from_secs(CALLBACK_READ_TIMEOUT_SECS),
-        tokio::io::AsyncBufReadExt::read_line(reader, &mut request_line),
-    )
-    .await
-    {
-        Ok(Ok(0)) => Ok(None),
-        Ok(Ok(_)) => Ok(Some(request_line)),
-        Ok(Err(err)) => Err(err.into()),
-        Err(_) => Ok(None),
-    }
-}
-
-async fn drain_http_headers_async<R>(reader: &mut tokio::io::BufReader<R>) -> Result<bool>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut header_line = String::new();
-    loop {
-        header_line.clear();
-        match tokio::time::timeout(
-            Duration::from_secs(CALLBACK_READ_TIMEOUT_SECS),
-            tokio::io::AsyncBufReadExt::read_line(reader, &mut header_line),
-        )
-        .await
-        {
-            Ok(Ok(0)) => return Ok(false),
-            Ok(Ok(_)) if header_line.trim().is_empty() => return Ok(true),
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => return Ok(false),
-        }
-    }
-}
-
-/// Start local server and wait for OAuth callback
-pub fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
-    eprintln!("Waiting for OAuth callback on port {}...", port);
-
-    loop {
-        let (mut stream, _) = listener.accept()?;
-        stream.set_read_timeout(Some(Duration::from_secs(CALLBACK_READ_TIMEOUT_SECS)))?;
-        let mut reader = BufReader::new(&stream);
-        let Some(request_line) = read_http_request_line_blocking(&mut reader)? else {
-            continue;
-        };
-        if !drain_http_headers_blocking(&mut reader)? {
-            continue;
-        }
-
-        let parts: Vec<&str> = request_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            let _ = stream.write_all(bad_request_response("Invalid HTTP request.").as_bytes());
-            continue;
-        }
-
-        let path = parts[1];
-        let url = match url::Url::parse(&format!("http://localhost{}", path)) {
-            Ok(url) => url,
-            Err(_) => {
-                let _ = stream.write_all(
-                    bad_request_response("Could not parse OAuth callback URL.").as_bytes(),
-                );
-                continue;
-            }
-        };
-
-        if let Some(error) = url
-            .query_pairs()
-            .find(|(k, _)| k == "error")
-            .map(|(_, v)| v.to_string())
-        {
-            let _ = stream.write_all(
-                bad_request_response("Authentication was denied or cancelled.").as_bytes(),
-            );
-            anyhow::bail!("OAuth provider returned error: {}", error);
-        }
-
-        let code = match url
-            .query_pairs()
-            .find(|(k, _)| k == "code")
-            .map(|(_, v)| v.to_string())
-        {
-            Some(code) => code,
-            None => {
-                let _ = stream.write_all(
-                    bad_request_response("No authorization code was included in this request.")
-                        .as_bytes(),
-                );
-                continue;
-            }
-        };
-
-        let state = match url
-            .query_pairs()
-            .find(|(k, _)| k == "state")
-            .map(|(_, v)| v.to_string())
-        {
-            Some(state) => state,
-            None => {
-                let _ = stream.write_all(
-                    bad_request_response("No OAuth state was included in this request.").as_bytes(),
-                );
-                continue;
-            }
-        };
-
-        if state != expected_state {
-            let _ = stream.write_all(
-                bad_request_response("OAuth state mismatch. Please retry the latest login flow.")
-                    .as_bytes(),
-            );
-            continue;
-        }
-
-        let body = "<html><body><h1>Success!</h1><p>You can close this window.</p></body></html>";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream.write_all(response.as_bytes())?;
-
-        return Ok(code);
-    }
-}
-
-/// Async version of wait_for_callback using tokio (for use from TUI context)
-pub async fn wait_for_callback_async(port: u16, expected_state: &str) -> Result<String> {
-    let listener = bind_callback_listener(port)?;
-    wait_for_callback_async_on_listener(listener, expected_state).await
-}
-
-pub fn bind_callback_listener(port: u16) -> Result<tokio::net::TcpListener> {
-    let std_listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}"))?;
-    std_listener.set_nonblocking(true)?;
-    Ok(tokio::net::TcpListener::from_std(std_listener)?)
-}
-
-pub async fn wait_for_callback_async_on_listener(
-    listener: tokio::net::TcpListener,
-    expected_state: &str,
-) -> Result<String> {
-    let expected_state = expected_state.to_string();
-
-    use tokio::io::{AsyncWriteExt, BufReader};
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let Some(request_line) = read_http_request_line_async(&mut reader).await? else {
-            continue;
-        };
-        if !drain_http_headers_async(&mut reader).await? {
-            continue;
-        }
-
-        let parts: Vec<&str> = request_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            let _ = writer
-                .write_all(bad_request_response("Invalid HTTP request.").as_bytes())
-                .await;
-            continue;
-        }
-
-        let path = parts[1];
-        let url = match url::Url::parse(&format!("http://localhost{}", path)) {
-            Ok(url) => url,
-            Err(_) => {
-                let _ = writer
-                    .write_all(
-                        bad_request_response("Could not parse OAuth callback URL.").as_bytes(),
-                    )
-                    .await;
-                continue;
-            }
-        };
-
-        if let Some(error) = url
-            .query_pairs()
-            .find(|(k, _)| k == "error")
-            .map(|(_, v)| v.to_string())
-        {
-            let _ = writer
-                .write_all(
-                    bad_request_response("Authentication was denied or cancelled.").as_bytes(),
-                )
-                .await;
-            anyhow::bail!("OAuth provider returned error: {}", error);
-        }
-
-        let code = match url
-            .query_pairs()
-            .find(|(k, _)| k == "code")
-            .map(|(_, v)| v.to_string())
-        {
-            Some(code) => code,
-            None => {
-                let _ = writer
-                    .write_all(
-                        bad_request_response("No authorization code was included in this request.")
-                            .as_bytes(),
-                    )
-                    .await;
-                continue;
-            }
-        };
-
-        let state = match url
-            .query_pairs()
-            .find(|(k, _)| k == "state")
-            .map(|(_, v)| v.to_string())
-        {
-            Some(state) => state,
-            None => {
-                let _ = writer
-                    .write_all(
-                        bad_request_response("No OAuth state was included in this request.")
-                            .as_bytes(),
-                    )
-                    .await;
-                continue;
-            }
-        };
-
-        if state != expected_state {
-            let _ = writer
-                .write_all(
-                    bad_request_response(
-                        "OAuth state mismatch. Please retry the latest login flow.",
-                    )
-                    .as_bytes(),
-                )
-                .await;
-            continue;
-        }
-
-        let body = "<html><body><h1>Success!</h1><p>You can close this window and return to jcode.</p></body></html>";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        writer.write_all(response.as_bytes()).await?;
-
-        return Ok(code);
-    }
-}
+pub use callback_io::{
+    bind_callback_listener, wait_for_callback, wait_for_callback_async,
+    wait_for_callback_async_on_listener,
+};
 
 /// Perform OAuth login for Claude
 pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
@@ -941,21 +648,63 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClaudeProfileResponse {
     #[serde(default)]
     account: ClaudeProfileAccount,
+    // Optional metadata must not make an otherwise usable profile fail to parse.
+    #[serde(default)]
+    organization: serde_json::Value,
 }
 
-#[derive(Deserialize, Default)]
+impl ClaudeProfileResponse {
+    fn subscription_type(&self) -> Option<String> {
+        let explicit = self
+            .organization
+            .get("subscription_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if explicit.is_some() {
+            return explicit;
+        }
+        // The live OAuth profile exposes organization_type rather than
+        // subscription_type. Rate-limit tiers refine Max only when the
+        // organization itself confirms that subscription family.
+        match self
+            .organization
+            .get("organization_type")
+            .and_then(serde_json::Value::as_str)?
+        {
+            "claude_max" => Some(
+                match self
+                    .organization
+                    .get("rate_limit_tier")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("default_claude_max_20x") => "max_20x",
+                    Some("default_claude_max_5x") => "max_5x",
+                    _ => "max",
+                }
+                .to_owned(),
+            ),
+            "claude_pro" => Some("pro".to_owned()),
+            "claude_free" => Some("free".to_owned()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct ClaudeProfileAccount {
     email: Option<String>,
 }
 
-async fn fetch_claude_profile_email_at_url(
+async fn fetch_claude_profile_at_url(
     access_token: &str,
     profile_url: &str,
-) -> Result<Option<String>> {
+) -> Result<ClaudeProfileResponse> {
     let client = crate::provider::shared_http_client();
     let resp = client
         .get(profile_url)
@@ -964,7 +713,7 @@ async fn fetch_claude_profile_email_at_url(
             "User-Agent",
             crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
         )
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+        .header("anthropic-beta", "oauth-2025-04-20")
         .bearer_auth(access_token)
         .send()
         .await?;
@@ -975,8 +724,7 @@ async fn fetch_claude_profile_email_at_url(
         anyhow::bail!("Profile fetch failed ({}): {}", status, body);
     }
 
-    let profile: ClaudeProfileResponse = resp.json().await?;
-    Ok(profile.account.email)
+    Ok(resp.json().await?)
 }
 
 /// Fetch profile metadata for a Claude account and persist any discovered fields.
@@ -984,9 +732,94 @@ pub async fn update_claude_account_profile(
     label: &str,
     access_token: &str,
 ) -> Result<Option<String>> {
-    let email = fetch_claude_profile_email_at_url(access_token, claude::PROFILE_URL).await?;
-    claude_auth::update_account_profile(label, email.clone())?;
+    let profile = fetch_claude_profile_at_url(access_token, claude::PROFILE_URL).await?;
+    let subscription_type = profile.subscription_type();
+    let email = profile.account.email;
+    claude_auth::update_account_profile_metadata(label, email.clone(), subscription_type)?;
     Ok(email)
+}
+
+const CLAUDE_PROFILE_PREFETCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+type ClaudeProfilePrefetchAttempts =
+    std::collections::HashMap<(std::path::PathBuf, String), std::time::Instant>;
+
+fn reserve_claude_profile_prefetch(
+    attempts: &mut ClaudeProfilePrefetchAttempts,
+    home: &std::path::Path,
+    label: &str,
+    now: std::time::Instant,
+) -> bool {
+    attempts
+        .retain(|_, attempted| now.duration_since(*attempted) < CLAUDE_PROFILE_PREFETCH_INTERVAL);
+    match attempts.entry((home.to_path_buf(), label.to_owned())) {
+        std::collections::hash_map::Entry::Occupied(_) => false,
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(now);
+            true
+        }
+    }
+}
+
+/// Opportunistically backfill unknown plans outside the render path. Failed or
+/// incomplete profiles are also throttled, so new-session bursts cannot retry
+/// every account repeatedly. Reuses the normal login profile update path.
+#[cfg(test)]
+pub(crate) fn prefetch_missing_claude_subscription_metadata() {}
+
+#[cfg(not(test))]
+pub(crate) fn prefetch_missing_claude_subscription_metadata() {
+    use futures::StreamExt;
+    static ATTEMPTS: std::sync::OnceLock<std::sync::Mutex<ClaudeProfilePrefetchAttempts>> =
+        std::sync::OnceLock::new();
+    static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return;
+    };
+    let home = home.canonicalize().unwrap_or(home);
+    let Ok(accounts) = claude_auth::list_accounts() else {
+        return;
+    };
+    let Ok(mut attempts) = ATTEMPTS.get_or_init(Default::default).lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let accounts: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| {
+            account
+                .subscription_type
+                .as_deref()
+                .is_none_or(|plan| plan.trim().is_empty())
+        })
+        .filter(|account| !account.access.is_empty())
+        .filter(|account| {
+            reserve_claude_profile_prefetch(&mut attempts, &home, &account.label, now)
+        })
+        .collect();
+    drop(attempts);
+    if accounts.is_empty() {
+        return;
+    }
+    runtime.spawn(async move {
+        futures::stream::iter(accounts)
+            .for_each_concurrent(2, |account| async move {
+                let Ok(_permit) = REQUESTS.acquire().await else {
+                    return;
+                };
+                // Never log a profile error body: it is untrusted and could
+                // contain sensitive account information or reflected tokens.
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(CLAUDE_TOKEN_TIMEOUT_SECS),
+                    update_claude_account_profile(&account.label, &account.access),
+                )
+                .await;
+            })
+            .await;
+    });
 }
 
 /// Load Claude tokens from jcode's credentials file (active account).
@@ -1285,16 +1118,6 @@ async fn refresh_openai_tokens_at(
     refresh_token: &str,
     label: Option<String>,
 ) -> Result<OAuthTokens> {
-    if label.is_some() {
-        // A token the provider already rejected as unrecoverable cannot start
-        // working again. Fail fast so callers fall through to their fallback
-        // instead of paying a doomed round-trip on every catalog sweep and turn.
-        crate::auth::refresh_state::ensure_refresh_allowed(
-            "openai",
-            refresh_token,
-            "Run `jcode login --provider openai` to mint a fresh token.",
-        )?;
-    }
     let token_url = token_url.to_string();
     let observed_refresh = refresh_token.to_string();
     // The per-account single-flight lock lives inside the transaction task, so
@@ -1324,6 +1147,14 @@ async fn refresh_openai_tokens_at(
                     .map(|tokens| tokens.refresh_token)
                     .filter(|token| !token.is_empty())
                     .unwrap_or(observed_refresh);
+                // A long-lived daemon may still remember a rejected token after
+                // /cloud imported a rotated credential. Check the effective
+                // disk token, not the stale caller snapshot, after reloading.
+                crate::auth::refresh_state::ensure_refresh_allowed(
+                    "openai",
+                    &token,
+                    "Run `jcode login --provider openai` to mint a fresh token.",
+                )?;
                 refresh_openai_tokens_inner(&token_url, timeout, &token, Some(&label)).await
             },
         )
@@ -1420,7 +1251,14 @@ async fn refresh_openai_tokens_inner(
         let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
 
         if let Some(label) = label {
-            save_openai_tokens_for_account(&oauth_tokens, label)?;
+            crate::auth::codex::update_account_tokens(
+                label,
+                &oauth_tokens.access_token,
+                &oauth_tokens.refresh_token,
+                oauth_tokens.id_token.clone(),
+                None,
+                Some(oauth_tokens.expires_at),
+            )?;
         } else {
             crate::logging::info(
                 "Refreshed OpenAI/Codex tokens from an external source without storing them in jcode auth",

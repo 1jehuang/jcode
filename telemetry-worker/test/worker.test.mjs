@@ -392,6 +392,28 @@ test("prompt_submitted is accepted and marks meaningful daily activity", async (
   assert.equal(rollup.values[4], 1, "release prompt activity should be meaningful release activity");
 });
 
+test("bulk families go to DB_BULK while rollups and other events stay in DB", async () => {
+  const db = makeDb();
+  const bulk = makeDb();
+  const env = { DB: db, DB_BULK: bulk };
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "prompt_submitted", event_id: "prompt-bulk-1", session_id: "s", turn_index: 1,
+      build_channel: "release",
+    })),
+    env,
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.ok(bulk.executed.some(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql)), "raw row in bulk");
+  assert.ok(!db.executed.some(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql)), "no raw row in main");
+  assert.ok(db.executed.some(({ sql }) => /INSERT INTO daily_active_users/.test(sql)), "rollup in main");
+  assert.ok(!bulk.executed.some(({ sql }) => /daily_active_users/.test(sql)), "no rollup in bulk");
+
+  await worker.fetch(postRequest(makeBody({ event: "onboarding_step", event_id: "ob-1" })), env, makeCtx());
+  assert.ok(db.executed.some(({ sql, values }) => /INTO events/.test(sql) && values.includes("onboarding_step")));
+});
+
 test("telemetry_opt_out is accepted and persists only coarse metadata", async () => {
   const db = makeDb();
   const response = await worker.fetch(

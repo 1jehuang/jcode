@@ -108,14 +108,18 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                 .map(|s| serde_json::Value::String(crate::util::truncate_str(s, 200).to_string()))
                 .unwrap_or(serde_json::Value::Null),
         )]),
-        "websearch" | "codesearch" | "session_search" | "conversation_search" => obj(vec![(
-            "query",
-            input
-                .get("query")
-                .and_then(|v| v.as_str())
-                .map(|s| serde_json::Value::String(crate::util::truncate_str(s, 200).to_string()))
-                .unwrap_or(serde_json::Value::Null),
-        )]),
+        "websearch" | "web_search" | "codesearch" | "session_search" | "conversation_search" => {
+            obj(vec![(
+                "query",
+                input
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        serde_json::Value::String(crate::util::truncate_str(s, 200).to_string())
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+            )])
+        }
         "open" => obj(vec![
             (
                 "action",

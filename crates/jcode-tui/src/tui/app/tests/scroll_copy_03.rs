@@ -1505,7 +1505,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "collapsed card must show the tldr:\n{collapsed}"
     );
     assert!(
-        collapsed.contains("▸ expand"),
+        collapsed.contains("⊞"),
         "collapsed card must show the expand badge:\n{collapsed}"
     );
     assert!(
@@ -1522,7 +1522,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         for col in 0..area.width {
             line.push_str(buf[(col, row)].symbol());
         }
-        if let Some(byte) = line.find("▸ expand") {
+        if let Some(byte) = line.find("⊞") {
             let col = line[..byte].chars().count() as u16;
             badge = Some((col, row));
             break 'rows;
@@ -1566,7 +1566,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "expanded card must show the body:\n{expanded}"
     );
     assert!(
-        expanded.contains("▾ collapse"),
+        expanded.contains("⊟"),
         "expanded card must show the collapse badge:\n{expanded}"
     );
 
@@ -1579,7 +1579,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         for col in 0..area.width {
             line.push_str(buf[(col, row)].symbol());
         }
-        if let Some(byte) = line.find("▾ collapse") {
+        if let Some(byte) = line.find("⊟") {
             let col = line[..byte].chars().count() as u16;
             collapse_badge = Some((col, row));
             break 'rows2;
@@ -1669,4 +1669,48 @@ fn command_palette_open_does_not_move_existing_rows() {
         checked += 1;
     }
     assert!(checked >= 3, "expected transcript rows to sample:\n{before}");
+}
+
+#[test]
+fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let mut msgs = Vec::new();
+    for i in 1..=4 {
+        msgs.push(DisplayMessage {
+            role: "user".to_string(),
+            content: format!("question number {i}"),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        msgs.push(DisplayMessage {
+            role: "assistant".to_string(),
+            content: App::build_scroll_test_content(0, 12, None),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+    }
+    app.display_messages = msgs;
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(60, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(!before.contains("question number 2"), "{before}");
+
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    let after = render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    assert!(after.contains("question number 2"), "{after}");
+    assert!(after.contains("question number 3"), "{after}");
 }

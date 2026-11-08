@@ -191,6 +191,7 @@ async fn communicate_assign_next_assigns_next_runnable_task() {
     let worker_session = spawn_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
@@ -198,6 +199,29 @@ async fn communicate_assign_next_assigns_next_runnable_task() {
     wait_for_member_presence(&mut watcher, &watcher_session, &worker_session)
         .await
         .expect("spawned worker should appear in swarm");
+
+    // A hand spawn always owns a lane: the coordinator gains it, tagged with
+    // the worker, and the worker's own todo list is exactly that lane.
+    assert_eq!(
+        spawn_output
+            .metadata
+            .as_ref()
+            .and_then(|m| m["lane"].as_str()),
+        Some("lane::next-task worker")
+    );
+    let coordinator_todos = crate::todo::load_todos(&watcher_session).unwrap();
+    let lane: Vec<_> = coordinator_todos
+        .iter()
+        .filter(|t| t.group.as_deref() == Some("next-task worker"))
+        .collect();
+    assert_eq!(lane.len(), 1, "{coordinator_todos:?}");
+    assert_eq!(
+        lane[0].assigned_to.as_deref(),
+        Some(worker_session.as_str())
+    );
+    let worker_todos = crate::todo::load_todos(&worker_session).unwrap();
+    assert_eq!(worker_todos.len(), 1);
+    assert_eq!(worker_todos[0].group.as_deref(), Some("next-task worker"));
 
     tool.execute(
         json!({
@@ -298,6 +322,7 @@ async fn communicate_assign_next_can_prefer_fresh_spawn_server_side() {
     let existing_worker = existing_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();
@@ -443,100 +468,6 @@ async fn communicate_assign_next_can_spawn_if_needed_server_side() {
 }
 
 #[tokio::test]
-async fn communicate_fill_slots_tops_up_to_concurrency_limit() {
-    let _env_lock = crate::storage::lock_test_env();
-    let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
-    let repo_dir = std::env::current_dir().expect("repo cwd");
-    let socket_path = runtime_dir.path().join("jcode.sock");
-    let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
-    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
-    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
-    let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
-    let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
-
-    let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
-        delay: Duration::from_millis(300),
-    });
-    let server = Arc::new(Server::new(provider));
-    let mut server_task = {
-        let server = Arc::clone(&server);
-        tokio::spawn(async move { server.run().await })
-    };
-
-    wait_for_server_socket(&socket_path, &mut server_task)
-        .await
-        .expect("server socket should be ready");
-
-    let mut watcher = RawClient::connect(&socket_path)
-        .await
-        .expect("watcher should connect");
-    watcher
-        .subscribe(&repo_dir)
-        .await
-        .expect("watcher subscribe");
-
-    let watcher_session = watcher.session_id().await.expect("watcher session id");
-    let tool = CommunicateTool::new();
-    let ctx = test_ctx(&watcher_session, &repo_dir);
-
-    tool.execute(
-        json!({
-            "action": "assign_role",
-            "target_session": watcher_session,
-            "role": "coordinator"
-        }),
-        ctx.clone(),
-    )
-    .await
-    .expect("self-promotion to coordinator should succeed");
-
-    tool.execute(
-        json!({
-            "action": "propose_plan",
-            "plan_items": [{
-                "id": "task-1",
-                "content": "first task",
-                "status": "queued",
-                "priority": "high"
-            }, {
-                "id": "task-2",
-                "content": "second task",
-                "status": "queued",
-                "priority": "high"
-            }, {
-                "id": "task-3",
-                "content": "third task",
-                "status": "queued",
-                "priority": "high"
-            }]
-        }),
-        ctx.clone(),
-    )
-    .await
-    .expect("plan proposal should succeed");
-
-    let output = tool
-        .execute(
-            json!({
-                "action": "fill_slots",
-                "concurrency_limit": 2,
-                "spawn_if_needed": true
-            }),
-            ctx,
-        )
-        .await
-        .expect("fill_slots should succeed");
-
-    assert!(
-        output.output.contains("Filled 2 slot(s):"),
-        "unexpected fill_slots output: {}",
-        output.output
-    );
-
-    server_task.abort();
-}
-
-#[tokio::test]
 async fn communicate_assign_task_can_prefer_fresh_spawn_over_reuse() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
@@ -597,6 +528,7 @@ async fn communicate_assign_task_can_prefer_fresh_spawn_over_reuse() {
     let existing_worker = existing_output
         .output
         .strip_prefix("Spawned new agent: ")
+        .and_then(|text| text.lines().next())
         .expect("spawn output should include session id")
         .trim()
         .to_string();

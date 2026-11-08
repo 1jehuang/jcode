@@ -106,15 +106,19 @@ fn remote_oauth_widget_usage(
     };
     UsageInfo {
         provider,
+        account_hint: snapshot
+            .email
+            .as_deref()
+            .map(crate::tui::app::helpers::mask_email),
         primary_limit_label: snapshot.five_hour_ratio.and(snapshot.primary_label.clone()),
-        five_hour: snapshot.five_hour_ratio.unwrap_or_default(),
+        five_hour: snapshot.five_hour_ratio.unwrap_or(0.0),
         // The wire snapshot has one reset timestamp, belonging to the primary
         // window (or secondary when primary is absent), not both windows.
         five_hour_resets_at: snapshot.five_hour_ratio.and(snapshot.resets_at.clone()),
         secondary_limit_label: snapshot
             .seven_day_ratio
             .and(snapshot.secondary_label.clone()),
-        seven_day: snapshot.seven_day_ratio.unwrap_or_default(),
+        seven_day: snapshot.seven_day_ratio.unwrap_or(0.0),
         seven_day_resets_at: snapshot
             .seven_day_ratio
             .filter(|_| snapshot.five_hour_ratio.is_none())
@@ -475,7 +479,45 @@ impl App {
         }
     }
 
+    /// Masked email of the OAuth account this session's requests use. Comes
+    /// from the session's own credential, never the global active login.
+    fn widget_account_hint(&self, provider: WidgetProviderKind) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        let email = if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else if provider == WidgetProviderKind::OpenAI {
+            // Same lookup the local OpenAI usage path already performs.
+            self.openai_widget_account_email()
+        } else {
+            None
+        };
+        email
+            .filter(|email| !email.trim().is_empty())
+            .map(|email| crate::tui::app::helpers::mask_email(&email))
+    }
+
     fn widget_usage_info(
+        &self,
+        route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
+    ) -> Option<crate::tui::info_widget::UsageInfo> {
+        let mut info = self.widget_usage_info_inner(route, auth_method)?;
+        if matches!(
+            info.provider,
+            crate::tui::info_widget::UsageProvider::OpenAI
+                | crate::tui::info_widget::UsageProvider::Anthropic
+        ) && let Some(hint) = self.widget_account_hint(route.provider)
+        {
+            info.account_hint = Some(hint);
+        }
+        Some(info)
+    }
+
+    fn widget_usage_info_inner(
         &self,
         route: WidgetRouteInfo,
         auth_method: crate::tui::info_widget::AuthMethod,
@@ -521,6 +563,7 @@ impl App {
             output_tps,
             limit_reached: false,
             available: true,
+            account_hint: None,
         };
 
         match route.provider {
@@ -542,6 +585,7 @@ impl App {
                 output_tps,
                 limit_reached: false,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
+                account_hint: None,
             }),
             WidgetProviderKind::Anthropic => {
                 match auth_method {
@@ -590,6 +634,7 @@ impl App {
                     output_tps,
                     limit_reached: false,
                     available: usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -668,6 +713,7 @@ impl App {
                     limit_reached: openai_usage.hard_limit_reached
                         || self.usage_reset.openai_quota_rejected,
                     available: openai_usage.has_limits() && openai_usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::Gemini => None,
@@ -777,6 +823,10 @@ impl crate::tui::TuiState for App {
         self.pinned_todos_expanded
     }
 
+    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.row()
+    }
+
     fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
         self.background_task_rows_ref()
     }
@@ -797,6 +847,13 @@ impl crate::tui::TuiState for App {
 
     fn input(&self) -> &str {
         &self.input
+    }
+
+    fn input_image_attached(&self, number: usize) -> bool {
+        number
+            .checked_sub(1)
+            .and_then(|index| self.pending_images.get(index))
+            .is_some_and(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
     }
 
     fn cursor_pos(&self) -> usize {
@@ -1020,6 +1077,10 @@ impl crate::tui::TuiState for App {
 
     fn has_pending_mouse_scroll_animation(&self) -> bool {
         self.mouse_scroll_queue != 0
+    }
+
+    fn stream_reveal_pending(&self) -> bool {
+        !self.stream_buffer.is_empty()
     }
 
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
@@ -1505,28 +1566,6 @@ impl crate::tui::TuiState for App {
     }
 
     fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
-        let session_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-
-        let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
-        let (todos, todo_goals) =
-            if crate::config::config().display.pin_todos && !todos_are_swarm_plan {
-                // The pinned band is the single source of truth while enabled. Do
-                // not duplicate the same session todos in a margin or overview
-                // info widget.
-                (Vec::new(), Vec::new())
-            } else if todos_are_swarm_plan {
-                (
-                    crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
-                    Vec::new(),
-                )
-            } else {
-                gather_todos_and_goals_for_session(session_id)
-            };
-
         let context_snapshot = self.context_snapshot();
         let context_info = if let Some(context_info) = context_snapshot.info.clone() {
             (context_info.total_chars > 0).then_some(context_info)
@@ -1652,7 +1691,7 @@ impl crate::tui::TuiState for App {
             };
 
             // Dock data: the agents this session actually manages (spawn
-            // subtree), the shared panel selection/focus, and plan progress.
+            // subtree) and the shared panel selection/focus.
             // This is what the SwarmStatus widget renders. Computed outside
             // the activity gate: managing agents is itself "interesting".
             let managed_members = self.inline_swarm_members();
@@ -1663,22 +1702,6 @@ impl crate::tui::TuiState for App {
                 || client_count.is_some()
                 || !managed_members.is_empty()
             {
-                let plan_progress = if self.swarm_plan_items.is_empty() {
-                    None
-                } else {
-                    let total = self.swarm_plan_items.len() as u32;
-                    let done = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "completed" | "done"))
-                        .count() as u32;
-                    let running = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "running" | "running_stale"))
-                        .count() as u32;
-                    Some((done, running, total))
-                };
                 Some(crate::tui::info_widget::SwarmInfo {
                     session_count,
                     subagent_status,
@@ -1692,7 +1715,6 @@ impl crate::tui::TuiState for App {
                             .min(managed_members.len().saturating_sub(1))
                     },
                     focused: self.swarm_panel_focused,
-                    plan_progress,
                     spinner_frame: (self.animation_elapsed()
                         * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
                         as usize,
@@ -1828,11 +1850,9 @@ impl crate::tui::TuiState for App {
                 self.remote_startup_phase.is_some(),
                 crate::usage::remote_account_usage_received(),
             ),
-            todos,
-            todo_goals,
-            todos_are_swarm_plan,
             context_info,
             context_info_stale: !context_snapshot.fresh,
+            historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
             model,
@@ -1862,10 +1882,12 @@ impl crate::tui::TuiState for App {
                                 if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!("{label} requested, provider reports {reported} (unconfirmed)")
+                                    // Keep the raw report: a generic `default`
+                                    // response tier is not a throughput measurement.
+                                    format!("{reported} ← {label}")
                                 }
                             }
-                            _ => format!("{label} requested (unconfirmed)"),
+                            _ => format!("{label} ?"),
                         }
                     })
             },
@@ -1874,6 +1896,7 @@ impl crate::tui::TuiState for App {
             session_count,
             session_name,
             working_dir: self.session.working_dir.clone(),
+            original_working_dir: self.session.original_working_dir.clone(),
             client_count,
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
@@ -1910,6 +1933,13 @@ impl crate::tui::TuiState for App {
                 false
             },
             git_info: gather_git_info(),
+            cloud_info: crate::tui::cloud_status::gather(self.current_session_id()),
+            cloud_connection: self.remote_startup_phase.as_ref().map(|phase| match phase {
+                super::RemoteStartupPhase::Reconnecting { .. } => "Reconnecting".to_string(),
+                _ => "Connecting".to_string(),
+            }),
+            cloud_working: self.is_processing,
+            dual_git_info: crate::tui::cloud_git::gather(),
             agent_edited: self.agent_edited_paths(),
         }
     }
@@ -1965,12 +1995,13 @@ impl crate::tui::TuiState for App {
     }
 
     fn startup_oauth_account_label(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return None;
-        }
         if !self.is_remote {
+            if crate::tui::is_ssh_remote() {
+                return None;
+            }
             return self.provider.oauth_account_label();
         }
+        // SSH must avoid host-local credentials, not daemon-reported identity.
         remote_oauth_account_label(
             self.remote_provider_oauth_account_label.as_deref(),
             self.session.route_api_method.as_deref(),
@@ -1995,31 +2026,20 @@ impl crate::tui::TuiState for App {
     }
 
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        if self.debug_force_inline_gallery {
-            return self.remote_swarm_members.clone();
+        let mut members = self.inline_swarm_members_unticked();
+        // Server snapshots only arrive on state changes, so advance active
+        // workers' stopwatches locally to make them tick every second.
+        if let Some(received_at) = self.remote_swarm_members_received_at {
+            let since = received_at.elapsed().as_secs();
+            for member in &mut members {
+                if jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    && let Some(elapsed) = member.runtime.elapsed_secs.as_mut()
+                {
+                    *elapsed = elapsed.saturating_add(since);
+                }
+            }
         }
-        if !self.swarm_enabled {
-            return Vec::new();
-        }
-        // Scope the inline gallery to the subtree this session actually spawned.
-        // Other sessions can share the same swarm (e.g. same repo) without this
-        // session having spawned them; showing those would be noise. The spawn
-        // tree is reconstructed from each member's `report_back_to_session_id`
-        // parent edge.
-        let self_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-        match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
-            // Session identity is not known yet (e.g. right after connect,
-            // before the History event sets `remote_session_id`). Showing all
-            // swarm members here caused the inline strip to flash on startup
-            // and then disappear once the subtree filter kicked in. Hide the
-            // strip until we know who we are.
-            None => Vec::new(),
-        }
+        members
     }
 
     fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -2241,6 +2261,12 @@ impl crate::tui::TuiState for App {
         self.normalized_copy_selection()
     }
 
+    fn input_drag_scroll_offset(&self) -> Option<usize> {
+        self.copy_selection_dragging
+            .then_some(self.input_selection_scroll)
+            .flatten()
+    }
+
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
         if !self.copy_selection_mode {
             return None;
@@ -2410,6 +2436,63 @@ impl App {
         }
     }
 
+    pub(crate) fn handle_swarm_agent_shortcut(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        if code == crossterm::event::KeyCode::Char('p')
+            && modifiers == crossterm::event::KeyModifiers::ALT
+        {
+            self.pop_out_all_swarm_agents();
+            return true;
+        }
+        let Some(index) = swarm_agent_shortcut_index(code, modifiers) else {
+            return false;
+        };
+        if index >= self.inline_swarm_members().len() {
+            return false;
+        }
+        self.swarm_panel_selected = index;
+        self.pop_out_selected_swarm_agent();
+        true
+    }
+
+    /// Open only this session's managed subtree, not repository-wide peers.
+    pub(crate) fn pop_out_all_swarm_agents(&mut self) {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        if order.is_empty() {
+            self.set_status_notice("No swarm workers to open");
+            return;
+        }
+        let mut opened = 0;
+        let mut failures = Vec::new();
+        for session_id in order {
+            match open_swarm_agent_window(&session_id) {
+                Ok(true) => opened += 1,
+                Ok(false) => failures.push(format!("{session_id}: no terminal emulator found")),
+                Err(error) => failures.push(format!("{session_id}: {error}")),
+            }
+        }
+        if failures.is_empty() {
+            self.set_status_notice(format!("Opened {opened} swarm workers in new windows"));
+        } else {
+            self.set_status_notice(format!(
+                "Opened {opened} swarm workers, {} failed: {}",
+                failures.len(),
+                failures.join(", ")
+            ));
+        }
+    }
+
+    pub(super) fn swarm_agent_shortcut_digit(&self, session_id: &str) -> Option<u8> {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        let index = order.iter().position(|id| id == session_id)?;
+        (index < 10).then_some(((index + 1) % 10) as u8)
+    }
+
     /// Open the currently selected swarm agent's session in a new terminal
     /// window (pop-out), reusing the resume-in-new-terminal launcher.
     pub(crate) fn pop_out_selected_swarm_agent(&mut self) {
@@ -2430,16 +2513,41 @@ impl App {
             .and_then(|m| m.friendly_name.clone())
             .unwrap_or_else(|| session_id.chars().take(8).collect());
 
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match jcode_app_core::session_launch::spawn_resume_in_new_terminal(&exe, &session_id, &cwd)
-        {
+        match open_swarm_agent_window(&session_id) {
             Ok(true) => self.set_status_notice(format!("Opened {label} in a new window")),
             Ok(false) => self.set_status_notice(format!(
                 "Could not open a terminal for {label} (no emulator found)"
             )),
             Err(e) => self.set_status_notice(format!("Failed to open {label}: {e}")),
         }
+    }
+}
+
+fn open_swarm_agent_window(session_id: &str) -> anyhow::Result<bool> {
+    let exe = super::launch_client_executable();
+    let cwd = crate::session::Session::load_startup_stub(session_id)
+        .ok()
+        .and_then(|session| session.working_dir)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let socket = std::env::var("JCODE_SOCKET").ok();
+    super::spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref())
+}
+
+/// Decode direct agent badges without capturing plain digits or other chords.
+pub(crate) fn swarm_agent_shortcut_index(
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> Option<usize> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if modifiers != KeyModifiers::ALT {
+        return None;
+    }
+    match code {
+        KeyCode::Char('0') => Some(9),
+        KeyCode::Char(c @ '1'..='9') => Some((c as u8 - b'1') as usize),
+        _ => None,
     }
 }
 
@@ -2536,225 +2644,39 @@ pub(crate) fn filter_inline_swarm_subtree(
         .collect()
 }
 
-#[cfg(test)]
-mod sidebar_usage_tests {
-    use super::{
-        WidgetProviderKind, WidgetRouteInfo, remote_oauth_widget_usage,
-        remote_oauth_widget_usage_for_route,
-    };
-    use crate::tui::info_widget::{AuthMethod, UsageProvider};
-    use crate::usage::AccountUsageSnapshot;
-
-    #[test]
-    fn startup_usage_slot_waits_for_account_binding_even_with_cached_quotas() {
-        for runtime_pending in [false, true] {
-            for usage_received in [false, true] {
-                assert!(!super::startup_usage_slot_pending(
-                    false,
-                    runtime_pending,
-                    usage_received
-                ));
-                assert_eq!(
-                    super::startup_usage_slot_pending(true, runtime_pending, usage_received),
-                    runtime_pending || !usage_received,
-                );
-            }
+impl App {
+    fn inline_swarm_members_unticked(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        if self.debug_force_inline_gallery {
+            return self.remote_swarm_members.clone();
         }
-    }
-
-    fn snapshot() -> AccountUsageSnapshot {
-        AccountUsageSnapshot {
-            label: "solosystems".into(),
-            email: None,
-            exhausted: false,
-            primary_label: Some("5-hour".into()),
-            five_hour_ratio: Some(1.0),
-            secondary_label: Some("7-day".into()),
-            seven_day_ratio: Some(0.0),
-            resets_at: Some("2099-01-01T00:00:00Z".into()),
-            error: None,
+        if !self.swarm_enabled {
+            return Vec::new();
         }
-    }
-
-    fn providers() -> [(UsageProvider, &'static str); 2] {
-        [
-            (UsageProvider::Anthropic, "claude-oauth"),
-            (UsageProvider::OpenAI, "openai-oauth"),
-        ]
-    }
-
-    #[test]
-    fn remote_sidebar_usage_uses_daemon_label_without_saved_route() {
-        for (provider, method) in providers() {
-            let stale_route = format!("{method}@stale-personal-account");
-            for route in [None, Some(stale_route.as_str())] {
-                let info = remote_oauth_widget_usage_for_route(
-                    provider,
-                    route,
-                    Some("solosystems"),
-                    false,
-                    None,
-                    |label| {
-                        assert_eq!(label, "solosystems");
-                        Some(snapshot())
-                    },
-                );
-                assert_eq!(info.provider, provider);
-                assert!(info.available);
-                assert_eq!(info.five_hour, 1.0);
-            }
-        }
-    }
-
-    #[test]
-    fn remote_sidebar_usage_uses_bound_label_not_global_account() {
-        for (provider, method) in providers() {
-            let route = format!("{method}@solosystems");
-            let info = remote_oauth_widget_usage_for_route(
-                provider,
-                Some(&route),
-                None,
-                false,
-                Some(42.0),
-                |label| {
-                    assert_eq!(label, "solosystems");
-                    Some(snapshot())
-                },
-            );
-            assert_eq!(info.provider, provider);
-            assert!(info.available);
-            assert_eq!(info.primary_limit_label.as_deref(), Some("5-hour"));
-            assert_eq!(info.five_hour, 1.0);
-            assert_eq!(info.seven_day, 0.0);
-            assert_eq!(info.output_tps, Some(42.0));
-            assert!(info.five_hour_resets_at.is_some());
-            assert!(info.seven_day_resets_at.is_none());
-        }
-    }
-
-    #[test]
-    fn remote_sidebar_usage_without_bound_account_never_looks_up_global_usage() {
-        for (provider, method) in providers() {
-            for route in [
-                None,
-                Some(method),
-                Some("anthropic-api-key"),
-                Some("openai-api-key"),
-            ] {
-                for label in [None, Some(""), Some("bad\nlabel")] {
-                    let info = remote_oauth_widget_usage_for_route(
-                        provider,
-                        route,
-                        label,
-                        false,
-                        Some(42.0),
-                        |_| panic!("unbound route must not look up another account"),
-                    );
-                    assert_eq!(info.provider, provider);
-                    assert!(!info.available);
-                    assert!(!info.limit_reached);
-                    assert_eq!(info.output_tps, Some(42.0));
-                    assert!(info.primary_limit_label.is_none());
-                    assert!(info.secondary_limit_label.is_none());
-                    assert!(info.five_hour_resets_at.is_none());
-                    assert!(info.seven_day_resets_at.is_none());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn remote_sidebar_usage_missing_daemon_account_does_not_retry_saved_route() {
-        for (provider, method) in providers() {
-            let route = format!("{method}@stale-personal-account");
-            let info = remote_oauth_widget_usage_for_route(
-                provider,
-                Some(&route),
-                Some("missing-daemon-account"),
-                false,
-                None,
-                |label| {
-                    assert_eq!(label, "missing-daemon-account");
-                    None
-                },
-            );
-            assert!(!info.available);
-            assert!(!info.limit_reached);
-            assert!(info.primary_limit_label.is_none());
-            assert!(info.secondary_limit_label.is_none());
-        }
-    }
-
-    #[test]
-    fn remote_sidebar_usage_preserves_weekly_only_and_unavailable_snapshots() {
-        for (provider, _) in providers() {
-            let mut usage = snapshot();
-            usage.five_hour_ratio = None;
-            usage.primary_label = None;
-            let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
-            assert!(info.available);
-            assert!(info.primary_limit_label.is_none());
-            assert_eq!(info.secondary_limit_label.as_deref(), Some("7-day"));
-            assert_eq!(info.seven_day, 0.0);
-            assert_eq!(info.seven_day_resets_at, usage.resets_at);
-            for error in ["HTTP 429", "HTTP 401", "connection failed"] {
-                usage.error = Some(error.into());
-                let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
-                assert!(!info.available);
-                assert!(
-                    !info.limit_reached,
-                    "a fetch failure is not a quota rejection"
-                );
-            }
-            let missing = remote_oauth_widget_usage(provider, None, true, None);
-            assert!(!missing.available);
-            assert!(missing.limit_reached);
-        }
-    }
-
-    #[test]
-    fn remote_sidebar_usage_does_not_invent_missing_windows_or_resets() {
-        for (provider, _) in providers() {
-            let mut usage = snapshot();
-            usage.five_hour_ratio = None;
-            usage.seven_day_ratio = None;
-            let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
-            assert!(!info.available);
-            assert!(info.primary_limit_label.is_none());
-            assert!(info.secondary_limit_label.is_none());
-            assert!(info.five_hour_resets_at.is_none());
-            assert!(info.seven_day_resets_at.is_none());
-        }
-    }
-
-    #[test]
-    fn remote_anthropic_widget_missing_usage_never_falls_back_to_local_getter() {
-        let mut app = super::super::tests::create_test_app();
-        let route = WidgetRouteInfo {
-            provider: WidgetProviderKind::Anthropic,
-            is_remote: true,
+        // Scope the inline gallery to the subtree this session actually spawned.
+        // Other sessions can share the same swarm (e.g. same repo) without this
+        // session having spawned them; showing those would be noise. The spawn
+        // tree is reconstructed from each member's `report_back_to_session_id`
+        // parent edge.
+        let self_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
         };
-        for label in [None, Some("remote-anthropic-missing-snapshot-test")] {
-            app.remote_provider_oauth_account_label = label.map(str::to_string);
-            app.session.route_api_method = Some("claude-oauth".into());
-            let info = app
-                .widget_usage_info(route, AuthMethod::AnthropicOAuth)
-                .unwrap();
-            assert_eq!(info.provider, UsageProvider::Anthropic);
-            assert!(!info.available);
-            assert!(!info.limit_reached);
-            assert!(info.primary_limit_label.is_none());
-            assert!(info.secondary_limit_label.is_none());
-            assert!(info.five_hour_resets_at.is_none());
-            assert!(info.seven_day_resets_at.is_none());
+        match self_id {
+            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
+            // Session identity is not known yet (e.g. right after connect,
+            // before the History event sets `remote_session_id`). Showing all
+            // swarm members here caused the inline strip to flash on startup
+            // and then disappear once the subtree filter kicked in. Hide the
+            // strip until we know who we are.
+            None => Vec::new(),
         }
-        assert!(app.widget_usage_info(route, AuthMethod::Unknown).is_none());
-        let api = app
-            .widget_usage_info(route, AuthMethod::AnthropicApiKey)
-            .unwrap();
-        assert_eq!(api.provider, UsageProvider::CostBased);
     }
 }
+
+#[cfg(test)]
+#[path = "tui_state_sidebar_usage_tests.rs"]
+mod sidebar_usage_tests;
 
 #[cfg(test)]
 #[path = "swarm_panel_key_tests.rs"]

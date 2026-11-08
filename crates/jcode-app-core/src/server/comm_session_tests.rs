@@ -121,11 +121,16 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions.write().await.insert(
-        "req".to_string(),
-        test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
-    );
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    sessions
+        .register_new(
+            "req".to_string(),
+            test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
+        )
+        .await
+        .unwrap();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
 
     assert_eq!(
@@ -149,7 +154,9 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (mut req_member, _rx) = member("req", Some("swarm-1"), "coordinator");
     req_member.working_dir = Some(std::path::PathBuf::from("/tmp/member-dir"));
@@ -335,11 +342,19 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         false,
         Some("Do the thing."),
-        |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
+        |session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
+            crate::session_env::set_session_env(
+                session_id,
+                HashMap::from([("SPAWN_SECRET".into(), "test-only".into())]),
+            )
+            .unwrap();
+            Ok(false)
+        },
     )
     .expect("visible spawn preparation should succeed even when launch is skipped");
 
     assert!(!launched);
+    assert!(crate::session_env::session_env(&session_id).is_empty());
     let path = crate::storage::jcode_dir()
         .expect("jcode dir")
         .join(format!("client-input-{}", session_id));
@@ -796,11 +811,13 @@ fn resolve_swarm_spawn_model_blank_requested_model_inherits_when_unconfigured() 
 async fn coordinator_identity_uses_live_agent_when_lock_is_available() {
     let agent = test_agent_with_working_dir("coord", "/tmp/coord").await;
     let live_model = agent.lock().await.provider_model();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     sessions
-        .write()
+        .register_new("coord".to_string(), Arc::clone(&agent))
         .await
-        .insert("coord".to_string(), Arc::clone(&agent));
+        .unwrap();
 
     let identity = resolve_coordinator_spawn_identity("coord", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some(live_model.as_str()));
@@ -827,13 +844,15 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
-    let _held = agent.lock().await;
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     sessions
-        .write()
+        .register_new("coord_busy".to_string(), Arc::clone(&agent))
         .await
-        .insert("coord_busy".to_string(), Arc::clone(&agent));
+        .unwrap();
 
+    let _held = agent.lock().await;
     let identity = resolve_coordinator_spawn_identity("coord_busy", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(identity.provider_key.as_deref(), Some("claude-api"));
@@ -898,10 +917,9 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     session.provider_key = Some("claude-api".into());
     session.route_api_method = Some("claude-api".into());
     session.save_prepared().unwrap();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        "routing_busy".to_string(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([("routing_busy".to_string(), agent.clone())]),
+    ));
     let held = agent.lock().await;
     tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -938,6 +956,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         super::spawn_swarm_agent(
             "routing_busy",
             "routing-swarm",
+            None,
             Some(temp.path().to_string_lossy().into_owned()),
             None,
             Some(crate::config::SwarmSpawnMode::Headless),
@@ -1283,44 +1302,5 @@ async fn spawn_admission_lock_serializes_per_swarm_only() {
     );
 }
 
-#[test]
-fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
-    use super::resolve_swarm_spawn_effort;
-
-    // Explicit spawn argument wins over the config pin (#1165).
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("low"), Some("medium")),
-        Some("low".to_string())
-    );
-    // A missing or blank spawn argument falls back to `agents.swarm_effort`.
-    assert_eq!(
-        resolve_swarm_spawn_effort(None, Some("medium")),
-        Some("medium".to_string())
-    );
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("  "), Some(" medium ")),
-        Some("medium".to_string())
-    );
-    // With neither, the worker inherits the provider-wide effort.
-    assert_eq!(resolve_swarm_spawn_effort(None, None), None);
-    assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
-}
-
-#[test]
-fn per_call_auto_spawn_mode_defers_to_configured_mode() {
-    use super::resolve_swarm_spawn_mode;
-    use crate::config::SwarmSpawnMode::{Auto, Headless, Inline, Visible};
-
-    // A model passing `auto` must not override an inline config with a
-    // visible-terminal attempt (workers opened outside VS Code).
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Inline), Inline);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Headless), Headless);
-    assert_eq!(resolve_swarm_spawn_mode(None, Inline), Inline);
-    // A configured `auto` keeps its visible-then-headless behavior.
-    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Auto), Auto);
-    assert_eq!(resolve_swarm_spawn_mode(None, Auto), Auto);
-    // Explicit concrete modes still win over config.
-    assert_eq!(resolve_swarm_spawn_mode(Some(Visible), Inline), Visible);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
-    assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
-}
+#[path = "comm_session_effort_tests.rs"]
+mod effort;

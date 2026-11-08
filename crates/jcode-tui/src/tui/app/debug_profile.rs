@@ -131,7 +131,6 @@ impl App {
                     "visible_text_bytes": estimate_string_vec_bytes(&self.queued_messages),
                     "hidden_count": self.hidden_queued_system_messages.len(),
                     "hidden_text_bytes": estimate_string_vec_bytes(&self.hidden_queued_system_messages),
-                    "current_turn_system_reminder_bytes": self.current_turn_system_reminder.as_ref().map(|value| value.len()).unwrap_or(0),
                 },
                 "clipboard_and_input_media": {
                     "pasted_contents_count": self.pasted_contents.len(),
@@ -566,17 +565,6 @@ fn build_debug_summary(payload: &serde_json::Value) -> serde_json::Value {
         (
             "queued_messages_hidden_bytes".to_string(),
             nested_usize(payload, &["ui", "queued_messages", "hidden_text_bytes"]),
-        ),
-        (
-            "current_turn_system_reminder_bytes".to_string(),
-            nested_usize(
-                payload,
-                &[
-                    "ui",
-                    "queued_messages",
-                    "current_turn_system_reminder_bytes",
-                ],
-            ),
         ),
         (
             "pasted_contents_bytes".to_string(),

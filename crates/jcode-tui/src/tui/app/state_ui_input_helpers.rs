@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::core;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
@@ -120,6 +119,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle dimmed technical details on tool rows with an intent",
     ),
     RegisteredCommand::public(
+        "/latex",
+        "Toggle LaTeX images (on/off/status/none/unicode/image)",
+    ),
+    RegisteredCommand::public(
         "/thinking-display",
         "Show/hide the model's thinking text (off/full/current)",
     ),
@@ -215,9 +218,13 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",
-        "Move this session to a cloud machine and keep working",
+        "Move this session and swarm to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
+    RegisteredCommand::public(
+        "/mobile",
+        "Move to Jcode Cloud and send a push to resume on mobile",
+    ),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
     RegisteredCommand::public("/auth", "Show authentication status"),
@@ -260,67 +267,6 @@ pub(crate) fn registered_command_names() -> impl Iterator<Item = &'static str> {
 }
 
 impl App {
-    /// Find word boundary going backward (for Ctrl+W, Alt+B)
-    pub(super) fn find_word_boundary_back(&self) -> usize {
-        if self.cursor_pos == 0 {
-            return 0;
-        }
-        let mut pos = self.cursor_pos;
-
-        // Move back one char
-        pos = core::prev_char_boundary(&self.input, pos);
-
-        // Skip trailing whitespace
-        while pos > 0 {
-            let ch = self.input[pos..].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            pos = core::prev_char_boundary(&self.input, pos);
-        }
-
-        // Skip word characters
-        while pos > 0 {
-            let prev = core::prev_char_boundary(&self.input, pos);
-            let ch = self.input[prev..].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            pos = prev;
-        }
-
-        pos
-    }
-
-    /// Find word boundary going forward (for Alt+F, Alt+D)
-    pub(super) fn find_word_boundary_forward(&self) -> usize {
-        let len = self.input.len();
-        if self.cursor_pos >= len {
-            return len;
-        }
-        let mut pos = self.cursor_pos;
-
-        // Skip current word
-        while pos < len {
-            let ch = self.input[pos..].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            pos = core::next_char_boundary(&self.input, pos);
-        }
-
-        // Skip whitespace
-        while pos < len {
-            let ch = self.input[pos..].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            pos = core::next_char_boundary(&self.input, pos);
-        }
-
-        pos
-    }
-
     pub fn input(&self) -> &str {
         &self.input
     }
@@ -559,6 +505,52 @@ impl App {
 
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/cloud ") {
+            let mut candidates = vec![
+                (
+                    "/cloud --dry-run".into(),
+                    "Preview moving this session and its swarm",
+                ),
+                (
+                    "/cloud replace".into(),
+                    "Show safe repository replacement commands",
+                ),
+                (
+                    "/cloud replace --dry-run".into(),
+                    "Preview replacing cloud code with local files",
+                ),
+                ("/cloud status".into(), "Show session location"),
+                (
+                    "/cloud reload".into(),
+                    "Restart the cloud daemon onto its new runtime once idle",
+                ),
+                ("/cloud cancel".into(), "Cancel a pending cloud command"),
+            ];
+            // Typing the command or a trailing space must never add consent.
+            if prefix.starts_with("/cloud replace --y") {
+                candidates.push((
+                    "/cloud replace --yes".into(),
+                    "Replace cloud code, preserving the old checkout in a backup",
+                ));
+            }
+            return self.rank_suggestions(input.trim_end(), candidates);
+        }
+
+        if prefix.starts_with("/usage ") {
+            return self.rank_suggestions(
+                input.trim_end(),
+                vec![
+                    ("/usage claude".into(), "Show Claude usage only"),
+                    ("/usage openai".into(), "Show OpenAI (ChatGPT) usage only"),
+                    ("/usage copilot".into(), "Show GitHub Copilot usage only"),
+                    ("/usage cursor".into(), "Show Cursor usage only"),
+                    ("/usage gemini".into(), "Show Google Gemini usage only"),
+                    ("/usage antigravity".into(), "Show Antigravity usage only"),
+                    ("/usage openrouter".into(), "Show OpenRouter usage only"),
+                ],
+            );
+        }
 
         if prefix.starts_with("/reset ") {
             return self.rank_suggestions(
@@ -1457,7 +1449,7 @@ impl App {
     /// the active guided flow phase. Defaults to the starter suggestion cards.
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill, TelemetryLevel};
+        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill};
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
                 let prompt = import.as_ref().map(|review| {
@@ -1481,10 +1473,9 @@ impl App {
                             SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
                             SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
                         },
-                        telemetry: review.telemetry.map(|level| match level {
-                            TelemetryLevel::Everything => crate::tui::TelemetryChoice::Everything,
-                            TelemetryLevel::NoContent => crate::tui::TelemetryChoice::NoContent,
-                            TelemetryLevel::Nothing => crate::tui::TelemetryChoice::Nothing,
+                        telemetry: review.telemetry.map(|t| crate::tui::TelemetryPage {
+                            cursor: t.cursor,
+                            checked: t.checked,
                         }),
                         telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
                         checked_count: review.checked_count(),
@@ -1782,6 +1773,7 @@ impl App {
                 | "/compact"
                 | "/compact mode"
                 | "/alignment"
+                | "/latex"
                 | "/compact-notifications"
                 | "/show-agentgrep-output"
                 | "/reasoning"

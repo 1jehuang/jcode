@@ -130,8 +130,6 @@ pub struct RenderTimingCapture {
 /// Info widget summary capture
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct InfoWidgetSummary {
-    pub todos_total: usize,
-    pub todos_done: usize,
     pub context_total_chars: Option<usize>,
     pub context_limit: Option<usize>,
     pub queue_mode: Option<bool>,
@@ -722,11 +720,8 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
         writeln!(file, "InfoWidgets:")?;
         writeln!(
             file,
-            "  todos: {}/{} done, context_chars: {:?}, model: {:?}",
-            info.summary.todos_done,
-            info.summary.todos_total,
-            info.summary.context_total_chars,
-            info.summary.model
+            "  context_chars: {:?}, model: {:?}",
+            info.summary.context_total_chars, info.summary.model
         )?;
         writeln!(
             file,

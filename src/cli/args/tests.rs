@@ -2,6 +2,129 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn cloud_lifecycle_commands_parse_their_contracts() {
+    for command in ["send", "status", "wait", "logs", "inspect", "run-detached"] {
+        let mut argv = vec!["jcode", "cloud", command, "--session", "session_test"];
+        if matches!(command, "send" | "run-detached") {
+            argv.push("continue the task");
+        }
+        assert!(Args::try_parse_from(argv).is_ok(), "{command}");
+        assert!(
+            Args::try_parse_from(["jcode", "cloud", command]).is_err(),
+            "{command} requires a session"
+        );
+    }
+    let args = Args::try_parse_from([
+        "jcode",
+        "cloud",
+        "wait",
+        "--session",
+        "s",
+        "--timeout",
+        "0",
+        "--messages",
+        "3",
+        "--json",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Wait { session, timeout: 0, messages: 3, json: true })) if session == "s")
+    );
+    let args = Args::try_parse_from([
+        "jcode",
+        "cloud",
+        "fork",
+        "--session",
+        "parent",
+        "--prompt",
+        "child task",
+        "--host",
+        "my-box",
+        "--json",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Fork { session: Some(parent), prompt: Some(prompt), target, json: true })) if parent == "parent" && prompt == "child task" && target.host.as_deref() == Some("my-box"))
+    );
+    assert!(Args::try_parse_from(["jcode", "cloud", "fork"]).is_ok());
+    assert!(Args::try_parse_from(["jcode", "cloud", "doctor", "--json"]).is_ok());
+    let args =
+        Args::try_parse_from(["jcode", "cloud", "problems", "--limit", "0", "--json"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Cloud(CloudCommand::Problems {
+            limit: 0,
+            json: true
+        }))
+    ));
+}
+
+#[test]
+fn cloud_move_selection_defaults_to_swarm_and_independent_sessions_are_explicit() {
+    let args = Args::try_parse_from(["jcode", "cloud", "move"]).unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Move {
+        include_sessions, session_only: false, ..
+    })) if include_sessions.is_empty())
+    );
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "cloud",
+        "move",
+        "--include-session",
+        "first",
+        "--include-session",
+        "second",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Cloud(CloudCommand::Move {
+        include_sessions, session_only: false, dry_run: true, ..
+    })) if include_sessions == ["first", "second"])
+    );
+
+    let args = Args::try_parse_from(["jcode", "cloud", "move", "--session-only"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Cloud(CloudCommand::Move {
+            session_only: true,
+            ..
+        }))
+    ));
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "cloud",
+            "move",
+            "--session-only",
+            "--include-session",
+            "other"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn update_channel_cli_is_explicit_and_limited_to_preview_and_stable() {
+    for channel in ["preview", "stable"] {
+        let args = Args::try_parse_from(["jcode", "update", "--channel", channel]).unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Update { channel: Some(value) }) if value == channel)
+        );
+    }
+    let args = Args::try_parse_from(["jcode", "update"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Update { channel: None })
+    ));
+    for channel in ["main", "nightly", "unknown"] {
+        assert!(Args::try_parse_from(["jcode", "update", "--channel", channel]).is_err());
+    }
+}
+
+#[test]
 fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
     for provider in ["openai", "claude"] {
         let args = Args::try_parse_from([
@@ -457,6 +580,37 @@ fn cloud_sessions_subcommands_parse() {
             assert_eq!(jade.user_id, "jeremy");
         }
         other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn cloud_return_preserves_local_auth_only_when_explicit() {
+    for explicit in [false, true] {
+        let mut argv = vec![
+            "jcode",
+            "cloud",
+            "return",
+            "--session",
+            "old-cloud-session",
+            "--refs-only",
+        ];
+        if explicit {
+            argv.push("--keep-local-auth");
+        }
+        let args = Args::try_parse_from(argv).unwrap();
+        match args.command {
+            Some(Command::Cloud(CloudCommand::Return {
+                session,
+                refs_only,
+                keep_local_auth,
+                ..
+            })) => {
+                assert_eq!(session.as_deref(), Some("old-cloud-session"));
+                assert!(refs_only);
+                assert_eq!(keep_local_auth, explicit);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }
 

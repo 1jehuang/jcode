@@ -15,6 +15,85 @@ fn miss(reason: &str) -> ServerEvent {
 }
 
 #[test]
+fn remote_prefix_tag_upgrades_provisional_notice_once_and_preserves_counters() {
+    for reason in [
+        KvCacheMissReason::LowRead,
+        KvCacheMissReason::HarnessToolsChanged,
+    ] {
+        let mut app = create_test_app();
+        app.kv_cache.kv_cache_turn_number = Some(2);
+        app.kv_cache.kv_cache_turn_call_index = 3;
+        app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+            turn_number: 2,
+            call_index: 3,
+            missed_tokens: 15_618,
+            reason,
+        });
+        let content = format!(
+            "ℹ️ KV cache miss [{}] turn 2 call 3: 4.35K cached / 20K expected tokens: ~15.6K tokens resent (provisional).",
+            reason.label()
+        );
+        app.push_display_message(DisplayMessage::system(content.clone()));
+        let count = app.display_messages.len();
+        let daemon = "KV cache miss [low_read] [prefix unchanged]: ~15.6K tokens resent";
+        let expected_upgrade = reason == KvCacheMissReason::LowRead;
+        assert_eq!(
+            handle_kv_cache_miss(&mut app, "low_read", 15_618, daemon.into(), true),
+            expected_upgrade
+        );
+        assert_eq!(app.display_messages.len(), count);
+        let notice = &app.display_messages[count - 1].content;
+        assert_eq!(notice.contains("[prefix unchanged]"), expected_upgrade);
+        assert!(notice.contains("turn 2 call 3: 4.35K cached / 20K expected tokens"));
+        if !expected_upgrade {
+            assert_eq!(notice, &content);
+        }
+        assert!(!handle_kv_cache_miss(
+            &mut app,
+            "low_read",
+            15_618,
+            daemon.into(),
+            true
+        ));
+        assert_eq!(app.display_messages.len(), count);
+    }
+}
+
+#[test]
+fn remote_prefix_tag_is_revoked_by_authoritative_harness_change() {
+    for (reason, expected) in [
+        ("system_changed", KvCacheMissReason::HarnessSystemChanged),
+        ("tools_changed", KvCacheMissReason::HarnessToolsChanged),
+        ("prefix_changed", KvCacheMissReason::HarnessPrefixChanged),
+    ] {
+        let mut app = create_test_app();
+        app.kv_cache.kv_cache_turn_number = Some(2);
+        app.kv_cache.kv_cache_turn_call_index = 3;
+        app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+            turn_number: 2,
+            call_index: 3,
+            missed_tokens: 15_618,
+            reason: KvCacheMissReason::LowRead,
+        });
+        app.push_display_message(DisplayMessage::system(
+            "ℹ️ KV cache miss [low read] [prefix unchanged] turn 2 call 3: provisional",
+        ));
+        let count = app.display_messages.len();
+        let corrected = format!("KV cache miss [{reason}]: ~15.6K tokens resent");
+        assert!(handle_kv_cache_miss(
+            &mut app,
+            reason,
+            15_618,
+            corrected.clone(),
+            true
+        ));
+        assert_eq!(app.display_messages.len(), count);
+        assert_eq!(app.display_messages[count - 1].content, corrected);
+        assert_eq!(app.kv_cache.kv_cache_miss_samples[0].reason, expected);
+    }
+}
+
+#[test]
 fn remote_kv_cache_miss_without_baseline_is_visible_in_order() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -79,6 +158,7 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
     handle_server_event(
         &mut app,
         ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 10_000,
             output: 10,
             cache_read_input: Some(0),
@@ -91,6 +171,7 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
     handle_server_event(
         &mut app,
         ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 10_000,
             output: 10,
             cache_read_input: Some(0),
@@ -253,8 +334,75 @@ fn remote_compaction_notice_follows_buffered_response() {
     assert!(
         app.display_messages[count - 1]
             .content
-            .starts_with("📦 Compacted (automatic): ~216,517 tokens")
+            .starts_with("📦 Compacted (automatic): from ~216,517 tokens")
     );
     assert!(!app.display_messages[count - 1].content.contains("unknown"));
+    assert!(
+        !app.display_messages[count - 1]
+            .content
+            .contains("unavailable")
+    );
     assert!(app.streaming.streaming_text.is_empty());
+}
+
+#[test]
+fn remote_daily_rollover_corrects_provisional_low_read_in_place() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(7);
+    app.kv_cache.kv_cache_turn_call_index = 1;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 7,
+        call_index: 1,
+        missed_tokens: 590_713,
+        reason: KvCacheMissReason::LowRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "ℹ️ KV cache miss [low read] turn 7 call 1: provisional",
+    ));
+    let count = app.display_messages.len();
+    let corrected = "KV cache refresh [provider_daily_rollover]: ~590K tokens resent";
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "daily_rollover",
+        590_713,
+        corrected.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count);
+    assert_eq!(app.display_messages[count - 1].content, corrected);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::DailyRollover
+    );
+}
+
+#[test]
+fn remote_account_switch_corrects_provisional_zero_read_in_place() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(2);
+    app.kv_cache.kv_cache_turn_call_index = 2;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 2,
+        call_index: 2,
+        missed_tokens: 33_096,
+        reason: KvCacheMissReason::ZeroRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "ℹ️ KV cache miss [zero read] turn 2 call 2: 0 cached / 33.1K expected tokens",
+    ));
+    let count = app.display_messages.len();
+    let corrected = "KV cache miss [account_switch]: ~33.1K tokens resent (account switched claude-fox -> claude-otter (e.g. failover after a rate limit); prompt caches are per account).";
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "account_switch",
+        33_096,
+        corrected.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count, "replaced, not appended");
+    assert_eq!(app.display_messages[count - 1].content, corrected);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::AccountSwitch
+    );
 }

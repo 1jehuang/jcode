@@ -2,8 +2,9 @@
 
 use super::{
     App, DisplayMessage, MAX_TURN_HOLD_SECS, PendingReloadReconnectStatus, ProcessingStatus,
-    RemoteResumeActivity, SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
-    remote_notifications::present_swarm_notification, spawn_in_new_terminal,
+    RemoteResumeActivity, SendAction, auth::auth_muse_helpers, ctrl_bracket_fallback_to_esc, input,
+    parse_rate_limit_error, remote_notifications::present_swarm_notification,
+    spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
@@ -18,13 +19,17 @@ use std::time::{Duration, Instant};
 
 mod input_dispatch;
 mod key_handling;
+mod latency;
 mod queue_recovery;
 mod reconnect;
 mod server_event_handlers;
 mod server_events;
 mod session_persistence;
+mod ssh_host;
+pub(super) mod ssh_sessions;
 mod swarm_plan_core;
 mod swarm_status_core;
+pub(super) mod turn_identity;
 mod workspace;
 
 #[cfg(test)]
@@ -38,8 +43,8 @@ use queue_recovery::{
 #[allow(unused_imports)]
 pub(super) use reconnect::{
     ConnectOutcome, PostConnectOutcome, ReloadReconnectHints, RemoteRunState, connect_with_retry,
-    finalize_reload_reconnect, handle_post_connect, reload_handoff_active,
-    should_allow_reconnect_takeover, should_use_same_session_fast_path,
+    finalize_reload_reconnect, handle_post_connect, queue_reload_continuation_once,
+    reload_handoff_active, should_allow_reconnect_takeover, should_use_same_session_fast_path,
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
@@ -48,8 +53,7 @@ use session_persistence::{
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
-// Re-export the remote input dispatch helpers for sibling modules/tests that go
-// through the `remote` facade instead of private submodule paths.
+// Re-export remote input dispatch helpers for sibling modules/tests.
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
@@ -61,7 +65,7 @@ pub(super) use input_dispatch::{
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
 };
-pub(super) use server_events::handle_server_event;
+pub(super) use latency::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
@@ -88,6 +92,13 @@ pub(super) enum RemoteEventOutcome {
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    if app.cloud_environment_idle_clear_due()
+        && let Err(error) = app.prepare_cloud_environment(remote).await
+    {
+        crate::logging::warn(&format!(
+            "Could not clear expired cloud resource tools: {error}"
+        ));
+    }
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
@@ -115,6 +126,15 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
+    needs_redraw |= app.poll_cloud_job();
+    if app.take_cloud_remote_interrupt() {
+        if let Err(error) = remote.cancel_with_reason("cloud_handoff_ready").await {
+            crate::logging::warn(&format!(
+                "Failed to interrupt turn for cloud handoff: {error}"
+            ));
+        }
+        needs_redraw = true;
+    }
     if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
         let sent = match provider {
             super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
@@ -189,17 +209,33 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         && app.stream_buffer.is_empty()
         && let Some(id) = app.deferred_stream_done_id.take()
     {
-        needs_redraw |= app.handle_server_event(crate::protocol::ServerEvent::Done { id }, remote);
+        let event = crate::protocol::ServerEvent::Done { id };
+        let event = match app.deferred_stream_done_identity.clone() {
+            Some(identity) => crate::protocol::ServerEvent::TurnEvent {
+                identity,
+                event: Box::new(event),
+            },
+            None => event,
+        };
+        needs_redraw |= app.handle_server_event(event, remote);
     }
 
+    if app.remote_todos_refresh_due()
+        && let Err(error) = remote.request_todos().await
+    {
+        crate::logging::warn(&format!("Remote todo refresh failed: {error}"));
+    }
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_completed_todo_report(false);
     needs_redraw |= app.refresh_pinned_todos_if_needed();
+    needs_redraw |= app.refresh_justrust_status();
     needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+    needs_redraw |= app.poll_session_picker_search_submission();
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
@@ -239,6 +275,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
 
     if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+        return needs_redraw;
+    }
+
+    if app.cloud_handoff_blocks_work() {
         return needs_redraw;
     }
 
@@ -341,6 +381,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
+    if app
+        .remote_queue_retry_not_before
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return needs_redraw;
+    }
+    app.remote_queue_retry_not_before = None;
+
     // Esc redirect hold. On timeout this arms pending_queued_dispatch, which
     // the next check hands to the normal follow-up path.
     let holding_for_interrupt = app.awaiting_remote_interrupt_ack();
@@ -400,7 +448,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
 
-    if !app.is_processing && !app.hidden_queued_system_messages.is_empty() {
+    if !app.is_processing
+        && (!app.hidden_queued_system_messages.is_empty()
+            || (remote.has_loaded_history() && app.has_pending_cloud_recovery()))
+    {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
@@ -423,7 +474,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             crate::logging::error(
                 "Failed to send hidden continuation reminder; restoring it to the queue",
             );
-            app.hidden_queued_system_messages.insert(0, combined);
+            if !combined.is_empty() {
+                app.hidden_queued_system_messages.insert(0, combined);
+            }
         }
         needs_redraw = true;
     }
@@ -563,63 +616,19 @@ async fn apply_terminal_event<B: Backend>(
                     }
                 }
                 if let Some(selection) = app.pending_account_picker_action.take() {
-                    match selection {
-                        crate::tui::AccountPickerAction::Switch { provider_id, label } => {
-                            match provider_id.as_str() {
-                                "claude" => {
-                                    if let Err(e) = crate::auth::claude::set_active_account(&label)
-                                    {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
-                                        let _ = remote.switch_anthropic_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to Anthropic account `{}`.",
-                                            label
-                                        )));
-                                        app.set_status_notice(format!(
-                                            "Account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                "openai" => {
-                                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch OpenAI account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
-                                        let _ = remote.switch_openai_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to OpenAI account `{}`.",
-                                            label
-                                        )));
-                                        app.set_status_notice(format!(
-                                            "OpenAI account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                _ => app.push_display_message(DisplayMessage::error(format!(
-                                    "Provider `{}` does not support account switching.",
-                                    provider_id
-                                ))),
-                            }
+                    if let crate::tui::AccountPickerAction::Switch { provider_id, label } =
+                        selection
+                    {
+                        let command = super::auth::AccountCommand::Switch { provider_id, label };
+                        if let Err(error) =
+                            super::auth::execute_account_command_remote(app, command, remote).await
+                        {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request remote account switch: {error}"
+                            )));
                         }
-                        crate::tui::AccountPickerAction::Add { .. }
-                        | crate::tui::AccountPickerAction::Replace { .. }
-                        | crate::tui::AccountPickerAction::OpenCenter { .. } => {}
+                    } else {
+                        app.remote_account_management_notice();
                     }
                 }
             }
@@ -681,8 +690,18 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
     let Some(visible_messages) = app.take_pending_compacted_history_load() else {
         return false;
     };
-    match remote.get_compacted_history(visible_messages).await {
-        Ok(_) => true,
+    let recent_history = app.recent_history_window_active();
+    match remote
+        .get_compacted_history(visible_messages, recent_history)
+        .await
+    {
+        Ok(id) => {
+            if recent_history {
+                app.recent_history_paging.request =
+                    Some((id, app.display_messages_version, visible_messages));
+            }
+            true
+        }
         Err(error) => {
             app.restore_pending_compacted_history_load(visible_messages);
             app.set_status_notice(format!("Failed to request older history: {}", error));
@@ -732,7 +751,7 @@ pub(super) async fn handle_bus_event(
                 app.set_status_notice("Local login does not change SSH server credentials");
                 return true;
             }
-            let success = login.success && login.provider != "copilot_code";
+            let success = login.success && auth_muse_helpers::is_completed_login(&login);
             let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
             let auth = auth_changed_event_for_login_provider(&login.provider);
             let prefer_strongest = success && app.onboarding_should_prefer_strongest_model();
@@ -970,7 +989,17 @@ pub(super) async fn handle_remote_event<B: Backend>(
     event: RemoteRead,
 ) -> Result<(RemoteEventOutcome, bool)> {
     match event {
+        RemoteRead::Event(ServerEvent::ToolCall {
+            session_id,
+            call_id,
+            name,
+            input,
+        }) => {
+            app.cloud_environment_call(remote, session_id, call_id, name, input);
+            Ok((RemoteEventOutcome::Continue, false))
+        }
         RemoteRead::Disconnected(reason) => {
+            app.revoke_cloud_environment();
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);
                 crate::logging::error(&format!(
@@ -1034,7 +1063,11 @@ pub(super) async fn handle_remote_event<B: Backend>(
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }
         RemoteRead::Event(server_event) => {
+            if ssh_sessions::handle_event(app, remote, &server_event).await? {
+                return Ok((RemoteEventOutcome::Continue, true));
+            }
             let needs_redraw = handle_server_event(app, server_event, remote);
+            ssh_sessions::after_event(app, remote).await?;
             process_remote_followups(app, remote).await;
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }
@@ -1065,6 +1098,7 @@ pub(super) fn handle_disconnect(
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {
         "server reload in progress".to_string()
     } else if let Some(reason) = reason.as_ref() {
@@ -1346,6 +1380,20 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app
+        .remote_queue_retry_not_before
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return;
+    }
+    app.remote_queue_retry_not_before = None;
+    if app.prepare_cloud_environment(remote).await.is_err() {
+        app.revoke_cloud_environment();
+        return;
+    }
+    if app.cloud_handoff_blocks_work() {
+        return;
+    }
     if app.pending_provider_failover.is_some()
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {
@@ -1365,56 +1413,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
-    // A headed fork stages its first prompt before launching the new client. We
-    // can send that prompt immediately after Subscribe, without waiting for the
-    // client to receive and render History: requests and events share one
-    // ordered socket, so the server finishes writing the Subscribe History
-    // response before it reads this Message request. Do not echo the user turn
-    // locally here because the still-in-flight History payload would clear it.
-    // Preserve the echo and apply it immediately after History instead.
-    //
-    // This removes the visible, intermittent pause between the fork window
-    // opening and its prompt starting, which was proportional to history payload
-    // transfer/render time for large parent sessions.
-    if !remote.has_loaded_history()
-        && app.submit_input_on_startup
-        && !app.is_processing
-        && !app.remote_model_switch_in_flight
-        && !app.auth_catalog_refresh_pending
-        && (!app.input.is_empty() || !app.pending_images.is_empty())
-    {
-        app.submit_input_on_startup = false;
-        app.startup_submit_deferred_reason = None;
-        let prepared = input::take_prepared_input(app);
-        app.pending_startup_prompt_echo = Some(prepared.raw_input.clone());
-        app.last_submitted_input = Some(prepared.raw_input);
-        crate::logging::info(&format!(
-            "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",
-            prepared.expanded.chars().count(),
-            prepared.images.len(),
-        ));
-        if let Err(error) = begin_remote_send(
-            app,
-            remote,
-            prepared.expanded,
-            prepared.images,
-            false,
-            None,
-            false,
-            0,
-        )
-        .await
-        {
-            crate::logging::warn(&format!("Early startup auto-submit failed: {error}"));
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to submit startup prompt: {}",
-                error
-            )));
-            app.set_status_notice("Startup prompt failed");
-        }
-        return;
-    }
-
+    // Drain Subscribe's History before sending the staged startup prompt.
+    // Both directions can carry large image payloads: awaiting a prompt write
+    // here would prevent this event loop from reading History while the server
+    // is still writing it, deadlocking both peers on socket backpressure.
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
         return;
@@ -1721,7 +1723,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 app.queued_messages.insert(0, combined);
             }
         }
-    } else if !app.hidden_queued_system_messages.is_empty() {
+    } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         if begin_remote_send(
@@ -1740,7 +1742,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             crate::logging::error(
                 "Failed to send hidden continuation reminder; restoring it to the queue",
             );
-            app.hidden_queued_system_messages.insert(0, combined);
+            if !combined.is_empty() {
+                app.hidden_queued_system_messages.insert(0, combined);
+            }
         }
     }
 }
@@ -1951,6 +1955,12 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
     if cmd == "state" {
         return serde_json::json!({
             "processing": app.is_processing,
+            "processing_status": format!("{:?}", app.status),
+            "current_message_id": app.current_message_id,
+            "pending_soft_interrupts": app.pending_soft_interrupts.len(),
+            "pending_soft_interrupt_requests": app.pending_soft_interrupt_requests.len(),
+            "pending_queued_dispatch": app.pending_queued_dispatch,
+            "remote_session_id": app.remote_session_id,
             "messages": app.messages.len(),
             "display_messages": app.display_messages.len(),
             "input": app.input,
@@ -2056,6 +2066,9 @@ fn queue_message_for_reconnect(app: &mut App) {
 
     let prepared = input::take_prepared_input(app);
     app.queued_messages.push(prepared.expanded);
+    if crate::tui::is_ssh_remote() {
+        crate::tui::request_immediate_ssh_reconnect();
+    }
 
     let queued_count = app.queued_messages.len();
     app.set_status_notice(format!(
@@ -2098,6 +2111,10 @@ fn handle_disconnected_key_internal(
     }
 
     if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
+    }
+
+    if input::handle_account_shortcut(app, code, modifiers) {
         return Ok(());
     }
 

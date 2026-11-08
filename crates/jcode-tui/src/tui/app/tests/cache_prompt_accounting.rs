@@ -109,6 +109,7 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
     app.remote_provider_model = Some("claude-opus-5-5".to_string());
     for write in [1_000, 1_375] {
         app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 2_482, output: 100,
             cache_read_input: Some(615_629), cache_creation_input: Some(write),
         }, &mut remote);
@@ -129,6 +130,7 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
         active_messages: Some(3),
     });
     app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+        effective_budget: None,
         input: 2_482, output: 101,
         cache_read_input: Some(615_629), cache_creation_input: Some(1_375),
     }, &mut remote);
@@ -218,6 +220,7 @@ fn cache_accounting_remote_snapshots_count_openai_prompt_once() {
     ] {
         app.handle_server_event(
             crate::protocol::ServerEvent::TokenUsage {
+                effective_budget: None,
                 input,
                 output: 100,
                 cache_read_input: Some(read),

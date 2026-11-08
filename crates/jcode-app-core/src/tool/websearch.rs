@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Web search using DuckDuckGo or Bing (HTML scraping, with optional Bing API)
+#[path = "websearch_kagi.rs"]
+mod kagi;
+
+/// Web search using configured local HTTP backends.
 pub struct WebSearchTool {
     client: reqwest::Client,
 }
@@ -23,10 +26,6 @@ struct WebSearchInput {
     query: String,
     #[serde(default)]
     num_results: Option<usize>,
-    #[serde(default)]
-    engine: Option<WebSearchEngine>,
-    #[serde(default)]
-    bing_market: Option<String>,
 }
 
 #[derive(Debug)]
@@ -41,6 +40,11 @@ struct BingSearchOptions<'a> {
     market: &'a str,
     configured_api_key: Option<&'a str>,
     api_key_env: &'a str,
+}
+
+struct BackendClients<'a> {
+    custom: &'a reqwest::Client,
+    kagi: &'a reqwest::Client,
 }
 
 #[async_trait]
@@ -66,40 +70,50 @@ impl Tool for WebSearchTool {
                 "num_results": {
                     "type": "integer",
                     "description": "Max results."
-                },
-                "engine": {
-                    "type": "string",
-                    "enum": ["duckduckgo", "bing", "searxng", "custom"],
-                    "description": "Engine. Defaults to configured engine; custom uses websearch.custom."
-                },
-                "bing_market": {
-                    "type": "string",
-                    "description": "Optional Bing market, e.g. en-US or zh-CN. Defaults to JCODE_BING_MARKET or en-US."
                 }
             }
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        use super::session_http::{self, Profile};
         let params: WebSearchInput = serde_json::from_value(input)?;
         let num_results = params.num_results.unwrap_or(8).min(20);
 
         let config = crate::config::config();
-        let engines = local_engine_order(
-            params.engine.unwrap_or(config.websearch.engine),
-            &config.websearch.fallback_engines,
-        );
+        let engines =
+            local_engine_order(config.websearch.engine, &config.websearch.fallback_engines);
 
-        let market = params
-            .bing_market
-            .as_deref()
-            .unwrap_or(&config.websearch.bing_market);
+        let mut profiles = vec![Profile::Shared];
+        if engines.contains(&WebSearchEngine::Custom) {
+            profiles.push(Profile::Custom);
+        }
+        if engines.contains(&WebSearchEngine::Kagi) {
+            profiles.push(Profile::Kagi);
+        }
+        let clients = session_http::clients(&ctx.session_id, &profiles)?;
+        let tool = Self {
+            client: clients[0].clone(),
+        };
+        let custom_client = &clients[profiles
+            .iter()
+            .position(|p| *p == Profile::Custom)
+            .unwrap_or(0)];
+        let kagi_client = &clients[profiles
+            .iter()
+            .position(|p| *p == Profile::Kagi)
+            .unwrap_or(0)];
+        let market = &config.websearch.bing_market;
         let mut last_error = None;
         let mut results = Vec::new();
         for (index, engine) in engines.into_iter().enumerate() {
             let allow_bing_api = index == 0;
-            match self
+            match tool
                 .search_with_engine(
+                    BackendClients {
+                        custom: custom_client,
+                        kagi: kagi_client,
+                    },
                     engine,
                     &params.query,
                     num_results,
@@ -130,12 +144,7 @@ impl Tool for WebSearchTool {
 
         if results.is_empty() {
             return Ok(ToolOutput::new(format!(
-                "No results found for: {}\n\n\
-                 If results are consistently empty on this machine, the default \
-                 DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
-                 or IP reputation (common on Linux/servers). Workaround:\n\
-                 - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".",
+                "No results found for: {}",
                 params.query
             )));
         }
@@ -159,6 +168,7 @@ impl Tool for WebSearchTool {
 impl WebSearchTool {
     async fn search_with_engine(
         &self,
+        clients: BackendClients<'_>,
         engine: WebSearchEngine,
         query: &str,
         num_results: usize,
@@ -172,12 +182,22 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            WebSearchEngine::Kagi => {
+                let config = crate::config::config();
+                kagi::search(
+                    clients.kagi,
+                    query,
+                    num_results,
+                    &config.websearch.kagi_api_key_env,
+                )
+                .await
+            }
             WebSearchEngine::Custom => {
                 let config = crate::config::config();
                 let custom = config.websearch.custom.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("Custom search requires [websearch.custom] configuration")
                 })?;
-                search_custom(custom, query, num_results).await
+                search_custom_with_client(clients.custom, custom, query, num_results).await
             }
             // Provider-native search never reaches the local tool: engine order
             // filters it out. Kept for exhaustiveness.
@@ -209,7 +229,8 @@ impl WebSearchTool {
             )
             .form(&[("q", query), ("kl", "us-en")])
             .send()
-            .await?;
+            .await
+            .map_err(super::session_http::transport_error)?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -218,7 +239,10 @@ impl WebSearchTool {
             ));
         }
 
-        let body = response.text().await?;
+        let body = response
+            .text()
+            .await
+            .map_err(super::session_http::transport_error)?;
         let results = parse_ddg_results(&body, num_results);
         if results.is_empty()
             && let Some(reason) = detect_anti_bot_page(&body)
@@ -279,7 +303,8 @@ impl WebSearchTool {
             ])
             .header("Ocp-Apim-Subscription-Key", api_key)
             .send()
-            .await?;
+            .await
+            .map_err(super::session_http::transport_error)?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -288,7 +313,13 @@ impl WebSearchTool {
             ));
         }
 
-        Ok(parse_bing_api_results(response.json().await?, num_results))
+        Ok(parse_bing_api_results(
+            response
+                .json()
+                .await
+                .map_err(super::session_http::transport_error)?,
+            num_results,
+        ))
     }
 
     async fn search_bing_html(
@@ -311,7 +342,8 @@ impl WebSearchTool {
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             )
             .send()
-            .await?;
+            .await
+            .map_err(super::session_http::transport_error)?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -320,7 +352,10 @@ impl WebSearchTool {
             ));
         }
 
-        let body = response.text().await?;
+        let body = response
+            .text()
+            .await
+            .map_err(super::session_http::transport_error)?;
         let results = parse_bing_html_results(&body, num_results);
         if results.is_empty()
             && let Some(reason) = detect_anti_bot_page(&body)
@@ -379,7 +414,8 @@ impl WebSearchTool {
             )
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
-            .await?;
+            .await
+            .map_err(super::session_http::transport_error)?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -389,9 +425,9 @@ impl WebSearchTool {
             ));
         }
 
-        let parsed: SearxngResponse = response.json().await.map_err(|err| {
+        let parsed: SearxngResponse = response.json().await.map_err(|_| {
             anyhow::anyhow!(
-                "SearXNG returned a non-JSON response ({err}). The instance may have \
+                "SearXNG returned a non-JSON response. The instance may have \
                  the JSON format disabled; enable `formats: [html, json]` in its settings."
             )
         })?;
@@ -525,18 +561,24 @@ fn custom_request(
         .map_err(|e| anyhow::anyhow!("Custom search request failed: {}", e.without_url()))
 }
 
+#[cfg(test)]
 async fn search_custom(
     config: &CustomWebSearchConfig,
     query: &str,
     count: usize,
 ) -> Result<Vec<SearchResult>> {
-    // Never forward user-configured credentials to redirect destinations.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|_| anyhow::anyhow!("Custom search HTTP client initialization failed"))?;
-    let request = custom_request(&client, config, query, count, |name| {
+    let client = super::session_http::client("", super::session_http::Profile::Custom)?;
+    search_custom_with_client(&client, config, query, count).await
+}
+
+async fn search_custom_with_client(
+    client: &reqwest::Client,
+    config: &CustomWebSearchConfig,
+    query: &str,
+    count: usize,
+) -> Result<Vec<SearchResult>> {
+    // The selected profile preserves the no-redirect policy and 30s timeout.
+    let request = custom_request(client, config, query, count, |name| {
         match std::env::var(name) {
             Ok(value) => Some(value),
             Err(error) => {
@@ -556,7 +598,7 @@ async fn search_custom(
     let response = client
         .execute(request)
         .await
-        .map_err(|e| anyhow::anyhow!("Custom search request failed: {}", e.without_url()))?;
+        .map_err(super::session_http::transport_error)?;
     anyhow::ensure!(
         response.status().is_success(),
         "Custom search failed with HTTP status {}",

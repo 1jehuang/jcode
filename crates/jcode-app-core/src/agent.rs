@@ -14,14 +14,18 @@ mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod runtime_recovery;
 mod status;
 mod streaming;
 #[cfg(test)]
 mod swarm_reminder_tests;
-mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;
+mod turn_ownership;
+pub(crate) use turn_ownership::{
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+};
 mod turn_streaming_mpsc;
 mod utils;
 
@@ -48,7 +52,6 @@ use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
@@ -62,8 +65,6 @@ pub use jcode_agent_runtime::{
 };
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
@@ -78,63 +79,9 @@ static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitSta
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
 
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    // Hash the cache-relevant projection, not the raw Message. Raw hashing
-    // keys off non-transmitted metadata (timestamp, tool_duration_ms,
-    // ReasoningTrace blocks, cache_control markers), which triggers spurious
-    // harness:_prefix_changed KV-cache miss reports when the same message is
-    // re-serialized with backfilled metadata on the next turn.
-    crate::message::cache_relevant_message_hashes(messages)
-}
-
-fn kv_cache_request_event(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    system_static: &str,
-    ephemeral_messages: &[Message],
-) -> ServerEvent {
-    // Provider-native deferred definitions are outside the cached prefix.
-    // Late MCP discovery must not look like a harness-induced tools change
-    // when the provider reports a cache miss for some unrelated reason.
-    // Borrow definitions rather than cloning potentially large MCP schemas.
-    let eager_tools: Vec<_> = tools.iter().filter(|tool| !tool.defer_loading).collect();
-    let ephemeral_hash = if ephemeral_messages.is_empty() {
-        None
-    } else {
-        Some(stable_hash_json(ephemeral_messages))
-    };
-    ServerEvent::KvCacheRequest {
-        system_static_hash: stable_hash_str(system_static),
-        tools_hash: stable_hash_json(&eager_tools),
-        messages_hash: stable_hash_json(&crate::message::cache_relevant_messages(messages)),
-        message_hashes: message_hashes(messages),
-        message_count: messages.len(),
-        tool_count: eager_tools.len(),
-        system_static_chars: system_static.chars().count(),
-        tools_json_chars: stable_json_len(&eager_tools),
-        messages_json_chars: stable_json_len(messages),
-        ephemeral_hash,
-        ephemeral_chars: stable_json_len(ephemeral_messages),
-        ephemeral_message_count: ephemeral_messages.len(),
-    }
-}
+#[path = "agent/cache_request.rs"]
+mod cache_request;
+use cache_request::kv_cache_request_event;
 
 impl Agent {
     /// Provider identity used for cache retention lookups. Generic OpenAI is
@@ -149,6 +96,29 @@ impl Agent {
             Some(jcode_provider_core::ResolvedCredential::Oauth) => "openai-oauth".into(),
             None => name,
         }
+    }
+
+    /// OAuth account serving this request. Prompt caches are per account, so
+    /// a failover between accounts must be attributed, not reported as an
+    /// unexplained provider eviction.
+    fn kv_cache_account_identity(&self) -> Option<String> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        // An unbound runtime authenticates with the globally active account.
+        self.provider.oauth_account_label().or_else(|| {
+            match jcode_provider_core::parse_provider_hint(self.provider.name()) {
+                Some(jcode_provider_core::ActiveProvider::Claude) => {
+                    crate::auth::claude::active_account_label()
+                }
+                Some(jcode_provider_core::ActiveProvider::OpenAI) => {
+                    crate::auth::codex::active_account_label()
+                }
+                _ => None,
+            }
+        })
     }
 
     fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
@@ -171,6 +141,7 @@ impl Agent {
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
+            account: self.kv_cache_account_identity(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -198,14 +169,18 @@ impl Agent {
             cache_creation,
         );
         let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
-        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let expected_refresh = matches!(
+            miss.reason,
+            crate::kv_cache_monitor::MissReason::Compaction
+                | crate::kv_cache_monitor::MissReason::DailyRollover
+        );
         let label = if expected_refresh {
             "KV_CACHE_REFRESH"
         } else {
             "KV_CACHE_MISS"
         };
         let diagnostic = format!(
-            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -213,6 +188,7 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
+            miss.detail,
         );
         if expected_refresh {
             logging::info(&diagnostic);
@@ -288,6 +264,7 @@ struct RewindUndoSnapshot {
 }
 
 pub struct Agent {
+    turn_ownership: turn_ownership::TurnOwnership,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -309,9 +286,6 @@ pub struct Agent {
     last_status_detail: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -346,6 +320,9 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Before/after token counts from the last context-limit auto-recovery,
+    /// consumed when the turn loop announces the compaction to clients.
+    last_recovery_compaction: Option<(u64, u64, usize)>,
     /// Whether `locked_tools` was built for provider-native deferred MCP
     /// loading. A mid-session model/provider switch can change that
     /// capability; the snapshot must then be rebuilt, or the new provider
@@ -400,6 +377,22 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub(crate) fn server_turn_observer(&self) -> TurnObserver {
+        self.turn_ownership.observer()
+    }
+
+    pub(crate) fn claim_runtime_mutation(&self) -> Result<RuntimeMutationLease> {
+        self.turn_ownership.claim_mutation()
+    }
+
+    pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
+        self.turn_ownership.claim()
+    }
+
+    pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
+        self.turn_ownership.validate(lease)
+    }
+
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self
             .session
@@ -466,6 +459,7 @@ impl Agent {
             disabled_tools.clone(),
         );
         let mut agent = Self {
+            turn_ownership: Default::default(),
             provider,
             registry,
             skills,
@@ -480,7 +474,6 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -492,6 +485,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            last_recovery_compaction: None,
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
@@ -713,6 +707,7 @@ impl Agent {
             }
         };
         manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
@@ -813,7 +808,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -835,8 +829,37 @@ impl Agent {
         let recognized = active_skill
             .as_ref()
             .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        let next = active_skill.filter(|name| skills.get(name).is_some());
+        if next != self.active_skill {
+            self.active_skill = next;
+            self.announce_active_skill();
+        }
         recognized
+    }
+
+    /// Record the newly active skill's instructions as a hidden transcript
+    /// message. The system prompt stays byte-identical across skill changes.
+    pub(crate) fn announce_active_skill(&mut self) {
+        let Some(name) = self.active_skill.clone() else {
+            return;
+        };
+        let skills = self.current_skills_snapshot();
+        let Some(skill) = skills.get(&name) else {
+            return;
+        };
+        let text = format!(
+            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+            skill.get_prompt().trim()
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(
@@ -859,7 +882,15 @@ impl Agent {
         &mut self,
         encrypted_content: String,
         compacted_count: usize,
-    ) -> Result<()> {
+    ) -> Result<(Option<u64>, Option<u64>)> {
+        // Measure the context before and after so clients can show what the
+        // compaction did. OpenAI does not report these sizes for native
+        // compaction, so jcode's own estimate is the best available figure.
+        let compaction = self.registry.compaction();
+        let pre_tokens = compaction
+            .try_read()
+            .ok()
+            .map(|manager| manager.token_estimate_with(self.session.provider_messages()) as u64);
         let encrypted_content_len = encrypted_content.len();
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
@@ -887,10 +918,12 @@ impl Agent {
         };
 
         self.session.compaction = Some(state.clone());
-        let compaction = self.registry.compaction();
+        let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            post_tokens =
+                Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
 
         self.cache_tracker.reset();
@@ -908,7 +941,7 @@ impl Agent {
             .with_session_id(self.session.id.clone())
             .force_attribution(),
         );
-        Ok(())
+        Ok((pre_tokens, post_tokens))
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
@@ -1158,6 +1191,16 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
+            if self.session.original_working_dir.is_none()
+                && self.session.working_dir != working_dir
+                && self
+                    .session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User)
+            {
+                self.session.original_working_dir = self.session.working_dir.clone();
+            }
             self.session.working_dir = working_dir;
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();

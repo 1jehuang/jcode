@@ -16,6 +16,22 @@ let cachedTodoSessionDetailColumns = null;
 // web-only fields live in the web_details table (see migration 0016): the
 // events table sits one column shy of D1's 100-column cap, so wide event
 // shapes go in detail tables per the session_details / turn_details pattern.
+// High-volume raw families that no headline dashboard reads. They live in a
+// second D1 database (binding DB_BULK) so the main database stays well below
+// D1's 10 GB per-database cap. Their rollups (daily_active_users,
+// country_daily) still go to the main DB. Without the binding everything stays
+// in DB, so a missing binding degrades to the old single-database behavior.
+const BULK_EVENTS = ["session_concurrency", "todo_session", "prompt_submitted"];
+
+function bulkEnv(env, event) {
+  if (!env.DB_BULK || !BULK_EVENTS.includes(event)) return env;
+  return { ...env, DB: env.DB_BULK, DB_MAIN: env.DB };
+}
+
+function mainDb(env) {
+  return env.DB_MAIN || env.DB;
+}
+
 const WEB_EVENTS = ["web_pageview", "web_cta_click", "web_vital", "web_error"];
 const INSTALL_FUNNEL_EVENTS = ["install_funnel"];
 
@@ -104,6 +120,7 @@ const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // the next request re-observes the size from its own insert result).
 let lastObservedDbSizeBytes = 0;
 let lastEmergencyPruneAtMs = 0;
+let lastObservedBulkDbSizeBytes = 0;
 
 // ---------------------------------------------------------------------------
 // Workers Analytics Engine firehose.
@@ -503,6 +520,10 @@ export default {
       try {
         const probe = await env.DB.prepare("SELECT 1").run();
         observeDbSize(probe);
+        if (env.DB_BULK) {
+          const bulkProbe = await env.DB_BULK.prepare("SELECT 1").run();
+          lastObservedBulkDbSizeBytes = bulkProbe?.meta?.size_after || lastObservedBulkDbSizeBytes;
+        }
       } catch (err) {
         return jsonResponse(
           { ok: false, error: "d1 probe failed", detail: String(err?.message || err) },
@@ -515,6 +536,7 @@ export default {
         db_size_bytes: lastObservedDbSizeBytes,
         db_soft_limit_bytes: D1_SOFT_LIMIT_BYTES,
         over_soft_limit: lastObservedDbSizeBytes >= D1_SOFT_LIMIT_BYTES,
+        bulk_db_size_bytes: env.DB_BULK ? lastObservedBulkDbSizeBytes : null,
         last_emergency_prune_at_ms: lastEmergencyPruneAtMs || null,
       }, 200, cors);
     }
@@ -621,9 +643,10 @@ export default {
     let durableOk = true;
     let concurrencyDurable = null;
     try {
-      await insertEvent(env, body);
+      const storeEnv = bulkEnv(env, body.event);
+      await insertEvent(storeEnv, body);
       if (CONCURRENCY_EVENTS.includes(body.event)) {
-        concurrencyDurable = await insertConcurrencyDetails(env, body);
+        concurrencyDurable = await insertConcurrencyDetails(storeEnv, body);
       }
     } catch (err) {
       durableOk = false;
@@ -700,6 +723,9 @@ export default {
           console.warn("model price sync failed", err?.message || err);
         }
         await pruneOldEvents(env);
+        if (env.DB_BULK) {
+          await pruneOldEvents({ ...env, DB: env.DB_BULK, DB_MAIN: env.DB });
+        }
         // If the normal prune did not free enough headroom, escalate with the
         // emergency (halved) retention windows instead of waiting for inserts
         // to start failing mid-day.
@@ -1082,7 +1108,7 @@ async function pruneOldEvents(env, options = {}) {
              WHERE event = ? AND created_at < datetime('now', ?)
              LIMIT ?)`
         ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        observeDbSize(result);
+        if (!env.DB_MAIN) observeDbSize(result);
         const changes = result?.meta?.changes ?? result?.changes ?? 0;
         // Empty event families must not consume the deletion budget, or adding
         // a family permanently starves later families of retention checks.
@@ -1607,7 +1633,7 @@ async function recordDailyActivity(env, body) {
   const sessionCrashCount = body.event === "session_crash" ? 1 : 0;
 
   try {
-    await env.DB.prepare(`
+    await mainDb(env).prepare(`
       INSERT INTO daily_active_users (
         activity_date,
         telemetry_id,
@@ -1668,7 +1694,7 @@ async function recordCountryDaily(env, body) {
   }
   const activityDate = new Date().toISOString().slice(0, 10);
   try {
-    await env.DB.prepare(`
+    await mainDb(env).prepare(`
       INSERT INTO country_daily (activity_date, country, event, is_ci, event_count)
       VALUES (?, ?, ?, ?, 1)
       ON CONFLICT(activity_date, country, event, is_ci) DO UPDATE SET
@@ -2261,7 +2287,11 @@ async function insertDynamic(env, table, entries) {
   const sql = `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
   const values = entries.map(([, value]) => value);
   const result = await env.DB.prepare(sql).bind(...values).run();
-  observeDbSize(result);
+  if (env.DB_MAIN) {
+    lastObservedBulkDbSizeBytes = result?.meta?.size_after || lastObservedBulkDbSizeBytes;
+  } else {
+    observeDbSize(result);
+  }
   return result;
 }
 

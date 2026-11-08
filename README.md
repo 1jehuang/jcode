@@ -1,15 +1,13 @@
 <div align="center">
 
+<p>
+<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/jcode-mark-inverse.svg">
   <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
 </picture>
-
-<br><br>
-
-<p>
-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
-</p>
 
 # jcode
 
@@ -18,31 +16,23 @@
   Run dozens of agents in parallel without melting your machine. More agents, less RAM, no lag.
 </p>
 
-[![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
-[![GitHub Stars](https://badgen.net/github/stars/1jehuang/jcode?icon=github)](https://github.com/1jehuang/jcode/stargazers)
-[![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
+[![Last Commit](https://img.shields.io/github/last-commit/1jehuang/jcode/master?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/commits/master)
+[![GitHub Stars](https://img.shields.io/github/stars/1jehuang/jcode?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/stargazers)
+[![GitHub Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F1jehuang%2Fjcode%2Fmaster%2Fdocs%2Fbadges%2Fdownloads.json&style=flat-square&logo=github)](https://github.com/1jehuang/jcode/releases)
 
-[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [OpenAI Ultrafast](docs/OPENAI_ULTRAFAST.md) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Contributing](CONTRIBUTING.md)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
+[![Y Combinator](https://img.shields.io/badge/Y%20Combinator-S26-F26625?style=flat-square&logo=ycombinator&logoColor=white)](https://www.ycombinator.com/companies/jcode)
+[![X (Twitter)](https://img.shields.io/badge/follow-%401jehuang-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/1jehuang)
 
 </div>
 
 <div align="center">
 
-## Screenshots
+  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
+    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
+  </a>
 
-[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
-
-<table>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-read.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-read.webp" alt="Jcode rendering an image inline after reading it" width="440" /></a><br>Inline images</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/deep-swarm-investigation.webp"><img src="https://jcode.sh/screenshots/thumbs/deep-swarm-investigation.webp" alt="Jcode coordinating a deep swarm investigation" width="440" /></a><br>Deep swarm investigation</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/latex-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/info-widgets.webp"><img src="https://jcode.sh/screenshots/thumbs/info-widgets.webp" alt="Jcode showing information widgets beside an active session" width="440" /></a><br>Info widgets</td>
-  </tr>
-</table>
+  <p><em>jcode performance demonstration (1x speed)</em></p>
 
 <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
   <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
@@ -61,8 +51,6 @@
 curl -fsSL https://jcode.sh/install | bash
 ```
 
-[Windows installation instructions](https://jcode.sh/docs#install).
-
 <div align="center">
 
 ## Benches
@@ -71,17 +59,15 @@ curl -fsSL https://jcode.sh/install | bash
 
 ### RAM per additional session (headless)
 
-Swarm workers run headless, so this is the number that matters when you fan out agents.
-
 | Tool | First session | Each additional session | Comparison (additional) |
 |---|---|---|---|
-| **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
-| **OpenCode** | 637.1 MB | ~5.9 MB | about the same |
-| **pi** | 84.0 MB | ~79.6 MB | **12.4× more RAM** |
-| **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
-| **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
+| **jcode** | **71.3 MB** | **~3.3 MB** | baseline |
+| **OpenCode** | 637.1 MB | ~5.9 MB | **1.8× more RAM** |
+| **pi** | 84.0 MB | ~79.6 MB | **24.1× more RAM** |
+| **Claude Code** | 272.9 MB | ~169.3 MB | **51.3× more RAM** |
+| **Codex CLI** | 398.6 MB | ~194.1 MB | **58.8× more RAM** |
 
-Each session completes 5 real model turns with tool calls, then total PSS of every process is measured at 1, 5, and 10 concurrent sessions, averaged over two runs. jcode, OpenCode, pi, and Codex CLI used `gpt-5.4`; Claude Code used Claude Sonnet. [Reproduce](scripts/bench_headless_memory.py).
+[Reproduce](scripts/bench_headless_memory.py).
 
 ### Time to first input
 
@@ -89,21 +75,30 @@ Time until typed text appears on screen, across 10 interactive launches.
 
 | Tool | Time to first input | Comparison |
 |---|---|---|
-| **jcode** | **48.7 ms** | baseline |
-| **pi** | 596.4 ms | **12.2× slower** |
-| **Codex CLI** | 905.8 ms | **18.6× slower** |
-| **OpenCode** | 1047.9 ms | **21.5× slower** |
-| **Claude Code** | 3512.8 ms | **72.2× slower** |
+| **jcode** | **19.1 ms** | baseline |
+| **pi** | 596.4 ms | **31.2× slower** |
+| **Codex CLI** | 905.8 ms | **47.4× slower** |
+| **OpenCode** | 1047.9 ms | **54.9× slower** |
+| **Claude Code** | 3512.8 ms | **183.9× slower** |
 
 Full numbers on [jcode.sh](https://jcode.sh).
 
 <div align="center">
 
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo.webp" alt="jcode performance demonstration" width="900">
-  </a>
+## Screenshots
 
-  <p><em>jcode performance demonstration</em></p>
+[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
+
+<table>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-rendering.webp" alt="Jcode rendering screenshots inline after reading image files" width="440" /></a><br>Inline images</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/resume-menu.webp"><img src="https://jcode.sh/screenshots/thumbs/resume-menu.webp" alt="Jcode resume menu with a session list and preview" width="440" /></a><br>Resume menu</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/latex-math-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-math-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/cache-cold-notification.webp"><img src="https://jcode.sh/screenshots/thumbs/cache-cold-notification.webp" alt="Jcode warning that the prompt cache went cold" width="440" /></a><br>Cache cold notification</td>
+  </tr>
+</table>
 
 </div>
 
@@ -111,24 +106,8 @@ Full numbers on [jcode.sh](https://jcode.sh).
 
 Spawn two or more agents in the same repo, and they will automatically be managed by the server to allow native collaboration. When agent A edits a file that agent B has read (code shifting under its feet), the server notifies agent B. Agent B can ignore it if it is not relevant, or it can check the diff to make sure that it doesn't conflict. Each agent has messaging abilities, capable of DMing just one agent, broadcasting to all other agents hosted by the server, or just agents working in that repo. This allows you to spawn multiple sessions in the same repo, and have all conflicts automatically resolved.
 
-<div align="center">
-
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/swarm-demo.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-swarm-demonstration.webp" alt="jcode swarm demonstration" width="900">
-  </a>
-
-  <p><em>jcode swarm demonstration</em></p>
-
-</div>
-
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
 
-
-## Token optimization
-
-### agentgrep
-
-agentgrep is jcode's grep tool, built for agents. Each match comes back with the file's structure, like its functions and where they sit, so the agent can understand a file without reading all of it. The harness also adaptively trims results based on what the agent has already seen, so it never pays for the same code twice. This saves a lot of context.
 
 ## OAuth and Providers
 
@@ -140,3 +119,9 @@ Jcode is inventing a new form of customizability. One that doesn't limit you to 
 
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
+
+## Other
+
+- [Token optimization](docs/HARNESS.md#token-optimization)
+- [KV cache](docs/HARNESS.md#kv-cache)
+- [Hill-climbable measurements](docs/HARNESS.md#hill-climbable-measurements)

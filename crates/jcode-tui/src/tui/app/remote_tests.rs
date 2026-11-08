@@ -178,6 +178,56 @@ fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
 include!("remote_tests/auth_mapping.rs");
 
 #[test]
+fn dead_server_respawn_waits_for_repeated_failures_and_throttles() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut state = RemoteRunState {
+        reconnect_attempts: 2,
+        ..Default::default()
+    };
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+
+    state.reconnect_attempts = 3;
+    assert!(reconnect::should_respawn_dead_server(&state, false, now));
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, true, now),
+        "SSH clients must not spawn a local server"
+    );
+
+    state.server_reload_in_progress = true;
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+    state.server_reload_in_progress = false;
+
+    state.initial_server_start = true;
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, false, now),
+        "a server we just started gets its startup window first"
+    );
+    state.initial_server_start = false;
+
+    state.last_dead_server_respawn = Some(now);
+    assert!(!reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(10)
+    ));
+    assert!(reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(61)
+    ));
+}
+
+#[test]
+fn long_disconnect_redraws_slowly() {
+    use std::time::Duration;
+    let short = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(5)));
+    let long = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(120)));
+    assert_eq!(short, Duration::from_secs(1));
+    assert!(long >= Duration::from_secs(5), "issue #1887: {long:?}");
+}
+
+#[test]
 fn reload_handoff_inactive_without_flag_or_marker() {
     // `reload_handoff_active` falls back to the on-disk reload marker in the
     // runtime dir. Point the runtime dir at an empty tempdir so a real
@@ -367,11 +417,13 @@ fn process_remote_followups_auto_submits_staged_startup_prompt() {
 }
 
 #[test]
-fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
+fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
     app.input = "Start the fork immediately".to_string();
+    let images = vec![("image/png".to_string(), "aW1hZ2U=".to_string())];
+    app.pending_images = images.clone();
     app.cursor_pos = app.input.len();
     app.submit_input_on_startup = true;
 
@@ -380,58 +432,120 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     assert!(!remote.has_loaded_history());
 
+    let next_request_id = remote.next_request_id_for_test();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
 
-    assert!(!app.submit_input_on_startup);
-    assert!(app.input.is_empty());
+    assert!(app.submit_input_on_startup);
+    assert_eq!(app.input, "Start the fork immediately");
+    assert_eq!(app.pending_images, images);
+    assert!(!app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert!(app.pending_startup_prompt_echo.is_none());
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
     assert!(
-        app.is_processing,
-        "the ordered startup request should start immediately"
-    );
-    assert!(
-        app.pending_startup_prompt_echo.as_deref() == Some("Start the fork immediately"),
-        "the user echo must be retained until bootstrap History is applied"
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user")
     );
 
-    let startup_id = app.current_message_id.expect("startup request was sent");
-    let next_request_id = remote.next_request_id_for_test();
-    let processing_started = app.processing_started;
-    let visible_turn_started = app.visible_turn_started;
-    // A queued recovery continuation must not dispatch behind the already-sent
-    // startup turn when Subscribe's earlier, idle History snapshot arrives.
-    app.hidden_queued_system_messages
-        .push("Continue after reload".to_string());
     handle_server_event(&mut app, startup_history("startup-session"), &mut remote);
     assert!(remote.has_loaded_history());
     assert_eq!(app.remote_session_id.as_deref(), Some("startup-session"));
-    assert!(app.is_processing);
-    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
-    assert_eq!(app.current_message_id, Some(startup_id));
-    assert_eq!(app.processing_started, processing_started);
-    assert_eq!(app.visible_turn_started, visible_turn_started);
-    assert_eq!(
-        app.rate_limit_pending_message
-            .as_ref()
-            .map(|pending| pending.content.as_str()),
-        Some("Start the fork immediately")
-    );
+    assert!(!app.is_processing);
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
 
     rt.block_on(process_remote_followups(&mut app, &mut remote));
-    assert_eq!(
-        remote.next_request_id_for_test(),
-        next_request_id,
-        "History must not enable a second send"
-    );
-    assert_eq!(app.current_message_id, Some(startup_id));
+    assert!(!app.submit_input_on_startup);
+    assert!(app.input.is_empty());
+    assert!(app.pending_images.is_empty());
     assert!(app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    let startup_id = app.current_message_id.expect("startup request was sent");
+    assert_eq!(startup_id, next_request_id);
+    let sent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("sent payload");
+    assert_eq!(sent.content, "Start the fork immediately");
+    assert_eq!(sent.images, images);
+
+    let next_request_id = remote.next_request_id_for_test();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(remote.next_request_id_for_test(), next_request_id);
+    assert_eq!(app.current_message_id, Some(startup_id));
     assert_eq!(
-        app.hidden_queued_system_messages,
-        vec!["Continue after reload"]
+        app.display_messages()
+            .iter()
+            .filter(|message| {
+                message.role == "user" && message.content == "Start the fork immediately"
+            })
+            .count(),
+        1
     );
-    assert!(app.display_messages().iter().any(|message| {
-        message.role == "user" && message.content == "Start the fork immediately"
-    }));
     assert!(app.pending_startup_prompt_echo.is_none());
+}
+
+#[test]
+fn hidden_reload_continuation_stays_busy_after_initial_history() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // The tick path can dispatch a hidden reload reminder before History arrives.
+    rt.block_on(super::input_dispatch::begin_remote_send(
+        &mut app,
+        &mut remote,
+        String::new(),
+        vec![],
+        true,
+        Some("Reload complete, continue working".to_string()),
+        true,
+        0,
+    ))
+    .expect("hidden continuation sent");
+    let request_id = app.current_message_id.expect("hidden continuation sent");
+    let started = app.processing_started.expect("processing timer started");
+    assert!(app.pending_startup_prompt_echo.is_none());
+    assert!(!remote.has_loaded_history());
+
+    handle_server_event(&mut app, startup_history("reload-session"), &mut remote);
+
+    assert!(app.is_processing, "history must not suppress the spinner");
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    assert_eq!(app.processing_started, Some(started));
+    assert_eq!(app.current_message_id, Some(request_id));
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("retry payload retained");
+    assert!(pending.is_system);
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some("Reload complete, continue working")
+    );
+
+    handle_server_event(
+        &mut app,
+        ServerEvent::TextDelta {
+            text: "Continuing".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(app.is_processing);
+    assert!(matches!(
+        app.status,
+        crate::tui::ProcessingStatus::Streaming
+    ));
+    // Drain the paced buffer so Done exercises the terminal state immediately.
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
+    handle_server_event(&mut app, ServerEvent::Done { id: request_id }, &mut remote);
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
 }
 
 fn startup_history(session_id: &str) -> ServerEvent {
@@ -578,9 +692,10 @@ fn startup_send_state_is_not_preserved_for_real_session_switch() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(app.current_message_id.is_some());
-    assert!(app.pending_startup_prompt_echo.is_some());
+    assert!(app.is_processing);
 
     handle_server_event(&mut app, startup_history("different-session"), &mut remote);
 
@@ -1209,183 +1324,6 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
     );
 }
 
-fn swarm_dm_notification(sender: &str, body: &str, tldr: Option<&str>) -> ServerEvent {
-    ServerEvent::Notification {
-        from_session: format!("session_{sender}_123"),
-        from_name: Some(sender.to_string()),
-        notification_type: crate::protocol::NotificationType::Message {
-            scope: Some("dm".to_string()),
-            channel: None,
-            tldr: tldr.map(str::to_string),
-        },
-        message: format!("DM from {sender}: {body}"),
-    }
-}
-
-fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerEvent {
-    ServerEvent::SoftInterruptInjected {
-        content: content.to_string(),
-        display_role: display_role.map(str::to_string),
-        point: "A".to_string(),
-        tools_skipped: None,
-        client_ids: Vec::new(),
-    }
-}
-
-fn assert_no_long_rows(app: &crate::tui::app::App) {
-    for message in app.display_messages() {
-        if message.role == "swarm" {
-            let lines = crate::tui::ui::render_swarm_message(
-                message,
-                100,
-                crate::config::DiffDisplayMode::Off,
-            );
-            assert_eq!(lines.len(), 1, "swarm row must be one row: {message:?}");
-        } else {
-            assert!(
-                !message.content.contains("DM from"),
-                "raw DM text leaked into a {} row: {:?}",
-                message.role,
-                message.content
-            );
-        }
-    }
-}
-
-#[test]
-fn injected_swarm_dm_is_deduped_against_its_notification_card() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
-
-    let body = "Finished the parser refactor. ".repeat(15) + "\n\nDetails follow.";
-    handle_server_event(
-        &mut app,
-        swarm_dm_notification("fox", &body, Some("parser refactor done")),
-        &mut remote,
-    );
-    let before = app.display_messages().len();
-    handle_server_event(
-        &mut app,
-        soft_interrupt_injected(&format!("DM from fox: {body}"), Some("system")),
-        &mut remote,
-    );
-    assert_eq!(
-        app.display_messages().len(),
-        before,
-        "injected copy of an already-shown DM must not add a row"
-    );
-    assert_no_long_rows(&app);
-}
-
-#[test]
-fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
-
-    let body = "word ".repeat(200);
-    handle_server_event(
-        &mut app,
-        soft_interrupt_injected(&format!("DM from owl: {body}"), Some("system")),
-        &mut remote,
-    );
-    let last = app.display_messages().last().expect("row");
-    assert_eq!(last.role, "swarm");
-    assert_eq!(last.title.as_deref(), Some("DM from owl"));
-    assert_no_long_rows(&app);
-}
-
-#[test]
-fn restored_display_snapshot_normalizes_only_raw_swarm_deliveries() {
-    use crate::tui::DisplayMessage;
-    let mut app = create_test_app();
-    let body = "Detailed implementation report. ".repeat(40);
-    let encoded = jcode_tui_messages::encode_collapsible_swarm_content("report", &body);
-    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
-    app.replace_display_messages(vec![
-        DisplayMessage::system(format!("DM from hatchling: {body}")),
-        DisplayMessage::user(format!("#parser from owl: {body}")),
-        DisplayMessage::assistant(format!("DM from fox: {body}")),
-        DisplayMessage::swarm("DM from sheep", expanded.clone()),
-    ]);
-    let messages = app.display_messages();
-    for message in &messages[..2] {
-        assert_eq!(message.role, "swarm");
-        assert_eq!(
-            crate::tui::ui::render_swarm_message(
-                message,
-                100,
-                crate::config::DiffDisplayMode::Off,
-            ).len(),
-            1,
-        );
-    }
-    assert_eq!(messages[2].role, "assistant");
-    assert_eq!(messages[3].content, expanded);
-}
-
-#[test]
-fn history_restore_renders_swarm_deliveries_as_one_row() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-
-    let mut history = startup_history("history-session");
-    if let ServerEvent::History { messages, .. } = &mut history {
-        let long = "Investigated the flaky test in depth. ".repeat(20);
-        for (role, content) in [
-            ("user", format!("DM from fox: {long}")),
-            ("system", format!("#parser from owl: {long}")),
-            ("user", "please review my change".to_string()),
-            ("assistant", format!("DM from fox: {long}")),
-        ] {
-            messages.push(crate::protocol::HistoryMessage {
-                response_stats: None,
-                role: role.to_string(),
-                content,
-                tool_calls: None,
-                tool_data: None,
-            });
-        }
-    }
-    handle_server_event(&mut app, history, &mut remote);
-
-    let roles: Vec<(String, Option<String>)> = app
-        .display_messages()
-        .iter()
-        .map(|m| (m.role.clone(), m.title.clone()))
-        .collect();
-    assert!(
-        roles.contains(&("swarm".to_string(), Some("DM from fox".to_string()))),
-        "{roles:?}"
-    );
-    assert!(
-        roles.contains(&("swarm".to_string(), Some("#parser · owl".to_string()))),
-        "{roles:?}"
-    );
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "user" && m.content == "please review my change"),
-        "ordinary user prompts are untouched: {roles:?}"
-    );
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "assistant" && m.content.starts_with("DM from fox")),
-        "assistant text is never rewritten: {roles:?}"
-    );
-    for message in app.display_messages().iter().filter(|m| m.role == "swarm") {
-        let lines =
-            crate::tui::ui::render_swarm_message(message, 100, crate::config::DiffDisplayMode::Off);
-        assert_eq!(lines.len(), 1, "{message:?}");
-    }
-}
+include!("remote_tests/swarm_delivery.rs");
 
 include!("remote_tests/recall_cancellation.rs");

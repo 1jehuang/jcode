@@ -460,6 +460,10 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
+                stage: None,
+                details: None,
                 group: None,
                 id: "todo-1".to_string(),
                 content: "keep going".to_string(),
@@ -470,6 +474,9 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                external_blocker: None,
+                completely_blocked: None,
+                waiting_on: Vec::new(),
             },
         ]));
 

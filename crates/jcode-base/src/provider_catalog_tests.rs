@@ -1201,7 +1201,10 @@ fn newest_release_picker_memo_follows_catalog_changes() {
         )
     };
 
-    save(&[mk("deepseek-v3", 1_700_000_000), mk("deepseek-v4", 1_900_000_000)]);
+    save(&[
+        mk("deepseek-v3", 1_700_000_000),
+        mk("deepseek-v4", 1_900_000_000),
+    ]);
     for _ in 0..3 {
         assert_eq!(
             newest_released_model_for_openai_compatible_profile("deepseek").as_deref(),
@@ -1209,7 +1212,10 @@ fn newest_release_picker_memo_follows_catalog_changes() {
         );
     }
 
-    save(&[mk("deepseek-v4", 1_900_000_000), mk("deepseek-v5", 1_950_000_000)]);
+    save(&[
+        mk("deepseek-v4", 1_900_000_000),
+        mk("deepseek-v5", 1_950_000_000),
+    ]);
     assert_eq!(
         newest_released_model_for_openai_compatible_profile("deepseek").as_deref(),
         Some("deepseek-v5"),

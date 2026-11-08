@@ -197,9 +197,10 @@ pub(super) fn wake() {
                     }
                     // A bounded notification channel cannot lose events: events are
                     // already on disk, and a periodic scan also covers process restarts.
-                    match receiver.recv_timeout(Duration::from_secs(30)) {
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                        _ => {}
+                    if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =
+                        receiver.recv_timeout(Duration::from_secs(30))
+                    {
+                        break;
                     }
                 }
             })

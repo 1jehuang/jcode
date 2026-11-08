@@ -51,7 +51,7 @@ pub(super) const OBSERVE_SCRIPT: &str = r#"return (() => {
   const aria=clip(e.getAttribute('aria-label')),name=clip(e.getAttribute('name')),placeholder=clip(e.getAttribute('placeholder'));
   const autocomplete=clip(e.getAttribute('autocomplete'),80);
   const text=e.matches(excluded)?'':visibleText(e,180);
-  if(type==='password'||/one-time-code/i.test(autocomplete)||/captcha|\botp\b|verification code|security code|reset password/i.test(aria+' '+name+' '+text+' '+e.getAttribute('src')))sensitive=true;
+  if(/captcha/i.test(aria+' '+name+' '+text+' '+e.getAttribute('src')))sensitive=true;
   if(elements.length>=64)continue;
   const css=selector(e);if(css.length>1000||!unique(css))continue;
   if(!identity.nodes.has(e))identity.nodes.set(e,identity.next++);
@@ -67,7 +67,7 @@ pub(super) const OBSERVE_SCRIPT: &str = r#"return (() => {
   elements.push({identity:identity.nodes.get(e),selector:css,tag:e.localName,type,role,text,aria,name,placeholder,autocomplete,search,form_action:form?clip(form.action,500):'',href:e.localName==='a'?clip(e.href,1000):'',target:clip(e.getAttribute('target')||baseTarget,40),disabled:!!e.disabled||e.getAttribute('aria-disabled')==='true',form:!!form,options:e.localName==='select'?Array.from(e.options).filter(o=>o.value.length<=200).slice(0,16).map(o=>({text:clip(o.text),value:o.value,disabled:o.disabled})):[]});
  }
  const body=visibleText(main||document.body||document.documentElement,6000);
- if(/captcha|one.time (password|code)|verification code|reset (your )?password/i.test(body))sensitive=true;
+ if(/captcha/i.test(body))sensitive=true;
  const root=document.scrollingElement||document.documentElement;
  const scrollState=e=>({can_up:e.scrollTop>0,can_down:e.scrollTop+e.clientHeight<e.scrollHeight-1,can_left:e.scrollLeft>0,can_right:e.scrollLeft+e.clientWidth<e.scrollWidth-1});
  const scroll_containers=[];scanned=0;
@@ -129,12 +129,7 @@ pub(super) fn risky(text: &str) -> bool {
         "sign",
         "log out",
         "logout",
-        "reset",
-        "password",
-        "otp",
         "captcha",
-        "verification",
-        "security code",
         "credit",
         "card",
         "bank",
@@ -261,7 +256,7 @@ pub(super) fn candidates(input: &BrowserInput, observation: &Value) -> Result<Ve
                 )?;
             }
             if matches!(tag, "input" | "textarea")
-                && matches!(kind, "" | "text" | "search" | "email" | "url")
+                && matches!(kind, "" | "text" | "search" | "email" | "url" | "password")
             {
                 for (index, text) in input.text_values.iter().enumerate() {
                     add(

@@ -86,8 +86,10 @@ async fn sdk_selection_replacement_validation_and_isolation() {
     assert!(sdk::configure(session, "owner", bad, tx.clone()).is_err());
     assert_eq!(sdk::config(session).unwrap().custom.len(), 2);
     sdk::configure(session, "owner", SessionToolConfig::default(), tx).unwrap();
-    assert!(sdk::config(session).unwrap().enabled.is_none());
-    assert!(sdk::config(session).unwrap().custom.is_empty());
+    assert!(
+        sdk::config(session).is_none(),
+        "default config removes the runtime overlay and restores built-in selection"
+    );
 }
 
 #[tokio::test]
@@ -226,7 +228,10 @@ async fn sdk_disabled_batch_subcalls_and_cancel_cleanup() {
         sdk::configure(
             session,
             "batch-owner",
-            SessionToolConfig::default(),
+            SessionToolConfig {
+                enabled: Some(vec![]),
+                ..Default::default()
+            },
             tx.clone()
         )
         .is_err()
@@ -315,7 +320,13 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+            Arc::new(mcp::McpCallTool::new(manager.clone()).with_registry(registry.clone())),
+        )
+        .await;
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(mcp::McpManagementTool::new(manager).with_registry(registry.clone())),
         )
         .await;
     let mut config = SessionToolConfig {
@@ -338,6 +349,11 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
         (
             "mcp_call",
             json!({"server":"sdk","tool":"echo","arguments":{"value":42}}),
+            "mcp__sdk__echo",
+        ),
+        (
+            "mcp",
+            json!({"action":"call","server":"sdk","tool":"echo","arguments":{"value":42}}),
             "mcp__sdk__echo",
         ),
     ] {
@@ -381,6 +397,15 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
         .execute(
             "mcp_call",
             json!({"server":"sdk","tool":"echo","arguments":{}}),
+            ctx(session),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not allowed"));
+    let error = registry
+        .execute(
+            "mcp",
+            json!({"action":"call","server":"sdk","tool":"echo","arguments":{}}),
             ctx(session),
         )
         .await

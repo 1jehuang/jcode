@@ -1,7 +1,7 @@
 use super::widget_render::set_cell_if_visible;
 use super::*;
 
-fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
+pub(super) fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     if let Ok(mut cache) = SOURCE_CACHE.lock()
         && let Some(img) = cache.get(hash, path)
     {
@@ -109,7 +109,7 @@ pub(super) fn viewport_crop_should_scale_to_area(
     crop_w == view_w_px && crop_h == view_h_px
 }
 
-fn kitty_viewport_unique_id(hash: u64) -> u32 {
+pub(super) fn kitty_viewport_unique_id(hash: u64) -> u32 {
     let _ = hash;
     loop {
         let sequence = NEXT_KITTY_IMAGE_ID.fetch_add(1, Ordering::Relaxed) & 0x00FF_FFFF;
@@ -148,7 +148,12 @@ fn kitty_transmit_payload(bytes: &[u8], id: u32, format: &str) -> String {
         match i {
             0 => {
                 let more = if chunk_count > 1 { 1 } else { 0 };
-                let _ = write!(data, "_Gq=2,i={id},a=T,U=1,{format},t=d,m={more};");
+                let action = if runtime::use_classic_kitty() {
+                    "a=t"
+                } else {
+                    "a=T,U=1"
+                };
+                let _ = write!(data, "_Gq=2,i={id},{action},{format},t=d,m={more};");
             }
             n if n + 1 == chunk_count => {
                 data.push_str("_Gq=2,m=0;");
@@ -284,6 +289,7 @@ pub(super) fn ensure_kitty_viewport_state(
 
     let unique_id = cache
         .get_mut(hash)
+        .filter(|_| !runtime::use_classic_kitty())
         .map(|state| state.unique_id)
         .unwrap_or_else(|| kitty_viewport_unique_id(hash));
 
@@ -303,6 +309,7 @@ pub(super) fn ensure_kitty_viewport_state(
             unique_id,
             full_cols,
             full_rows,
+            pixel_size: (scaled.width(), scaled.height()),
             pending_transmit: Some(pending_transmit),
             pending_transmit_bytes,
             fit_target: None,
@@ -362,7 +369,9 @@ pub(super) fn ensure_kitty_fit_state(
     if full_cols == 0 || full_rows == 0 {
         return None;
     }
-    let unique_id = existing_unique_id.unwrap_or_else(|| kitty_viewport_unique_id(hash));
+    let unique_id = existing_unique_id
+        .filter(|_| !runtime::use_classic_kitty())
+        .unwrap_or_else(|| kitty_viewport_unique_id(hash));
     let pending_transmit = if matches!(&scaled, Cow::Borrowed(_)) {
         kitty_transmit_png_path(source_path, unique_id)
             .unwrap_or_else(|| kitty_transmit_virtual(&scaled, unique_id))
@@ -391,6 +400,7 @@ pub(super) fn ensure_kitty_fit_state(
             unique_id,
             full_cols,
             full_rows,
+            pixel_size: (scaled.width(), scaled.height()),
             pending_transmit: Some(pending_transmit),
             pending_transmit_bytes,
             fit_target: Some((target_cols, target_rows)),
@@ -450,6 +460,17 @@ pub(super) fn render_kitty_virtual_viewport(
     visible_width: u16,
     visible_height: u16,
 ) -> bool {
+    if runtime::use_classic_kitty() {
+        return kitty_classic::render_cell_viewport(
+            hash,
+            area,
+            buf,
+            scroll_x,
+            scroll_y,
+            visible_width,
+            visible_height,
+        );
+    }
     if visible_width == 0 || visible_height == 0 {
         return true;
     }
@@ -908,7 +929,7 @@ pub fn inline_fit_readiness(
     let fit_cols = target_cols.saturating_sub(border_width);
     let ready = if picker.protocol_type() == ProtocolType::Kitty {
         probe_kitty_fit_state(
-            hash,
+            kitty_classic::state_hash(hash, Some((fit_cols, target_rows)), picker.font_size()),
             &cached.path,
             fit_cols,
             target_rows,
@@ -956,14 +977,15 @@ pub fn prewarm_inline_fit_state(
     if picker.protocol_type() != ProtocolType::Kitty {
         return load_fitted_source(hash, &cached.path, fit_cols, target_rows, font_size).is_some();
     }
-    if probe_kitty_fit_state(hash, &cached.path, fit_cols, target_rows, font_size).is_some() {
+    let state_hash = kitty_classic::state_hash(hash, Some((fit_cols, target_rows)), font_size);
+    if probe_kitty_fit_state(state_hash, &cached.path, fit_cols, target_rows, font_size).is_some() {
         return true;
     }
     let Some(source) = load_source_image(hash, &cached.path) else {
         return false;
     };
     let prepared = ensure_kitty_fit_state(
-        hash,
+        state_hash,
         &cached.path,
         source.as_ref(),
         fit_cols,
@@ -1234,29 +1256,34 @@ pub fn render_image_widget_fit_stable(
     let source_path = cached.path;
     let font_size = picker.font_size();
     let fit_cols = target_cols.saturating_sub(border_width);
+    let state_hash = kitty_classic::state_hash(hash, Some((fit_cols, target_rows)), font_size);
 
     // Hot path: steady-state frames hit the already-transmitted state without
     // ever touching (or re-decoding) the source image.
-    let placement = probe_kitty_fit_state(hash, &source_path, fit_cols, target_rows, font_size)
-        .or_else(|| {
-            let source = load_source_image(hash, &source_path)?;
-            let placement = ensure_kitty_fit_state(
-                hash,
-                &source_path,
-                source.as_ref(),
-                fit_cols,
-                target_rows,
-                font_size,
-            );
-            drop(source);
-            release_source_image(hash, &source_path);
-            placement
-        });
+    let placement =
+        probe_kitty_fit_state(state_hash, &source_path, fit_cols, target_rows, font_size).or_else(
+            || {
+                let source = load_source_image(hash, &source_path)?;
+                let placement = ensure_kitty_fit_state(
+                    state_hash,
+                    &source_path,
+                    source.as_ref(),
+                    fit_cols,
+                    target_rows,
+                    font_size,
+                );
+                drop(source);
+                release_source_image(hash, &source_path);
+                placement
+            },
+        );
     let Some((_, full_cols, full_rows)) = placement else {
         return false;
     };
 
-    if !can_use_kitty_virtual_viewport(full_cols, full_rows, 0, skip_rows) {
+    if !runtime::use_classic_kitty()
+        && !can_use_kitty_virtual_viewport(full_cols, full_rows, 0, skip_rows)
+    {
         return false;
     }
 
@@ -1289,7 +1316,7 @@ pub fn render_image_widget_fit_stable(
     }
 
     render_kitty_virtual_viewport(
-        hash,
+        state_hash,
         image_area,
         buf,
         0,
@@ -1435,6 +1462,35 @@ pub fn render_image_widget_viewport_precise(
         view_w_px,
         view_h_px,
     };
+
+    if picker.protocol_type() == ProtocolType::Kitty && runtime::use_classic_kitty() {
+        let state_hash = kitty_classic::state_hash(hash, None, font_size);
+        if ensure_kitty_viewport_state(state_hash, &source_path, source.as_ref(), 100, font_size)
+            .is_none()
+        {
+            return 0;
+        }
+        let width = div_ceil_u32_local(crop_w.saturating_mul(zoom) / 100, font_size.0.max(1) as u32)
+            .min(image_area.width as u32) as u16;
+        let height =
+            div_ceil_u32_local(crop_h.saturating_mul(zoom) / 100, font_size.1.max(1) as u32)
+                .min(image_area.height as u32) as u16;
+        let destination = Rect {
+            width,
+            height,
+            ..image_area
+        };
+        return if kitty_classic::render_crop(
+            state_hash,
+            destination,
+            buf,
+            (scroll_x_px, scroll_y_px, crop_w, crop_h),
+        ) {
+            area.height
+        } else {
+            0
+        };
+    }
 
     if zoom_percent <= 200
         && picker.protocol_type() == ProtocolType::Kitty
@@ -1642,6 +1698,7 @@ mod kitty_viewport_leak_tests {
                     unique_id: 10_000 + index as u32,
                     full_cols: 10,
                     full_rows: 10,
+                    pixel_size: (80, 160),
                     pending_transmit: None,
                     pending_transmit_bytes: 0,
                     fit_target: Some((10, 10)),
@@ -1659,6 +1716,7 @@ mod kitty_viewport_leak_tests {
                 unique_id: 10_000 + index as u32,
                 full_cols: 10,
                 full_rows: 10,
+                pixel_size: (80, 160),
                 pending_transmit: None,
                 pending_transmit_bytes: 0,
                 fit_target: Some((10, 10)),
@@ -1694,6 +1752,7 @@ mod kitty_viewport_leak_tests {
                     unique_id: 20_000 + index as u32,
                     full_cols: 10,
                     full_rows: 10,
+                    pixel_size: (80, 160),
                     pending_transmit: Some(String::from("synthetic")),
                     pending_transmit_bytes: accounted,
                     fit_target: Some((10, 10)),
@@ -1873,6 +1932,7 @@ mod kitty_viewport_leak_tests {
                 unique_id: 0x00AABBCC,
                 full_cols,
                 full_rows,
+                pixel_size: (full_cols as u32 * 8, full_rows as u32 * 16),
                 pending_transmit: Some(String::from("\x1b_Gtransmit\x1b\\")),
                 pending_transmit_bytes: "\x1b_Gtransmit\x1b\\".len(),
                 fit_target: Some((full_cols, full_rows)),

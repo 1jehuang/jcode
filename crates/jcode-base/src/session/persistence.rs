@@ -193,7 +193,6 @@ fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
     let Ok(file) = std::fs::File::open(journal_path) else {
         return;
     };
-    let mut latest = None;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
@@ -201,11 +200,10 @@ fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<MetaOnly>(trimmed) {
-            latest = Some(entry.meta);
+            // Compatibility fields can retain an earlier entry's value, so
+            // applying only the last metadata record loses that state.
+            session.apply_journal_meta(entry.meta);
         }
-    }
-    if let Some(meta) = latest {
-        session.apply_journal_meta(meta);
     }
 }
 
@@ -739,12 +737,17 @@ impl Session {
         } else {
             let entry_build_start = Instant::now();
             let mut entry_meta = current_meta.clone();
-            if entry_meta.compaction.is_some()
-                && self
-                    .persist_state
-                    .last_meta
-                    .as_ref()
-                    .is_some_and(|prev| prev.compaction == entry_meta.compaction)
+            // A transcript-stripped stub never loaded the compaction state, so
+            // its `None` means "unknown", not "cleared". Writing it would erase
+            // the owner's summary on replay, and the next resume or split would
+            // see the full uncompacted transcript and emergency-compact it.
+            if self.persist_state.transcript_stripped
+                || (entry_meta.compaction.is_some()
+                    && self
+                        .persist_state
+                        .last_meta
+                        .as_ref()
+                        .is_some_and(|prev| prev.compaction == entry_meta.compaction))
             {
                 entry_meta.compaction = None;
                 entry_meta.compaction_unchanged = true;
@@ -872,6 +875,7 @@ impl Session {
             fields.push(("error", crate::util::format_error_chain(error)));
             crate::logging::event_warn("SESSION_PERSISTENCE", fields);
         } else {
+            crate::mobile_sync::notify_session_persisted(&self.id);
             if let Err(error) = crate::recent_session_index::upsert_session(self) {
                 crate::logging::warn(&format!(
                     "Failed to update recent-session metadata for {}: {error}",

@@ -194,10 +194,12 @@ fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(3700),
+        utc_day: 0,
         cache_ttl_secs: Some(3600),
         provider: "anthropic".into(),
         model: "claude-opus-4-6".into(),
         upstream_provider: None,
+        account: None,
         signature: None,
     };
     app.kv_cache.kv_cache_baseline = Some(baseline.clone());
@@ -221,10 +223,12 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         cache_ttl_secs: Some(1800),
         provider: "openai-api".into(),
         model: "gpt-6-astra".into(),
         upstream_provider: None,
+        account: None,
         signature: Some(App::kv_cache_request_signature(
             &messages,
             &[],

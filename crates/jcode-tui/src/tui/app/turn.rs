@@ -1,3 +1,5 @@
+#[path = "turn_system_reminder.rs"]
+mod system_reminder;
 use super::*;
 use crate::message::ToolDefinition;
 
@@ -58,26 +60,6 @@ impl PendingStreamingTools {
 }
 
 impl App {
-    pub(super) fn append_current_turn_system_reminder(
-        &self,
-        split: &mut crate::prompt::SplitSystemPrompt,
-    ) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
-    }
-
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
     pub(super) async fn run_turn_interactive(
         &mut self,
@@ -92,6 +74,7 @@ impl App {
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
         'turn_loop: loop {
+            self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
             // missing progress beats mean a real hang, not an idle client.
             let _turn_work = crate::logging::watchdog::begin_work("turn.request");
@@ -134,9 +117,10 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt =
-                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            // Use split prompt for better caching - static content cached, dynamic not.
+            // Memory rides as an ephemeral tail message, never in the system
+            // prompt, so recalled memories cannot invalidate the cached history.
+            let split_prompt = self.build_system_prompt_split(None);
             self.context_info.tool_defs_count = tools.len();
             self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
             if let Some(pending) = &memory_pending {
@@ -159,6 +143,14 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
+            let mut provider_messages = provider_messages;
+            let cache_signature_len = provider_messages.len();
+            if let Some(pending) = &memory_pending {
+                provider_messages.push(Message::user(&format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    pending.prompt
+                )));
+            }
             let request_messages = if crate::config::config().features.message_timestamps {
                 Message::with_timestamps(&provider_messages)
             } else {
@@ -167,7 +159,12 @@ impl App {
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
             let dynamic_part = split_prompt.dynamic_part.clone();
-            self.begin_kv_cache_request(&request_messages, &tools, &static_part, &dynamic_part);
+            self.begin_kv_cache_request(
+                &request_messages[..cache_signature_len],
+                &tools,
+                &static_part,
+                &dynamic_part,
+            );
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
             let mut api_future = std::pin::pin!(provider.complete_split(
@@ -584,6 +581,7 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        self.streaming.response_output.text(&text);
                                         if !text.is_empty() {
                                             self.usage_reset.openai_quota_rejected = false;
                                         }
@@ -632,6 +630,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.streaming.response_output.tool();
                                         self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
@@ -815,7 +814,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::StatusDetail { detail } => {
-                                        self.status_detail = Some(detail);
+                                        self.apply_status_detail(detail);
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
@@ -825,7 +824,8 @@ impl App {
                                         self.status_detail = Some(format!("Provider tier: {tier}"));
                                     }
                                     StreamEvent::TextDone => {}
-                    StreamEvent::MessageEnd { .. } => {
+                    StreamEvent::MessageEnd { stop_reason } => {
+                                        self.streaming.response_output.finish(stop_reason.as_deref());
                                         self.pause_streaming_tps(true);
                                         self.stream_message_ended = true;
                                         saw_message_end = true;
@@ -1034,6 +1034,7 @@ impl App {
                                         if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
                                             dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
                                         }) {
+                                            dm.duration_secs = DisplayMessage::tool_duration_from_output(&content);
                                             dm.content = content.clone();
                                             self.bump_display_messages_version();
                                         }
@@ -1409,6 +1410,9 @@ impl App {
                         sdk_content.clone()
                     };
                     let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    if let Some(seconds) = DisplayMessage::tool_duration_from_output(&sdk_content) {
+                        self.set_latest_tool_duration(&tc.id, seconds);
+                    }
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
@@ -1651,6 +1655,7 @@ impl App {
                     output.clone(),
                 );
 
+                self.set_latest_tool_duration(&tc.id, tool_duration_ms as f32 / 1000.0);
                 self.add_provider_message(Message::tool_result_with_duration(
                     &tc.id,
                     &output,

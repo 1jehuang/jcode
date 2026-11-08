@@ -29,6 +29,28 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 
 #[cfg(test)]
 #[test]
+fn kagi_websearch_documented_config_parses() {
+    let docs = include_str!("../../../docs/kagi-web-search.md");
+    let example = docs
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let config: Config = toml::from_str(example).unwrap();
+    assert_eq!(config.websearch.engine, WebSearchEngine::Kagi);
+    assert!(!config.websearch.native_enabled());
+    assert!(config.websearch.fallback_engines.is_empty());
+    assert_eq!(config.websearch.kagi_api_key_env, "KAGI_API_KEY");
+    let encoded = toml::to_string(&config.websearch).unwrap();
+    let decoded: WebSearchConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.engine, WebSearchEngine::Kagi);
+    assert_eq!(decoded.kagi_api_key_env, "KAGI_API_KEY");
+}
+
+#[cfg(test)]
+#[test]
 fn custom_websearch_config_toml_roundtrip() {
     let input = r#"
 engine = "custom"
@@ -70,8 +92,36 @@ snippet_pointer = "/summary"
     assert!(WebSearchConfig::default().custom.is_none());
 }
 
+#[cfg(test)]
+#[test]
+fn agents_jev_models_parse_and_default_unset() {
+    let config: AgentsConfig = toml::from_str(
+        r#"
+memory_jev_model = "typesafe/jev-1.14"
+browser_jev_model = "typesafe/jev-1.14"
+voice_jev_model = "typesafe/jev-1.14"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.memory_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(
+        config.browser_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(config.voice_jev_model.as_deref(), Some("typesafe/jev-1.14"));
+    let defaults = AgentsConfig::default();
+    assert!(defaults.memory_jev_model.is_none());
+    assert!(defaults.browser_jev_model.is_none());
+    assert!(defaults.voice_jev_model.is_none());
+}
+
 const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_HIBERNATION_IDLE_SECS",
+    "JCODE_HIBERNATION_MODE",
+    "JCODE_REQUEST_COMPRESSION",
     "HOME",
     "JCODE_COMMIT_LOG_KEY",
     "JCODE_RESUME_PROJECT_SCOPE",
@@ -175,6 +225,14 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MEMORY_EMBEDDING_MODEL",
     "JCODE_MEMORY_ENABLED",
     "JCODE_MEMORY_JEV_PROVIDER",
+    "JCODE_BROWSER_JEV_PROVIDER",
+    "JCODE_VOICE_JEV_PROVIDER",
+    "JCODE_LAYA_BASE_URL",
+    "LAYA_BASE_URL",
+    "LAYA_API_KEY",
+    "JCODE_MEMORY_JEV_MODEL",
+    "JCODE_BROWSER_JEV_MODEL",
+    "JCODE_VOICE_JEV_MODEL",
     "JCODE_ENABLE_MERMAID",
     "JCODE_MEMORY_MODEL",
     "JCODE_MEMORY_SIDECAR_ENABLED",
@@ -339,6 +397,7 @@ pub fn config() -> &'static Config {
     }
 
     let mut reload_reason = None;
+    let mut changed_default_route = None;
     let config = {
         let mut cache = CONFIG_CACHE
             .write()
@@ -359,7 +418,16 @@ pub fn config() -> &'static Config {
                 &cache.fingerprint,
                 &fingerprint,
             ));
-            cache.config = leak_config(Config::load());
+            let next = Config::load();
+            // Direct file edits bypass set_default_model's account-pool sync.
+            // Reconcile only a changed default in the same home, so unrelated
+            // reloads never undo a deliberate pool ordering change.
+            if cache.fingerprint.path == fingerprint.path
+                && cache.config.provider.default_provider != next.provider.default_provider
+            {
+                changed_default_route = next.provider.default_provider.clone();
+            }
+            cache.config = leak_config(next);
             // Loading applies env overrides that can themselves set env vars
             // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
@@ -369,6 +437,15 @@ pub fn config() -> &'static Config {
         }
         cache.config
     };
+
+    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
+    if let Some(route) = changed_default_route
+        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
+    {
+        crate::logging::error(&format!(
+            "Could not sync account order after config edit: {error}"
+        ));
+    }
 
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
@@ -533,10 +610,44 @@ pub fn on_config_reloaded(listener: fn()) {
         .push(listener);
 }
 
+/// Scoped local resource bridge policy. Zero disables access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudConfig {
+    pub local_access_seconds: u32,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            local_access_seconds: 86_400,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cloud_config_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_access_defaults_and_overrides() {
+        let defaults: Config = toml::from_str("").unwrap();
+        assert_eq!(defaults.cloud.local_access_seconds, 86400);
+        for seconds in [0, 900, 172800] {
+            let config: Config =
+                toml::from_str(&format!("[cloud]\nlocal_access_seconds = {seconds}")).unwrap();
+            assert_eq!(config.cloud.local_access_seconds, seconds);
+        }
+        assert!(toml::from_str::<Config>("[cloud]\nlocal_access_seconds = -1").is_err());
+    }
+}
+
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Local resource access after cloud handoff.
+    pub cloud: CloudConfig,
     /// Idle session memory hibernation policy.
     pub session: SessionConfig,
 
@@ -657,6 +768,9 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+    /// Send mobile push notifications through the Jcode API when an account
+    /// key is available. `None` means enabled; set `false` to opt out.
+    pub mobile_push: Option<bool>,
 }
 
 /// Agent Client Protocol adapter configuration.
@@ -684,7 +798,7 @@ impl Default for AcpConfig {
 pub enum McpToolsMode {
     /// Never change the cached tool list for MCP changes. Providers with
     /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
-    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// deferred definitions; others get the fixed `mcp` search/call
     /// surface, with new tools described in the transcript.
     #[default]
     Auto,
@@ -718,6 +832,10 @@ impl McpToolsMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolConfig {
+    /// Opt into Jev browser handoff. Direct browser actions remain available.
+    pub browser_handoff: bool,
+    /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
+    pub auto_background_timeout_ms: u64,
     /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
     pub profile: String,
     /// Explicit allow-list. When set, only these tools are exposed.
@@ -738,22 +856,24 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
-    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// Codemode: expose a `codemode` tool that runs model-written
     /// JavaScript in an embedded QuickJS sandbox able to call every other
-    /// tool (including MCP tools). Off by default.
+    /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
 }
 
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            browser_handoff: false,
+            auto_background_timeout_ms: 3_000,
             profile: String::new(),
             enabled: Vec::new(),
             disabled: Vec::new(),
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
-            codemode: false,
+            codemode: true,
         }
     }
 }
@@ -818,7 +938,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",
@@ -836,7 +955,6 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "replace",
                     "apply_patch",
                     "agentgrep",
                     "ls",
@@ -932,18 +1050,8 @@ mod color_tests;
 /// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.
 ///
-/// Discovery originally shipped opt-in with `enabled = false`, and because
-/// config saves serialize the whole struct, any save during that window froze
-/// the old default into the user's file and permanently disabled discovery even
-/// after the default flipped. Omitting default sections prevents a repeat.
+/// Explicit opt-ins must be serialized so unrelated preference saves cannot
+/// silently disable discovery on the next load.
 fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
-    sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
-}
-
-/// Endpoints used by shipped defaults. These may also be explicit user choices.
-fn is_default_discovery_endpoint(endpoint: &str) -> bool {
-    matches!(
-        endpoint.trim_end_matches('/'),
-        "https://api.jcode.sh/v1/discovery" | "https://api.solosystems.dev/v1/discovery"
-    )
+    !sponsors.enabled && sponsors.endpoint == SponsorsConfig::default().endpoint
 }

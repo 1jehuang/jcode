@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
@@ -46,6 +47,65 @@ class WebhookHandler(BaseHTTPRequestHandler):
 class DiscordReleaseTests(unittest.TestCase):
     def setUp(self) -> None:
         WebhookHandler.response_status = 200
+
+    def test_preview_is_commit_list_with_single_link(self) -> None:
+        body = (
+            "## What changed\n\n5 commits since **v0.9**.\n\n"
+            "[Full comparison](https://example.test/compare/a...b)\n\n"
+            "**Highlights from commit titles**\n\n- Highlight only\n\n"
+            "## Commits\n\n"
+            "- [abc12345](https://example.test/commit/abc12345) Fix picker\n"
+            "- [def67890](https://example.test/commit/def67890) feat: see https://x.test/y\n"
+            "\n## First-time preview setup\nDO NOT INCLUDE\n"
+        )
+        message = MODULE.format_message(
+            tag="v1.0.0-preview.12", name="Preview", body=body,
+            url="https://example.test/releases/preview.12",
+        )
+        self.assertEqual(message, (
+            "**jcode v1.0.0-preview.12** (preview) https://example.test/releases/preview.12\n"
+            "- Fix picker\n- feat: see <https://x.test/y>"))
+        self.assertEqual(len(re.findall(r"(?<!<)https?://", message)), 1)
+
+    def test_preview_without_commits_is_header_only(self) -> None:
+        for body in ("", "@everyone legacy notes", "## What changed\n\n"):
+            with self.subTest(body=body):
+                message = MODULE.format_message(
+                    tag="v1.0.0-preview.12", name="Preview", body=body,
+                    url="https://example.test/preview",
+                )
+                self.assertEqual(message, "**jcode v1.0.0-preview.12** (preview) https://example.test/preview")
+
+    def test_preview_long_commit_list_is_truncated(self) -> None:
+        for url in ("https://example.test/preview", "https://example.test/" + "x" * 10_000):
+            with self.subTest(url_length=len(url)):
+                body = "## Commits\n" + "- [abcdef12](https://e.test/c) Fix picker\n" * 5_000
+                message = MODULE.format_message(
+                    tag="v1.0.0-preview.12", name="Preview", body=body, url=url)
+                self.assertLessEqual(len(message), MODULE.DISCORD_LIMIT)
+                self.assertRegex(message, r"\n… \d+ more$")
+                self.assertEqual(len(re.findall(r"(?<!<)https?://", message)), 1)
+
+    def test_preview_announcement_requires_public_prerelease(self) -> None:
+        for flags in ({"draft": True, "prerelease": True},
+                      {"draft": False, "prerelease": False}):
+            with (self.subTest(flags=flags),
+                  mock.patch.object(MODULE, "fetch_release", return_value=flags),
+                  mock.patch.object(MODULE, "post_to_discord") as post,
+                  self.assertRaises(RuntimeError)):
+                MODULE.announce_release(repository="owner/repo", tag="v1.0.0-preview.12",
+                                        token="token", webhook_url="https://discord.test/webhook")
+            post.assert_not_called()
+
+    def test_preview_reuses_tag_specific_duplicate_prevention(self) -> None:
+        tag = "v1.0.0-preview.12"
+        release = {"draft": False, "prerelease": True,
+                   "body": MODULE.announcement_marker(tag)}
+        with (mock.patch.object(MODULE, "fetch_release", return_value=release),
+              mock.patch.object(MODULE, "post_to_discord") as post):
+            self.assertIsNone(MODULE.announce_release(repository="owner/repo", tag=tag,
+                              token="token", webhook_url="https://discord.test/webhook"))
+        post.assert_not_called()
 
     def test_formats_release_and_removes_platform_availability(self) -> None:
         body = """## Highlights

@@ -237,11 +237,18 @@ mod tests {
                 priority: "high".to_string(),
                 id: "window-title".to_string(),
                 group: Some("resume title sync".to_string()),
+                lane_after: None,
+                lane_owner: None,
                 confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),
+                completely_blocked: None,
+                external_blocker: None,
+                waiting_on: Vec::new(),
                 assigned_to: None,
+                stage: None,
+                details: None,
             }],
         )
         .expect("save todos");

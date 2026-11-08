@@ -42,6 +42,11 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if self.profile_id.as_deref() == Some("muse-subscription") {
+            jcode_base::auth::muse::ensure_enabled()?;
+            let client = jcode_base::auth::muse::http_client()?;
+            jcode_base::auth::muse::refresh_if_needed(&client).await?;
+        }
         if self.builtin_azure {
             return self.complete_azure_responses(messages, tools, system).await;
         }
@@ -973,7 +978,7 @@ impl OpenRouterProvider {
     /// Standard/direct OpenRouter and built-in profiles keep the existing
     /// env-var-driven `cache_path()` semantics.
     pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
-        self.is_user_named_profile()
+        (self.is_user_named_profile() || self.profile_id.as_deref() == Some("grok-build"))
             .then(|| self.profile_id.clone())
             .flatten()
     }

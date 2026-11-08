@@ -163,6 +163,29 @@ fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
     assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - msg-1"));
     assert!(last.content.contains("2 👤 User - msg-2"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rows: Vec<String> =
+        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("1 👤 User - msg-1"))
+        .expect("first entry visible");
+    let second = rows
+        .iter()
+        .position(|row| row.contains("2 👤 User - msg-2"))
+        .expect("second entry visible");
+    assert!(
+        first < second,
+        "rewind entries must occupy separate ordered rows: {rows:?}"
+    );
     assert!(!last.content.contains("Session Context"));
     assert!(!last.content.contains("No messages in conversation"));
 }
@@ -882,6 +905,8 @@ fn test_resize_resets_diagram_and_side_panel_diagram_view_to_fit() {
 
 #[test]
 fn test_side_panel_visibility_change_resets_diagram_fit_context() {
+    let _lock = crate::storage::lock_test_env();
+    let _provider_env = ProviderEnvGuard::clear();
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
@@ -1242,7 +1267,7 @@ fn test_workspace_info_widget_appears_in_visual_debug_frame_when_enabled() {
 #[test]
 fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_focus = false;
@@ -1270,7 +1295,7 @@ fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() 
 #[test]
 fn test_mouse_scroll_animation_preserves_side_pane_scroll_sensitivity() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_auto_scroll = true;
@@ -1350,33 +1375,5 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane_without_chan
     assert!(!app.diff_pane_auto_scroll);
 }
 
-#[test]
-fn test_side_pane_scroll_by_clamps_to_rendered_extent() {
-    let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-
-    // Simulate a rendered frame: 30 content lines in a 20-line viewport.
-    crate::tui::ui::set_pinned_pane_total_lines(30);
-    crate::tui::ui::set_last_diff_pane_max_scroll(10);
-    crate::tui::ui::set_last_diff_pane_effective_scroll(10);
-
-    // Follow-bottom sentinel resolves to the on-screen position before moving.
-    app.diff_pane_scroll = usize::MAX;
-    assert!(app.side_pane_scroll_by(-3));
-    assert_eq!(app.diff_pane_scroll, 7);
-    assert!(!app.diff_pane_auto_scroll);
-
-    // Downward motion clamps at the rendered max instead of accumulating
-    // phantom offset past the bottom.
-    app.diff_pane_scroll = 9;
-    assert!(app.side_pane_scroll_by(3));
-    assert_eq!(app.diff_pane_scroll, 10);
-    assert!(!app.side_pane_scroll_by(3), "already at the bottom");
-    assert_eq!(app.diff_pane_scroll, 10);
-
-    // A stale stored offset beyond the rendered extent snaps back so the very
-    // next upward scroll moves the visible view immediately.
-    app.diff_pane_scroll = 25;
-    assert!(app.side_pane_scroll_by(-3));
-    assert_eq!(app.diff_pane_scroll, 7);
-}
+#[path = "part_01/side_pane_extent.rs"]
+mod side_pane_extent;

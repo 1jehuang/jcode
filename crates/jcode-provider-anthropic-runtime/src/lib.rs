@@ -16,6 +16,9 @@
 //! This provides better control and eliminates the Python dependency.
 
 mod reasoning_request;
+mod usage_recording;
+
+mod catalog;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
@@ -575,66 +578,6 @@ impl AnthropicProvider {
         self.set_credential_mode(mode)
     }
 
-    /// Fetch the live Anthropic model catalog using the resolved credential.
-    ///
-    /// Mirrors [`Provider::prefetch_models`] but returns the model ids to the
-    /// caller (rather than only persisting them) so the doctor can assert the
-    /// live `GET /v1/models` endpoint works and that the model under test is in
-    /// the live catalog.
-    pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let oauth_scope = self.catalog_scope_for_route(true);
-        let api_scope = self.catalog_scope_for_route(false);
-        let (token, is_oauth) = self.get_access_token().await?;
-        let scope = if is_oauth { oauth_scope } else { api_scope };
-        if token.trim().is_empty() {
-            anyhow::bail!("resolved an empty Anthropic access token");
-        }
-        let catalog = if is_oauth {
-            jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
-        } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&token).await?
-        };
-        // Persist so the rest of the process benefits from the warm catalog,
-        // exactly like the runtime's own prefetch.
-        jcode_base::provider::persist_anthropic_model_catalog_for_scope(&scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits.clone());
-        }
-        if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_anthropic_models_for_scope(
-                &scope,
-                catalog.available_models.clone(),
-            );
-        }
-        Ok(catalog.available_models)
-    }
-
-    async fn refresh_model_catalog_for_route(&self, oauth: bool, scope: &str) -> Result<()> {
-        let catalog = if oauth {
-            let (token, _) = self.get_oauth_access_token().await?;
-            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
-                Ok(catalog) => catalog,
-                Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
-                    let token = force_refresh_oauth_token(
-                        Arc::clone(&self.credentials),
-                        &self.oauth_refresh_label(),
-                    )
-                    .await?;
-                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
-                }
-                Err(err) => return Err(err),
-            }
-        } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&self.direct_api_key()?).await?
-        };
-        jcode_base::provider::persist_anthropic_model_catalog_for_scope(scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
-        }
-        jcode_base::provider::populate_anthropic_models_for_scope(scope, catalog.available_models);
-        Ok(())
-    }
-
     pub fn new() -> Self {
         let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
             if Self::is_usage_exhausted() {
@@ -802,9 +745,7 @@ impl AnthropicProvider {
     /// cheaper models stay cheap.
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
         let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus-5-5") {
-            Some("medium".to_string())
-        } else if key.contains("claude-opus-5") {
+        if key.contains("claude-opus-5") {
             Some("low".to_string())
         } else if key.contains("claude-opus") {
             Some(if Self::model_supports_xhigh_effort(model) {
@@ -1059,7 +1000,17 @@ impl AnthropicProvider {
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
         // A removed explicit account must fail closed, even with a fresh cache.
         if let Some(label) = self.oauth_account_label() {
-            auth::claude::load_credentials_for_account(&label)?;
+            let mut cached = self.credentials.write().await;
+            let stored = auth::claude::load_credentials_for_account(&label)?;
+            if cached.as_ref().is_some_and(|old| {
+                old.access_token != stored.access_token
+                    || old.refresh_token != stored.refresh_token
+                    || old.expires_at != stored.expires_at
+            }) {
+                // /cloud imports happen in another process. Discard the old
+                // daemon snapshot and validate the newly stored account below.
+                *cached = None;
+            }
         }
         // Check cached credentials
         {
@@ -1099,9 +1050,13 @@ impl AnthropicProvider {
                 "claude",
                 &fresh_creds.refresh_token,
             ) {
-                anyhow::bail!(
-                    "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-                );
+                if fresh_creds.expires_at <= now {
+                    anyhow::bail!(
+                        "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+                    );
+                }
+                // Rejection blocks refresh, not a still-live access token.
+                return Ok((fresh_creds.access_token, true));
             }
 
             jcode_base::logging::info(
@@ -1669,45 +1624,21 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
-        // leak gateway API keys to Anthropic's official model-catalog
-        // endpoint. Genuine Anthropic OAuth credentials are a different case:
-        // users often route /v1/messages through a local proxy (e.g. a
-        // caching proxy) while authenticating with their real subscription,
-        // and skipping the refresh for them silently freezes the model list
-        // at the last disk snapshot, hiding newly released models. The
-        // catalog fetch itself always goes directly to api.anthropic.com.
-        let custom_gateway = self.direct_transport.api_url != API_URL;
-        // Discovery is independent of the selected chat credential mode. Do not
-        // mutate that mode on this shared provider just to inspect another route.
-        // API discovery gets first opportunity, OAuth still runs on API failure.
-        for oauth in [false, true] {
-            if custom_gateway && !oauth {
-                // Never send named gateway API keys to Anthropic's catalog.
-                continue;
-            }
-            let configured = if oauth {
-                auth::claude::load_credentials().is_ok()
-            } else {
-                self.direct_api_key().is_ok()
-            };
-            if !configured {
-                continue;
-            }
-            let scope = self.catalog_scope_for_route(oauth);
-            if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
-                continue;
-            }
-            let result = self.refresh_model_catalog_for_route(oauth, &scope).await;
-            jcode_base::provider::finish_anthropic_model_catalog_refresh_for_scope(&scope);
-            if let Err(err) = result {
-                jcode_base::logging::warn(&format!(
-                    "Anthropic {} model catalog refresh failed; keeping cached list: {err}",
-                    if oauth { "OAuth" } else { "API key" }
-                ));
-            }
-        }
-        Ok(())
+        self.refresh_catalogs(false).await
+    }
+
+    async fn refresh_model_catalog(
+        &self,
+    ) -> Result<jcode_provider_core::ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalogs(true).await?;
+        Ok(jcode_provider_core::summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn name(&self) -> &'static str {
@@ -1896,6 +1827,7 @@ async fn run_stream_with_retries(
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
 ) {
+    let usage_label = usage_recording::credential_label(is_oauth, &initial_token);
     let mut token = initial_token;
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -1958,6 +1890,7 @@ async fn run_stream_with_retries(
             &oauth_session_id,
             &direct_transport,
             &mut response_accepted,
+            usage_label.as_deref(),
         )
         .await
         {
@@ -2254,6 +2187,7 @@ async fn stream_response(
     oauth_session_id: &str,
     direct_transport: &DirectTransportConfig,
     response_accepted: &mut bool,
+    usage_label: Option<&str>,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -2418,6 +2352,11 @@ async fn stream_response(
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
             let events = process_sse_event(&event, &mut sse_state, is_oauth);
+            if event.event_type == "message_stop" {
+                usage_recording::record(usage_label, &request.model, &sse_state).await;
+                usage_recording::send_final_usage(&tx, &sse_state).await;
+                return Ok(());
+            }
             for stream_event in events {
                 if let StreamEvent::Error { ref message, .. } = stream_event
                     && is_retryable_error(&message.to_lowercase())
@@ -2431,27 +2370,7 @@ async fn stream_response(
         }
     }
 
-    // Send final token usage if we have it
-    if sse_state.input_tokens.is_some() || sse_state.output_tokens.is_some() {
-        // Log cache usage for debugging
-        if sse_state.cache_read_input_tokens.is_some()
-            || sse_state.cache_creation_input_tokens.is_some()
-        {
-            jcode_base::logging::info(&format!(
-                "Prompt cache: read={:?} created={:?}",
-                sse_state.cache_read_input_tokens, sse_state.cache_creation_input_tokens
-            ));
-        }
-        let _ = tx
-            .send(Ok(StreamEvent::TokenUsage {
-                input_tokens: sse_state.input_tokens,
-                output_tokens: sse_state.output_tokens,
-                cache_read_input_tokens: sse_state.cache_read_input_tokens,
-                cache_creation_input_tokens: sse_state.cache_creation_input_tokens,
-            }))
-            .await;
-    }
-
+    usage_recording::send_final_usage(&tx, &sse_state).await;
     Ok(())
 }
 
@@ -2516,6 +2435,10 @@ struct SseStreamState {
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
+    served_model: Option<String>,
+    service_tier: Option<String>,
+    cache_creation_5m: Option<u64>,
+    cache_creation_1h: Option<u64>,
     /// Lowercased base id of the model we asked for, so `message_start` can flag
     /// a silent server-side substitution (e.g. an unavailable id aliased to a
     /// different model). Empty when unknown (e.g. in unit tests).
@@ -2540,6 +2463,7 @@ fn process_sse_event(
                 // Log it so we can confirm there was no silent server-side
                 // substitution (and surface it under JCODE_LOG_SERVED_MODEL).
                 if let Some(served) = parsed.message.model.as_deref() {
+                    state.served_model = Some(served.to_string());
                     jcode_base::logging::info(&format!("Anthropic served model={}", served));
                     if std::env::var("JCODE_LOG_SERVED_MODEL").is_ok() {
                         eprintln!("[anthropic] served model={served}");
@@ -2568,19 +2492,7 @@ fn process_sse_event(
                     }
                 }
                 if let Some(usage) = parsed.message.usage {
-                    state.input_tokens = usage.input_tokens.map(|t| t as u64);
-                    state.cache_read_input_tokens = usage.cache_read_input_tokens.map(|t| t as u64);
-                    state.cache_creation_input_tokens =
-                        usage.cache_creation_input_tokens.map(|t| t as u64);
-                    if let Some(tier) = usage.service_tier.as_deref() {
-                        jcode_base::logging::info(&format!(
-                            "Anthropic granted service_tier={}",
-                            tier
-                        ));
-                        if std::env::var("JCODE_LOG_SERVICE_TIER").is_ok() {
-                            eprintln!("[anthropic] granted service_tier={tier}");
-                        }
-                    }
+                    usage_recording::update_usage(state, usage);
                 }
             }
         }
@@ -2686,7 +2598,7 @@ fn process_sse_event(
         "message_delta" => {
             if let Ok(parsed) = serde_json::from_str::<MessageDeltaEvent>(&event.data) {
                 if let Some(usage) = parsed.usage {
-                    state.output_tokens = usage.output_tokens.map(|t| t as u64);
+                    usage_recording::update_usage(state, usage);
                 }
                 if let Some(stop_reason) = parsed.delta.stop_reason {
                     events.push(StreamEvent::MessageEnd {

@@ -239,13 +239,14 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
     assert!(msg.content.contains("monthly spending limit"));
     assert!(msg.content.contains("progressively larger tranches"));
     assert!(msg.content.contains("/login jcode"));
-    assert!(msg.content.contains("Claude Opus 4.8"));
-    assert!(msg.content.contains("GPT-5.5"));
-    assert!(msg.content.contains("Claude Fable 5"));
-    assert!(msg.content.contains("GPT-5.6 Sol"));
+    assert!(msg.content.contains("Claude Opus 5.5"));
+    assert!(msg.content.contains("Claude Sonnet 5.5"));
+    assert!(msg.content.contains("Claude Haiku 5.5"));
+    assert!(msg.content.contains("GPT-6.1 Sol"));
     assert!(!msg.content.contains("$10/mo"));
     assert!(!msg.content.contains("usable inference budget"));
-    assert!(!msg.content.contains("Claude Fable 5 - claude-fable-5 [Ultra]"));
+    assert!(!msg.content.contains("Claude Opus 4.8"));
+    assert!(!msg.content.contains("GPT-5.5"));
 }
 
 #[test]
@@ -275,9 +276,48 @@ fn test_usage_report_shows_no_connected_providers_when_results_empty() {
 
     let msg = app.display_messages().last().expect("missing usage card");
     assert_eq!(msg.role, "usage");
-    assert!(msg.content.contains("No connected providers"));
+    assert!(msg.content.starts_with("*none\tnot connected"));
+    assert!(msg.content.contains("No providers are connected yet"));
     assert!(msg.content.contains("/login claude"));
     assert!(msg.content.contains("/login openai"));
+}
+
+#[test]
+fn test_usage_provider_command_shows_only_that_provider() {
+    let mut app = create_test_app();
+    assert!(super::commands::handle_usage_command(&mut app, "/usage claude"));
+    let report = |name: &str| crate::usage::ProviderUsage {
+        provider_name: name.to_string(),
+        ..Default::default()
+    };
+    app.handle_usage_report(vec![report("Anthropic (Claude)"), report("OpenAI (ChatGPT)")]);
+    let cards: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "usage")
+        .collect();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].title.as_deref(), Some("Anthropic (Claude)"));
+
+    assert!(super::commands::handle_usage_command(&mut app, "/usage nope"));
+    app.handle_usage_report(vec![report("Anthropic (Claude)")]);
+    let msg = app.display_messages().last().unwrap();
+    assert_eq!(msg.title.as_deref(), Some("Usage · nope"));
+    assert!(msg.content.contains("No connected provider matches \"nope\""));
+
+    // Plain /usage shows one card per provider, refreshed in place.
+    assert!(super::commands::handle_usage_command(&mut app, "/usage"));
+    for _ in 0..2 {
+        app.handle_usage_report(vec![report("Anthropic (Claude)"), report("OpenAI (ChatGPT)")]);
+    }
+    let titles: Vec<_> = app
+        .display_messages()
+        .iter()
+        .rev()
+        .take_while(|m| m.role == "usage")
+        .filter_map(|m| m.title.clone())
+        .collect();
+    assert_eq!(titles, ["OpenAI (ChatGPT)", "Anthropic (Claude)"]);
 }
 
 #[test]

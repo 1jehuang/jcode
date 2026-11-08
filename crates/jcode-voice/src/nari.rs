@@ -238,10 +238,17 @@ fn is_prompt_echo(text: &str) -> bool {
 /// Conservative bound on the recognition context sent per session.
 const MAX_PROMPT_CHARS: usize = 1000;
 
-/// Recognition context: built-in names plus `[dictation] vocabulary`,
+/// Recognition context: built-in names plus desktop `[dictation] vocabulary`,
 /// deduplicated case-insensitively and bounded without splitting a term.
 pub fn recognition_prompt() -> String {
-    build_prompt(&jcode_base::config::config().dictation.vocabulary)
+    #[cfg(feature = "desktop-config")]
+    {
+        build_prompt(&jcode_base::config::config().dictation.vocabulary)
+    }
+    #[cfg(not(feature = "desktop-config"))]
+    {
+        build_prompt(&[])
+    }
 }
 
 fn build_prompt(extra: &[String]) -> String {
@@ -275,7 +282,7 @@ fn build_prompt(extra: &[String]) -> String {
 }
 
 pub fn nari_api_key() -> Option<String> {
-    jcode_base::provider_catalog::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
+    jcode_provider_env::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
         .filter(|key| !key.trim().is_empty())
 }
 
@@ -287,6 +294,7 @@ pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) 
 
 /// Microphone-owned channel. Holds 100 ms chunks for longer than the setup
 /// timeout so audio captured during the handshake is buffered, never dropped.
+#[cfg(feature = "desktop-config")]
 pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
     mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
 }
@@ -664,6 +672,13 @@ mod tests {
     fn transcription_cost_uses_published_hourly_rate() {
         assert_eq!(estimated_transcription_usd(Duration::from_secs(3600)), 0.12);
         assert!((estimated_transcription_usd(Duration::from_secs(30)) - 0.001).abs() < 1e-12);
+    }
+
+    #[cfg(not(feature = "desktop-config"))]
+    #[test]
+    fn lightweight_prompt_uses_builtin_vocabulary() {
+        assert_eq!(recognition_prompt(), build_prompt(&[]));
+        assert!(recognition_prompt().contains("Jcode"));
     }
 
     #[test]

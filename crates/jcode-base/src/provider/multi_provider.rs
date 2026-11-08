@@ -29,6 +29,17 @@ impl MultiProvider {
                 || !saved_account_can_serve_model(provider, label, model)
                 || models::provider_unavailability_detail_for_account_label(provider, Some(label))
                     .is_some()
+                // The runtime cooldown expires after minutes, but a quota
+                // window can stay spent for days. Skip straight past logins
+                // whose last known usage is still exhausted.
+                || crate::usage::account_known_exhausted(
+                    if provider == "claude" {
+                        crate::usage::MultiAccountProviderKind::Anthropic
+                    } else {
+                        crate::usage::MultiAccountProviderKind::OpenAI
+                    },
+                    label,
+                )
             {
                 return false;
             }
@@ -219,6 +230,7 @@ impl MultiProvider {
         if let Some(position) = order.iter().position(|key| *key == source_key) {
             order.rotate_left(position + 1);
         }
+        order.sort_by_cached_key(|key| pool.priority(key));
         let configured_model = crate::config::Config::load().provider.default_model;
         let target = order
             .into_iter()
@@ -413,10 +425,13 @@ fn saved_account_can_serve_model(provider: &str, label: &str, model: &str) -> bo
         }
         _ => return false,
     };
-    known_model
-        && !((!access_present || expired) && refresh.is_empty())
-        && (refresh.is_empty()
-            || !crate::auth::refresh_state::refresh_token_is_known_rejected(provider, &refresh))
+    let rejected = !refresh.is_empty()
+        && crate::auth::refresh_state::refresh_token_is_known_rejected(provider, &refresh);
+    if provider == "claude" {
+        known_model && ((access_present && !expired) || (!refresh.is_empty() && !rejected))
+    } else {
+        known_model && !((!access_present || expired) && refresh.is_empty()) && !rejected
+    }
 }
 
 fn saved_account_labels(provider: &str) -> Vec<String> {
@@ -436,5 +451,35 @@ fn saved_account_labels(provider: &str) -> Vec<String> {
             }
         },
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn claude_saved_account_readiness_uses_live_access_or_usable_refresh() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let rejected = "saved-account-rejected-refresh";
+    crate::auth::refresh_state::record_permanent_rejection("claude", rejected, "invalid_grant")
+        .unwrap();
+    for (expires, refresh, expected) in [
+        (now - 60_000, rejected, false),
+        (now + 120_000, rejected, true),
+        (now - 60_000, "saved-account-fresh-refresh", true),
+    ] {
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-otter".into(),
+            access: "saved-access".into(),
+            refresh: refresh.into(),
+            expires,
+            email: None,
+            subscription_type: Some("max".into()),
+            scopes: vec!["user:inference".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            saved_account_can_serve_model("claude", "claude-otter", "claude-sonnet-4-6"),
+            expected
+        );
     }
 }

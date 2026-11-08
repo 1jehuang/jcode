@@ -12,6 +12,7 @@ fn header_invalidation_discards_composed_account_quota_frames() {
         messages_version: 0,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -21,6 +22,8 @@ fn header_invalidation_discards_composed_account_quota_frames() {
         inline_images_visible: true,
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::default(),
+        show_link_urls: false,
     };
     {
         let mut cache = full_prep_cache().lock().unwrap();

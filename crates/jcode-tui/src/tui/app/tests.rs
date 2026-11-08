@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+mod tool_duration;
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
@@ -29,6 +31,7 @@ include!("tests/service_tier_dedup.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
+include!("tests/idle_soft_interrupt_cancel.rs");
 include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
@@ -41,6 +44,7 @@ include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
+include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
@@ -48,12 +52,18 @@ include!("tests/onboarding_eval.rs");
 include!("tests/onboarding_sim.rs");
 include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
+include!("tests/long_transcript_scroll_perf.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/background_todo_dependencies.rs");
+include!("tests/todo_completion.rs");
+include!("tests/final_response_followup.rs");
+include!("tests/reload_recovery_replay.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
+include!("tests/latex_command.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");
@@ -187,9 +197,11 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 911_873,
         completed_at: Instant::now() - Duration::from_secs(3723),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -231,9 +243,11 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(3700),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -296,9 +310,11 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(60),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -360,9 +376,11 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -414,9 +432,11 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -493,10 +513,12 @@ fn legitimate_model_switch_miss_pushes_informational_notice() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
-        provider: "anthropic".to_string(),
-        // Different model than the current request -> ModelSwitch.
+        utc_day: 0,
+        // Same provider, different model than the current request -> ModelSwitch.
+        provider: app.kv_cache_provider_name(),
         model: "claude-opus-4-5".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -529,6 +551,7 @@ fn kv_cache_notice_explicit_loss_matrix() {
         (None, "same", None),
         (Some(0), "provider", Some("provider switch")),
         (Some(0), "upstream", Some("upstream switch")),
+        (Some(0), "account", Some("account switch")),
         (Some(0), "expired", Some("expired")),
     ] {
         let mut app = create_test_app();
@@ -538,13 +561,18 @@ fn kv_cache_notice_explicit_loss_matrix() {
             cache_generation: app.kv_cache.cache_generation,
             input_tokens: 100_000,
             completed_at: Instant::now(),
+            utc_day: 0,
             provider: app.kv_cache_provider_name(),
             model: app.kv_cache_provider_model(),
             upstream_provider: Some("old upstream".into()),
+            account: None,
             signature: None,
         };
         if route == "provider" {
             baseline.provider = "other provider".into();
+        }
+        if route == "account" {
+            baseline.account = Some("fox".into());
         }
         if route == "expired" {
             baseline.provider = "anthropic".into();
@@ -553,6 +581,9 @@ fn kv_cache_notice_explicit_loss_matrix() {
         }
         let mut request = app.fallback_pending_kv_cache_request();
         request.call_index = 3;
+        if route == "account" {
+            request.account = Some("otter".into());
+        }
         if route == "expired" {
             request.provider = "anthropic".into();
             request.started_at = Some(Instant::now());
@@ -583,7 +614,18 @@ fn kv_cache_notice_explicit_loss_matrix() {
             assert_eq!(notices.len(), 1, "route={route} read={read:?}");
             assert!(notices[0].content.contains(reason), "{:?}", notices[0]);
             assert!(notices[0].content.contains("call 3"));
-            assert!(notices[0].content.contains("cached / 100000 expected"));
+            assert!(
+                notices[0].content.contains("cached / 100K expected"),
+                "{:?}",
+                notices[0]
+            );
+            if route == "account" {
+                assert!(
+                    notices[0].content.contains("account switched fox -> otter"),
+                    "{:?}",
+                    notices[0]
+                );
+            }
             assert!(notices[0].content.starts_with("ℹ️"));
         } else {
             assert!(
@@ -636,9 +678,11 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 200_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(big_signature),
     });
 
@@ -685,9 +729,11 @@ fn kv_cache_baseline_same_session_still_compares() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 1_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -729,9 +775,11 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 80_169,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature.clone()),
     });
 
@@ -808,9 +856,11 @@ fn native_compaction_application_invalidates_kv_cache_baseline_before_continuati
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 262_419,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature),
     });
     let old_generation = app.kv_cache.cache_generation;
@@ -868,6 +918,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -891,6 +942,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -1882,106 +1934,8 @@ fn oversized_pasted_submit_is_rejected_and_preserves_input() {
     );
 }
 
-fn seed_stale_clear_usage(app: &mut App) {
-    app.streaming.streaming_input_tokens = 40_000;
-    app.streaming.streaming_output_tokens = 2_000;
-    app.streaming.streaming_cache_read_tokens = Some(30_000);
-    app.streaming.streaming_cache_creation_tokens = Some(5_000);
-    app.streaming.streaming_context_stale = true;
-    app.streaming.streaming_usage_call_reset_pending = true;
-    app.kv_cache.current_api_usage_recorded = true;
-}
+include!("tests/clear_runtime_state.rs");
 
-fn assert_clear_usage_reset(app: &App) {
-    assert_eq!(app.current_stream_context_tokens(), None);
-    assert_eq!(app.streaming.streaming_input_tokens, 0);
-    assert_eq!(app.streaming.streaming_output_tokens, 0);
-    assert_eq!(app.streaming.streaming_cache_read_tokens, None);
-    assert_eq!(app.streaming.streaming_cache_creation_tokens, None);
-    assert!(!app.streaming.streaming_context_stale);
-    assert!(!app.streaming.streaming_usage_call_reset_pending);
-    assert!(!app.kv_cache.current_api_usage_recorded);
-}
-
-fn seed_stale_clear_image(app: &mut App) -> u64 {
-    app.remote_side_pane_images = vec![crate::session::RenderedImage {
-        history_message_index: None,
-        media_type: "image/png".to_string(),
-        data: "stale-image".to_string(),
-        label: Some("stale.png".to_string()),
-        source: crate::session::RenderedImageSource::UserInput,
-        anchor: None,
-    }];
-    let _ = crate::tui::TuiState::side_pane_images_signature(app);
-    app.expanded_images_version
-}
-
-fn assert_clear_image_reset(app: &App, previous_version: u64) {
-    assert!(app.remote_side_pane_images.is_empty());
-    assert_eq!(app.side_pane_images_signature_cache.get(), None);
-    assert!(app.expanded_images.is_empty());
-    assert_eq!(
-        app.expanded_images_version,
-        previous_version.wrapping_add(1)
-    );
-}
-
-#[test]
-fn local_clear_resets_provider_reported_context_usage() {
-    let mut app = create_test_app();
-    seed_stale_clear_usage(&mut app);
-    seed_stale_clear_swarm_plan(&mut app);
-    let image_version = seed_stale_clear_image(&mut app);
-
-    assert!(super::commands::handle_session_command(&mut app, "/clear"));
-
-    assert_clear_usage_reset(&app);
-    assert_clear_swarm_plan_reset(&app);
-    assert_clear_image_reset(&app, image_version);
-}
-
-#[test]
-fn remote_clear_resets_provider_reported_context_usage() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
-    app.is_remote = true;
-    seed_stale_clear_usage(&mut app);
-    seed_stale_clear_swarm_plan(&mut app);
-    let image_version = seed_stale_clear_image(&mut app);
-    app.input = "/clear".to_string();
-    app.cursor_pos = app.input.len();
-
-    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-        .expect("remote /clear should succeed");
-
-    assert_clear_usage_reset(&app);
-    assert_clear_swarm_plan_reset(&app);
-    assert_clear_image_reset(&app, image_version);
-}
-
-fn seed_stale_clear_swarm_plan(app: &mut App) {
-    app.swarm_plan_items = vec![crate::plan::PlanItem {
-        content: "old session task".to_string(),
-        status: "queued".to_string(),
-        priority: "high".to_string(),
-        id: "old-task".to_string(),
-        subsystem: None,
-        file_scope: Vec::new(),
-        blocked_by: Vec::new(),
-        assigned_to: None,
-    }];
-    app.swarm_plan_version = Some(19);
-    app.swarm_plan_swarm_id = Some("old-swarm".to_string());
-}
-
-fn assert_clear_swarm_plan_reset(app: &App) {
-    assert!(app.swarm_plan_items.is_empty());
-    assert_eq!(app.swarm_plan_version, None);
-    assert_eq!(app.swarm_plan_swarm_id, None);
-}
 include!("tests/kv_cache_provider_identity.rs");
 
 include!("tests/cache_retention_routes.rs");

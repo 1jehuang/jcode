@@ -1,6 +1,156 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
+
+#[derive(Default)]
+struct LockOwner {
+    thread: Option<std::thread::ThreadId>,
+    depth: usize,
+    file: Option<std::fs::File>,
+}
+
+#[derive(Default)]
+struct StoreLock {
+    owner: Mutex<LockOwner>,
+    available: Condvar,
+}
+
+static STORE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<StoreLock>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Synchronous transaction guard. Deliberately !Send: release on the acquiring
+/// thread, and never hold this guard across an await. Sidecars must never be
+/// removed, since replacing the inode would split the cross-process lock.
+pub(crate) struct StoreLockGuard {
+    lock: Arc<StoreLock>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for StoreLockGuard {
+    fn drop(&mut self) {
+        let mut owner = self.lock.owner.lock().unwrap_or_else(|e| e.into_inner());
+        owner.depth -= 1;
+        if owner.depth == 0 {
+            // Closing the last descriptor releases flock, including on unwind.
+            owner.file = None;
+            owner.thread = None;
+            self.lock.available.notify_one();
+        }
+    }
+}
+
+/// Lock one store in the jcode home directory for a complete read/modify/write
+/// transaction. Nested acquisitions on the same thread are supported, including
+/// load-time migration calling save. Unix also serializes independent processes.
+/// Other platforms retain process-local serialization (no cross-process flock).
+pub(crate) fn lock_store(home: &Path, store_name: &str) -> Result<StoreLockGuard> {
+    anyhow::ensure!(
+        !store_name.is_empty()
+            && store_name != "."
+            && store_name != ".."
+            && store_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
+        "Unsafe account store name"
+    );
+    std::fs::create_dir_all(home)?;
+    let metadata = std::fs::symlink_metadata(home)?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "Unsafe account store directory"
+    );
+    let home = std::fs::canonicalize(home)?;
+    let path = home.join(format!(".{store_name}.lock"));
+    let lock = STORE_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(path.clone())
+        .or_default()
+        .clone();
+    let thread = std::thread::current().id();
+    let mut owner = lock.owner.lock().unwrap_or_else(|e| e.into_inner());
+    while owner.thread.is_some() && owner.thread != Some(thread) {
+        owner = lock
+            .available
+            .wait(owner)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    if owner.thread.is_none() {
+        owner.file = Some(open_store_lock(&home, &path)?);
+        owner.thread = Some(thread);
+    }
+    owner.depth += 1;
+    drop(owner);
+    Ok(StoreLockGuard {
+        lock,
+        _not_send: std::marker::PhantomData,
+    })
+}
+
+#[cfg(unix)]
+fn open_store_lock(home: &Path, path: &Path) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(home)?;
+    let metadata = directory.metadata()?;
+    anyhow::ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o022 == 0,
+        "Unsafe account store directory ownership or permissions"
+    );
+    let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())?;
+    // Open relative to a pinned directory and never follow the sidecar symlink.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o777 == 0o600,
+        "Unsafe account store lock ownership, type, links or permissions"
+    );
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error.into());
+        }
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_store_lock(_home: &Path, path: &Path) -> Result<std::fs::File> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "Unsafe account store lock path"
+        );
+    }
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?)
+}
 
 /// Runtime (process-local) active-account overrides, keyed by provider
 /// prefix ("claude", "openai", ...). Lets `/account switch <label>` take
@@ -295,6 +445,175 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn increment_store(home: &Path) {
+        for _ in 0..40 {
+            let outer = lock_store(home, "counter.json").unwrap();
+            let inner = lock_store(home, "counter.json").unwrap();
+            // Out-of-order destruction must also retain the process lock.
+            drop(outer);
+            let path = home.join("counter.json");
+            let value: usize = std::fs::read_to_string(&path)
+                .ok()
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(0);
+            std::thread::yield_now();
+            std::fs::write(path, (value + 1).to_string()).unwrap();
+            drop(inner);
+        }
+    }
+
+    #[test]
+    fn store_lock_subprocess_worker() {
+        if let Some(home) = std::env::var_os("JCODE_ACCOUNT_LOCK_TEST_HOME") {
+            increment_store(Path::new(&home));
+        }
+    }
+
+    #[test]
+    fn store_lock_serializes_threads_and_nested_transactions() {
+        let home = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let home = home.path();
+                scope.spawn(move || increment_store(home));
+            }
+        });
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("counter.json")).unwrap(),
+            "320"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_lock_serializes_process_transactions() {
+        let home = tempfile::tempdir().unwrap();
+        let mut children = (0..4)
+            .map(|_| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "auth::account_store::tests::store_lock_subprocess_worker",
+                        "--nocapture",
+                    ])
+                    .env("JCODE_ACCOUNT_LOCK_TEST_HOME", home.path())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        increment_store(home.path());
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("counter.json")).unwrap(),
+            "200"
+        );
+    }
+
+    #[test]
+    fn store_lock_provider_transactions_preserve_concurrent_accounts() {
+        use crate::auth::{claude, codex};
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let home = sandbox.root();
+                scope.spawn(move || {
+                    for index in 0..4 {
+                        let identity = format!("worker-{worker}-{index}");
+                        {
+                            // Simulate a cloud transaction sharing the same lock.
+                            let _guard = lock_store(home, "openai-auth.json").unwrap();
+                            let account = serde_json::from_value(serde_json::json!({
+                                "label": identity, "access_token": "old", "refresh_token": "refresh"
+                            })).unwrap();
+                            let label = codex::upsert_account(account).unwrap();
+                            codex::update_account_tokens(&label, "new", "refresh", None, None, None).unwrap();
+                            codex::update_account_profile(&label, Some(identity.clone())).unwrap();
+                        }
+                        {
+                            let _guard = lock_store(home, "auth.json").unwrap();
+                            let account = serde_json::from_value(serde_json::json!({
+                                "label": identity, "access": "old", "refresh": "refresh", "expires": 0
+                            })).unwrap();
+                            let label = claude::upsert_account(account).unwrap();
+                            claude::update_account_tokens(&label, "new", "refresh", 42).unwrap();
+                            claude::update_account_profile(&label, Some(identity.clone())).unwrap();
+                        }
+                    }
+                });
+            }
+        });
+        let openai = codex::list_accounts().unwrap();
+        let claude = claude::list_accounts().unwrap();
+        assert_eq!(openai.len(), 32);
+        assert_eq!(claude.len(), 32);
+        assert_eq!(
+            openai
+                .iter()
+                .filter_map(|a| a.email.as_ref())
+                .collect::<HashSet<_>>()
+                .len(),
+            32
+        );
+        assert_eq!(
+            claude
+                .iter()
+                .filter_map(|a| a.email.as_ref())
+                .collect::<HashSet<_>>()
+                .len(),
+            32
+        );
+        assert!(openai.iter().all(|a| a.access_token == "new"));
+        assert!(claude.iter().all(|a| a.access == "new" && a.expires == 42));
+    }
+
+    #[test]
+    fn store_lock_rejects_invalid_names() {
+        let home = tempfile::tempdir().unwrap();
+        for name in [
+            "",
+            ".",
+            "..",
+            "../auth.json",
+            "x/y",
+            "x\\y",
+            "/auth",
+            "x\0y",
+        ] {
+            assert!(lock_store(home.path(), name).is_err(), "{name:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_lock_rejects_unsafe_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("target");
+        std::fs::write(&target, "unchanged").unwrap();
+        let path = home.path().join(".auth.json.lock");
+        symlink(&target, &path).unwrap();
+        assert!(lock_store(home.path(), "auth.json").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unchanged");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(lock_store(home.path(), "auth.json").is_err());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(lock_store(home.path(), "auth.json").is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&path, home.path().join("hardlink")).unwrap();
+        assert!(lock_store(home.path(), "auth.json").is_err());
+        let alias = home.path().join("alias");
+        symlink(home.path(), &alias).unwrap();
+        assert!(lock_store(&alias, "other.json").is_err());
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(lock_store(home.path(), "other.json").is_err());
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
 
     #[derive(Clone)]
     struct Account {
