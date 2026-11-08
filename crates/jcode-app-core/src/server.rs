@@ -2356,6 +2356,10 @@ impl Server {
         #[cfg(unix)]
         let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
 
+        // Reap zombies and stop orphaned MCP servers left by a previous image
+        // of this PID (exec reload). Must run before this image spawns children.
+        crate::inherited_children::start();
+
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
                 "Refusing to replace active server socket at {}",

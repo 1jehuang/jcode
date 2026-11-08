@@ -23,6 +23,51 @@ type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 static GIT_LINE_CACHE: std::sync::LazyLock<Mutex<git_line_cache::GitLineCache>> =
     std::sync::LazyLock::new(|| Mutex::new(git_line_cache::GitLineCache::default()));
+/// Cheap `.git` metadata stamp from the last full probe, plus when that probe
+/// ran. While the stamp is unchanged, TTL expiry only re-stats a few files
+/// instead of spawning six git processes every 5s per client.
+static GIT_PROBE_STAMP: Mutex<Option<(std::time::Instant, GitStamp)>> = Mutex::new(None);
+
+/// Full probes still run this often with an unchanged stamp, because editor
+/// writes to tracked files do not touch `.git` until something stages them.
+#[cfg(not(test))]
+const GIT_FULL_PROBE_INTERVAL: Duration = Duration::from_secs(60);
+
+type GitStamp = Vec<(std::path::PathBuf, Option<(std::time::SystemTime, u64)>)>;
+
+/// mtimes of the files that change on commit, checkout, stage, fetch, and
+/// branch updates. `None` when the git dir cannot be resolved cheaply.
+fn git_stamp(repo_root: &std::path::Path) -> Option<GitStamp> {
+    let git_dir = repo_root.join(".git");
+    if !git_dir.is_dir() {
+        return None;
+    }
+    let mut paths = vec![
+        git_dir.join("HEAD"),
+        git_dir.join("index"),
+        git_dir.join("FETCH_HEAD"),
+        git_dir.join("packed-refs"),
+    ];
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(reference) = head.trim().strip_prefix("ref: ")
+    {
+        paths.push(git_dir.join(reference));
+        if let Some(branch) = reference.strip_prefix("refs/heads/") {
+            paths.push(git_dir.join("refs/remotes/origin").join(branch));
+        }
+    }
+    Some(
+        paths
+            .into_iter()
+            .map(|path| {
+                let meta = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| Some((m.modified().ok()?, m.len())));
+                (path, meta)
+            })
+            .collect(),
+    )
+}
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
 /// assessments (closed feedback loop etc.). Module-level so the app can force a
@@ -75,6 +120,9 @@ pub(crate) fn invalidate_git_info_cache() {
         // returning the last-known value (no flicker to empty).
         *ts = backdated_now(Duration::from_secs(3600));
         *refreshing = false;
+    }
+    if let Ok(mut stamp) = GIT_PROBE_STAMP.lock() {
+        *stamp = None;
     }
 }
 
@@ -1236,6 +1284,17 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
                 if *refreshing {
                     return cached.clone();
                 }
+                // Nothing in .git moved and the last full probe is recent:
+                // extend the entry without spawning any git process.
+                if let Some(root) = cached.as_ref().and_then(|info| info.repo_root.as_deref())
+                    && let Ok(stamp_guard) = GIT_PROBE_STAMP.lock()
+                    && let Some((probed_at, stamp)) = stamp_guard.as_ref()
+                    && probed_at.elapsed() < GIT_FULL_PROBE_INTERVAL
+                    && git_stamp(root).as_ref() == Some(stamp)
+                {
+                    *ts = std::time::Instant::now();
+                    return cached.clone();
+                }
                 let stale = cached.clone();
                 *refreshing = true;
                 spawn_git_info_refresh();
@@ -1257,6 +1316,13 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 fn spawn_git_info_refresh() {
     std::thread::spawn(|| {
         let result = gather_git_info_inner();
+        if let Ok(mut stamp) = GIT_PROBE_STAMP.lock() {
+            *stamp = result
+                .as_ref()
+                .and_then(|info| info.repo_root.as_deref())
+                .and_then(git_stamp)
+                .map(|s| (std::time::Instant::now(), s));
+        }
         let changed = if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
             let changed = guard
                 .as_ref()
@@ -1803,3 +1869,20 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
 #[cfg(test)]
 #[path = "helpers/account_notice_tests.rs"]
 mod account_notice_tests;
+
+#[cfg(test)]
+mod git_stamp_tests {
+    #[test]
+    fn stamp_changes_when_head_ref_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("refs/heads/main"), "a\n").unwrap();
+        let before = super::git_stamp(dir.path()).unwrap();
+        assert_eq!(super::git_stamp(dir.path()).unwrap(), before);
+        std::fs::write(git.join("refs/heads/main"), "bb\n").unwrap();
+        assert_ne!(super::git_stamp(dir.path()).unwrap(), before);
+        assert!(super::git_stamp(&dir.path().join("missing")).is_none());
+    }
+}

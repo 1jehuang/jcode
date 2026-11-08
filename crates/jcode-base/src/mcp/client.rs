@@ -224,9 +224,15 @@ impl McpClient {
         command
             .args(&config.args)
             .envs(&env)
+            .env(crate::inherited_children::MCP_CHILD_MARKER_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // Own process group so shutdown also stops `npx` wrapper descendants
+        // (node), which otherwise outlive the wrapper and keep running.
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
@@ -568,6 +574,7 @@ impl McpClient {
 
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+                kill_process_group(child);
                 let _ = child.kill().await;
             }
             Backend::Remote(connection) => connection.shutdown().await,
@@ -656,9 +663,22 @@ fn mcp_child_env(
 impl Drop for McpClient {
     fn drop(&mut self) {
         if let Backend::Stdio(child) = &mut self.backend {
+            kill_process_group(child);
             let _ = child.start_kill();
         }
     }
+}
+
+fn kill_process_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: the child leads its own process group (process_group(0)).
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 #[cfg(all(test, unix))]
