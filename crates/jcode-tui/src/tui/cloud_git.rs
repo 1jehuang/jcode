@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+#[path = "cloud_git_stderr.rs"]
+mod stderr_timing;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum RepoState {
@@ -143,7 +145,7 @@ fn script_command_inner(
     };
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     cmd
 }
@@ -180,6 +182,7 @@ pub(crate) async fn bounded_output(
     deadline: Duration,
     limit: usize,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    let mut timing = super::cloud_latency::Span::new("workspace_command");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -201,27 +204,48 @@ pub(crate) async fn bounded_output(
             }
         }
     }
+    command
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let Ok(mut child) = command.spawn() else {
         return None;
     };
+    let _process_group = stderr_timing::ProcessGroup(child.id());
     let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
     let result = tokio::time::timeout(deadline, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take((limit + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .ok()?;
-        if bytes.len() > limit {
-            return None;
+        let output = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .ok()?;
+            if bytes.len() > limit {
+                return None;
+            }
+            let status = child.wait().await.ok()?;
+            Some((status, bytes))
+        };
+        let diagnostics = async {
+            stderr_timing::drain(stderr, |record| crate::logging::info(&record)).await;
+            Ok::<(), ()>(())
+        };
+        // No detached reader can outlive cancellation or this deadline. An
+        // oversized stdout cancels the stderr drain immediately.
+        match tokio::try_join!(async { output.await.ok_or(()) }, diagnostics) {
+            Ok((output, ())) => Some(output),
+            Err(()) => None,
         }
-        let status = child.wait().await.ok()?;
-        Some((status, bytes))
     })
     .await;
     match result {
-        Ok(Some(output)) => Some(output),
-        _ => {
+        Ok(Some(output)) => {
+            timing.finish(if output.0.success() { "ok" } else { "error" });
+            Some(output)
+        }
+        result => {
+            timing.finish(if result.is_err() { "timeout" } else { "error" });
             #[cfg(unix)]
             if let Some(pid) = child.id() {
                 // Own process group only, including ProxyCommand descendants.

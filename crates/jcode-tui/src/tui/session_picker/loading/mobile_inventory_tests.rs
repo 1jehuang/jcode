@@ -1,5 +1,48 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn inventory_projection_uses_bounded_transport_without_mixing_timing_into_json() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _guard = HomeGuard::install(home.path());
+    let id = "session_inventory_transport";
+    let mut session = Session::create_with_id(
+        id.into(),
+        None,
+        Some("Private title must stay out of timing records".into()),
+    );
+    session.migration_epoch = 8;
+    session.save().unwrap();
+    let mut command = crate::tui::cloud_git::script_command(
+        None,
+        None,
+        id,
+        &super::super::super::cloud_preview::projection_script("inventory"),
+    );
+    command.env("JCODE_HOME", home.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (status, bytes) = runtime
+        .block_on(crate::tui::cloud_git::bounded_output(
+            command,
+            Duration::from_secs(5),
+            1024 * 1024,
+        ))
+        .unwrap();
+    assert!(status.success());
+    let inventory: VerifiedInventory = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(inventory.sessions.len(), 1);
+    assert_eq!(inventory.sessions[0].session_id, id);
+    assert_eq!(inventory.sessions[0].epoch, 8);
+    assert_eq!(
+        inventory.sessions[0].title.as_deref(),
+        Some("Private title must stay out of timing records")
+    );
+}
+
 struct HomeGuard(Option<std::ffi::OsString>);
 
 impl HomeGuard {

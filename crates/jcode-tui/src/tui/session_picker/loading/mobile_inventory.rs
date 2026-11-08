@@ -1,4 +1,5 @@
 //! Discover mobile-created sessions without copying their transcripts locally.
+use super::super::cloud_preview::StageTimer;
 use super::*;
 
 #[derive(Deserialize)]
@@ -24,7 +25,9 @@ pub(super) fn available() -> bool {
 }
 
 pub(super) fn refresh() -> Result<bool> {
+    let mut timer = StageTimer::new("inventory_refresh");
     if !available() {
+        timer.outcome("skipped_unavailable");
         return Ok(false);
     }
     let home = storage::jcode_dir()?;
@@ -32,8 +35,11 @@ pub(super) fn refresh() -> Result<bool> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let result = runtime.block_on(async {
+        let mut discovery = StageTimer::new("inventory_discovery");
         let inventory = crate::mobile_sync::discover_cloud_sessions().await?;
+        discovery.outcome("success");
+        drop(discovery);
         let candidates: Vec<_> = inventory
             .into_iter()
             .filter(|s| should_verify(&home, &s.session_id))
@@ -41,7 +47,10 @@ pub(super) fn refresh() -> Result<bool> {
         if candidates.is_empty() {
             return Ok(false);
         }
+        let mut prepare = StageTimer::new("inventory_prepare_ssh");
         prepare_ssh_config(&config).await?;
+        prepare.outcome("success");
+        drop(prepare);
         let ids = candidates
             .iter()
             .map(|s| s.session_id.as_str())
@@ -53,14 +62,29 @@ pub(super) fn refresh() -> Result<bool> {
             &ids,
             &super::super::cloud_preview::projection_script("inventory"),
         );
+        let mut fetch = StageTimer::new("inventory_ssh");
         let (status, bytes) =
             crate::tui::cloud_git::bounded_output(command, Duration::from_secs(10), 1024 * 1024)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("cloud inventory verification unavailable"))?;
         anyhow::ensure!(status.success(), "cloud inventory verification failed");
+        fetch.outcome("success");
+        drop(fetch);
+        let mut parse = StageTimer::new("inventory_parse");
         let verified: VerifiedInventory = serde_json::from_slice(&bytes)?;
-        register(&home, candidates, verified)
-    })
+        parse.outcome("success");
+        drop(parse);
+        let mut registration = StageTimer::new("inventory_register");
+        let result = register(&home, candidates, verified);
+        if result.is_ok() {
+            registration.outcome("success");
+        }
+        result
+    });
+    if result.is_ok() {
+        timer.outcome("success");
+    }
+    result
 }
 
 fn valid_id(id: &str) -> bool {
