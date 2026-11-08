@@ -498,7 +498,19 @@ pub fn notify(
     body: &str,
     turn_id: Option<u64>,
 ) {
-    if cfg!(test) || !enabled() {
+    if cfg!(test) {
+        return;
+    }
+    let requested = kind;
+    if !enabled() {
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("disabled by config or JCODE_MOBILE_PUSH"),
+            None,
+        );
         return;
     }
     if SUPPRESSION
@@ -507,18 +519,113 @@ pub fn notify(
         .unwrap_or(false)
     {
         crate::logging::debug("mobile push suppressed: no registered devices");
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("no registered devices (10 min back-off)"),
+            None,
+        );
         return;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("no tokio runtime"),
+            None,
+        );
         return;
     };
     let payload = build_payload(kind, session_id, session_title, body, turn_id);
+    let source = body.to_string();
     handle.spawn(async move {
         let Some((key, base)) = credentials() else {
+            record(
+                requested,
+                Some(&payload),
+                &source,
+                "skipped",
+                Some("not signed in (no JCODE_API_KEY)"),
+                None,
+            );
             return;
         };
-        send(&key, &base, &payload).await;
+        let mut attempt = send(&key, &base, &payload).await;
+        // Transient network failures (DNS, reset, timeout) get one retry.
+        if attempt.0 == "error" && attempt.2.is_none() {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            attempt = send(&key, &base, &payload).await;
+            if let Some(detail) = attempt.1.as_mut() {
+                detail.push_str(" (after retry)");
+            }
+        }
+        let (outcome, detail, status) = attempt;
+        record(
+            requested,
+            Some(&payload),
+            &source,
+            outcome,
+            detail.as_deref(),
+            status,
+        );
     });
+}
+
+/// Record a turn that deliberately did not push, so the history explains
+/// missing notifications too.
+pub fn note_skipped(kind: PushKind, reason: &str) {
+    if !cfg!(test) {
+        record(kind, None, "", "skipped", Some(reason), None);
+    }
+}
+
+/// Append one line per push attempt to `~/.jcode/logs/mobile-push.jsonl`:
+/// what was requested, the exact payload sent, a source excerpt, and the
+/// outcome. This is the push history used to debug notification quality.
+fn record(
+    requested: PushKind,
+    payload: Option<&PushPayload>,
+    source: &str,
+    outcome: &str,
+    detail: Option<&str>,
+    http_status: Option<u16>,
+) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "requested_kind": requested,
+        "outcome": outcome,
+        "detail": detail,
+        "http_status": http_status,
+        "payload": payload,
+        "source_chars": source.chars().count(),
+        "source_excerpt": truncate_chars(source, 1500),
+    });
+    crate::logging::info(&format!(
+        "mobile push {:?} {outcome}{}",
+        payload.map(|p| p.kind).unwrap_or(requested),
+        detail.map(|d| format!(": {d}")).unwrap_or_default()
+    ));
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".jcode").join("logs")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("mobile-push.jsonl");
+    // Keep the history bounded: rotate once past 5 MB.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("mobile-push.1.jsonl"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -575,12 +682,15 @@ async fn send_mobile_resume(
     }
 }
 
-async fn send(key: &str, base: &str, payload: &PushPayload) {
+async fn send(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> (&'static str, Option<String>, Option<u16>) {
     let client = match reqwest::Client::builder().timeout(SEND_TIMEOUT).build() {
         Ok(c) => c,
         Err(error) => {
-            crate::logging::warn(&format!("mobile push client build failed: {error}"));
-            return;
+            return ("error", Some(format!("client build failed: {error}")), None);
         }
     };
     let result = client
@@ -591,28 +701,45 @@ async fn send(key: &str, base: &str, payload: &PushPayload) {
         .await;
     match result {
         Ok(resp) if resp.status().is_success() => {
+            let status = resp.status().as_u16();
             let reply = match resp.json::<SendReply>().await {
                 Ok(reply) => reply,
                 Err(error) => {
-                    crate::logging::warn(&format!("invalid mobile push reply: {error}"));
-                    return;
+                    return (
+                        "error",
+                        Some(format!("invalid reply: {error}")),
+                        Some(status),
+                    );
                 }
             };
             let devices = reply.devices;
             if let Ok(mut s) = SUPPRESSION.lock() {
                 s.record_reply(devices, Instant::now());
             }
-            crate::logging::debug(&format!(
-                "mobile push {:?} session={} sent={:?} devices={:?}",
-                payload.kind, payload.session_id, reply.sent, devices
-            ));
+            let detail = format!("sent={:?} devices={:?}", reply.sent, devices);
+            let outcome = match (reply.sent, devices) {
+                (_, Some(0)) => "no_devices",
+                (Some(n), _) if n > 0 => "delivered",
+                _ => "undelivered",
+            };
+            (outcome, Some(detail), Some(status))
         }
-        Ok(resp) => crate::logging::warn(&format!(
-            "mobile push {:?} rejected: HTTP {}",
-            payload.kind,
-            resp.status()
-        )),
-        Err(error) => crate::logging::warn(&format!("mobile push failed: {error}")),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            // Keep the API's error body: it says exactly which field was rejected.
+            let body = resp.text().await.unwrap_or_default();
+            crate::logging::warn(&format!(
+                "mobile push {:?} rejected: HTTP {status}: {}",
+                payload.kind,
+                truncate_chars(&body, 300)
+            ));
+            ("rejected", Some(truncate_chars(&body, 500)), Some(status))
+        }
+        Err(error) => {
+            let detail = crate::util::format_error_chain(&anyhow::Error::from(error));
+            crate::logging::warn(&format!("mobile push failed: {detail}"));
+            ("error", Some(detail), None)
+        }
     }
 }
 

@@ -368,7 +368,13 @@ pub(super) async fn start_processing_message(
                         Some(id),
                     );
                 }
-                Ok(()) => {}
+                Ok(()) => crate::mobile_push::note_skipped(
+                    crate::mobile_push::PushKind::TurnDone,
+                    &format!(
+                        "turn too short ({}s) for a non-iOS session",
+                        turn_started.elapsed().as_secs()
+                    ),
+                ),
                 Err(error) => crate::mobile_push::notify(
                     crate::mobile_push::PushKind::TurnError,
                     &push_session_id,
