@@ -366,7 +366,10 @@ mod tests {
 
     #[test]
     fn live_reload_marker_matches_daemon_capability() {
-        assert_eq!(LIVE_RELOAD_MARKER, crate::server::MANAGED_CLOUD_LIVE_RELOAD_MARKER);
+        assert_eq!(
+            LIVE_RELOAD_MARKER,
+            crate::server::MANAGED_CLOUD_LIVE_RELOAD_MARKER
+        );
         let script = reload_command(0, false);
         assert!(script.contains(&format!("grep -qa {LIVE_RELOAD_MARKER} ")));
         assert!(script.contains("activate-live"));

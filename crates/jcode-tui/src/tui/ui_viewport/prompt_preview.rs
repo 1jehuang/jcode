@@ -9,7 +9,14 @@ pub(crate) fn prompt_preview_lines(
     // The pinned preview is rebuilt every frame with the same prompt; memoize
     // the last result (keyed on every input, including theme colors) so the
     // grapheme walk over the whole prompt runs only when something changes.
-    type Key = (usize, u64, usize, u16, ratatui::layout::Alignment, [Color; 4]);
+    type Key = (
+        usize,
+        u64,
+        usize,
+        u16,
+        ratatui::layout::Alignment,
+        [Color; 4],
+    );
     thread_local! {
         static MEMO: std::cell::RefCell<Option<(Key, Vec<Line<'static>>)>> =
             const { std::cell::RefCell::new(None) };

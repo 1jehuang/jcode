@@ -312,12 +312,10 @@ impl<'a> Span<'a> {
         // ratatui-jcode: printable ASCII is one grapheme per byte, so skip the
         // Unicode segmentation state machine.
         if crate::fast::is_printable_ascii(content) {
-            itertools::Either::Left(
-                (0..content.len()).map(move |i| StyledGrapheme {
-                    symbol: &content[i..=i],
-                    style,
-                }),
-            )
+            itertools::Either::Left((0..content.len()).map(move |i| StyledGrapheme {
+                symbol: &content[i..=i],
+                style,
+            }))
         } else {
             itertools::Either::Right(
                 content

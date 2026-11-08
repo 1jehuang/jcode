@@ -32,7 +32,11 @@ pub fn log(line: &str) {
         if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
             let _ = std::fs::rename(&path, path.with_extension("log.1"));
         }
-        *guard = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        *guard = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
     }
     if let Some(file) = guard.as_mut() {
         let ms = std::time::SystemTime::now()
@@ -71,7 +75,8 @@ impl Pending {
         if self.inflight.len() > 1024 {
             self.inflight.clear();
         }
-        self.inflight.insert(id, (kind.to_string(), received, translate));
+        self.inflight
+            .insert(id, (kind.to_string(), received, translate));
     }
 
     /// A reply was written. `source` is "bridge" (answered locally) or
