@@ -20,6 +20,9 @@ pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000)
 /// Tick cadence while a drag-held edge autoscroll runs (one line per tick).
 pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
+/// Tick cadence while a turn is live but its streamed text is fully revealed.
+/// Matches the status spinner glyph cadence so the spinner stays smooth.
+pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);
 
 /// Whether this session has been left alone long enough to be treated as
 /// dormant (deep idle): no stream activity *and* no user interaction for
@@ -525,6 +528,24 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         && (state.is_processing() || rate_limit_countdown_redraw_active(state))
     {
         return REDRAW_PASSIVE_LIVENESS;
+    }
+
+    // Streamed text is on screen but fully revealed while the turn continues
+    // (thinking or running a tool after emitting text). New deltas wake the
+    // loop themselves, so ticks only need to keep the status spinner and timer
+    // alive. Measured on a live client: this state held 66 full frames/s with
+    // zero changed cells, about 0.2 cores per waiting session.
+    if state.is_processing()
+        && !state.streaming_text().is_empty()
+        && !state.stream_reveal_pending()
+        && !state.has_pending_mouse_scroll_animation()
+        && !state.copy_selection_edge_autoscroll_active()
+        && !rate_limit_countdown_redraw_active(state)
+    {
+        return match policy.tier {
+            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
+            _ => REDRAW_STATIC_STREAM,
+        };
     }
 
     if state.is_processing()
