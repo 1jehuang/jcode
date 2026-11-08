@@ -1,5 +1,162 @@
 use super::*;
 
+struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl RestoreEnv {
+    fn save(names: &[&'static str]) -> Self {
+        Self(
+            names
+                .iter()
+                .map(|&name| (name, std::env::var_os(name)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => crate::env::set_var(name, value),
+                None => crate::env::remove_var(name),
+            }
+        }
+    }
+}
+
+#[test]
+fn preflight_cache_identity_tracks_account_endpoint_release_and_binary() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _restore = RestoreEnv::save(&[
+        "JCODE_API_KEY",
+        "JCODE_API_BASE",
+        "JCODE_CLOUD_RELEASE",
+        "JCODE_CLOUD_REMOTE_BINARY",
+    ]);
+    crate::env::set_var("JCODE_API_KEY", "offline-account-a");
+    crate::env::set_var("JCODE_API_BASE", "https://offline-a.invalid/v1");
+    crate::env::remove_var("JCODE_CLOUD_RELEASE");
+    crate::env::remove_var("JCODE_CLOUD_REMOTE_BINARY");
+    let target = Target::default();
+    let host = super::super::super::cloud_managed::HOST;
+    let initial = target.preflight_key(host)?;
+    assert!(!initial.contains("offline-account-a"));
+    crate::env::set_var("JCODE_API_KEY", "offline-account-b");
+    assert_ne!(initial, target.preflight_key(host)?);
+    crate::env::set_var("JCODE_API_KEY", "offline-account-a");
+    crate::env::set_var("JCODE_API_BASE", "https://offline-b.invalid/v1");
+    assert_ne!(initial, target.preflight_key(host)?);
+    crate::env::set_var("JCODE_API_BASE", "https://offline-a.invalid/v1");
+    crate::env::set_var("JCODE_CLOUD_RELEASE", "v99.0.0");
+    assert_ne!(initial, target.preflight_key(host)?);
+    crate::env::remove_var("JCODE_CLOUD_RELEASE");
+    crate::env::set_var("JCODE_CLOUD_REMOTE_BINARY", "/other/jcode");
+    assert_ne!(initial, target.preflight_key(host)?);
+    Ok(())
+}
+
+#[test]
+fn managed_preparation_verifies_default_once_and_still_probes_custom_binary() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = crate::storage::lock_test_env();
+    let _restore = RestoreEnv::save(&[
+        "JCODE_HOME",
+        "PATH",
+        "JCODE_API_KEY",
+        "JCODE_API_BASE",
+        "JCODE_CLOUD_REMOTE_BINARY",
+        "JCODE_CLOUD_FORCE_UPGRADE",
+        "JCODE_CLOUD_RELEASE",
+    ]);
+    let dir = tempfile::tempdir()?;
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_API_KEY", "offline-account");
+    // Reintroduced direct API calls must not reach any real cloud endpoint.
+    crate::env::set_var("JCODE_API_BASE", "https://127.0.0.1:9/v1");
+    crate::env::remove_var("JCODE_CLOUD_REMOTE_BINARY");
+    crate::env::remove_var("JCODE_CLOUD_FORCE_UPGRADE");
+    crate::env::remove_var("JCODE_CLOUD_RELEASE");
+    let ssh = dir.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf 'invocation\\n' >> \"$JCODE_HOME/calls\"\ncat >\"$JCODE_HOME/sent-script\"\n",
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))?;
+    crate::env::set_var("PATH", format!("{}:/usr/bin:/bin", dir.path().display()));
+    let host = super::super::super::cloud_managed::HOST;
+    Target::default().preflight(host)?;
+    let preparation = std::fs::read_to_string(dir.path().join("sent-script"))?;
+    for command in REQUIRED_REMOTE_COMMANDS {
+        assert!(preparation.contains(&format!("cloud {command} --help")));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("calls"))?
+            .lines()
+            .count(),
+        1
+    );
+    let custom = Target {
+        remote_binary: Some("/custom/jcode".into()),
+        ..Target::default()
+    };
+    custom.preflight(host)?;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("calls"))?
+            .lines()
+            .count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn concurrent_preflights_share_success_and_failed_checks_clear_marker() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = crate::storage::lock_test_env();
+    let _restore = RestoreEnv::save(&[
+        "JCODE_HOME",
+        "PATH",
+        "JCODE_CLOUD_REMOTE_BINARY",
+        "JCODE_CLOUD_FORCE_UPGRADE",
+    ]);
+    let dir = tempfile::tempdir()?;
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::remove_var("JCODE_CLOUD_REMOTE_BINARY");
+    crate::env::remove_var("JCODE_CLOUD_FORCE_UPGRADE");
+    let ssh = dir.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf 'probe\\n' >> \"$JCODE_HOME/calls\"\nsleep 0.1\n[ ! -f \"$JCODE_HOME/fail\" ]\n",
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))?;
+    crate::env::set_var("PATH", format!("{}:/usr/bin:/bin", dir.path().display()));
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| Target::default().preflight("offline-fixture"));
+        let second = scope.spawn(|| Target::default().preflight("offline-fixture"));
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+    });
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("calls"))?
+            .lines()
+            .count(),
+        1
+    );
+    crate::env::set_var("JCODE_CLOUD_FORCE_UPGRADE", "1");
+    Target::default().preflight("offline-fixture")?;
+    std::fs::write(dir.path().join("fail"), "")?;
+    assert!(Target::default().preflight("offline-fixture").is_err());
+    assert!(!super::super::preflight_marker().unwrap().exists());
+    crate::env::remove_var("JCODE_CLOUD_FORCE_UPGRADE");
+    let changed = Target {
+        remote_binary: Some("different-jcode".into()),
+        ..Target::default()
+    };
+    assert!(changed.preflight("offline-fixture").is_err());
+    assert!(!super::super::preflight_marker().unwrap().exists());
+    Ok(())
+}
+
 fn scripted_target(script: &str) -> Result<(tempfile::TempDir, Target)> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("transport.sh");

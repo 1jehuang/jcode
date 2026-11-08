@@ -202,18 +202,25 @@ fn snapshot_age(
 /// stays unknown. Callers must skip this entirely for SSH-forwarded sockets.
 /// Returns true only when an actual (possibly empty) snapshot was imported.
 pub fn hydrate_remote_account_usage(socket: &Path) -> bool {
+    let generation = super::remote_accounts::remote_account_usage_generation();
+    hydrate_remote_account_usage_for_generation(socket, generation)
+}
+
+/// Read a startup hint off the async connection path. A live daemon reply or
+/// another connection reset invalidates the generation while disk I/O runs.
+pub fn hydrate_remote_account_usage_for_generation(socket: &Path, generation: u64) -> bool {
     let Some(socket) = normalized_socket(socket) else {
         return false;
     };
     let Some((snapshot, age)) = read_snapshot(&socket, &cache_path(&socket)) else {
         return false;
     };
-    super::remote_accounts::set_remote_account_usage_with_age(
+    super::remote_accounts::import_remote_account_usage(
+        generation,
         snapshot.anthropic,
         snapshot.openai,
         age,
-    );
-    true
+    )
 }
 
 fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {

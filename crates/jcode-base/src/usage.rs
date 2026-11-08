@@ -47,7 +47,10 @@ pub use remote_accounts::{
     clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
     remote_account_usage_received, set_remote_account_usage,
 };
-pub use startup_snapshot::{AccountUsageStartupPublisher, hydrate_remote_account_usage};
+pub use startup_snapshot::{
+    AccountUsageStartupPublisher, hydrate_remote_account_usage,
+    hydrate_remote_account_usage_for_generation,
+};
 
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};

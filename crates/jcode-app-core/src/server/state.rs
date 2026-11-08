@@ -532,6 +532,13 @@ impl TurnEventChannel {
                 let Some(event) = event else {
                     return;
                 };
+                match &event {
+                    ServerEvent::ToolExec { name, .. } => {
+                        crate::agents_status::tool_started(&session_id, name)
+                    }
+                    ServerEvent::ToolDone { .. } => crate::agents_status::tool_done(&session_id),
+                    _ => {}
+                }
                 let event = ServerEvent::TurnEvent {
                     identity: identity.clone(),
                     event: Box::new(event),

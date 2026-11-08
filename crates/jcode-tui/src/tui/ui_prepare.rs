@@ -867,6 +867,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -2531,6 +2538,7 @@ fn wrap_lines(
     }
 
     let image_regions = compute_image_regions(&wrapped_lines);
+    shrink_wrapped_lines(&mut wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -2556,6 +2564,16 @@ fn wrap_lines(
     clippy::too_many_arguments,
     reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
 )]
+/// Drop spare span and line capacity before a body is cached. Wrapping builds
+/// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
+/// and these bodies live in the body cache for the session's lifetime.
+fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
+    for line in wrapped_lines.iter_mut() {
+        line.spans.shrink_to_fit();
+    }
+    wrapped_lines.shrink_to_fit();
+}
+
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],
@@ -2692,6 +2710,7 @@ fn wrap_lines_with_map(
         });
     }
 
+    shrink_wrapped_lines(&mut wrapped_lines);
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
     // Translate the per-message unwrapped-line boundaries into wrapped-line

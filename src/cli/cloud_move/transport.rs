@@ -86,10 +86,7 @@ fn output_with_ssh_retry(
         {
             return Ok(output);
         }
-        step(
-            "prepare",
-            &ssh_retry_message(host, attempt, &output.stderr),
-        );
+        step("prepare", &ssh_retry_message(host, attempt, &output.stderr));
         std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
         attempt += 1;
     }
@@ -140,38 +137,78 @@ impl Target {
     /// Fail fast, with an actionable message, when the cloud host's jcode is
     /// too old to speak the move protocol.
     pub(super) fn preflight(&self, host: &str) -> Result<()> {
-        if self.transport.is_none() && preflight_is_fresh(&self.preflight_key(host)) {
+        // Lock across the cache check and preparation, including other CLI
+        // processes. Waiters reuse only a fully successful preflight.
+        let _guard = if self.transport.is_none() {
+            Some(timed_move_stage("preflight singleflight wait", || {
+                let home = crate::storage::jcode_dir()?;
+                std::fs::create_dir_all(&home).context("create cloud preflight directory")?;
+                let path = home.join("cloud-preflight.lock");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(path)?;
+                file.lock().context("lock cloud preflight")?;
+                Ok::<_, anyhow::Error>(file)
+            })?)
+        } else {
+            None
+        };
+        let key = self.preflight_key(host)?;
+        if self.transport.is_none()
+            && std::env::var("JCODE_CLOUD_FORCE_UPGRADE").as_deref() != Ok("1")
+            && preflight_is_fresh(&key)
+        {
             crate::logging::info("cloud move: host preflight skipped, prepared moments ago");
             return Ok(());
         }
         let result = self.preflight_uncached(host);
         if result.is_ok() && self.transport.is_none() {
-            record_preflight(&self.preflight_key(host));
+            record_preflight(&key);
+        } else if result.is_err() && self.transport.is_none() {
+            // An old marker must not survive a failed verification.
+            if let Some(path) = super::preflight_marker() {
+                let _ = std::fs::remove_file(path);
+            }
         }
         result
     }
 
-    fn preflight_key(&self, host: &str) -> String {
+    fn preflight_key(&self, host: &str) -> Result<String> {
         // Capability changes invalidate markers written by older clients.
-        format!(
-            "{host}\n{}\n{}",
+        let namespace = if super::super::cloud_managed::is_managed(host) && self.transport.is_none()
+        {
+            super::super::cloud_managed::preparation_namespace()?
+        } else {
+            String::new()
+        };
+        let exe = std::env::current_exe().context("locate preflight client")?;
+        // A running daemon's executable can have been replaced by an update.
+        // Its compiled identity still scopes evidence even when that old path
+        // no longer has metadata.
+        let metadata = exe.metadata().ok().map(|m| (m.len(), m.modified().ok()));
+        Ok(format!(
+            "{host}\n{}\n{}\n{namespace}\n{:?}\n{:?}\n{}\n{:?}\n{}\n{}\n{}",
             self.remote_binary(),
-            REQUIRED_REMOTE_COMMANDS.join(",")
-        )
+            REQUIRED_REMOTE_COMMANDS.join(","),
+            std::env::var_os("JCODE_CLOUD_RELEASE"),
+            std::env::var_os("JCODE_CLOUD_FORCE_UPGRADE"),
+            exe.display(),
+            metadata,
+            jcode_build_meta::VERSION,
+            jcode_build_meta::GIT_HASH,
+            jcode_build_meta::semver(),
+        ))
     }
 
     fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
             if super::super::cloud_managed::is_managed(host) && self.transport.is_none() {
-                // Usually the machine is already running and this is one
-                // authorization request. `connect` reports real wake progress.
+                // The SSH ProxyCommand connects and reports wake progress.
+                // Calling connect here too would authorize the same key twice
+                // whenever the multiplexed master has expired.
                 step("prepare", "connecting to your Jcode Cloud machine");
-                timed_move_stage("cloud api connect", || {
-                    if super::super::cloud_managed::master_is_live() {
-                        return Ok(());
-                    }
-                    super::super::cloud_managed::connect(&mut |m| step("prepare", m)).map(|_| ())
-                })?;
                 let home = dirs::home_dir()
                     .context("locate local home directory for cloud preparation")?
                     .to_string_lossy()
@@ -201,6 +238,12 @@ impl Target {
                     }
                     Ok(())
                 })?;
+                // The managed preparation already verified this exact wrapper
+                // and every mandatory protocol. Custom binary selections still
+                // need their own capability probes below.
+                if self.remote_binary() == "jcode" {
+                    return Ok(());
+                }
             }
             // Preserve custom transports that only support one remote invocation.
             if self.transport.is_none() {
@@ -217,18 +260,20 @@ impl Target {
                     "out=$({binary} --no-update --no-selfdev cloud {command} --help 2>&1 >/dev/null) || {{ printf '%s\\ncloud protocol probe failed: {command} (remote %s)\\n' \"$out\" \"$version\" >&2; exit 4; }}\n"
                 ));
                 }
-                let output = output_with_ssh_retry(
-                    || {
-                        let mut command = Self::ssh_command(host)?;
-                        command
-                            .arg(&script)
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::piped());
-                        Ok(command)
-                    },
-                    host,
-                )?;
+                let output = timed_move_stage("host capability verification", || {
+                    output_with_ssh_retry(
+                        || {
+                            let mut command = Self::ssh_command(host)?;
+                            command
+                                .arg(&script)
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::piped());
+                            Ok(command)
+                        },
+                        host,
+                    )
+                })?;
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 return match output.status.code() {
                     Some(0) => Ok(()),
@@ -392,6 +437,13 @@ impl Target {
                 .context("ssh stdin")?
                 .write_all(script.as_bytes());
             let output = child.wait_with_output()?;
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                if line.starts_with("[cloud prepare timing] ")
+                    || line.starts_with("[cloud prepare] capability cache warm=")
+                {
+                    crate::logging::info(line);
+                }
+            }
             if output.status.success() {
                 written.context("send cloud preparation script")?;
                 return Ok(());
@@ -399,10 +451,7 @@ impl Target {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             // The prepare script is idempotent and serialized by its own lock.
             if ssh_connection_failed(&output.status) && attempt < SSH_ATTEMPTS {
-                step(
-                    "prepare",
-                    &ssh_retry_message(host, attempt, &output.stderr),
-                );
+                step("prepare", &ssh_retry_message(host, attempt, &output.stderr));
                 std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
                 attempt += 1;
                 continue;

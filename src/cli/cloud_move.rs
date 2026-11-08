@@ -423,20 +423,8 @@ fn mark_memory_sent(host: &str, memory: &Path, bytes: &[u8]) {
     }
 }
 
-fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = std::time::Instant::now();
-    let result = operation();
-    crate::logging::info(&format!(
-        "cloud move: {stage} {} in {:.3}s",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        },
-        started.elapsed().as_secs_f64()
-    ));
-    result
-}
+mod timing;
+use timing::timed_move_stage;
 
 pub(crate) fn run_move(
     session_ref: Option<&str>,
@@ -2249,6 +2237,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Machine { action } => {
             use super::args::CloudMachineAction as A;
             let reply = match action {
+                A::PrepareSsh => return super::cloud_managed::prepare_ssh(),
                 A::Status => super::cloud_managed::status()?,
                 A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
                 A::Stop => super::cloud_managed::stop()?,

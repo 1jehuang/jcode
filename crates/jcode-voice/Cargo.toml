@@ -15,17 +15,20 @@ name = "jcode_voice"
 path = "src/lib.rs"
 
 [dependencies]
-jcode-base = { path = "../jcode-base", default-features = false }
-anyhow = "1"
+jcode-base = { path = "../jcode-base", default-features = false, optional = true }
+jcode-provider-env = { path = "../jcode-provider-env" }
+anyhow = { version = "1", optional = true }
 base64 = "0.22"
 futures = "0.3"
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "rustls-tls-native-roots"] }
-serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "rustls-tls-native-roots"] }
+serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+# Use an explicit bundled-root connector, never the platform filesystem CA loader.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "__rustls-tls"] }
+webpki-roots = "1"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # Native microphone input is opt-in so CLI builds need no audio development libraries.
@@ -33,14 +36,18 @@ cpal = { version = "0.15", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # logind session check for background microphone use.
-zbus = "5.19"
-async-io = "2.6"
+zbus = { version = "5.19", optional = true }
+async-io = { version = "2.6", optional = true }
 
 [features]
-voice-capture = ["dep:cpal"]
+default = ["desktop-config"]
+# Desktop settings, subscriptions, hotkeys, and recorder-process integration.
+desktop-config = ["dep:jcode-base", "dep:reqwest", "dep:serde", "dep:anyhow", "dep:libc", "dep:zbus", "dep:async-io", "tokio/process", "tokio/rt-multi-thread"]
+# Auth sandbox coverage is opt-in so lightweight tests never pull in jcode-base.
+desktop-test-support = ["desktop-config", "jcode-base/test-support"]
+voice-capture = ["desktop-config", "dep:cpal"]
 
 [dev-dependencies]
-jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

@@ -521,6 +521,10 @@ impl App {
                     "Preview replacing cloud code with local files",
                 ),
                 ("/cloud status".into(), "Show session location"),
+                (
+                    "/cloud reload".into(),
+                    "Restart the cloud daemon onto its new runtime once idle",
+                ),
                 ("/cloud cancel".into(), "Cancel a pending cloud command"),
             ];
             // Typing the command or a trailing space must never add consent.

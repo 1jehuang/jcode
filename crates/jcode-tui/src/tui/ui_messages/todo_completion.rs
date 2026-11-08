@@ -163,7 +163,8 @@ mod tests {
         for title in [serde_json::Value::Null, serde_json::json!(" \n\t ")] {
             msg.content = serde_json::json!({
                 "todo_completion_version": 1, "plan": {"title": title}
-            }).to_string();
+            })
+            .to_string();
             let lines = render_with_gate_diagnostics(&msg, 80, false).unwrap();
             assert_eq!(lines.len(), 1);
         }

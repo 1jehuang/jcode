@@ -79,6 +79,29 @@ fn kill_group(pid: Option<u32>) {
 #[cfg(not(unix))]
 fn kill_group(_pid: Option<u32>) {}
 
+/// Kills the child's process group when dropped, unless disarmed. Dropping the
+/// run future (for example when a turn is cancelled) skips the explicit
+/// `kill_group` calls, and `kill_on_drop` only reaches the direct child, so
+/// without this a shell hook's subprocesses would outlive the cancellation.
+struct GroupKillGuard {
+    pid: Option<u32>,
+    armed: bool,
+}
+
+impl GroupKillGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_group(self.pid);
+        }
+    }
+}
+
 /// Run `std_cmd` with `stdin` bytes, waiting at most `timeout` for the whole
 /// exchange. On timeout the process group is killed.
 pub(super) async fn run_command(
@@ -114,6 +137,7 @@ pub(super) async fn run_command_with_limit(
         .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(RunError::Spawn)?;
     let pid = child.id();
+    let mut guard = GroupKillGuard { pid, armed: true };
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -150,14 +174,11 @@ pub(super) async fn run_command_with_limit(
     };
 
     match tokio::time::timeout(timeout, exchange).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => {
-            kill_group(pid);
-            Err(RunError::Io(error))
+        Ok(Ok(output)) => {
+            guard.disarm();
+            Ok(output)
         }
-        Err(_elapsed) => {
-            kill_group(pid);
-            Err(RunError::Timeout)
-        }
+        Ok(Err(error)) => Err(RunError::Io(error)),
+        Err(_elapsed) => Err(RunError::Timeout),
     }
 }

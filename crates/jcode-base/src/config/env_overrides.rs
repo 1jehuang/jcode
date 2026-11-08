@@ -295,6 +295,11 @@ impl Config {
                 self.display.resume_project_scope = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_RESUME_TIME") {
+            if let Some(parsed) = super::ResumeTimeMode::parse(&v) {
+                self.display.resume_time = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {

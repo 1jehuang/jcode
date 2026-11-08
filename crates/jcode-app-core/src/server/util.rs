@@ -100,6 +100,17 @@ pub(crate) fn server_update_candidate(is_selfdev_session: bool) -> Option<(PathB
 /// build whenever that build is the freshest one on disk (the case the pin is
 /// meant to protect).
 pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &'static str)> {
+    // A managed Jcode Cloud daemon runs from an immutable release directory and
+    // its runtime is selected by the root-owned updater through one launcher
+    // link. That selection is authoritative (a pin may deliberately downgrade),
+    // so reload follows it instead of the self-dev/stable channels in ~/.jcode.
+    if let Some(target) = managed_cloud_reload_target(running_server_binary().as_deref()) {
+        crate::logging::info(&format!(
+            "{MANAGED_CLOUD_LIVE_RELOAD_MARKER}: exec target {:?}",
+            target.0
+        ));
+        return Some(target);
+    }
     let candidate = newest_reload_candidate(is_selfdev_session)?;
     // On Linux a self-dev rebuild rewrites the running binary in place (a dirty
     // build reuses the same `versions/<hash>` path), which unlinks the running
@@ -163,6 +174,34 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
             Some(target)
         }
     }
+}
+
+/// Capability marker. `jcode cloud runtime reload` greps the running daemon's
+/// executable for it to decide whether an in-place session-preserving handoff
+/// will land on the managed selection, or whether only a restart can.
+pub const MANAGED_CLOUD_LIVE_RELOAD_MARKER: &str = "jcode-managed-cloud-live-reload-v1";
+
+/// Launcher link the managed cloud updater repoints at the selected runtime.
+pub(crate) const MANAGED_CLOUD_LAUNCHER: &str = "/opt/jcode-cloud/jcode";
+const MANAGED_CLOUD_RELEASES: &str = "/opt/jcode-cloud/releases/";
+
+fn managed_cloud_reload_target(running: Option<&Path>) -> Option<(PathBuf, &'static str)> {
+    managed_cloud_reload_target_in(running, Path::new(MANAGED_CLOUD_LAUNCHER), MANAGED_CLOUD_RELEASES)
+}
+
+fn managed_cloud_reload_target_in(
+    running: Option<&Path>,
+    launcher: &Path,
+    releases_prefix: &str,
+) -> Option<(PathBuf, &'static str)> {
+    let running = running?.to_str()?;
+    if !running.starts_with(releases_prefix) {
+        return None;
+    }
+    // Exec the resolved release, not the link, so the new process pins the
+    // runtime it actually started from even if the link moves again.
+    let target = std::fs::canonicalize(launcher).ok()?;
+    target.is_file().then_some((target, "managed-cloud"))
 }
 
 fn binary_mtime(path: &Path) -> Option<std::time::SystemTime> {
@@ -307,6 +346,47 @@ pub(crate) fn running_server_binary() -> Option<PathBuf> {
 fn resolve_launch_path(exe: PathBuf) -> PathBuf {
     let exe = strip_deleted_suffix(exe);
     std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+#[cfg(all(test, unix))]
+mod managed_cloud_target_tests {
+    use super::managed_cloud_reload_target_in;
+
+    #[test]
+    fn managed_daemon_reloads_onto_the_selected_release_even_if_older() {
+        let dir = tempfile::tempdir().unwrap();
+        let releases = dir.path().join("releases");
+        let old = releases.join("aaa/jcode-linux-x86_64");
+        let new = releases.join("bbb/jcode-linux-x86_64");
+        for binary in [&old, &new] {
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(binary, b"bin").unwrap();
+        }
+        let launcher = dir.path().join("jcode");
+        std::os::unix::fs::symlink(&new, &launcher).unwrap();
+        let prefix = format!("{}/", std::fs::canonicalize(&releases).unwrap().display());
+        let running = std::fs::canonicalize(&old).unwrap();
+        let (target, label) =
+            managed_cloud_reload_target_in(Some(&running), &launcher, &prefix).unwrap();
+        assert_eq!(target, std::fs::canonicalize(&new).unwrap());
+        assert_eq!(label, "managed-cloud");
+        // Repointing to an older pinned release is still followed.
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(&old, &launcher).unwrap();
+        let (target, _) =
+            managed_cloud_reload_target_in(Some(&running), &launcher, &prefix).unwrap();
+        assert_eq!(target, running);
+    }
+
+    #[test]
+    fn unmanaged_daemons_keep_channel_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = dir.path().join("jcode");
+        std::fs::write(&launcher, b"bin").unwrap();
+        let local = dir.path().join("builds/versions/x/jcode");
+        assert!(managed_cloud_reload_target_in(Some(&local), &launcher, "/opt/jcode-cloud/releases/").is_none());
+        assert!(managed_cloud_reload_target_in(None, &launcher, "/opt/jcode-cloud/releases/").is_none());
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -72,40 +72,6 @@ fn cold_preview_viewport_matches_full_wide_then_narrow_layout() {
         for width in [1, 2, 3, 20, 80, 120] {
             for height in [0, 1, 2, 5, 30, 200] {
                 let area = Rect::new(0, 0, width, height);
-                let wide = width
-                    .saturating_sub(super::super::ui::left_aligned_content_inset(width, false));
-                let mut prepared =
-                    super::super::ui::prepare::prepare_history_preview(&messages, 0, wide, mode);
-                let mut header = super::super::ui::header::build_preview_header(&item, wide);
-                let mut padding =
-                    super::super::ui::prepare::initial_header_pad_top(height, header.len());
-                let scrollbar = super::super::ui::native_scrollbar_visible(
-                    width > 1,
-                    padding + header.len() + prepared.wrapped_lines.len(),
-                    height as usize,
-                );
-                if scrollbar {
-                    let render_width = width.saturating_sub(1);
-                    let narrow = render_width.saturating_sub(
-                        super::super::ui::left_aligned_content_inset(render_width, false),
-                    );
-                    prepared = super::super::ui::prepare::prepare_history_preview(
-                        &messages, 0, narrow, mode,
-                    );
-                    header = super::super::ui::header::build_preview_header(&item, narrow);
-                    padding =
-                        super::super::ui::prepare::initial_header_pad_top(height, header.len());
-                }
-                let body_empty = prepared.wrapped_lines.is_empty();
-                let mut expected = vec![Line::default(); padding];
-                expected.extend(header);
-                expected.extend(prepared.wrapped_lines);
-                if body_empty {
-                    expected.push(Line::styled(
-                        "(empty session)",
-                        Style::default().fg(rgb(80, 80, 80)),
-                    ));
-                }
                 let actual = picker.build_preview_cache(
                     &item,
                     area,
@@ -114,12 +80,15 @@ fn cold_preview_viewport_matches_full_wide_then_narrow_layout() {
                     Alignment::Left,
                     mode,
                 );
+                // Wrapping and chrome belong to the real chat renderer now.
+                let roles: Vec<_> = actual.messages.iter().map(|m| m.role.clone()).collect();
+                let expected: Vec<_> = if messages.is_empty() {
+                    vec!["system".to_string()]
+                } else {
+                    messages.iter().map(|m| m.role.clone()).collect()
+                };
                 assert_eq!(
-                    actual.show_scrollbar, scrollbar,
-                    "turns={turns} width={width} height={height}"
-                );
-                assert_eq!(
-                    actual.wrapped_lines, expected,
+                    roles, expected,
                     "turns={turns} width={width} height={height}"
                 );
             }
@@ -332,6 +301,7 @@ fn tiny_cache(id: u64, bytes: usize) -> PreviewRenderCache {
             diff_mode: crate::config::DiffDisplayMode::Off,
             search_query: String::new(),
         },
+        messages: Vec::new(),
         wrapped_lines: vec![Line::from("x".repeat(bytes))],
         image_regions: Vec::new(),
         user_prompt_markers: Vec::new(),
