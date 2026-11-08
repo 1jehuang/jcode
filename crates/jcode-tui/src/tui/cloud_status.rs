@@ -329,6 +329,10 @@ pub(crate) fn gather(_session_id: Option<String>) -> Option<CloudStatusInfo> {
 }
 
 #[cfg(test)]
+#[path = "cloud_directories_probe_tests.rs"]
+mod directories_probe_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
