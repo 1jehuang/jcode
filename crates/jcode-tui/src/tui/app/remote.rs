@@ -397,6 +397,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
+    // After a reload `is_processing` stays false until the History bootstrap
+    // reports whether the server is still mid-turn. Dispatching queued work
+    // before then would inject follow-ups into the still-running turn.
+    if !remote.has_loaded_history() {
+        return needs_redraw;
+    }
+
     if !app.is_processing && !app.queued_commands.is_empty() {
         // Commands queued with Ctrl+Enter run before queued prompts. Hand them
         // to the follow-up dispatcher, which runs them one at a time.
