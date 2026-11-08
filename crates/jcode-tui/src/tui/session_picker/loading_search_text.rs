@@ -86,22 +86,7 @@ pub(crate) fn build_search_index(
     save_label: Option<&str>,
     messages_preview: &[PreviewMessage],
 ) -> String {
-    let mut combined = String::new();
-    combined.push_str(title);
-    combined.push(' ');
-    combined.push_str(short_name);
-    combined.push(' ');
-    combined.push_str(id);
-
-    if let Some(dir) = working_dir {
-        combined.push(' ');
-        combined.push_str(dir);
-    }
-
-    if let Some(label) = save_label {
-        combined.push(' ');
-        combined.push_str(label);
-    }
+    let mut combined = search_index_header(id, short_name, title, working_dir, save_label);
 
     let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
     let mut current = None;
@@ -124,6 +109,33 @@ pub(crate) fn build_search_index(
     }
 
     combined.to_lowercase()
+}
+
+/// Session metadata at the head of every search index. The title and saved
+/// label stay unmarked since ranking already treats them as user intent. The
+/// ID is an identifier, and the name and directory locate the project.
+pub(crate) fn search_index_header(
+    id: &str,
+    short_name: &str,
+    title: &str,
+    working_dir: Option<&str>,
+    save_label: Option<&str>,
+) -> String {
+    let mut combined = String::new();
+    combined.push_str(title);
+    if let Some(label) = save_label {
+        combined.push(' ');
+        combined.push_str(label);
+    }
+    push_mark(&mut combined, Source::Other);
+    combined.push_str(id);
+    push_mark(&mut combined, Source::Project);
+    combined.push_str(short_name);
+    if let Some(dir) = working_dir {
+        combined.push(' ');
+        combined.push_str(dir);
+    }
+    combined
 }
 
 pub(crate) fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {

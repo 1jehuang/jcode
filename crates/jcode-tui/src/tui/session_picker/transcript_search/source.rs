@@ -15,6 +15,9 @@ pub(crate) enum Source {
     /// Metadata, system reminders, and untagged strings.
     #[default]
     Other,
+    /// Working directory and project name: a deliberate way to find a
+    /// session, but weaker than words from the conversation itself.
+    Project,
     Assistant,
     /// Tool-call intent labels: the agent's one-line statement of what it is
     /// doing, usually a close paraphrase of the user's request.
@@ -29,6 +32,7 @@ impl Source {
             Source::User => 8,
             Source::Intent => 6,
             Source::Assistant => 4,
+            Source::Project => 3,
             Source::Other | Source::ToolInput => 2,
             Source::Thinking | Source::ToolOutput => 1,
         }
@@ -62,11 +66,12 @@ const MARK: char = '\u{1f}';
 
 impl Source {
     /// Ordered weakest to strongest, matching the tag digits.
-    const ALL: [Source; 7] = [
+    const ALL: [Source; 8] = [
         Source::ToolOutput,
         Source::Thinking,
         Source::ToolInput,
         Source::Other,
+        Source::Project,
         Source::Assistant,
         Source::Intent,
         Source::User,
@@ -78,9 +83,10 @@ impl Source {
             Source::Thinking => '1',
             Source::ToolInput => '2',
             Source::Other => '3',
-            Source::Assistant => '4',
-            Source::Intent => '5',
-            Source::User => '6',
+            Source::Project => '4',
+            Source::Assistant => '5',
+            Source::Intent => '6',
+            Source::User => '7',
         }
     }
 
@@ -155,7 +161,7 @@ pub(crate) fn metadata_sources(
 /// keeps a flood of tool output from evicting the user's prompts.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SourceBuckets {
-    text: [String; 7],
+    text: [String; 8],
 }
 
 impl SourceBuckets {
@@ -539,6 +545,29 @@ mod tests {
         let sources = metadata_sources(&["deploy the thing"], "deploy api", &tokens);
         assert_eq!(sources, [Some(Source::User), Some(Source::Other), None]);
         assert_eq!(source_weight(&sources), 10);
+    }
+
+    #[test]
+    fn index_header_ranks_project_above_ids_and_below_replies() {
+        let index = crate::tui::session_picker::loading::build_search_index(
+            "session_abc123",
+            "jcode",
+            "Fix picker",
+            Some("/home/me/jcode"),
+            None,
+            &[],
+        );
+        let tokens: Vec<String> = ["abc123", "jcode", "fix"].map(String::from).into();
+        assert_eq!(
+            metadata_sources(&["fix picker"], &index, &tokens),
+            [
+                Some(Source::Other),
+                Some(Source::Project),
+                Some(Source::User)
+            ]
+        );
+        assert!(Source::Project.weight() > Source::ToolInput.weight());
+        assert!(Source::Project.weight() < Source::Assistant.weight());
     }
 
     #[test]

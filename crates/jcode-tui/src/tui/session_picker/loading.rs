@@ -571,22 +571,8 @@ fn build_search_index_from_summary(
     save_label: Option<&str>,
     transcript_search_text: &str,
 ) -> String {
-    let mut combined = String::new();
-    combined.push_str(title);
-    combined.push(' ');
-    combined.push_str(short_name);
-    combined.push(' ');
-    combined.push_str(id);
-
-    if let Some(dir) = working_dir {
-        combined.push(' ');
-        combined.push_str(dir);
-    }
-
-    if let Some(label) = save_label {
-        combined.push(' ');
-        combined.push_str(label);
-    }
+    let mut combined =
+        search_text::search_index_header(id, short_name, title, working_dir, save_label);
 
     if !transcript_search_text.is_empty() {
         combined.push(' ');
