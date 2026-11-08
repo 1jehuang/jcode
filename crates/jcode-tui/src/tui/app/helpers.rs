@@ -114,6 +114,7 @@ pub(crate) fn backdated_now(amount: Duration) -> std::time::Instant {
 /// immediately rather than after the 5s TTL. Stale-while-revalidate still
 /// applies: the next read returns the last value and kicks a background refresh.
 pub(crate) fn invalidate_git_info_cache() {
+    crate::tui::cloud_git::refresh_soon();
     if let Ok(mut guard) = GIT_INFO_CACHE.lock()
         && let Some((ts, _cached, refreshing)) = guard.as_mut()
     {

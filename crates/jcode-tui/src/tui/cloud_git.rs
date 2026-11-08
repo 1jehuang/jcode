@@ -360,6 +360,36 @@ fn parse(bytes: &[u8]) -> Option<GitInfo> {
     Some(info)
 }
 
+static CLIENT_FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn probe_wake() -> &'static tokio::sync::Notify {
+    static WAKE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    WAKE.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Each probe spawns a shell and git (plus ssh for the cloud side). A
+/// backgrounded window shows nothing, so it only needs a slow safety refresh;
+/// regaining focus or a repo-mutating tool wakes the workers immediately.
+fn probe_period() -> Duration {
+    if CLIENT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(120)
+    }
+}
+
+pub(crate) fn note_client_focus(focused: bool) {
+    let was = CLIENT_FOCUSED.swap(focused, std::sync::atomic::Ordering::Relaxed);
+    if focused && !was {
+        refresh_soon();
+    }
+}
+
+/// Re-probe both repos now instead of at the next period.
+pub(crate) fn refresh_soon() {
+    probe_wake().notify_waiters();
+}
+
 /// Starts exactly two independent workers for this attach. No shared cache
 /// with the ordinary local status-line probe, and no stale success on failure.
 #[cfg(not(test))]
@@ -415,7 +445,8 @@ pub(crate) fn gather() -> Option<DualGitInfo> {
                             crate::bus::Bus::global()
                                 .publish(crate::bus::BusEvent::GitInfoRefreshed);
                         }
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let wake = probe_wake();
+                        let _ = tokio::time::timeout(probe_period(), wake.notified()).await;
                     }
                 });
             });
