@@ -1184,6 +1184,7 @@ struct BodyRenderCtx<'a> {
 /// Render saved history through the live dispatcher and wrapping pipeline.
 /// No active App is borrowed: expansion state, images and in-flight swarm work
 /// from the session behind the picker must never leak into this transcript.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_history_preview(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1200,6 +1201,7 @@ mod preview_fallback;
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
 /// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_history_preview_for_viewport(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1229,6 +1231,7 @@ pub(crate) fn prepare_history_preview_for_viewport(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -2560,10 +2563,6 @@ fn wrap_lines(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
-)]
 /// Drop spare span and line capacity before a body is cached. Wrapping builds
 /// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
 /// and these bodies live in the body cache for the session's lifetime.
@@ -2574,6 +2573,10 @@ fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
     wrapped_lines.shrink_to_fit();
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
+)]
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],

@@ -41,10 +41,12 @@ pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
 
 /// Whether an event on `name` inside the git dir can change the widget.
 /// Lock files and temp objects churn during every git command.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn git_dir_event_relevant(name: &str) -> bool {
     !(name.ends_with(".lock") || name.starts_with("tmp_") || name == "ORIG_HEAD.lock")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// Directories never worth watching even if not gitignored.
 pub(super) fn skip_dir(name: &str) -> bool {
     name == ".git"

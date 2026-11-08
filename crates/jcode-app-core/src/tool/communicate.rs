@@ -110,6 +110,9 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
+// Test-only coordination predicates: the auto-dispatch rework (92ca1819a)
+// inlined their production use, the unit tests keep them pinned.
+#[cfg_attr(not(test), allow(dead_code))]
 fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     matches!(
         member.status.as_deref(),
@@ -117,6 +120,7 @@ fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn coordination_in_flight_count(
     summary: &PlanGraphStatus,
     members: &[AgentInfo],
@@ -136,6 +140,7 @@ fn coordination_in_flight_count(
 /// assignment (and therefore one it is safe to await): a spawned headless worker,
 /// or one owned by the coordinator that issued the run. Foreign client-attached
 /// sessions are not drivable and must not count toward its in-flight workers.
+#[cfg_attr(not(test), allow(dead_code))]
 fn swarm_member_is_drivable_worker(member: &AgentInfo, coordinator_session_id: &str) -> bool {
     member.is_headless.unwrap_or(false)
         || member.report_back_to_session_id.as_deref() == Some(coordinator_session_id)

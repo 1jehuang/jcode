@@ -1573,6 +1573,7 @@ pub(crate) fn preview_overscroll_line(
 }
 
 /// The host belongs to the selected preview, never the attached live session.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn preview_overscroll_line_for_host(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
@@ -2139,6 +2140,7 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
 
 /// The idle resume composer uses the live input wrapper, but never reads the
 /// currently open session's draft, queue, selection, or cursor state.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
     let number = next_prompt.to_string();
     let prompt = "> ";
@@ -2659,6 +2661,7 @@ pub(crate) fn wrap_input_text<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn wrap_input_text_with_images<'a>(
     input: &str,
     cursor_pos: usize,

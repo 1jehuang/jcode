@@ -123,6 +123,7 @@ fn standalone_version_line() -> Line<'static> {
 
 /// The persisted subset of the real header. Credentials, transport and binary
 /// versions are deliberately omitted when the selected session does not own them.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_preview_header(
     session: &crate::tui::session_picker::SessionInfo,
     width: u16,

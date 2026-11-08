@@ -238,6 +238,7 @@ async fn open(target: &str) -> Result<String> {
     jcode_desktop_open::open_target(&target).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn terminal_command_from_parts(
     program: PathBuf,
     args: Vec<String>,

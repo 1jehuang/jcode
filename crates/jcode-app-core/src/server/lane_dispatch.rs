@@ -210,27 +210,24 @@ fn schedule_queued_retry(session_id: &str) {
     }
     let session_id = session_id.to_string();
     tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(QUEUED_RETRY_INTERVAL).await;
-            let still_queued = queued_sessions()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&session_id);
-            if !still_queued {
-                return;
-            }
-            let Ok(todos) = crate::todo::load_todos(&session_id) else {
-                return;
-            };
-            let lanes = dispatchable_lanes(&todos);
-            if lanes.is_empty() {
-                return;
-            }
-            // dispatch re-inserts the session when the cap still holds; that
-            // insert starts a fresh retry loop, so this one ends.
-            dispatch(session_id.clone(), lanes).await;
+        tokio::time::sleep(QUEUED_RETRY_INTERVAL).await;
+        let still_queued = queued_sessions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
+        if !still_queued {
             return;
         }
+        let Ok(todos) = crate::todo::load_todos(&session_id) else {
+            return;
+        };
+        let lanes = dispatchable_lanes(&todos);
+        if lanes.is_empty() {
+            return;
+        }
+        // dispatch re-inserts the session when the cap still holds; that
+        // insert starts a fresh retry, so this one ends.
+        dispatch(session_id.clone(), lanes).await;
     });
 }
 

@@ -959,7 +959,6 @@ impl BashTool {
         }
         let mut child = command.spawn()?;
 
-        let child_pid = child.id().unwrap_or(0);
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();

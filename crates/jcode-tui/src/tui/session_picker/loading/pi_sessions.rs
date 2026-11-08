@@ -1,5 +1,7 @@
 use super::*;
 
+// Dead in both builds since the live layout rework; kept for the preview tests.
+#[allow(dead_code)]
 pub(in crate::tui::session_picker) fn load_pi_preview_from_path(
     path: &Path,
 ) -> Option<Vec<PreviewMessage>> {

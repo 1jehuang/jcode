@@ -361,6 +361,7 @@ fn resolve(
 /// Literal match over the given segments, with the same semantics as the
 /// literal scanner (substring match, score 0, strongest origin), plus the
 /// list of matching segments when it is small enough to keep.
+#[allow(clippy::type_complexity)]
 fn literal_in_segments(
     text: &Segments,
     token: &str,
@@ -581,6 +582,9 @@ mod tests {
         let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
             panic!("extension must reuse its prefix's segments")
         };
+        // The scan parameter's full trait signature keeps `resolve`'s bound
+        // inferable; type_complexity is inherent to the trait-object shape.
+        #[allow(clippy::type_complexity)]
         let resolve_one =
             |token: &str,
              scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
