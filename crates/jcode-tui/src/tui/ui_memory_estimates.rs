@@ -96,6 +96,35 @@ pub(super) fn estimate_prepared_messages_bytes(prepared: &PreparedMessages) -> u
         + estimate_copy_targets_bytes(&prepared.copy_targets)
 }
 
+/// Sections share immutable `Arc<PreparedMessages>` bodies across frames.
+/// Walking a large body (tens of thousands of lines) on every streaming frame
+/// was ~10% of release-build client CPU, so remember the estimate per Arc.
+/// `Weak` keeps the pointer from being reused for a different allocation.
+fn estimate_shared_prepared_messages_bytes(prepared: &Arc<PreparedMessages>) -> usize {
+    use std::cell::RefCell;
+    use std::sync::Weak;
+    const MEMO_CAP: usize = 8;
+    thread_local! {
+        static MEMO: RefCell<Vec<(Weak<PreparedMessages>, usize)>> = const { RefCell::new(Vec::new()) };
+    }
+    MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((_, bytes)) = memo
+            .iter()
+            .find(|(weak, _)| std::ptr::eq(weak.as_ptr(), Arc::as_ptr(prepared)))
+        {
+            return *bytes;
+        }
+        let bytes = estimate_prepared_messages_bytes(prepared);
+        memo.retain(|(weak, _)| weak.strong_count() > 0);
+        if memo.len() >= MEMO_CAP {
+            memo.remove(0);
+        }
+        memo.push((Arc::downgrade(prepared), bytes));
+        bytes
+    })
+}
+
 pub(super) fn estimate_prepared_chat_frame_bytes(prepared: &PreparedChatFrame) -> usize {
     // Include each section's prepared content: the wrapped lines dominate a
     // frame's real memory footprint. Without this, multi-megabyte transcripts
@@ -104,7 +133,7 @@ pub(super) fn estimate_prepared_chat_frame_bytes(prepared: &PreparedChatFrame) -
     prepared
         .sections
         .iter()
-        .map(|section| estimate_prepared_messages_bytes(&section.prepared))
+        .map(|section| estimate_shared_prepared_messages_bytes(&section.prepared))
         .sum::<usize>()
         + prepared.sections.capacity() * std::mem::size_of::<PreparedSection>()
         + estimate_usize_vec_bytes(&prepared.wrapped_user_indices)

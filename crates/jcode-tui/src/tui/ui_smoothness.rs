@@ -25,23 +25,33 @@ fn recorder() -> &'static Mutex<AnchorStabilityRecorder> {
 /// Hash one buffer row's cell symbols within `area`. Returns
 /// [`BLANK_ROW_HASH`] for visually blank rows.
 fn hash_row(buffer: &Buffer, area: Rect, y: u16) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // FNV-1a over symbol bytes: this runs over every visible cell each frame,
+    // and SipHash via `DefaultHasher` was a measurable share of release CPU.
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut blank = true;
-    for x in area.left()..area.right() {
-        if let Some(cell) = buffer.cell((x, y)) {
-            let symbol = cell.symbol();
-            if blank && !symbol.trim().is_empty() {
-                blank = false;
-            }
-            symbol.hash(&mut hasher);
+    let buf_area = *buffer.area();
+    if y < buf_area.top() || y >= buf_area.bottom() {
+        return BLANK_ROW_HASH;
+    }
+    let left = area.left().max(buf_area.left());
+    let right = area.right().min(buf_area.right());
+    if left >= right {
+        return BLANK_ROW_HASH;
+    }
+    let start = buffer.index_of(left, y);
+    for cell in &buffer.content[start..start + usize::from(right - left)] {
+        let symbol = cell.symbol();
+        if blank && !symbol.trim().is_empty() {
+            blank = false;
         }
+        for &byte in symbol.as_bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
+        }
+        // Cell separator so "ab","c" differs from "a","bc".
+        hash = (hash ^ 0xff).wrapping_mul(PRIME);
     }
-    if blank {
-        BLANK_ROW_HASH
-    } else {
-        hasher.finish()
-    }
+    if blank { BLANK_ROW_HASH } else { hash }
 }
 
 /// Build an [`AnchorFrame`] from a rendered buffer region. Shared by the live

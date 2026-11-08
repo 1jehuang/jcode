@@ -2,9 +2,16 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 pub fn clear_area(frame: &mut Frame, area: Rect) {
-    for x in area.left()..area.right() {
-        for y in area.top()..area.bottom() {
-            frame.buffer_mut()[(x, y)].reset();
+    let buffer = frame.buffer_mut();
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let width = usize::from(area.width);
+    for y in area.top()..area.bottom() {
+        let start = buffer.index_of(area.left(), y);
+        for cell in &mut buffer.content[start..start + width] {
+            cell.reset();
         }
     }
 }
