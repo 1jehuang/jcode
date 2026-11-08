@@ -45,12 +45,15 @@ fn reload_command(wait_secs: u64, force: bool) -> String {
         r#"set -u
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 say() {{ echo "[cloud reload] $*" >&2; }}
-streaming() {{ /opt/jcode-cloud/jcode menubar --json 2>/dev/null | sed -n 's/.*"streaming":\([0-9]*\).*/\1/p'; }}
+streaming() {{
+  activity=$(/opt/jcode-cloud/jcode --no-update --no-selfdev menubar --json 2>/dev/null) || return 1
+  printf '%s' "$activity" | python3 -c 'import json,sys; n=json.load(sys.stdin).get("streaming"); sys.exit(1) if type(n) is not int or n < 0 else print(n)' 2>/dev/null
+}}
 deadline=$(( $(date +%s) + {wait_secs} ))
 last=""
 if [ {force} = 0 ]; then
   while :; do
-    n=$(streaming); n=${{n:-0}}
+    n=$(streaming) || {{ say "cannot verify cloud activity; not restarting"; exit 3; }}
     [ "$n" = 0 ] && break
     if [ "$(date +%s)" -ge "$deadline" ]; then say "still $n session(s) mid-turn after {wait_secs}s; not restarting. Retry later or use --force."; exit 3; fi
     [ "$n" != "$last" ] && say "waiting for $n session(s) to finish their turn"
@@ -320,6 +323,39 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!(" push {digest}"))
         );
+    }
+
+    #[test]
+    fn runtime_reload_requires_a_verified_nonnegative_idle_count() {
+        // Execute only the idle gate. No test can reach service stop/start code.
+        let generated = reload_command(0, false);
+        let gate = generated.split("before=$(readlink").next().unwrap();
+        for (json, status, idle) in [
+            (r#"{"streaming":0}"#, 0, true),
+            (r#"{"streaming":2}"#, 0, false),
+            (r#"{"streaming":0}"#, 1, false),
+            ("", 0, false),
+            ("not json", 0, false),
+            ("{}", 0, false),
+            (r#"{"streaming":false}"#, 0, false),
+            (r#"{"streaming":-1}"#, 0, false),
+            (r#"{"streaming":"0"}"#, 0, false),
+        ] {
+            let mock = r#"sh -c 'printf %s "$MOCK_ACTIVITY"; exit $MOCK_STATUS' --"#;
+            let script = gate.replace("/opt/jcode-cloud/jcode", mock) + "printf verified_idle";
+            let result = Command::new("sh")
+                .args(["-c", &script])
+                .env("MOCK_ACTIVITY", json)
+                .env("MOCK_STATUS", status.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(result.status.success(), idle, "{json:?}, status={status}");
+            assert_eq!(result.stdout == b"verified_idle", idle);
+            if !idle {
+                assert_eq!(result.status.code(), Some(3));
+                assert!(String::from_utf8_lossy(&result.stderr).contains("not restarting"));
+            }
+        }
     }
 
     #[test]
