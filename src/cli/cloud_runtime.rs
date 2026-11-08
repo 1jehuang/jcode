@@ -35,6 +35,132 @@ fn remote_command(verb: &str, value: Option<&str>) -> Result<String> {
     Ok(command)
 }
 
+/// Remote reload: wait until no session is streaming, then restart the
+/// managed service. `ExecStartPre` activates any pending runtime and
+/// `ExecStopPost` rolls back a runtime that fails to start. Only an integer
+/// and a fixed flag are interpolated.
+fn reload_command(wait_secs: u64, force: bool) -> String {
+    let force = if force { 1 } else { 0 };
+    format!(
+        r#"set -u
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+say() {{ echo "[cloud reload] $*" >&2; }}
+streaming() {{ /opt/jcode-cloud/jcode menubar --json 2>/dev/null | sed -n 's/.*"streaming":\([0-9]*\).*/\1/p'; }}
+deadline=$(( $(date +%s) + {wait_secs} ))
+last=""
+if [ {force} = 0 ]; then
+  while :; do
+    n=$(streaming); n=${{n:-0}}
+    [ "$n" = 0 ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then say "still $n session(s) mid-turn after {wait_secs}s; not restarting. Retry later or use --force."; exit 3; fi
+    [ "$n" != "$last" ] && say "waiting for $n session(s) to finish their turn"
+    last=$n; sleep 5
+  done
+fi
+before=$(readlink /opt/jcode-cloud/jcode)
+say "restarting cloud daemon"
+systemctl --user restart jcode-cloud.service || {{ say "restart failed"; exit 1; }}
+for i in $(seq 1 60); do
+  pid=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
+  if [ "${{pid:-0}}" != 0 ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
+    sleep 3
+    pid2=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
+    if [ "$pid2" = "$pid" ]; then
+      after=$(readlink /opt/jcode-cloud/jcode)
+      [ "$after" = "$before" ] || say "activated new runtime"
+      say "daemon ready: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+      exit 0
+    fi
+  fi
+  sleep 1
+done
+say "daemon did not become ready; see: journalctl --user -u jcode-cloud.service"
+sudo -n /usr/local/sbin/jcode-cloud-runtime status >&2 || true
+exit 1
+"#
+    )
+}
+
+fn run_remote(script: &str, input: Option<File>) -> Result<std::process::ExitStatus> {
+    let args = cloud_managed::ssh_args()?;
+    Command::new("ssh")
+        .args(args)
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])
+        .arg(cloud_managed::HOST)
+        .arg(script)
+        .stdin(input.map(Stdio::from).unwrap_or_else(Stdio::null))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("connect to the managed cloud host over SSH")
+}
+
+fn reload(wait_secs: u64, force: bool) -> Result<()> {
+    let status = run_remote(&reload_command(wait_secs, force), None)?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(3) => bail!("cloud reload deferred: turns were still running. Nothing was restarted."),
+        _ => bail!("cloud reload failed ({status})"),
+    }
+}
+
+/// Build a portable Linux x86_64 package from the jcode checkout containing
+/// the current directory.
+fn build_from_source() -> Result<std::path::PathBuf> {
+    let root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("run git")?;
+    if !root.status.success() {
+        bail!("--from-source must run inside a jcode checkout");
+    }
+    let root = std::path::PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let script = root.join("scripts/package_cloud_runtime.sh");
+    if !script.is_file() {
+        bail!("{} is not a jcode checkout", root.display());
+    }
+    let target = "x86_64-unknown-linux-gnu";
+    eprintln!("[cloud build] building portable Linux runtime in {}", root.display());
+    let builder = if Command::new("justrust").arg("--version").output().is_ok() {
+        "justrust"
+    } else {
+        "cargo"
+    };
+    let status = Command::new(builder)
+        .current_dir(&root)
+        .args([
+            "zigbuild",
+            "--profile",
+            "selfdev",
+            "-p",
+            "jcode",
+            "--bin",
+            "jcode",
+            "--target",
+            &format!("{target}.2.17"),
+            "--features",
+            "linux-compat-vendored-openssl",
+        ])
+        .status()
+        .with_context(|| format!("run {builder} zigbuild"))?;
+    if !status.success() {
+        bail!("portable Linux build failed ({status})");
+    }
+    let binary = root.join("target").join(target).join("selfdev").join("jcode");
+    let output = root.join("target/cloud-runtime/jcode-linux-x86_64.tar.gz");
+    eprintln!("[cloud build] packaging");
+    let status = Command::new(&script)
+        .arg(&binary)
+        .arg(&output)
+        .stdout(Stdio::null())
+        .status()
+        .context("run package_cloud_runtime.sh")?;
+    if !status.success() {
+        bail!("packaging the cloud runtime failed ({status})");
+    }
+    Ok(output)
+}
+
 fn valid_release_tag(value: &str) -> bool {
     let Some(version) = value.strip_prefix('v') else {
         return false;
@@ -112,13 +238,30 @@ pub(crate) fn run_cli(action: CloudRuntimeCommand) -> Result<()> {
             };
             invoke("pin", Some(&version), None)
         }
-        CloudRuntimeCommand::Push { artifact } => {
+        CloudRuntimeCommand::Push {
+            artifact,
+            from_source,
+            reload: then_reload,
+            wait_secs,
+        } => {
+            let artifact = match (artifact, from_source) {
+                (Some(path), false) => path,
+                (None, true) => build_from_source()?,
+                _ => bail!("pass exactly one of --artifact or --from-source"),
+            };
             let (file, digest) = package(&artifact)?;
             eprintln!(
-                "Uploading explicit cloud runtime package ({digest}). This selects dev policy for the whole host. Active daemons are not restarted."
+                "[cloud push] uploading runtime package {digest}. This selects dev policy for the whole host."
             );
-            invoke("push", Some(&digest), Some(file))
+            invoke("push", Some(&digest), Some(file))?;
+            if then_reload {
+                reload(wait_secs, false)
+            } else {
+                eprintln!("Active daemons are not restarted. Run `jcode cloud runtime reload` to switch.");
+                Ok(())
+            }
         }
+        CloudRuntimeCommand::Reload { force, wait_secs } => reload(wait_secs, force),
     }
 }
 
