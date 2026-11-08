@@ -16,6 +16,9 @@ pub(crate) enum Source {
     #[default]
     Other,
     Assistant,
+    /// Tool-call intent labels: the agent's one-line statement of what it is
+    /// doing, usually a close paraphrase of the user's request.
+    Intent,
     User,
 }
 
@@ -24,6 +27,7 @@ impl Source {
     pub(crate) fn weight(self) -> u32 {
         match self {
             Source::User => 8,
+            Source::Intent => 6,
             Source::Assistant => 4,
             Source::Other | Source::ToolInput => 2,
             Source::Thinking | Source::ToolOutput => 1,
@@ -57,12 +61,14 @@ pub(crate) fn stronger(a: Option<Source>, b: Option<Source>) -> Option<Source> {
 const MARK: char = '\u{1f}';
 
 impl Source {
-    const ALL: [Source; 6] = [
+    /// Ordered weakest to strongest, matching the tag digits.
+    const ALL: [Source; 7] = [
         Source::ToolOutput,
         Source::Thinking,
         Source::ToolInput,
         Source::Other,
         Source::Assistant,
+        Source::Intent,
         Source::User,
     ];
 
@@ -73,7 +79,8 @@ impl Source {
             Source::ToolInput => '2',
             Source::Other => '3',
             Source::Assistant => '4',
-            Source::User => '5',
+            Source::Intent => '5',
+            Source::User => '6',
         }
     }
 
@@ -148,7 +155,7 @@ pub(crate) fn metadata_sources(
 /// keeps a flood of tool output from evicting the user's prompts.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SourceBuckets {
-    text: [String; 6],
+    text: [String; 7],
 }
 
 impl SourceBuckets {
@@ -381,9 +388,9 @@ impl Visitor<'_> for KeySeed {
             "toolUseResult" | "tool_use_result" | "output" | "tool_output" | "stdout"
             | "stderr" => Key::Force(Source::ToolOutput),
             // Tool-call intent labels are the agent's own one-line summary of
-            // what it is doing, so they rank with assistant prose rather than
-            // with the raw arguments around them.
-            "intent" => Key::Force(Source::Assistant),
+            // what it is doing, so they rank above assistant prose and far
+            // above the raw arguments around them.
+            "intent" => Key::Force(Source::Intent),
             "meta" | "metadata" => Key::Force(Source::Other),
             _ => Key::Plain,
         })
@@ -478,7 +485,7 @@ mod tests {
         assert_eq!(source_of(json, "CMD"), Source::ToolInput);
         let with_intent = r#"{"role":"assistant","content":[
                 {"type":"tool_use","id":"t","name":"bash","input":{"command":"CMD","intent":"WHY"}}]}"#;
-        assert_eq!(source_of(with_intent, "WHY"), Source::Assistant);
+        assert_eq!(source_of(with_intent, "WHY"), Source::Intent);
         assert_eq!(source_of(with_intent, "CMD"), Source::ToolInput);
         assert_eq!(source_of(json, "OUT"), Source::ToolOutput);
         // Identifiers beside a prompt are not something the user typed.
@@ -512,7 +519,11 @@ mod tests {
 
     #[test]
     fn weights_prefer_user_then_assistant_then_tools_and_thinking() {
-        assert!(Source::User.weight() > Source::Assistant.weight());
+        assert!(Source::User.weight() > Source::Intent.weight());
+        assert!(Source::Intent.weight() > Source::Assistant.weight());
+        for pair in Source::ALL.windows(2) {
+            assert!(pair[0].weight() <= pair[1].weight());
+        }
         assert!(Source::Assistant.weight() > Source::ToolInput.weight());
         assert!(Source::ToolInput.weight() > Source::ToolOutput.weight());
         assert_eq!(Source::Thinking.weight(), Source::ToolOutput.weight());
