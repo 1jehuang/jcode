@@ -249,7 +249,10 @@ pub struct RemoteConnection {
     /// loop must never await socket writes: if the daemon's receive buffer is
     /// full while the daemon is itself blocked writing to us, awaiting the
     /// write here would stop us reading and deadlock both ends.
-    outbound: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+    outbound: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<OutboundWrite>>>,
+    /// Queued writes not yet flushed. When a backlog exists, senders do not
+    /// wait for their own write result at all.
+    outbound_pending: Arc<std::sync::atomic::AtomicUsize>,
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
@@ -281,6 +284,12 @@ pub struct RemoteConnection {
 }
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest a request send waits for its own write result before returning.
+const OUTBOUND_RESULT_WAIT: Duration = Duration::from_millis(250);
+type OutboundWrite = (
+    Vec<u8>,
+    tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+);
 const MAX_STRAY_REMOTE_PROTOCOL_LINES: usize = 32;
 /// Hard cap for one newline-delimited server event. History events can be large
 /// because they may contain images, but an authenticated or compromised peer
@@ -422,6 +431,7 @@ impl RemoteConnection {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
             outbound: std::sync::Mutex::new(None),
+            outbound_pending: Default::default(),
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
@@ -616,7 +626,22 @@ impl RemoteConnection {
 
         let mut timing = super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
-        let result = self.enqueue_outbound(json.into_bytes());
+        let backlogged = self
+            .outbound_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0;
+        let result = match self.enqueue_outbound(json.into_bytes()) {
+            Err(error) => Err(error),
+            Ok(_) if backlogged => Ok(()),
+            // Surface prompt write failures (broken pipe) to the caller, but
+            // never wait longer than a short bound: a full socket must not
+            // stall the loop that drains server events.
+            Ok(done) => match tokio::time::timeout(OUTBOUND_RESULT_WAIT, done).await {
+                Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
+                Ok(Err(_)) => Err(anyhow::anyhow!("remote connection writer closed")),
+                Ok(Ok(Ok(()))) | Err(_) => Ok(()),
+            },
+        };
         if let Some(fields) = &interrupt_log {
             match &result {
                 Ok(()) => crate::logging::info(&format!(
@@ -642,26 +667,47 @@ impl RemoteConnection {
 
     /// Queue bytes for the connection writer task, spawning it on first use.
     /// Never waits on the socket, so the caller keeps draining server events.
-    fn enqueue_outbound(&self, bytes: Vec<u8>) -> Result<()> {
+    /// The returned receiver resolves with the write result.
+    fn enqueue_outbound(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>> {
         let mut slot = self.outbound.lock().unwrap_or_else(|e| e.into_inner());
         if slot.as_ref().is_none_or(|tx| tx.is_closed()) {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundWrite>();
             let writer = Arc::clone(&self.writer);
+            // Writes dropped with a dead writer task never flushed.
+            self.outbound_pending
+                .store(0, std::sync::atomic::Ordering::Release);
+            let pending = Arc::clone(&self.outbound_pending);
             tokio::spawn(async move {
-                while let Some(bytes) = rx.recv().await {
+                while let Some((bytes, done)) = rx.recv().await {
                     let mut w = writer.lock().await;
-                    if let Err(error) = w.write_all(&bytes).await {
-                        crate::logging::warn(&format!("Remote writer task stopped: {error}"));
+                    let result = w.write_all(&bytes).await;
+                    drop(w);
+                    pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    let failed = result.is_err();
+                    let _ = done.send(result.map_err(|error| error.to_string()));
+                    if failed {
+                        crate::logging::warn("Remote writer task stopped after write error");
                         break;
                     }
                 }
             });
             *slot = Some(tx);
         }
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        self.outbound_pending
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         slot.as_ref()
             .expect("outbound sender initialized")
-            .send(bytes)
-            .map_err(|_| anyhow::anyhow!("remote connection writer closed"))
+            .send((bytes, done_tx))
+            .map_err(|_| {
+                self.outbound_pending
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                anyhow::anyhow!("remote connection writer closed")
+            })?;
+        Ok(done_rx)
     }
 
     async fn send_request(&self, request: Request) -> Result<()> {
@@ -1531,6 +1577,7 @@ impl RemoteConnection {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
             outbound: std::sync::Mutex::new(None),
+            outbound_pending: Default::default(),
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,

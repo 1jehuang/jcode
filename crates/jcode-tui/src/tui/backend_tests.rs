@@ -816,7 +816,7 @@ async fn request_send_does_not_block_ui_when_server_stops_reading() {
     let writer = remote.writer();
     let _guard = writer.lock().await;
 
-    let result = tokio::time::timeout(Duration::from_millis(200), async {
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
         for _ in 0..64 {
             remote.request_todos().await.expect("queued");
         }
