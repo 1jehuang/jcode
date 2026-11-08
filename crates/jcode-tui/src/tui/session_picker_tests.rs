@@ -129,7 +129,7 @@ fn cloud_filter_supports_flat_sessions_and_debug_visibility() {
     assert_eq!(picker.visible_sessions.len(), 2);
     assert_eq!(picker.hidden_test_count, 0);
     picker.cycle_filter_mode_backwards();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
 }
@@ -893,6 +893,10 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.visible_sessions.len(), 6);
 
     picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+    assert!(picker.visible_sessions.is_empty());
+
+    picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(
@@ -915,10 +919,6 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(picker.visible_session_iter().all(|session| session.saved));
     assert_eq!(picker.items.len(), picker.visible_sessions.len());
-
-    picker.cycle_filter_mode();
-    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
-    assert!(picker.visible_sessions.is_empty());
 
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::Active);
@@ -987,10 +987,24 @@ fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
-    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
 
     picker
         .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+
+    // Alt+S cycles even while typing a search query, without inserting text.
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::empty())
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
+    assert!(picker.search_query.is_empty());
+    picker
+        .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT)
         .unwrap();
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
 }

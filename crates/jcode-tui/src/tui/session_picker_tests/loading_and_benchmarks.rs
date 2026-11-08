@@ -264,7 +264,7 @@ fn loading_picker_filter_choice_survives_refresh() {
         .unwrap();
     let chosen = picker.filter_mode;
     assert!(picker.filter_mode_user_chosen);
-    assert_eq!(chosen, SessionFilterMode::CurrentDir);
+    assert_eq!(chosen, SessionFilterMode::Cloud);
     picker
         .apply_session_list_update(SessionListUpdate::Cached((
             Vec::new(),

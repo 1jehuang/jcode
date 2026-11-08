@@ -1413,6 +1413,21 @@ impl SessionPicker {
         if let Some(action) = self.handle_claude_takeover_confirmation_key(code, modifiers) {
             return Ok(action);
         }
+        // Alt+S / Alt+Shift+S cycle filters from any mode, including while
+        // typing a search query where plain `s` must stay literal text.
+        if modifiers.contains(KeyModifiers::ALT) {
+            match code {
+                KeyCode::Char('s') if !modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.cycle_filter_mode();
+                    return Ok(OverlayAction::Continue);
+                }
+                KeyCode::Char('S') | KeyCode::Char('s') => {
+                    self.cycle_filter_mode_backwards();
+                    return Ok(OverlayAction::Continue);
+                }
+                _ => {}
+            }
+        }
         // Search editing must work even before the first cached list arrives.
         // Keep the query in picker state so reseeding applies it to new entries.
         if self.search_active {
