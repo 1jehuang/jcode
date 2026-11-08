@@ -241,16 +241,12 @@ impl SessionPicker {
             })
             .collect::<Vec<_>>();
 
-        filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        filtered.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
         // Cache once per candidate, never run matching from the comparator.
         // Stable sorting keeps recency as the deterministic final tie-break.
@@ -459,16 +455,12 @@ impl SessionPicker {
             }
         }
 
-        saved_sessions.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        saved_sessions.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
 
         if !saved_sessions.is_empty() {

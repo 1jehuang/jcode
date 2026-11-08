@@ -266,6 +266,13 @@ prompt_entry_animation = true
 # disconnected SDK client, since the server cannot observe OS windows directly.
 # resume_recent_close_seconds = 30
 
+# Which time Resume shows as "x ago" and sorts by (default: "message").
+#   "message":  newest message of any role (prompts, replies, tool results)
+#   "activity": newest of the last message and the last open/resume
+#   "opened":   last time the session was opened, resumed, or attached
+#   "created":  when the session was created
+# resume_time = "message"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.

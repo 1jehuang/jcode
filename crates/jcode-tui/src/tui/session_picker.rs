@@ -164,7 +164,7 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// Format duration since a time in a human-readable way
 #[path = "session_picker/time_labels.rs"]
 mod time_labels;
-pub(crate) use time_labels::format_time_ago;
+pub(crate) use time_labels::{format_time_ago, session_resume_time};
 
 /// Which pane has keyboard focus
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -862,7 +862,7 @@ impl SessionPicker {
         self.visible_sessions
             .iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
-            .max_by_key(|session| session.last_active_at.unwrap_or(session.last_message_time))
+            .max_by_key(|session| session_resume_time(session))
             .map(|session| session.resume_target.clone())
     }
 

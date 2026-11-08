@@ -1596,3 +1596,34 @@ fn benchmark_resume_loading_reports_timings() {
 
 #[path = "loading_scope_tests.rs"]
 mod loading_scope;
+
+#[test]
+fn summary_tracks_newest_message_timestamp_across_roles() {
+    let data: SessionMessageSummaryData = serde_json::from_str(
+        r#"[
+            {"role":"user","content":"hi","timestamp":"2026-01-01T00:00:00Z"},
+            {"role":"assistant","content":"later tool reply","timestamp":"2026-01-01T03:00:00Z"},
+            {"role":"user","content":"no ts"}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        data.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-01T03:00:00+00:00".to_string())
+    );
+
+    let mut base: SessionMessageSummaryData = serde_json::from_str(
+        r#"[{"role":"user","content":"a","timestamp":"2026-01-01T00:00:00Z"}]"#,
+    )
+    .unwrap();
+    base.merge(
+        serde_json::from_str(
+            r#"[{"role":"assistant","content":"b","timestamp":"2026-01-02T00:00:00Z"}]"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        base.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-02T00:00:00+00:00".to_string())
+    );
+}

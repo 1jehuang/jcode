@@ -1272,10 +1272,15 @@ struct SessionMessageSummaryData {
     estimated_tokens: usize,
     first_user_prompt: Option<String>,
     search_text: String,
+    /// Newest stored message timestamp, of any role (prompts, replies, tools).
+    last_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SessionMessageSummaryData {
     fn add_message(&mut self, message: &SessionMessageSummary) {
+        if let Some(ts) = message.timestamp {
+            self.last_message_at = Some(self.last_message_at.map_or(ts, |cur| cur.max(ts)));
+        }
         if !summary_message_is_visible_conversation(message) {
             return;
         }
@@ -1305,6 +1310,10 @@ impl SessionMessageSummaryData {
     }
 
     fn merge(&mut self, other: Self) {
+        self.last_message_at = match (self.last_message_at, other.last_message_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
         self.visible_message_count = self
             .visible_message_count
             .saturating_add(other.visible_message_count);
@@ -1392,6 +1401,7 @@ struct SessionMessageSummary {
     content_text: Option<String>,
     display_role: Option<StoredDisplayRole>,
     token_usage: Option<SessionTokenUsageSummary>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl<'de> Deserialize<'de> for SessionMessageSummary {
@@ -1424,11 +1434,15 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         let mut content: Option<&'de RawValue> = None;
         let mut display_role: Option<StoredDisplayRole> = None;
         let mut token_usage: Option<SessionTokenUsageSummary> = None;
+        let mut timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
 
         while let Some(key) = map.next_key::<Cow<'de, str>>()? {
             match key.as_ref() {
                 "role" => {
                     role = Some(map.next_value()?);
+                }
+                "timestamp" => {
+                    timestamp = map.next_value()?;
                 }
                 "content" => {
                     content = Some(map.next_value()?);
@@ -1466,6 +1480,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
             content_text,
             display_role,
             token_usage,
+            timestamp,
         })
     }
 }
@@ -1777,7 +1792,12 @@ fn parse_jcode_session_info(
         user_message_count,
         assistant_message_count,
         created_at: session.created_at,
-        last_message_time: session.updated_at,
+        // Newest message, falling back to the save time for old snapshots
+        // whose messages predate per-message timestamps (or empty sessions).
+        last_message_time: session
+            .messages
+            .last_message_at
+            .unwrap_or(session.updated_at),
         last_active_at: session.last_active_at,
         working_dir: session.working_dir,
         model: session.model,
@@ -1969,7 +1989,7 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
 /// ordinary conversations out of the most recent results. Saved and cloud
 /// sessions compete by recency too, rather than reserving extra visible slots.
 fn limit_sessions_by_recency(sessions: &mut Vec<SessionInfo>, limit: usize) {
-    sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    sessions.sort_by_cached_key(|s| std::cmp::Reverse(super::session_resume_time(s)));
     let mut visible = 0;
     let mut debug = 0;
     sessions.retain(|session| {

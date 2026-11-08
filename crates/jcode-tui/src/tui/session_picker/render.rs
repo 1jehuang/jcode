@@ -203,10 +203,8 @@ impl SessionPicker {
         let dimmer: Color = rgb(70, 70, 70);
         let batch_restore: Color = rgb(255, 140, 140);
 
-        // The list is ordered by last activity, so show that instead of the
-        // creation time (a day-old session active a minute ago sits on top).
-        let active_ago =
-            format_time_ago(session.last_active_at.unwrap_or(session.last_message_time));
+        // Same timestamp the list is sorted by (`display.resume_time`).
+        let active_ago = format_time_ago(session_resume_time(session));
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
         let is_marked = self.selected_session_ids.contains(&session.id);
         let same_dir = self.session_in_current_dir(session);
