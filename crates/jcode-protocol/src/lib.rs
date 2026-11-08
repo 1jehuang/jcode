@@ -919,6 +919,10 @@ impl Request {
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                // One-shot login clients report new credentials without a
+                // session. Subscribed connections still take the
+                // session-local path that also switches their model.
+                | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }
