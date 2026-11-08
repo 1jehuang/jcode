@@ -10,6 +10,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 const HELPER: &str = "/opt/jcode-cloud/runtime-update";
+/// Must match `jcode-app-core`'s managed live reload capability marker. A
+/// daemon binary containing it re-execs the managed selection on reload.
+const LIVE_RELOAD_MARKER: &str = "jcode-managed-cloud-live-reload-v1";
 const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// All remote arguments are fixed verbs, validated release tags, or hex digests.
@@ -41,6 +44,7 @@ fn remote_command(verb: &str, value: Option<&str>) -> Result<String> {
 /// and a fixed flag are interpolated.
 fn reload_command(wait_secs: u64, force: bool) -> String {
     let force = if force { 1 } else { 0 };
+    let marker = LIVE_RELOAD_MARKER;
     format!(
         r#"set -u
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -63,14 +67,40 @@ fi
 before=$(readlink /opt/jcode-cloud/jcode)
 pending=0
 sudo -n /usr/local/sbin/jcode-cloud-runtime status 2>/dev/null | grep -q '"pending": {{' && pending=1
+# Live path: a daemon built with managed live reload re-execs the selected
+# runtime in place, so sessions, clients and in-flight turns survive the same
+# way a local self-dev reload does. Older daemons fall through to a restart.
+daemon=$(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' | head -n1)
+if [ -n "$daemon" ] && grep -qa {marker} "/proc/$daemon/exe" 2>/dev/null; then
+  live_ok=1
+  if [ "$pending" = 1 ]; then
+    sudo -n /usr/local/sbin/jcode-cloud-runtime activate-live >/dev/null || live_ok=0
+  fi
+  if [ "$live_ok" = 1 ]; then
+    target=$(readlink -f /opt/jcode-cloud/jcode)
+    say "live reloading daemon (sessions stay attached)"
+    JCODE_SOCKET="$XDG_RUNTIME_DIR/jcode.sock" /opt/jcode-cloud/jcode --no-update --no-selfdev server reload --force --json >/dev/null 2>&1 || live_ok=0
+    if [ "$live_ok" = 1 ] && [ "$(readlink /proc/$daemon/exe 2>/dev/null)" = "$target" ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
+      [ "$pending" = 1 ] && say "activated new runtime"
+      say "daemon ready: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+      exit 0
+    fi
+  fi
+  say "live reload did not land; falling back to a restart"
+  if [ "$pending" = 1 ]; then
+    sudo -n /usr/local/sbin/jcode-cloud-runtime rollback-live >/dev/null 2>&1 && say "rolled back the live-activated runtime"
+    pending=0
+  fi
+  before=$(readlink /opt/jcode-cloud/jcode)
+fi
 say "restarting cloud daemon"
 # A daemon may have handed itself off outside systemd on an earlier stop. If it
 # keeps the socket, the unit start fails and the new runtime is falsely rolled
 # back. Turns are idle here (or --force), so stop every daemon first.
 systemctl --user stop jcode-cloud.service 2>/dev/null
-for p in $(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$'); do say "stopping detached daemon pid $p"; kill -TERM "$p" 2>/dev/null; done
-for i in $(seq 1 20); do pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$' >/dev/null || break; sleep 1; done
-pkill -KILL -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$' 2>/dev/null
+for p in $(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)'); do say "stopping detached daemon pid $p"; kill -TERM "$p" 2>/dev/null; done
+for i in $(seq 1 20); do pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' >/dev/null || break; sleep 1; done
+pkill -KILL -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' 2>/dev/null
 rm -f "$XDG_RUNTIME_DIR/jcode.sock"
 systemctl --user reset-failed jcode-cloud.service 2>/dev/null
 systemctl --user start jcode-cloud.service || {{ say "start failed"; exit 1; }}
@@ -332,6 +362,15 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!(" push {digest}"))
         );
+    }
+
+    #[test]
+    fn live_reload_marker_matches_daemon_capability() {
+        assert_eq!(LIVE_RELOAD_MARKER, crate::server::MANAGED_CLOUD_LIVE_RELOAD_MARKER);
+        let script = reload_command(0, false);
+        assert!(script.contains(&format!("grep -qa {LIVE_RELOAD_MARKER} ")));
+        assert!(script.contains("activate-live"));
+        assert!(script.contains("rollback-live"));
     }
 
     #[test]
