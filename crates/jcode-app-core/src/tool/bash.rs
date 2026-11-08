@@ -1000,13 +1000,11 @@ impl BashTool {
                                         break;
                                     }
                                     crate::agents_status::waiting(&push_session_id, &push_command);
-                                    crate::mobile_push::notify(
-                                        crate::mobile_push::PushKind::NeedsInput,
-                                        &push_session_id,
-                                        None,
-                                        &format!("Command is waiting for input: {push_command}"),
-                                        None,
-                                    );
+                                    // No mobile push here: stdin is closed after
+                                    // STDIN_RESPONSE_TIMEOUT_MS (1.5s) without a reply, so a
+                                    // phone notification would always arrive after the
+                                    // command already got EOF. Detection is also heuristic
+                                    // (wchan fallback) and produced many false alerts.
 
                                     // Most clients cannot answer stdin prompts. Without a
                                     // prompt reply, close stdin so commands that read it

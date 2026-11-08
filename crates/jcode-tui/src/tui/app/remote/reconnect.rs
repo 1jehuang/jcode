@@ -989,6 +989,7 @@ pub(in crate::tui::app) fn queue_reload_continuation_once(
     }
     app.push_display_message(DisplayMessage::system(notice));
     app.hidden_queued_system_messages.push(continuation);
+    app.reload_recovery_dispatch_pending = true;
     true
 }
 

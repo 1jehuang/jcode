@@ -409,7 +409,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         // to the follow-up dispatcher, which runs them one at a time.
         app.pending_queued_dispatch = true;
         needs_redraw = true;
-    } else if !app.is_processing && !app.queued_messages.is_empty() {
+    } else if !app.is_processing
+        && !app.queued_messages.is_empty()
+        && !app.reload_recovery_dispatch_pending
+    {
         let mut queued_messages = std::mem::take(&mut app.queued_messages);
         super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
@@ -1691,7 +1694,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 )));
             }
         }
-    } else if !app.queued_messages.is_empty() {
+    } else if !app.queued_messages.is_empty() && !app.reload_recovery_dispatch_pending {
         let mut queued_messages = std::mem::take(&mut app.queued_messages);
         super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);

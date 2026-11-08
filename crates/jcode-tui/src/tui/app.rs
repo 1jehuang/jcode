@@ -1034,6 +1034,9 @@ pub struct App {
     // Keep recovery identities after dispatch so delayed History cannot requeue
     // the same continuation. Reset only when a new server reload begins.
     scheduled_reload_recoveries: HashSet<(String, String)>,
+    // A reload recovery continuation was queued. It must run as its own turn
+    // so user follow-ups queued before the reload still wait for that turn to end.
+    reload_recovery_dispatch_pending: bool,
     // Current status
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
