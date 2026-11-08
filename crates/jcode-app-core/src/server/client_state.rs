@@ -25,35 +25,10 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
-/// Resume chrome must not queue behind a multi-megabyte History frame. Write
-/// the small, session-bound authoritative snapshot before acquiring that frame's
-/// writer lock. This does not require the agent lock, even during a live turn.
-pub(super) async fn send_resume_todos(
-    session_id: &str,
-    writer: &Arc<Mutex<WriteHalf>>,
-) -> Result<()> {
-    let started = Instant::now();
-    let payload = serde_json::json!({
-        "todos": crate::todo::load_todos(session_id).unwrap_or_else(|error| {
-            crate::logging::warn(&format!("Failed to load resume todos for {session_id}: {error}"));
-            Vec::new()
-        }),
-        "plan": crate::todo::load_plan(session_id).unwrap_or_default(),
-        "goals": crate::todo::load_goals(session_id).unwrap_or_default(),
-    });
-    let event = ServerEvent::Todos {
-        session_id: session_id.to_owned(),
-        payload: payload.to_string(),
-    };
-    let json = encode_event(&event);
-    writer.lock().await.write_all(json.as_bytes()).await?;
-    crate::logging::info(&format!(
-        "[TIMING] resume todos: session={session_id}, bytes={}, total={}ms",
-        json.len(),
-        started.elapsed().as_millis(),
-    ));
-    Ok(())
-}
+#[path = "history_timing.rs"]
+mod history_timing;
+use history_timing::Timing;
+pub(super) use history_timing::send_resume_todos;
 
 /// Do not probe any identity until telemetry is enabled. Only the provider
 /// may identify its effective OAuth credential. An API-key route must not expose the email
@@ -213,6 +188,7 @@ pub(super) async fn handle_get_history(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("history", Some(id), client_session_id);
     let history_start = Instant::now();
     let activity =
         session_activity_snapshot(client_connections, client_session_id, client_is_processing)
@@ -226,7 +202,8 @@ pub(super) async fn handle_get_history(
             "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
             client_session_id
         ));
-        send_history_from_persisted_session(
+        timing.stage("persisted");
+        let result = send_history_from_persisted_session(
             id,
             client_session_id,
             provider,
@@ -241,7 +218,9 @@ pub(super) async fn handle_get_history(
             supports_turn_identity,
             history_base,
         )
-        .await?;
+        .await;
+        timing.result(&result);
+        result?;
         crate::logging::info(&format!(
             "[TIMING] handle_get_history: session={}, persisted_fallback total={}ms",
             client_session_id,
@@ -250,7 +229,8 @@ pub(super) async fn handle_get_history(
         return Ok(());
     };
 
-    send_history_with_guard(
+    timing.stage("live");
+    let result = send_history_with_guard(
         id,
         client_session_id,
         agent_guard,
@@ -267,7 +247,9 @@ pub(super) async fn handle_get_history(
         supports_turn_identity,
         history_base,
     )
-    .await?;
+    .await;
+    timing.result(&result);
+    result?;
     let send_history_ms = history_start.elapsed().as_millis();
 
     let prefetch_start = Instant::now();
@@ -484,86 +466,9 @@ pub(super) async fn handle_get_model_catalog(
     Ok(())
 }
 
-pub(super) async fn handle_get_compacted_history(
-    id: u64,
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    writer: &Arc<Mutex<WriteHalf>>,
-    visible_messages: usize,
-    recent_history: bool,
-) -> Result<()> {
-    let started = Instant::now();
-    let (messages, images, compacted_info, source) = match agent.try_lock() {
-        Ok(agent_guard) => {
-            let (messages, images, info) = if recent_history {
-                let (messages, images) = agent_guard.get_history_and_rendered_images();
-                let (messages, images, info) =
-                    recent_history_window(messages, images, visible_messages);
-                (messages, images, Some(info))
-            } else {
-                agent_guard.get_history_and_rendered_images_with_compacted_history(visible_messages)
-            };
-            (messages, images, info, "live")
-        }
-        Err(_) => {
-            let session = crate::session::Session::load_for_remote_startup(session_id)
-                .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
-            let (rendered_messages, images, info) = if recent_history {
-                let (messages, images) = crate::session::render_messages_and_images(&session);
-                (messages, images, None)
-            } else {
-                crate::session::render_messages_and_images_with_compacted_history(
-                    &session,
-                    visible_messages,
-                )
-            };
-            let messages = rendered_messages
-                .into_iter()
-                .map(rendered_to_history_message)
-                .collect();
-            let (messages, images, info) = if recent_history {
-                let (messages, images, info) =
-                    recent_history_window(messages, images, visible_messages);
-                (messages, images, Some(info))
-            } else {
-                (messages, images, info)
-            };
-            (messages, images, info, "persisted")
-        }
-    };
-
-    let compacted_info = compacted_info.unwrap_or(crate::session::RenderedCompactedHistoryInfo {
-        total_messages: 0,
-        visible_messages: 0,
-        remaining_messages: 0,
-        hidden_user_prompts: 0,
-    });
-    crate::logging::info(&format!(
-        "[TIMING] get_compacted_history: session={}, source={}, requested={}, visible={}, remaining={}, messages={}, total={}ms",
-        session_id,
-        source,
-        visible_messages,
-        compacted_info.visible_messages,
-        compacted_info.remaining_messages,
-        messages.len(),
-        started.elapsed().as_millis(),
-    ));
-
-    write_event(
-        writer,
-        &ServerEvent::CompactedHistory {
-            id,
-            session_id: session_id.to_string(),
-            messages,
-            images,
-            compacted_total: compacted_info.total_messages,
-            compacted_visible: compacted_info.visible_messages,
-            compacted_remaining: compacted_info.remaining_messages,
-            compacted_hidden_prompts: compacted_info.hidden_user_prompts,
-        },
-    )
-    .await
-}
+#[path = "history_paging.rs"]
+mod history_paging;
+pub(super) use history_paging::handle_get_compacted_history;
 
 /// Window canonical rendered entries, not raw provider messages. Images follow
 /// their rendered entry and the synthetic marker occupies its own index.
@@ -893,6 +798,7 @@ async fn send_history_from_persisted_session(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("persisted_history", Some(id), session_id);
     let loaded = super::run_blocking_io(|| {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))
@@ -913,8 +819,12 @@ async fn send_history_from_persisted_session(
             // Do not save this synthetic snapshot or mask other I/O errors.
             Session::create_with_id(session_id.to_string(), None, None)
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            timing.result(&Err::<(), _>(()));
+            return Err(error);
+        }
     };
+    timing.stage("render");
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
@@ -1014,15 +924,23 @@ async fn send_history_from_persisted_session(
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
+    timing.stage("encode");
     let json = encode_event(&history_event);
+    timing.stage("writer_lock");
     let mut writer_guard = writer.lock().await;
+    timing.stage("write");
     if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
-        writer_guard
+        let sent = writer_guard
             .write_all(encode_event(&state).as_bytes())
-            .await?;
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
     }
-    writer_guard.write_all(json.as_bytes()).await?;
-    Ok(())
+    let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
+    result.map_err(Into::into)
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -1076,6 +994,7 @@ async fn send_history_with_guard(
     supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("live_history", Some(id), session_id);
     let history_start = Instant::now();
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
@@ -1326,6 +1245,7 @@ async fn send_history_with_guard(
         applets,
     };
     let build_ms = build_start.elapsed().as_millis();
+    timing.stage("encode");
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -1333,16 +1253,23 @@ async fn send_history_with_guard(
     drop(history_event);
     let json_len = json.len();
     let encode_ms = encode_start.elapsed().as_millis();
+    timing.stage("writer_lock");
     let writer_lock_start = Instant::now();
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
+    timing.stage("write");
     let write_start = Instant::now();
     if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
-        writer_guard
+        let sent = writer_guard
             .write_all(encode_event(&state).as_bytes())
-            .await?;
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
     }
     let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
     // only needs the captured length).
