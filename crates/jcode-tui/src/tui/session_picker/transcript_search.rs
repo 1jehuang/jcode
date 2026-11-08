@@ -180,10 +180,11 @@ struct Evidence {
 /// the incoming order for equally promising candidates.
 fn prioritize_candidates(
     candidates: Vec<Candidate>,
-    query: &str,
+    phrase: &Option<PhraseQuery>,
     tokens: &[String],
     cancel: &AtomicBool,
 ) -> Vec<(Candidate, SearchRank)> {
+    let phrase = phrase.as_ref();
     let mut ranked = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if cancel.load(Ordering::Relaxed) {
@@ -191,7 +192,7 @@ fn prioritize_candidates(
         }
         let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
             .with_exact_field(candidate.exact_field);
-        rank.opening_prompt = opening_prompt_rank(&candidate.opening_prompt, query);
+        rank.opening_prompt = phrase.map_or(0, |phrase| phrase.rank(&candidate.opening_prompt));
         let intent = lowercase_field(&candidate.intent_text);
         rank.intent_terms = tokens
             .iter()
@@ -211,49 +212,154 @@ fn prioritize_candidates(
 // A retyped request is stronger evidence than words scattered throughout a
 // huge transcript. Compare contiguous word windows, allowing a few misspelled
 // words without requiring every short function word to match literally.
+#[cfg(test)]
 fn opening_prompt_rank(prompt: &str, query: &str) -> usize {
-    let words = |text: &str| -> Vec<String> {
-        text.split_whitespace()
-            .take(256)
-            .map(|word| {
-                word.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase()
-            })
-            .filter(|word| !word.is_empty())
-            .collect()
-    };
-    let query = words(query);
-    if query.len() < 4 || query.len() > 64 {
-        return 0;
-    }
-    let prompt = words(prompt);
-    // Missing spaces ("ofhow") should not hide an otherwise exact request.
-    let compact_query = query.concat();
-    if compact_query.chars().count() >= 16 && prompt.concat().contains(&compact_query) {
-        return query.len();
-    }
-    let prepared: Vec<_> = query
-        .iter()
-        .map(|word| jcode_fuzzy::PreparedTokenQuery::new(word))
-        .collect();
-    prompt
-        .windows(query.len())
-        .filter_map(|window| {
-            let matched = query
-                .iter()
-                .zip(&prepared)
-                .zip(window)
-                .filter(|((word, prepared), candidate)| {
-                    word == candidate
-                        || (word.len() >= 4
-                            && candidate.len() <= 128
-                            && prepared.matches_search_text(candidate))
-                })
-                .count();
-            (matched * 5 >= query.len() * 4).then_some(matched)
+    PhraseQuery::new(query).map_or(0, |phrase| phrase.rank(prompt))
+}
+
+fn phrase_words(text: &str, limit: usize) -> Vec<String> {
+    text.split_whitespace()
+        .take(limit)
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
         })
-        .max()
-        .unwrap_or(0)
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// A multiword query prepared once and compared against many user prompts.
+struct PhraseQuery {
+    words: Vec<String>,
+    compact: String,
+    prepared: Vec<jcode_fuzzy::PreparedTokenQuery>,
+}
+
+impl PhraseQuery {
+    fn new(query: &str) -> Option<Self> {
+        let words = phrase_words(query, 256);
+        if words.len() < 4 || words.len() > 64 {
+            return None;
+        }
+        Some(Self {
+            compact: words.concat(),
+            prepared: words
+                .iter()
+                .map(|word| jcode_fuzzy::PreparedTokenQuery::new(word))
+                .collect(),
+            words,
+        })
+    }
+
+    fn rank(&self, prompt: &str) -> usize {
+        let prompt = phrase_words(prompt, 2048);
+        if prompt.len() + 1 < self.words.len() * 4 / 5 {
+            return 0;
+        }
+        // Missing spaces ("ofhow") should not hide an otherwise exact request.
+        if self.compact.chars().count() >= 16 && prompt.concat().contains(&self.compact) {
+            return self.words.len();
+        }
+        prompt
+            .windows(self.words.len())
+            .filter_map(|window| {
+                let matched = self
+                    .words
+                    .iter()
+                    .zip(&self.prepared)
+                    .zip(window)
+                    .filter(|((word, prepared), candidate)| {
+                        word == candidate
+                            || (word.len() >= 4
+                                && candidate.len() <= 128
+                                && prepared.matches_search_text(candidate))
+                    })
+                    .count();
+                (matched * 5 >= self.words.len() * 4).then_some(matched)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Best retyped-request match across every user prompt in a transcript, not
+/// only the opening one. Later follow-ups ("okay lets do that") are what
+/// people remember and retype just as often.
+fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &AtomicBool) -> usize {
+    let mut sink = PhraseSink {
+        phrase,
+        best: 0,
+        cancel,
+    };
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) || sink.best == phrase.words.len() {
+            break;
+        }
+        if let Some(segments) = text_cache::segments(path, cancel) {
+            for (text, source) in segments.iter() {
+                if source == Source::User {
+                    sink.best = sink.best.max(phrase.rank(text));
+                }
+            }
+            continue;
+        }
+        stream_file(path, &mut sink, cancel);
+    }
+    sink.best
+}
+
+struct PhraseSink<'a> {
+    phrase: &'a PhraseQuery,
+    best: usize,
+    cancel: &'a AtomicBool,
+}
+
+impl source::Sink for PhraseSink<'_> {
+    fn text(&mut self, text: &str, source: Source) -> Result<(), &'static str> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err("search cancelled");
+        }
+        if source == Source::User {
+            self.best = self.best.max(self.phrase.rank(text));
+            if self.best == self.phrase.words.len() {
+                return Err("search complete");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stream a transcript too large for the text cache through a sink.
+fn stream_file<S: source::Sink>(path: &Path, sink: &mut S, cancel: &AtomicBool) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut reader = BufReader::with_capacity(
+        64 * 1024,
+        CancellableReader {
+            reader: file,
+            cancel,
+        },
+    );
+    if path.extension().is_some_and(|ext| ext == "jsonl") {
+        let mut line = Vec::new();
+        while !cancel.load(Ordering::Relaxed) {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let _ = source::Walk::new(&mut *sink)
+                        .deserialize(&mut serde_json::Deserializer::from_slice(&line));
+                }
+            }
+        }
+        return;
+    }
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    while source::Walk::new(&mut *sink)
+        .deserialize(&mut deserializer)
+        .is_ok()
+    {}
 }
 
 #[derive(Default)]
@@ -398,11 +504,22 @@ impl TranscriptSearch {
                     // Metadata matches whose words may have come from a user
                     // prompt rather than a sampled tool dump or reasoning.
                     let mut classify = Vec::new();
+                    let phrase = PhraseQuery::new(&query);
+                    // Sessions whose later user prompts may contain the query
+                    // as a retyped phrase, checked after cheaper evidence.
+                    let mut phrase_jobs = Vec::new();
                     for (mut candidate, priority) in
-                        prioritize_candidates(candidates, &query, &tokens, &cancel)
+                        prioritize_candidates(candidates, &phrase, &tokens, &cancel)
                     {
                         if cancel.load(Ordering::Relaxed) {
                             return;
+                        }
+                        if phrase.is_some() && !candidate.paths.is_empty() {
+                            phrase_jobs.push((
+                                candidate.id.clone(),
+                                candidate.paths.clone(),
+                                priority,
+                            ));
                         }
                         if priority.opening_prompt > 0 {
                             let mut rank = fuzzy_metadata_rank_with_scores(
@@ -612,6 +729,32 @@ impl TranscriptSearch {
                                 ..rank
                             };
                             if sender.send((candidate.id, rank)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    // A follow-up prompt the user retyped outranks scattered
+                    // word hits, the same as a retyped opening prompt.
+                    if let Some(phrase) = &phrase {
+                        for (id, paths, priority) in phrase_jobs {
+                            if cancel.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let matched = user_prompt_phrase_rank(&paths, phrase, &cancel);
+                            if matched > priority.opening_prompt
+                                && sender
+                                    .send((
+                                        id,
+                                        SearchRank {
+                                            opening_prompt: matched,
+                                            source_weight: priority
+                                                .source_weight
+                                                .max(Source::User.weight() * tokens.len() as u32),
+                                            ..priority
+                                        },
+                                    ))
+                                    .is_err()
+                            {
                                 return;
                             }
                         }

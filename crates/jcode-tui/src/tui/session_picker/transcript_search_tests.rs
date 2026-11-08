@@ -408,7 +408,7 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
     ];
     let ranked = prioritize_candidates(
         candidates,
-        query,
+        &PhraseQuery::new(query),
         &search_query_tokens(query),
         &AtomicBool::new(false),
     );
