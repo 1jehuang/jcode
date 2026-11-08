@@ -86,6 +86,21 @@ justrust test --remote -p jcode-base --lib benchmark_unchanged_reconciliation --
 
 It measures 1,300 unchanged sessions, not upload or end-to-end cloud latency.
 
+Successful HTTP/1 mobile uploads drain small acknowledgment bodies to preserve
+connection reuse. `http_upload_body` records success, timeout, size-limit or
+read-error outcomes, bounded to 100ms and 64KiB. An already accepted upload remains
+successful if its acknowledgment body is malformed or slow, avoiding duplicate
+retries. HTTP/2 and later multiplexed responses skip this HTTP/1-specific drain.
+`http_upload` includes this bounded cleanup, so its timing boundary differs from
+older builds that stopped at response headers. The controlled keep-alive benchmark:
+
+```bash
+justrust test --remote -p jcode-base --lib benchmark_mobile_upload_keep_alive -- --ignored --nocapture
+```
+
+It injects a 30ms per-connection delay and an 8ms body delay. Connection counts
+demonstrate reuse, but its elapsed times are not production API measurements.
+
 A high total alone is not proof of the cause. Compare cache hits/misses, success
 versus failure, cold versus warm connections and local versus daemon stage timing.
 Do not claim a cold VM wake or a full end-to-end cloud resume is subsecond just

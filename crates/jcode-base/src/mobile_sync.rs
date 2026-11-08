@@ -288,7 +288,8 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
     }
     let _lock = state_lock()?;
     let mut current = load_state();
-    if current.enabled && current.generation == generation && merge_progress(&mut current, updates) {
+    if current.enabled && current.generation == generation && merge_progress(&mut current, updates)
+    {
         storage::write_json_secret(&state_path()?, &current)?;
     }
     Ok(())
@@ -533,8 +534,46 @@ async fn upload(
         // Response bodies can echo private content or credentials.
         anyhow::bail!("mobile sync upload returned {status}");
     }
+    // Dropping an unread HTTP/1 body closes the pooled connection. HTTP/2
+    // streams can be cancelled without sacrificing their shared connection.
+    if matches!(
+        response.version(),
+        reqwest::Version::HTTP_10 | reqwest::Version::HTTP_11
+    ) {
+        drain_upload_response(response).await;
+    }
     timing.outcome = "success";
     Ok(())
+}
+
+const UPLOAD_RESPONSE_DRAIN_LIMIT: usize = 64 * 1024;
+const UPLOAD_RESPONSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+async fn drain_upload_response(mut response: reqwest::Response) -> &'static str {
+    let mut timing = SyncTiming::new("http_upload_body");
+    // The server has already accepted the upload. A broken, oversized or slow
+    // acknowledgment must not turn success into a retry of accepted messages.
+    timing.outcome = match tokio::time::timeout(UPLOAD_RESPONSE_DRAIN_TIMEOUT, async {
+        let mut bytes = 0usize;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes = bytes.saturating_add(chunk.len());
+                    if bytes > UPLOAD_RESPONSE_DRAIN_LIMIT {
+                        return "size_limit";
+                    }
+                }
+                Ok(None) => return "success",
+                Err(_) => return "read_error",
+            }
+        }
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => "timeout",
+    };
+    timing.outcome
 }
 
 fn valid_session_id(id: &str) -> bool {
@@ -783,6 +822,9 @@ async fn background_sync() {
     }
 }
 
+#[cfg(test)]
+#[path = "mobile_sync_http_tests.rs"]
+mod http_tests;
 #[cfg(test)]
 #[path = "mobile_sync_tests.rs"]
 mod tests;
