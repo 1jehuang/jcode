@@ -1037,6 +1037,7 @@ impl App {
                     // line while a turn is running.
                     biased;
                     event = event_stream.next() => {
+                        super::wake_stats::note("terminal");
                         if event.is_some() {
                             let event_redraw = remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
                             needs_redraw |= event_redraw;
@@ -1055,11 +1056,13 @@ impl App {
                         }
                     }
                     _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                        super::wake_stats::note("spinner");
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
                         }
                     }
                     _ = redraw_interval.tick() => {
+                        super::wake_stats::note("tick");
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
                     _ = async {
@@ -1068,9 +1071,14 @@ impl App {
                             None => futures::future::pending::<()>().await,
                         }
                     } => {
+                        super::wake_stats::note("deferred_redraw");
                         deferred_redraw_at = None;
                     }
                     event = remote_conn.next_event() => {
+                        match &event {
+                            crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
+                            crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                        }
                         let (outcome, event_redraw) = remote::handle_remote_event(
                             &mut self,
                             &mut terminal,
@@ -1101,6 +1109,10 @@ impl App {
                         }
                     }
                     bus_event = bus_receiver_remote.recv() => {
+                        match &bus_event {
+                            Ok(event) => super::wake_stats::note_debug("bus", event),
+                            Err(_) => super::wake_stats::note("bus:lagged"),
+                        }
                         needs_redraw |= remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
                     }
                 }

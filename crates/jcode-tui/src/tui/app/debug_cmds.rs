@@ -1156,6 +1156,7 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
             "idle_animation_area": crate::tui::ui::last_idle_animation_area()
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
+            "wake_sources": super::wake_stats::snapshot(),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
             // Unlike `idle_animation.last_full_frame_reason`, which is sticky,
             // this is evaluated against current state, so an expired notice

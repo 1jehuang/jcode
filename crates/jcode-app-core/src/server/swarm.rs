@@ -856,7 +856,10 @@ pub(super) async fn monitor_wait_status(
 ) {
     let mut changes = crate::wait_registry::subscribe_changes();
     let mut live_changes = super::live_status::subscribe_changes();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    // Transitions are pushed by the watch channels above. The tick only ages
+    // displayed wait/elapsed counters, and each tick fans a full swarm status
+    // out to every attached client, so keep it coarse to let clients sleep.
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut previous = HashSet::<String>::new();
     loop {

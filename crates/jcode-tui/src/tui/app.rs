@@ -131,6 +131,7 @@ mod terminal_setup_command;
 mod terminal_title;
 mod todo_completion;
 mod todos_view;
+mod wake_stats;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;

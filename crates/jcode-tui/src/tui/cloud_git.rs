@@ -390,6 +390,12 @@ pub(crate) fn refresh_soon() {
     probe_wake().notify_waiters();
 }
 
+/// Sleep until the next SSH probe is due: the focus-dependent period, or an
+/// earlier wake from focus regain or a repo-mutating tool.
+pub(crate) async fn wait_for_next_probe() {
+    let _ = tokio::time::timeout(probe_period(), probe_wake().notified()).await;
+}
+
 /// Starts exactly two independent workers for this attach. No shared cache
 /// with the ordinary local status-line probe, and no stale success on failure.
 #[cfg(not(test))]
@@ -445,8 +451,7 @@ pub(crate) fn gather() -> Option<DualGitInfo> {
                             crate::bus::Bus::global()
                                 .publish(crate::bus::BusEvent::GitInfoRefreshed);
                         }
-                        let wake = probe_wake();
-                        let _ = tokio::time::timeout(probe_period(), wake.notified()).await;
+                        wait_for_next_probe().await;
                     }
                 });
             });

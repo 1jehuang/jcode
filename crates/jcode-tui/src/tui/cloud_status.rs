@@ -314,7 +314,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                         directories,
                     );
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    super::cloud_git::wait_for_next_probe().await;
                 }
             });
         });
