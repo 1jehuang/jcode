@@ -102,6 +102,9 @@ pub fn focused_cli_session() -> Result<Option<String>> {
         .and_then(|dir| std::fs::metadata(dir.join("client_sessions")).ok())
         .and_then(|meta| meta.modified().ok());
     let key = (window.pid, registry_stamp);
+    // Same cache-entry shape as the other focused-session caches; the tuple
+    // stays local to this static.
+    #[allow(clippy::type_complexity)]
     static CACHE: std::sync::Mutex<
         Option<(
             (u32, Option<std::time::SystemTime>),

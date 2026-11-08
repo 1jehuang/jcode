@@ -2,12 +2,12 @@
   "threshold_loc": 1200,
   "tracked_files": {
     "crates/jcode-app-core/src/agent_tests.rs": 3195,
-    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1658,
+    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1661,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1306,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1310,
     "crates/jcode-app-core/src/tool/browser_fast_tests.rs": 1286,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1439,
-    "crates/jcode-app-core/src/tool/tests.rs": 1976,
+    "crates/jcode-app-core/src/tool/tests.rs": 1998,
     "crates/jcode-base/src/auth/tests.rs": 1206,
     "crates/jcode-base/src/compaction_tests.rs": 1351,
     "crates/jcode-base/src/config_tests.rs": 1760,
@@ -15,7 +15,7 @@
     "crates/jcode-base/src/provider/tests.rs": 1276,
     "crates/jcode-base/src/provider/tests/model_resolution.rs": 2248,
     "crates/jcode-base/src/provider_catalog_tests.rs": 1424,
-    "crates/jcode-base/src/session_tests/cases.rs": 3298,
+    "crates/jcode-base/src/session_tests/cases.rs": 3309,
     "crates/jcode-base/src/usage/tests.rs": 1289,
     "crates/jcode-harness-api-server/src/translate_tests.rs": 4079,
     "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 2072,
@@ -28,7 +28,7 @@
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1589,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1245,
     "crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs": 3305,
-    "crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs": 1672,
+    "crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs": 1684,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_01/part_01.rs": 1734,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_04.rs": 2622,
     "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 2336,
@@ -48,7 +48,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1344,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1476,
     "src/cli/args/tests.rs": 1225,
-    "src/cli/commands_tests.rs": 1764
+    "src/cli/commands_tests.rs": 1765
   },
   "version": 1
 }
