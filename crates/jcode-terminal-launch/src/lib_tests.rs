@@ -671,6 +671,7 @@ fn preferred_terminal_is_tried_before_detected_emulators() {
 }
 
 #[test]
+#[cfg(unix)]
 fn macos_kitty_open_command_launches_app_bundle() {
     // kitty installed as an app is usually not on the LaunchAgent's PATH,
     // so it is opened through LaunchServices like the setup scripts do.
@@ -696,6 +697,49 @@ fn macos_kitty_open_command_launches_app_bundle() {
             "cd '/work tree' && exec env JCODE_FRESH_SPAWN=1 '/opt/jcode' '--resume'",
         ]
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn macos_kitty_open_command_serializes_runtime_env_into_inner_script() {
+    // `open` launches kitty through LaunchServices, so neither our env nor the
+    // cwd reach the spawned jcode; the runtime context has to ride along in
+    // the inner script, exactly like the Apple Terminal and Ghostty paths.
+    let command = TerminalCommand::new("/opt/jcode", vec!["--resume".to_string()])
+        .fresh_spawn()
+        .runtime_env(vec![
+            (
+                "JCODE_HOME".to_string(),
+                "/tmp/kitty home/it's 🧪".to_string(),
+            ),
+            ("JCODE_SOCKET".to_string(), "/tmp/kitty.sock".to_string()),
+            (
+                "JCODE_API_KEY".to_string(),
+                "must-not-propagate".to_string(),
+            ),
+        ]);
+    let cmd = macos_kitty_open_command(&command, Path::new("/work tree"));
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        &args[..7],
+        [
+            "-na",
+            "kitty",
+            "--args",
+            "--title",
+            "jcode",
+            "/bin/bash",
+            "-lc"
+        ]
+    );
+    assert_eq!(
+        args[7],
+        "cd '/work tree' && exec 'env' '-u' 'JCODE_API_SOCKET' '-u' 'JCODE_NO_AUTO_UPDATE' 'JCODE_FRESH_SPAWN=1' 'JCODE_HOME=/tmp/kitty home/it'\"'\"'s 🧪' 'JCODE_SOCKET=/tmp/kitty.sock' '/opt/jcode' '--resume'"
+    );
+    assert!(!args[7].contains("must-not-propagate"));
 }
 
 #[test]
