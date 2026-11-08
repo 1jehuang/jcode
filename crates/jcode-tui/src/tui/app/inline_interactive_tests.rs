@@ -50,7 +50,7 @@ use super::{
     model_picker_route_is_default, model_picker_route_is_recommended,
     next_model_favorite_after_current, picker_is_runtime_model_picker,
     remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-    remote_model_catalog_snapshot_is_safe,
+    remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
 };
 use crate::tui::{
     AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -662,7 +662,27 @@ fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     }
+}
+
+#[test]
+fn route_effort_support_covers_effort_capable_runtimes_only() {
+    assert!(route_supports_reasoning_effort("claude-oauth"));
+    assert!(route_supports_reasoning_effort("claude-api"));
+    assert!(route_supports_reasoning_effort("openai-oauth"));
+    assert!(route_supports_reasoning_effort("openai-api-key"));
+    assert!(route_supports_reasoning_effort("openrouter"));
+    assert!(!route_supports_reasoning_effort(
+        "openai-compatible:llamacpp"
+    ));
+    assert!(!route_supports_reasoning_effort("openai-compatible:zai"));
+    assert!(!route_supports_reasoning_effort("copilot"));
+    assert!(!route_supports_reasoning_effort("bedrock"));
+    assert!(!route_supports_reasoning_effort("https"));
+    assert!(!route_supports_reasoning_effort("openai-compatible"));
+    assert!(!route_supports_reasoning_effort("remote-catalog"));
+    assert!(!route_supports_reasoning_effort("current"));
 }
 
 #[test]

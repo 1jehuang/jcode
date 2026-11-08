@@ -1006,6 +1006,7 @@ impl Provider for GeminiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }

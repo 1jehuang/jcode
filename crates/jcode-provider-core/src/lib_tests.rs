@@ -395,6 +395,7 @@ impl Provider for SnapshotTestProvider {
             detail: "test route".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }]
     }
 
@@ -442,6 +443,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://openrouter.ai/api/v1".to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     assert_eq!(selection.model, "openrouter/owl-alpha");
     assert_eq!(selection.runtime_key, RuntimeKey::OpenRouter);
@@ -455,6 +457,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://integrate.api.nvidia.com/v1".to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     assert_eq!(
         selection.runtime_key,
@@ -475,6 +478,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
         cheapness: None,
         usage: None,
+        reasoning_efforts: None,
     });
     assert_eq!(selection.runtime_key, RuntimeKey::GrokBuild);
     assert_eq!(selection.runtime_key.stable_id(), "grok-build");
@@ -488,6 +492,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: String::new(),
         cheapness: None,
         usage: None,
+        reasoning_efforts: None,
     });
     assert_eq!(prefixed.routed_model_spec(), "grok-build:grok-4.6");
 }
@@ -517,29 +522,4 @@ fn grok_build_runtime_key_is_internally_tagged_wire_safe() {
     assert_eq!(json, serde_json::json!({"kind": "grok-build"}));
     let decoded: RuntimeKey = serde_json::from_value(json).expect("GrokBuild must deserialize");
     assert_eq!(decoded, RuntimeKey::GrokBuild);
-}
-
-// Clients read a route's effort ladder from the route payload; older
-// daemons' routes, without it, must still deserialize.
-#[test]
-fn serialized_route_reports_its_effort_ladder_and_round_trips() {
-    let route = ModelRoute {
-        model: "gpt-5.4".to_string(),
-        provider: "OpenRouter".to_string(),
-        api_method: "openrouter".to_string(),
-        available: true,
-        detail: String::new(),
-        usage: None,
-        cheapness: None,
-    };
-    let value = serde_json::to_value(&route).unwrap();
-    assert_eq!(
-        value["reasoning_efforts"],
-        serde_json::json!(OPENROUTER_SELECTABLE_EFFORTS)
-    );
-    assert_eq!(serde_json::from_value::<ModelRoute>(value).unwrap(), route);
-
-    let mut legacy = serde_json::to_value(&route).unwrap();
-    legacy.as_object_mut().unwrap().remove("reasoning_efforts");
-    assert_eq!(serde_json::from_value::<ModelRoute>(legacy).unwrap(), route);
 }

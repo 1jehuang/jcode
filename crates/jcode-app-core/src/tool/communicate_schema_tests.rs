@@ -349,6 +349,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
             detail: "API key".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
         jcode_provider_core::ModelRoute {
             model: "claude-fable-5".to_string(),
@@ -358,6 +359,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
     ];
     let output =

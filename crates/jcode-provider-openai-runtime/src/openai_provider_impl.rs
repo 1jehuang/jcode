@@ -1059,8 +1059,8 @@ impl Provider for OpenAIProvider {
         }
     }
 
-    fn available_efforts(&self) -> Vec<&'static str> {
-        let model = jcode_provider_core::model_id::canonical(&self.model());
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        let model = jcode_provider_core::model_id::canonical(model);
         // Platform-API-only GPT Pro models never appear in the Codex catalog,
         // so their ladders are pinned from live Responses API behavior:
         // gpt-5-pro accepts only `high`; newer pro generations accept

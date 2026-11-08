@@ -575,6 +575,7 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "m".to_string(),
@@ -584,6 +585,7 @@ mod tests {
                 detail: "duplicate".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "m".to_string(),
@@ -593,6 +595,7 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ];
 
@@ -612,6 +615,7 @@ mod tests {
                 detail: "generic transport".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "qwen".to_string(),
@@ -621,6 +625,7 @@ mod tests {
                 detail: "profile transport".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "qwen".to_string(),
@@ -630,6 +635,7 @@ mod tests {
                 detail: "different provider".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "qwen".to_string(),
@@ -639,6 +645,7 @@ mod tests {
                 detail: "distinct profile route".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ];
 
@@ -691,6 +698,7 @@ mod tests {
                 detail: format!("route-{i}"),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
 

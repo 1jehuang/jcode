@@ -100,6 +100,7 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         })
         .collect();
 

@@ -67,6 +67,7 @@ impl JcodeProvider {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }
@@ -197,6 +198,10 @@ impl Provider for JcodeProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         self.inner.set_reasoning_effort(effort)
+    }
+
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        self.inner.reasoning_efforts_for_model(model)
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {

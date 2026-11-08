@@ -198,6 +198,7 @@ mod tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }
     }
 
@@ -402,6 +403,7 @@ mod generation_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }
     }
 
@@ -520,6 +522,7 @@ mod unified_rank_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }
     }
 
@@ -560,6 +563,7 @@ mod unified_rank_account_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }];
         let ranked = rank_fallback_routes(
             &routes,

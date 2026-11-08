@@ -647,6 +647,7 @@ impl Provider for CursorCliProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }

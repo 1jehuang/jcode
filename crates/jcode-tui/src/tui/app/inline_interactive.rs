@@ -100,6 +100,7 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 
 #[path = "inline_interactive_placeholder_routes.rs"]
 mod placeholder_routes;
+use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
@@ -812,6 +813,7 @@ impl App {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
     }
@@ -1726,6 +1728,7 @@ impl App {
                 detail: "catalog still loading".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             }]
         } else {
             routes
@@ -1863,12 +1866,18 @@ impl App {
             }
 
             // Expand each route only across the effort ladder its runtime can
-            // actually apply.
+            // actually apply. The same model can be reachable through native
+            // OpenAI (where `max` is real) and OpenRouter (where `max` aliases
+            // `xhigh`), so model-id-only inference over-advertises values.
             let mut effort_routes = Vec::new();
             let mut plain_routes = Vec::new();
             let mut model_efforts = Vec::new();
             for route in entry_routes {
-                let efforts = jcode_provider_core::route_reasoning_efforts(&route.api_method, name);
+                let efforts = if route_supports_reasoning_effort(&route.api_method) {
+                    inferred_reasoning_efforts(Some(&route.api_method), Some(name))
+                } else {
+                    Vec::new()
+                };
                 if efforts.is_empty() {
                     plain_routes.push(route);
                 } else {

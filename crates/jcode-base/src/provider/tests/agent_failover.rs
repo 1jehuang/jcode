@@ -302,6 +302,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 },
             ],
         );

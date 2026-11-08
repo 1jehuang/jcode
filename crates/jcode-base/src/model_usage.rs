@@ -528,6 +528,7 @@ mod tests {
             detail: String::new(),
             cheapness: None,
             usage: None,
+            reasoning_efforts: None,
         }
     }
 

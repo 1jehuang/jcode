@@ -1154,9 +1154,9 @@ impl Provider for CopilotApiProvider {
         Ok(())
     }
 
-    fn available_efforts(&self) -> Vec<&'static str> {
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
         const KNOWN: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-        let supported = self.efforts_for(&self.model());
+        let supported = self.efforts_for(model);
         KNOWN
             .into_iter()
             .filter(|e| supported.iter().any(|s| s == e))

@@ -53,8 +53,7 @@ pub use models::{
 };
 pub use reasoning::{
     DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    canonical_reasoning_effort, inferred_reasoning_efforts, route_reasoning_efforts,
-    route_supports_reasoning_effort,
+    canonical_reasoning_effort, inferred_reasoning_efforts,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
@@ -347,9 +346,15 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Ordered reasoning efforts [`Provider::set_reasoning_effort`] accepts
+    /// while `model` is selected.
+    fn reasoning_efforts_for_model(&self, _model: &str) -> Vec<&'static str> {
+        vec![]
+    }
+
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
-        vec![]
+        self.reasoning_efforts_for_model(&self.model())
     }
 
     /// Get the active service tier override (if applicable).
@@ -924,7 +929,6 @@ pub struct NativeCompactionResult {
 
 /// A single route to access a model: model + provider + API method
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(into = "SerializedModelRoute")]
 pub struct ModelRoute {
     pub model: String,
     pub provider: String,
@@ -935,46 +939,11 @@ pub struct ModelRoute {
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<jcode_usage_types::ModelUsage>,
-}
-
-/// [`ModelRoute`] as sent to clients, which also get the route's effort
-/// ladder ([`route_reasoning_efforts`]); it is derived, so never read back.
-#[derive(Serialize)]
-struct SerializedModelRoute {
-    model: String,
-    provider: String,
-    api_method: String,
-    available: bool,
-    detail: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cheapness: Option<RouteCheapnessEstimate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<jcode_usage_types::ModelUsage>,
-    reasoning_efforts: Vec<&'static str>,
-}
-
-impl From<ModelRoute> for SerializedModelRoute {
-    fn from(route: ModelRoute) -> Self {
-        let ModelRoute {
-            model,
-            provider,
-            api_method,
-            available,
-            detail,
-            cheapness,
-            usage,
-        } = route;
-        Self {
-            reasoning_efforts: route_reasoning_efforts(&api_method, &model),
-            model,
-            provider,
-            api_method,
-            available,
-            detail,
-            cheapness,
-            usage,
-        }
-    }
+    /// Reasoning efforts [`Provider::set_reasoning_effort`] accepts after
+    /// switching to this route, from the runtime that serves it. `None` when
+    /// that runtime is not loaded, so its ladder is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// Exact runtime identity for a selected model route.

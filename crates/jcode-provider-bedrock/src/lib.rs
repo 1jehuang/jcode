@@ -1480,6 +1480,7 @@ impl Provider for BedrockProvider {
                     },
                     usage: None,
                     cheapness: Self::route_pricing(&model),
+                    reasoning_efforts: None,
                 }
             })
             .collect()

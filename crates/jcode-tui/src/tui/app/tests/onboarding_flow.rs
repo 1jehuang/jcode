@@ -37,6 +37,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "gpt-5.1".to_string(),
@@ -46,6 +47,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string(),
@@ -55,6 +57,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ]
     }

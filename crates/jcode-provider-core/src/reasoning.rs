@@ -95,45 +95,6 @@ pub fn inferred_reasoning_efforts(
     Vec::new()
 }
 
-/// Whether a model route's runtime can apply a per-request reasoning effort.
-/// Other routes (Copilot, Bedrock, Antigravity CLI, remote-catalog
-/// placeholders, ...) have no effort a picker could apply.
-pub fn route_supports_reasoning_effort(api_method: &str) -> bool {
-    use crate::ModelRouteApiMethod as Method;
-    match Method::parse(api_method) {
-        Method::ClaudeOAuth
-        | Method::AnthropicApiKey
-        | Method::OpenAIOAuth
-        | Method::OpenAIApiKey
-        | Method::OpenRouter => true,
-        // Named OpenAI-compatible profiles expose effort through `/effort`.
-        // Expanding them in the picker creates one duplicate row per effort.
-        Method::OpenAiCompatible { .. } => false,
-        Method::JcodeSubscription
-        | Method::GrokBuild
-        | Method::Copilot
-        | Method::Cursor
-        | Method::Bedrock
-        | Method::CodeAssistOAuth
-        | Method::AntigravityHttps
-        | Method::RemoteCatalog
-        | Method::Current
-        | Method::Other(_) => false,
-    }
-}
-
-/// The effort ladder selectable for `model` on one route: the model picker's
-/// rows, and what route payloads report to clients. The same model can be
-/// reachable through native OpenAI (where `max` is real) and OpenRouter
-/// (where `max` aliases `xhigh`), so the route's method decides, not the id.
-pub fn route_reasoning_efforts(api_method: &str, model: &str) -> Vec<&'static str> {
-    if route_supports_reasoning_effort(api_method) {
-        inferred_reasoning_efforts(Some(api_method), Some(model))
-    } else {
-        Vec::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,44 +127,6 @@ mod tests {
             inferred_reasoning_efforts(Some("openai-compatible:zai"), Some("glm-5.3-flash")),
             OPENAI_SELECTABLE_EFFORTS
         );
-    }
-
-    #[test]
-    fn route_ladder_comes_from_effort_capable_route_runtimes_only() {
-        for method in [
-            "claude-oauth",
-            "claude-api",
-            "openai-oauth",
-            "openai-api-key",
-            "openrouter",
-        ] {
-            assert!(route_supports_reasoning_effort(method), "{method}");
-        }
-        for method in [
-            "openai-compatible:llamacpp",
-            "openai-compatible:zai",
-            "openai-compatible",
-            "copilot",
-            "bedrock",
-            "https",
-            "remote-catalog",
-            "current",
-        ] {
-            assert!(!route_supports_reasoning_effort(method), "{method}");
-            assert!(
-                route_reasoning_efforts(method, "gpt-5.4").is_empty(),
-                "{method}"
-            );
-        }
-        assert_eq!(
-            route_reasoning_efforts("openrouter", "gpt-5.4"),
-            OPENROUTER_SELECTABLE_EFFORTS
-        );
-        assert_eq!(
-            route_reasoning_efforts("openai-oauth", "gpt-5.4"),
-            OPENAI_SELECTABLE_EFFORTS
-        );
-        assert!(route_reasoning_efforts("claude-oauth", "claude-sonnet-4-5").is_empty());
     }
 
     #[test]

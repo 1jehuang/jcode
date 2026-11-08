@@ -475,6 +475,7 @@ impl AuthLifecycleDriver {
                 detail: "fixture live-catalog route".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }
@@ -720,6 +721,7 @@ mod tests {
             detail: "stale route".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }
     }
 
@@ -1089,6 +1091,7 @@ mod tests {
                 detail: "wrong namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "qwen-3-235b-a22b-instruct-2507".to_string(),
@@ -1098,6 +1101,7 @@ mod tests {
                 detail: "correct namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             ModelRoute {
                 model: "llama3.1-8b".to_string(),
@@ -1107,6 +1111,7 @@ mod tests {
                 detail: "correct namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ];
 
@@ -1180,6 +1185,7 @@ mod tests {
             detail: "https://api.cerebras.ai/v1".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
         result.catalog_report = validate_catalog_invariants(
             &result.activation,

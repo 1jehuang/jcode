@@ -279,6 +279,38 @@ fn openai_credential_mode_runtime_provider_identity_round_trips() {
 }
 
 #[tokio::test]
+async fn openai_reasoning_efforts_for_a_model_match_what_selecting_it_accepts() {
+    let provider = OpenAIProvider::new_browser_only();
+    *provider.model.write().await = "gpt-5.6".to_string();
+    provider
+        .model_reasoning_efforts
+        .write()
+        .expect("reasoning effort catalog lock")
+        .insert(
+            "gpt-5.5".to_string(),
+            vec!["low".to_string(), "high".to_string()],
+        );
+
+    for model in ["gpt-5-pro", "gpt-5.5"] {
+        let reported = provider.reasoning_efforts_for_model(model);
+        *provider.model.write().await = model.to_string();
+        assert_eq!(provider.available_efforts(), reported, "{model}");
+        for effort in jcode_provider_core::OPENAI_SELECTABLE_EFFORTS {
+            assert_eq!(
+                provider.set_reasoning_effort(effort).is_ok(),
+                reported.contains(effort),
+                "{model} {effort}"
+            );
+        }
+        *provider.model.write().await = "gpt-5.6".to_string();
+    }
+    assert_eq!(
+        provider.reasoning_efforts_for_model("gpt-5-pro"),
+        vec!["high", "swarm"]
+    );
+}
+
+#[tokio::test]
 async fn openai_available_efforts_follow_active_model_catalog_metadata() {
     let provider = OpenAIProvider::new_browser_only();
     *provider.model.write().await = "gpt-5.6".to_string();

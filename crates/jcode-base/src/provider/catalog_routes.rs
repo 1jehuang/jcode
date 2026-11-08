@@ -49,6 +49,7 @@ pub fn simplified_model_routes_for_picker(
                     },
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 });
                 continue;
             }
@@ -61,6 +62,7 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 });
             }
             if auth.openai_has_api_key {
@@ -72,6 +74,7 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 });
             }
             if auth.openai == AuthState::NotConfigured {
@@ -83,6 +86,7 @@ pub fn simplified_model_routes_for_picker(
                     detail: "no credentials".to_string(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 });
             }
             continue;
@@ -150,6 +154,7 @@ pub fn simplified_model_routes_for_picker(
             detail,
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -162,6 +167,7 @@ pub fn simplified_model_routes_for_picker(
             detail: "simplified catalog".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -351,6 +357,7 @@ pub fn append_simplified_anthropic_model_routes(
             detail,
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 }
@@ -409,6 +416,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             detail: "OPENROUTER_API_KEY not set".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -472,7 +480,58 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             }
         }
     }
-    expand_saved_account_routes(routes)
+    let mut routes = expand_saved_account_routes(routes);
+    for route in &mut routes {
+        route.reasoning_efforts = route_reasoning_efforts(provider, route);
+    }
+    routes
+}
+
+/// Efforts the runtime that `set_reasoning_effort` dispatches to accepts for
+/// this route's model; `None` when that runtime is not loaded.
+pub(super) fn route_reasoning_efforts(
+    provider: &MultiProvider,
+    route: &ModelRoute,
+) -> Option<Vec<String>> {
+    use jcode_provider_core::ModelRouteApiMethod as Method;
+    let registry = ProviderRegistry::new(provider);
+    // A direct OpenAI-compatible or jcode subscription runtime can occupy the
+    // OpenRouter slot and report its routes under its own api method.
+    let openrouter_slot_serving_route = || {
+        registry.real_openrouter().filter(|runtime| {
+            runtime
+                .direct_openai_compatible_route_parts()
+                .is_some_and(|(_, api_method, _)| api_method == route.api_method)
+        })
+    };
+    let runtime = match Method::parse(&route.api_method) {
+        Method::ClaudeOAuth | Method::AnthropicApiKey => provider.anthropic_provider(),
+        Method::OpenAIOAuth | Method::OpenAIApiKey => provider.openai_provider(),
+        Method::Copilot => provider.copilot_provider(),
+        Method::OpenRouter => registry.real_openrouter(),
+        Method::OpenAiCompatible {
+            profile_id: Some(profile_id),
+        } => registry
+            .compatible_profile(&profile_id)
+            .or_else(openrouter_slot_serving_route),
+        Method::JcodeSubscription => openrouter_slot_serving_route(),
+        Method::GrokBuild => registry.compatible_profile(GROK_BUILD_PROFILE_ID),
+        // MultiProvider rejects reasoning effort for these runtimes.
+        Method::Cursor | Method::Bedrock | Method::CodeAssistOAuth | Method::AntigravityHttps => {
+            return Some(Vec::new());
+        }
+        Method::OpenAiCompatible { profile_id: None }
+        | Method::RemoteCatalog
+        | Method::Current
+        | Method::Other(_) => None,
+    }?;
+    Some(
+        runtime
+            .reasoning_efforts_for_model(&route.model)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Anthropic models via OAuth and/or API key.
@@ -511,6 +570,7 @@ pub(super) fn append_anthropic_routes(
                     detail,
                     usage: None,
                     cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
+                    reasoning_efforts: None,
                 });
             }
         }
@@ -721,6 +781,7 @@ fn named_provider_profile_routes(
             detail: detail.clone(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
     routes
@@ -759,6 +820,7 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
     }
@@ -781,6 +843,7 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
     }
@@ -883,6 +946,7 @@ fn append_openrouter_routes(
                 detail,
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
         // Add per-provider routes from endpoints cache

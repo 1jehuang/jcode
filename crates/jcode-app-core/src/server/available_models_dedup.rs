@@ -45,6 +45,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 detail,
                 usage,
                 cheapness,
+                reasoning_efforts,
             } = route;
             (
                 model,
@@ -54,6 +55,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 strip_relative_age_text(detail),
                 usage,
                 cheapness,
+                reasoning_efforts,
             )
         })
         .collect();
