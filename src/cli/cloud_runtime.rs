@@ -72,6 +72,19 @@ for i in $(seq 1 60); do
       exit 0
     fi
   fi
+  # The old daemon may hand its sessions to a detached successor on stop. The
+  # unit then fails with "already running" while that successor serves.
+  if [ "$i" -ge 10 ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
+    target=$(dirname "$(readlink -f /opt/jcode-cloud/jcode)")
+    for p in $(pgrep -u "$(id -u)" -f ' serve$'); do
+      exe=$(readlink -f /proc/$p/exe 2>/dev/null)
+      case "$exe" in "$target"/*)
+        systemctl --user reset-failed jcode-cloud.service 2>/dev/null
+        say "daemon ready outside systemd (pid $p, handed off): $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+        exit 0;;
+      esac
+    done
+  fi
   sleep 1
 done
 say "daemon did not become ready; see: journalctl --user -u jcode-cloud.service"
