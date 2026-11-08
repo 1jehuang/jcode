@@ -1155,13 +1155,24 @@ impl SessionPicker {
             return;
         };
 
+        // A running turn keeps appending to its transcript. Follow it closely
+        // so the preview tracks the session like its own chat view would.
+        let refresh_after = if self
+            .live_presence
+            .get(&cache_session_id)
+            .is_some_and(|presence| presence.streaming)
+        {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(15)
+        };
         if self
             .preview_extras
             .get(&cache_session_id)
             .is_some_and(|extras| {
                 extras
                     .loaded_at
-                    .is_none_or(|at| at.elapsed() < Duration::from_secs(15))
+                    .is_none_or(|at| at.elapsed() < refresh_after)
             })
             || self.preview_load_failures.contains(&cache_session_id)
             || self
@@ -1677,6 +1688,9 @@ impl SessionPicker {
                 Some(line) if !tokens.is_empty() => Some(line.saturating_sub(2)),
                 _ => None,
             }
+        } else if self.scroll_offset >= self.preview_max_scroll {
+            // Parked at the bottom: keep following a transcript that grows.
+            None
         } else {
             Some(self.scroll_offset as usize)
         };
@@ -1742,7 +1756,17 @@ impl SessionPicker {
             local_auth: host.is_none(),
             machine: host,
             scroll,
-            live: None,
+            live: self
+                .live_presence
+                .get(&session.id)
+                .filter(|presence| presence.streaming)
+                .map(|presence| session_view::LiveTurn {
+                    status: super::ProcessingStatus::Streaming,
+                    elapsed: presence
+                        .streaming_since
+                        .and_then(|since| std::time::SystemTime::now().duration_since(since).ok()),
+                    ..Default::default()
+                }),
             now_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
