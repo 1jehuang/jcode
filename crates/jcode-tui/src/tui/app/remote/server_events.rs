@@ -3221,10 +3221,15 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            app.push_display_message(DisplayMessage::swarm(
-                presentation.title.clone(),
-                presentation.message.clone(),
-            ));
+            let now = std::time::Instant::now();
+            let since_last = app
+                .swarm_last_message_at
+                .insert(sender.clone(), now)
+                .map(|prev| now.duration_since(prev).as_secs_f32());
+            let mut swarm_message =
+                DisplayMessage::swarm(presentation.title.clone(), presentation.message.clone());
+            swarm_message.duration_secs = since_last;
+            app.push_display_message(swarm_message);
             persist_replay_display_message(
                 app,
                 "swarm",

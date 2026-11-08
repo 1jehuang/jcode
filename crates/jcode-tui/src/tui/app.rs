@@ -1424,6 +1424,9 @@ pub struct App {
     /// When `remote_swarm_members` last arrived, so worker stopwatches can
     /// tick locally between server snapshots.
     remote_swarm_members_received_at: Option<std::time::Instant>,
+    /// When each swarm agent last sent us a notification, keyed by sender, so
+    /// notifications can show time since that agent's previous message.
+    swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
