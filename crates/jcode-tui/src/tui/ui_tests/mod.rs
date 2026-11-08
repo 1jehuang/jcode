@@ -3,7 +3,6 @@ use super::*;
 mod cloud_directories;
 mod preview_redraw_schedule;
 mod resume_parity;
-mod stable_status;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
 
@@ -135,9 +134,6 @@ struct TestState {
     pending_soft_interrupts: Vec<String>,
     interleave_message: Option<String>,
     status: ProcessingStatus,
-    status_elapsed: Option<Duration>,
-    status_rate_limit: Option<Duration>,
-    status_background: Vec<crate::tui::BackgroundTaskRow>,
     queue_mode: bool,
     active_skill: Option<String>,
     centered_mode: bool,
@@ -278,7 +274,7 @@ impl crate::tui::TuiState for TestState {
         Vec::new()
     }
     fn elapsed(&self) -> Option<Duration> {
-        self.status_elapsed
+        None
     }
     fn status(&self) -> ProcessingStatus {
         self.status.clone()
@@ -371,10 +367,7 @@ impl crate::tui::TuiState for TestState {
         self.anim_elapsed
     }
     fn rate_limit_remaining(&self) -> Option<Duration> {
-        self.status_rate_limit
-    }
-    fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
-        &self.status_background
+        None
     }
     fn queue_mode(&self) -> bool {
         self.queue_mode
