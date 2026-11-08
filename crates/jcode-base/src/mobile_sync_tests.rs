@@ -1,6 +1,47 @@
 use super::*;
 use jcode_session_types::StoredMessage;
 
+#[tokio::test]
+#[ignore = "manual local filesystem reconciliation benchmark"]
+async fn benchmark_unchanged_reconciliation() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[
+        ("JCODE_HOME", home.path().as_os_str()),
+        ("JCODE_API_KEY", std::ffi::OsStr::new("benchmark-no-network")),
+        ("JCODE_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:1")),
+    ]);
+    DIRTY_SESSIONS.lock().unwrap().clear();
+    let dir = home.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut state = MobileSyncState { enabled: true, ..Default::default() };
+    for index in 0..1300 {
+        let id = format!("benchmark-{index:04}");
+        let path = dir.join(format!("{id}.json"));
+        // An unchanged revision must never need to deserialize a transcript.
+        std::fs::write(&path, b"{}").unwrap();
+        state.sessions.insert(id, SessionProgress {
+            uploaded: 100,
+            mtime_ms: session_mtime_ms(&path),
+            revision: Some(session_revision(&path)),
+            fingerprint: Some(42),
+        });
+    }
+    save_state(&state).unwrap();
+    // Enabling increments the fence, so seed progress in the current generation.
+    state.generation = load_state().generation;
+    save_state(&state).unwrap();
+    let client = reqwest::Client::new();
+    let mut elapsed = Vec::new();
+    for _ in 0..7 {
+        let started = Instant::now();
+        assert_eq!(sync_once(&client).await.unwrap(), SyncReport::default());
+        elapsed.push(started.elapsed().as_micros());
+    }
+    elapsed.sort_unstable();
+    eprintln!("unchanged reconciliation: candidates=1300 passes=7 median_us={} max_us={} samples_us={elapsed:?}", elapsed[3], elapsed[6]);
+}
+
 #[test]
 fn sync_timing_records_only_static_fields_and_elapsed_milliseconds() {
     let mut timing = SyncTiming::new("test_stage");

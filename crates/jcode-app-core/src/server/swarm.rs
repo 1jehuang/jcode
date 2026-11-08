@@ -399,7 +399,7 @@ impl DeadMemberSalvage {
             ));
         }
         parts.push(
-            "Queued tasks will be picked up by assign_next/run_plan; check plan_status for details."
+            "Queued worker lanes start automatically as dependencies and capacity allow; check plan_status for details."
                 .to_string(),
         );
         parts.join(" ")

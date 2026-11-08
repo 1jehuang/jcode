@@ -953,6 +953,7 @@ mod tests {
             priority: priority.to_string(),
             group: None,
             lane_after: None,
+            lane_owner: None,
             confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),
