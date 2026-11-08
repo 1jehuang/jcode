@@ -435,9 +435,9 @@ impl Buffer {
 
     /// Reset all cells in the buffer
     pub fn reset(&mut self) {
-        for cell in &mut self.content {
-            cell.reset();
-        }
+        // ratatui-jcode: bulk fill. Dropping heap symbols still happens, but the
+        // per-cell call and its bounds checks go away.
+        self.content.fill(Cell::EMPTY);
     }
 
     /// Merge an other buffer into this one
