@@ -1819,6 +1819,7 @@ pub(super) async fn handle_client(
             Request::GetCompactedHistory {
                 id,
                 visible_messages,
+                recent_history,
             } => {
                 if handle_get_compacted_history(
                     id,
@@ -1826,6 +1827,7 @@ pub(super) async fn handle_client(
                     &agent,
                     &writer,
                     visible_messages,
+                    recent_history,
                 )
                 .await
                 .is_err()

@@ -490,31 +490,45 @@ pub(super) async fn handle_get_compacted_history(
     agent: &Arc<Mutex<Agent>>,
     writer: &Arc<Mutex<WriteHalf>>,
     visible_messages: usize,
+    recent_history: bool,
 ) -> Result<()> {
     let started = Instant::now();
     let (messages, images, compacted_info, source) = match agent.try_lock() {
         Ok(agent_guard) => {
-            let (messages, images, info) = agent_guard
-                .get_history_and_rendered_images_with_compacted_history(visible_messages);
+            let (messages, images, info) = if recent_history {
+                let (messages, images) = agent_guard.get_history_and_rendered_images();
+                let (messages, images, info) =
+                    recent_history_window(messages, images, visible_messages);
+                (messages, images, Some(info))
+            } else {
+                agent_guard.get_history_and_rendered_images_with_compacted_history(visible_messages)
+            };
             (messages, images, info, "live")
         }
         Err(_) => {
             let session = crate::session::Session::load_for_remote_startup(session_id)
                 .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
-            let (rendered_messages, images, info) =
+            let (rendered_messages, images, info) = if recent_history {
+                let (messages, images) = crate::session::render_messages_and_images(&session);
+                (messages, images, None)
+            } else {
                 crate::session::render_messages_and_images_with_compacted_history(
                     &session,
                     visible_messages,
-                );
-            (
-                rendered_messages
-                    .into_iter()
-                    .map(rendered_to_history_message)
-                    .collect(),
-                images,
-                info,
-                "persisted",
-            )
+                )
+            };
+            let messages = rendered_messages
+                .into_iter()
+                .map(rendered_to_history_message)
+                .collect();
+            let (messages, images, info) = if recent_history {
+                let (messages, images, info) =
+                    recent_history_window(messages, images, visible_messages);
+                (messages, images, Some(info))
+            } else {
+                (messages, images, info)
+            };
+            (messages, images, info, "persisted")
         }
     };
 
@@ -549,6 +563,113 @@ pub(super) async fn handle_get_compacted_history(
         },
     )
     .await
+}
+
+/// Window canonical rendered entries, not raw provider messages. Images follow
+/// their rendered entry and the synthetic marker occupies its own index.
+pub(super) fn recent_history_window(
+    mut messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    visible: usize,
+) -> (
+    Vec<HistoryMessage>,
+    Vec<crate::session::RenderedImage>,
+    crate::session::RenderedCompactedHistoryInfo,
+) {
+    let total = messages.len();
+    let start = total.saturating_sub(visible.max(1));
+    let archived_prompts = messages
+        .iter()
+        .filter(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with("Earlier conversation compacted - ")
+        })
+        .filter_map(|message| {
+            message
+                .content
+                .split("Hidden user prompts: ")
+                .nth(1)?
+                .split('.')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .sum::<usize>();
+    let is_prompt = |message: &&HistoryMessage| {
+        message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
+    };
+    let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
+    let hidden_user_prompts = archived_prompts + excluded_prompts;
+    let info = crate::session::RenderedCompactedHistoryInfo {
+        total_messages: total,
+        visible_messages: total - start,
+        remaining_messages: start,
+        hidden_user_prompts,
+    };
+    if start == 0 {
+        return (messages, images, info);
+    }
+    messages = messages.split_off(start);
+    messages.insert(0, HistoryMessage {
+        response_stats: None,
+        role: "system".to_owned(),
+        content: format!("{}{start} older historical messages hidden. Showing {} of {total} messages. Scroll to the top to load more. Hidden user prompts: {hidden_user_prompts}.", crate::protocol::RECENT_HISTORY_MARKER_PREFIX, info.visible_messages),
+        tool_calls: None,
+        tool_data: None,
+    });
+    let visible_prompts = messages.iter().filter(is_prompt).count();
+    let images = images
+        .into_iter()
+        .filter_map(|mut image| {
+            match &mut image.anchor {
+                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => {
+                    *ordinal = ordinal.checked_sub(excluded_prompts)?;
+                    if *ordinal >= visible_prompts {
+                        return None;
+                    }
+                }
+                Some(crate::session::RenderedImageAnchor::ToolCall { id }) => {
+                    if !messages.iter().any(|message| {
+                        message
+                            .tool_data
+                            .as_ref()
+                            .is_some_and(|tool| &tool.id == id)
+                    }) {
+                        return None;
+                    }
+                }
+                None if image.history_message_index.is_none() => return None,
+                None => {}
+            }
+            if let Some(index) = image.history_message_index {
+                if index < start || index > total {
+                    return None;
+                }
+                image.history_message_index = Some(index - start + 1);
+            }
+            Some(image)
+        })
+        .collect();
+    (messages, images, info)
+}
+
+fn apply_recent_history_base(
+    messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+    messages_base_count: Option<usize>,
+) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
+    if messages_base_count.is_none()
+        && let Some(visible) = history_base
+            .filter(|base| base.count == 0)
+            .and_then(|base| base.recent_messages)
+    {
+        let (messages, images, _) = recent_history_window(messages, images, visible);
+        return (messages, images);
+    }
+    (messages, images)
 }
 
 /// Trim History to the messages after the client's verified prefix.
@@ -821,6 +942,8 @@ async fn send_history_from_persisted_session(
         .map(rendered_to_history_message)
         .collect();
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),
@@ -1154,6 +1277,8 @@ async fn send_history_with_guard(
             )
         });
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),

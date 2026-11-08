@@ -228,6 +228,9 @@ pub enum Request {
     #[serde(rename = "get_compacted_history")]
     GetCompactedHistory {
         id: u64,
+        /// Expand a recent remote window rather than archived compaction.
+        #[serde(default)]
+        recent_history: bool,
         /// Number of leading compacted messages the client wants rendered before the live tail.
         visible_messages: usize,
     },
