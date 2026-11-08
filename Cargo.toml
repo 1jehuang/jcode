@@ -97,6 +97,8 @@ members = [
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
+    "vendor/ratatui-jcode/ratatui-core",
+    "vendor/ratatui-jcode/ratatui-widgets",
 ]
 
 [lib]
@@ -637,3 +639,9 @@ jcode-provider-core = { path = "crates/jcode-provider-core" }
 jcode-tui = { path = "crates/jcode-tui", default-features = false, features = ["test-support"] }
 
 [build-dependencies]
+
+# ratatui-jcode: in-tree fork of ratatui-core / ratatui-widgets tuned for
+# jcode's per-frame hot paths. See vendor/ratatui-jcode/README.md.
+[patch.crates-io]
+ratatui-core = { path = "vendor/ratatui-jcode/ratatui-core" }
+ratatui-widgets = { path = "vendor/ratatui-jcode/ratatui-widgets" }

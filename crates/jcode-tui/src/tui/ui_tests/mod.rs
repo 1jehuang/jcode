@@ -141,6 +141,8 @@ struct TestState {
     anim_elapsed: f32,
     now_ms: u64,
     time_since_activity: Option<Duration>,
+    /// `Some(pending)` overrides the trait's conservative default.
+    stream_reveal_pending: Option<bool>,
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
     inline_interactive_state: Option<crate::tui::InlineInteractiveState>,
@@ -291,6 +293,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn time_since_activity(&self) -> Option<Duration> {
         self.time_since_activity
+    }
+    fn stream_reveal_pending(&self) -> bool {
+        self.stream_reveal_pending.unwrap_or(true)
     }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None

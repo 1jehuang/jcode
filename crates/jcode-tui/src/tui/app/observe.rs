@@ -142,6 +142,7 @@ impl App {
             && let Some(session_id) = self.active_client_session_id().map(str::to_string)
         {
             super::helpers::invalidate_todos_cache(&session_id);
+            self.request_remote_todos_refresh_soon();
             // Local sessions also receive TodoUpdated, while remote sessions only
             // observe the completed tool call. Refresh here as well so both paths
             // adopt the same todo-derived title that /resume displays.

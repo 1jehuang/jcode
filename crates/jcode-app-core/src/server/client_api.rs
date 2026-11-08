@@ -97,6 +97,7 @@ impl Client {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+            client_name: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
@@ -221,6 +222,7 @@ impl Client {
             client_instance_id: None,
             client_has_local_history,
             allow_session_takeover,
+            client_name: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

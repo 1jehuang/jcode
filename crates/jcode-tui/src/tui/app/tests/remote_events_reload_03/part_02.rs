@@ -755,6 +755,7 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
             count: 2,
             fingerprint: 0,
             images_fingerprint: None,
+            recent_messages: None,
         },
         prefix: Some(prefix),
         images: Some(vec![crate::session::RenderedImage {

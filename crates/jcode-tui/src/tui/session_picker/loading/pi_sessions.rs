@@ -3,10 +3,17 @@ use super::*;
 pub(in crate::tui::session_picker) fn load_pi_preview_from_path(
     path: &Path,
 ) -> Option<Vec<PreviewMessage>> {
-    load_pi_session_info(path)
-        .ok()
-        .flatten()
-        .map(|session| session.messages_preview)
+    load_pi_external_preview(path).map(|preview| preview.messages)
+}
+
+pub(in crate::tui::session_picker) fn load_pi_external_preview(
+    path: &Path,
+) -> Option<ExternalPreview> {
+    let (session, search) = load_pi_session_info(path).ok().flatten()?;
+    Some(ExternalPreview {
+        messages: session.messages_preview,
+        search,
+    })
 }
 
 pub(super) fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
@@ -108,7 +115,7 @@ pub(super) fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
     }))
 }
 
-pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
+pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<(SessionInfo, SourceBuckets)>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -148,6 +155,7 @@ pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut assistant_message_count = 0usize;
     let mut message_count = 0usize;
     let mut preview = Vec::new();
+    let mut search = SourceBuckets::default();
 
     for line in lines {
         let line = line?;
@@ -208,6 +216,7 @@ pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
                     _ => {}
                 }
                 push_preview_message(&mut preview, role, text);
+                classify_json_into(&mut search, message, message_role_source(role));
             }
             _ => {}
         }
@@ -224,20 +233,20 @@ pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
             jcode_core::util::truncate_str(&session_id, 8)
         )
     });
-    let search_index = build_search_index(
+    let search_index = build_classified_search_index(
         &format!("pi:{session_id}"),
         &short_name,
         &title,
         working_dir.as_deref(),
         None,
-        &preview,
+        &search,
     );
     let first_user_prompt = preview
         .iter()
         .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
         .map(|msg| msg.content.clone());
 
-    Ok(Some(SessionInfo {
+    let session = SessionInfo {
         id: format!("pi:{session_id}"),
         parent_id: None,
         short_name,
@@ -270,5 +279,6 @@ pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         },
         external_path: Some(path.to_string_lossy().to_string()),
         todo_statuses: Vec::new(),
-    }))
+    };
+    Ok(Some((session, search)))
 }

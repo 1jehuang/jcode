@@ -1,9 +1,8 @@
-use super::{BACKGROUND_WAIT_GUIDANCE, StdinInputRequest, Tool, ToolContext, ToolOutput};
+use super::{BACKGROUND_WAIT_GUIDANCE, Tool, ToolContext, ToolOutput};
 use crate::background::TaskResult;
 use crate::bus::{
     BackgroundTaskProgress, BackgroundTaskProgressKind, BackgroundTaskProgressSource,
 };
-use crate::stdin_detect::{self, StdinState};
 use crate::util::truncate_str;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,9 +26,6 @@ use tokio::process::Command as TokioCommand;
 
 const MAX_OUTPUT_LEN: usize = 30000;
 const DEFAULT_TIMEOUT_MS: u64 = 120000;
-const STDIN_POLL_INTERVAL_MS: u64 = 500;
-const STDIN_INITIAL_DELAY_MS: u64 = 300;
-const STDIN_RESPONSE_TIMEOUT_MS: u64 = 1500;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BASH_TOOL_DESCRIPTION: &str =
@@ -623,6 +619,39 @@ fn tool_scratch_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// Every bash command is non-interactive: stdin is /dev/null (callers that
+/// pipe stdin drop it immediately), common tools are told not to prompt, and
+/// on unix the command runs in its own session with no controlling terminal so
+/// prompts that open /dev/tty directly (sudo, ssh, git credentials) fail fast
+/// instead of hanging. The agent sees the failure and reruns non-interactively.
+const NON_INTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", "true"),
+    ("SSH_ASKPASS_REQUIRE", "never"),
+    ("GCM_INTERACTIVE", "never"),
+    ("DEBIAN_FRONTEND", "noninteractive"),
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("SYSTEMD_PAGER", ""),
+    ("NPM_CONFIG_YES", "true"),
+    ("PIP_NO_INPUT", "1"),
+];
+
+#[cfg(not(windows))]
+fn configure_non_interactive(command: &mut TokioCommand) {
+    command.stdin(Stdio::null());
+    command.envs(NON_INTERACTIVE_ENV.iter().copied());
+    command.env_remove("SSH_ASKPASS");
+    unsafe {
+        command.pre_exec(|| {
+            // New session: no controlling tty, own process group (so group
+            // kills still work). Ignore failure if already a group leader.
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
 #[cfg(not(windows))]
 fn configure_tool_scratch(command: &mut TokioCommand) {
     if let Some(dir) = tool_scratch_dir() {
@@ -678,6 +707,7 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
         let mut cmd = TokioCommand::new("bash");
         cmd.arg("-c").arg(cmd_str);
         configure_tool_scratch(&mut cmd);
+        configure_non_interactive(&mut cmd);
         cmd
     }
 }
@@ -710,7 +740,9 @@ fn build_detached_shell_wrapper(command: &str) -> StdCommand {
         .arg(
             r#"eval "$JCODE_RELOAD_DETACH_COMMAND"; status=$?; printf '\n--- Command finished with exit code: %s ---\n' "$status"; exit "$status""#,
         )
-        .env("JCODE_RELOAD_DETACH_COMMAND", command);
+        .env("JCODE_RELOAD_DETACH_COMMAND", command)
+        .envs(NON_INTERACTIVE_ENV.iter().copied())
+        .env_remove("SSH_ASKPASS");
     if let Some(dir) = tool_scratch_dir() {
         cmd.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
     }
@@ -913,8 +945,6 @@ impl BashTool {
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
         let timeout_duration = Duration::from_millis(timeout_ms);
 
-        let has_stdin_channel = ctx.stdin_request_tx.is_some();
-
         let mut command = build_shell_command(&params.command);
         command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         command.envs(crate::session_env::session_env(&ctx.session_id));
@@ -923,10 +953,6 @@ impl BashTool {
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
-        if has_stdin_channel {
-            command.stdin(Stdio::piped());
-        }
 
         if let Some(ref dir) = ctx.working_dir {
             command.current_dir(dir);
@@ -944,8 +970,6 @@ impl BashTool {
             .intent
             .clone()
             .unwrap_or_else(|| params.command.clone());
-        let stdin_tx = ctx.stdin_request_tx.clone();
-        let tool_call_id = ctx.tool_call_id.clone();
         let title_for_work = title.clone();
         // Track progress parsed from output so a timeout promotion starts the
         // background task at the real percentage instead of 0%.
@@ -968,86 +992,11 @@ impl BashTool {
                     stderr_progress,
                 ));
 
-                let stdin_task = if has_stdin_channel {
-                    Some(tokio::spawn(async move {
-                        if let (Some(mut stdin_pipe), Some(stdin_tx)) = (stdin_handle, stdin_tx) {
-                            tokio::time::sleep(Duration::from_millis(STDIN_INITIAL_DELAY_MS)).await;
-
-                            let mut request_counter = 0u32;
-                            loop {
-                                #[cfg(target_os = "linux")]
-                                let state = stdin_detect::linux::check_process_tree(child_pid);
-                                #[cfg(not(target_os = "linux"))]
-                                let state = stdin_detect::is_waiting_for_stdin(child_pid);
-
-                                if state == StdinState::Reading {
-                                    request_counter += 1;
-                                    let request_id =
-                                        format!("stdin-{}-{}", tool_call_id, request_counter);
-                                    let (response_tx, response_rx) =
-                                        tokio::sync::oneshot::channel();
-
-                                    let request = StdinInputRequest {
-                                        request_id,
-                                        prompt: String::new(),
-                                        is_password: false,
-                                        response_tx,
-                                    };
-
-                                    if stdin_tx.send(request).is_err() {
-                                        break;
-                                    }
-
-                                    // Most clients cannot answer stdin prompts. Without a
-                                    // prompt reply, close stdin so commands that read it
-                                    // (e.g. `rg pattern` with no path) see EOF instead of
-                                    // hanging until the tool timeout.
-                                    match tokio::time::timeout(
-                                        Duration::from_millis(STDIN_RESPONSE_TIMEOUT_MS),
-                                        response_rx,
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(input)) => {
-                                            let line = if input.ends_with('\n') {
-                                                input
-                                            } else {
-                                                format!("{}\n", input)
-                                            };
-                                            if stdin_pipe.write_all(line.as_bytes()).await.is_err()
-                                            {
-                                                break;
-                                            }
-                                            if stdin_pipe.flush().await.is_err() {
-                                                break;
-                                            }
-                                        }
-                                        Ok(Err(_)) | Err(_) => {
-                                            drop(stdin_pipe);
-                                            break;
-                                        }
-                                    }
-
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                } else {
-                                    tokio::time::sleep(Duration::from_millis(
-                                        STDIN_POLL_INTERVAL_MS,
-                                    ))
-                                    .await;
-                                }
-                            }
-                        }
-                    }))
-                } else {
-                    drop(stdin_handle);
-                    None
-                };
+                // Commands are always non-interactive: stdin is /dev/null, so
+                // anything that reads it gets EOF immediately.
+                drop(stdin_handle);
 
                 let status = child.wait().await?;
-
-                if let Some(task) = stdin_task {
-                    task.abort();
-                }
 
                 let stdout = stdout_task.await.unwrap_or_default();
                 let stderr = stderr_task.await.unwrap_or_default();
@@ -1312,15 +1261,8 @@ impl BashTool {
 					cmd.envs(cloud_environment);
 					cmd.envs(session_environment);
 					cmd.env("JCODE_SESSION_ID", &session_id_env);
-					#[cfg(unix)]
-					unsafe {
-						cmd.pre_exec(|| {
-							if libc::setpgid(0, 0) == -1 {
-								return Err(std::io::Error::last_os_error());
-							}
-							Ok(())
-						});
-					}
+					// build_shell_command runs the child in its own session
+					// (setsid), so it is already its own process group leader.
                     cmd.kill_on_drop(true);
                     configure_background_command_stdio(&mut cmd);
                     if let Some(ref dir) = working_dir {
