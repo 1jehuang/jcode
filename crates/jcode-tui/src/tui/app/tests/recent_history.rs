@@ -67,7 +67,7 @@ fn recent_history_marker_preserves_absolute_prompt_numbers_and_queues_page() {
 #[test]
 fn recent_history_page_retries_instead_of_discarding_live_append() {
     let mut app = recent_history_test_app();
-    app.recent_history_request = Some((42, app.display_messages_version, 192));
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 192));
     app.display_messages
         .push(DisplayMessage::assistant("live response after request"));
     app.bump_display_messages_version();
@@ -81,16 +81,16 @@ fn recent_history_page_retries_instead_of_discarding_live_append() {
         Some(192)
     );
     assert_eq!(app.take_pending_compacted_history_load(), None);
-    app.recent_history_retry_at = Some(Instant::now());
+    app.recent_history_paging.retry_at = Some(Instant::now());
     assert_eq!(app.take_pending_compacted_history_load(), Some(192));
 }
 
 #[test]
 fn recent_history_page_rejects_wrong_request_and_rewind() {
     let mut app = recent_history_test_app();
-    app.recent_history_request = Some((42, app.display_messages_version, 192));
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 192));
     assert!(!app.accept_recent_history_response(41));
-    assert!(app.recent_history_request.is_some());
+    assert!(app.recent_history_paging.request.is_some());
     app.replace_display_messages(vec![DisplayMessage::user("rewound transcript")]);
     assert!(!app.accept_recent_history_response(42));
     assert_eq!(app.take_pending_compacted_history_load(), None);
@@ -100,7 +100,7 @@ fn recent_history_page_rejects_wrong_request_and_rewind() {
 #[test]
 fn recent_history_full_window_restores_archived_compaction_loading() {
     let mut app = recent_history_test_app();
-    app.recent_history_request = Some((42, app.display_messages_version, 1000));
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 1000));
     assert!(app.accept_recent_history_response(42));
     app.apply_compacted_history_window(
         vec![
@@ -117,9 +117,9 @@ fn recent_history_full_window_restores_archived_compaction_loading() {
 #[test]
 fn recent_history_page_accepts_unchanged_generation() {
     let mut app = recent_history_test_app();
-    app.recent_history_request = Some((42, app.display_messages_version, 192));
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 192));
     assert!(app.accept_recent_history_response(42));
-    assert!(app.recent_history_request.is_none());
+    assert!(app.recent_history_paging.request.is_none());
     // Unsolicited page payloads cannot replace a bounded current-history view.
     assert!(!app.accept_recent_history_response(42));
 }

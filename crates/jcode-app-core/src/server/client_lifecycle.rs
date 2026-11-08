@@ -82,10 +82,7 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 mod subscribe_context;
 use subscribe_context::*;
 
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
+fn event_for_transport(mut event: ServerEvent, supports_turn_identity: bool) -> Option<ServerEvent> {
     if supports_turn_identity {
         return Some(event);
     }

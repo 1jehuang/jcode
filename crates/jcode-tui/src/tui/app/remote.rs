@@ -697,7 +697,7 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
     {
         Ok(id) => {
             if recent_history {
-                app.recent_history_request =
+                app.recent_history_paging.request =
                     Some((id, app.display_messages_version, visible_messages));
             }
             true
