@@ -422,8 +422,13 @@ async fn submit_remote_transcript_input(
     }
 
     if trimmed.starts_with('/') {
+        // Sent transcripts take the typed Enter path. That path sends
+        // `/model`, `/effort`, `/plan` and `/compact` over the wire.
         let prepared = input::take_prepared_input(app);
-        submit_remote_slash_input(app, remote, prepared).await?;
+        Box::pin(super::key_handling::submit_prepared_remote_enter_input(
+            app, remote, prepared,
+        ))
+        .await?;
         return Ok(());
     }
 
@@ -897,6 +902,53 @@ mod ssh_slash_tests {
                     command
                 );
                 assert!(!app.pending_turn);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod transcript_slash_tests {
+    use super::*;
+
+    #[test]
+    fn sent_transcript_slash_commands_use_typed_remote_handlers() {
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+            for (text, expected) in [
+                ("/model my-profile:claude-haiku-5-5", "set_model"),
+                ("/effort high", "set_reasoning_effort"),
+                ("/plan write a hello script", "message"),
+            ] {
+                apply_remote_transcript_event(
+                    &mut app,
+                    &mut remote,
+                    text.to_string(),
+                    TranscriptMode::Send,
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], expected, "{text}: {line}");
+                if expected == "set_model" {
+                    assert_eq!(request["model"], "my-profile:claude-haiku-5-5");
+                }
+                if expected == "message" {
+                    let content = request["content"].as_str().unwrap();
+                    assert!(content.contains("Goal: write a hello script"), "{content}");
+                }
+                assert!(!app.pending_turn, "{text}");
             }
         });
     }
