@@ -17,6 +17,38 @@ pub const MIN_TURN_DURATION_FOR_PUSH: Duration = Duration::from_secs(20);
 /// Back-off after the API reports no registered devices.
 pub const NO_DEVICES_SUPPRESS: Duration = Duration::from_secs(10 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timing labels are deliberately static, never payloads, URLs or errors.
+struct PushTiming {
+    stage: &'static str,
+    outcome: &'static str,
+    start: Instant,
+}
+
+impl PushTiming {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            outcome: "cancelled",
+            start: Instant::now(),
+        }
+    }
+
+    fn finish(mut self, outcome: &'static str) {
+        self.outcome = outcome;
+    }
+}
+
+impl Drop for PushTiming {
+    fn drop(&mut self) {
+        crate::logging::info(&format!(
+            "[CLOUD_TIMING] operation=mobile_push stage={} outcome={} duration_ms={}",
+            self.stage,
+            self.outcome,
+            self.start.elapsed().as_millis()
+        ));
+    }
+}
 const BODY_MAX_CHARS: usize = 180;
 pub const OPT_OUT_ENV: &str = "JCODE_MOBILE_PUSH";
 
@@ -660,15 +692,31 @@ async fn send_mobile_resume(
     base: &str,
     payload: &PushPayload,
 ) -> anyhow::Result<String> {
-    let response = reqwest::Client::new()
+    let total = PushTiming::new("total");
+    let result = send_mobile_resume_inner(key, base, payload).await;
+    total.finish(if result.is_ok() { "delivered" } else { "error" });
+    result
+}
+
+async fn send_mobile_resume_inner(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> anyhow::Result<String> {
+    let http = PushTiming::new("http_send");
+    let result = crate::provider::shared_http_client()
         .post(format!("{base}/push/send"))
         .bearer_auth(key)
         .json(&payload)
         .timeout(SEND_TIMEOUT)
         .send()
-        .await?
-        .error_for_status()?;
-    let reply = response.json::<SendReply>().await?;
+        .await;
+    http.finish(if result.is_ok() { "response" } else { "error" });
+    let response = result?.error_for_status()?;
+    let body = PushTiming::new("body");
+    let result = response.json::<SendReply>().await;
+    body.finish(if result.is_ok() { "decoded" } else { "error" });
+    let reply = result?;
     match (reply.devices, reply.sent) {
         (Some(0), _) => anyhow::bail!(
             "No mobile devices registered. Open the Jcode app, sign in to the same account, and enable notifications, then retry /mobile."
@@ -687,22 +735,33 @@ async fn send(
     base: &str,
     payload: &PushPayload,
 ) -> (&'static str, Option<String>, Option<u16>) {
-    let client = match reqwest::Client::builder().timeout(SEND_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(error) => {
-            return ("error", Some(format!("client build failed: {error}")), None);
-        }
-    };
-    let result = client
+    let total = PushTiming::new("total");
+    let result = send_inner(key, base, payload).await;
+    total.finish(result.0);
+    result
+}
+
+async fn send_inner(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> (&'static str, Option<String>, Option<u16>) {
+    let http = PushTiming::new("http_send");
+    let result = crate::provider::shared_http_client()
         .post(format!("{base}/push/send"))
         .bearer_auth(key)
         .json(payload)
+        .timeout(SEND_TIMEOUT)
         .send()
         .await;
+    http.finish(if result.is_ok() { "response" } else { "error" });
     match result {
         Ok(resp) if resp.status().is_success() => {
             let status = resp.status().as_u16();
-            let reply = match resp.json::<SendReply>().await {
+            let body = PushTiming::new("body");
+            let result = resp.json::<SendReply>().await;
+            body.finish(if result.is_ok() { "decoded" } else { "error" });
+            let reply = match result {
                 Ok(reply) => reply,
                 Err(error) => {
                     return (
@@ -727,7 +786,10 @@ async fn send(
         Ok(resp) => {
             let status = resp.status().as_u16();
             // Keep the API's error body: it says exactly which field was rejected.
-            let body = resp.text().await.unwrap_or_default();
+            let timing = PushTiming::new("body");
+            let result = resp.text().await;
+            timing.finish(if result.is_ok() { "read" } else { "error" });
+            let body = result.unwrap_or_default();
             crate::logging::warn(&format!(
                 "mobile push {:?} rejected: HTTP {status}: {}",
                 payload.kind,
@@ -742,6 +804,10 @@ async fn send(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mobile_push_http_tests.rs"]
+mod http_tests;
 
 #[cfg(test)]
 mod tests {
