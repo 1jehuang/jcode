@@ -104,3 +104,32 @@ fn single_key_profile_keeps_api_key_env_and_rejects_unsafe_pool_names() {
     assert_eq!(picked(&pool.auth()).0, "secret-a");
     assert!(KeyPool::new("gateway", &profile(&["bad name"])).is_err());
 }
+
+#[test]
+fn pool_profile_credential_checks_name_the_first_entry() {
+    let _lock = ENV_LOCK.lock();
+    let _env = [
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+    ]
+    .map(EnvVarGuard::remove);
+    let mut config = jcode_base::config::Config::default();
+    config.providers.insert(
+        "gateway".to_string(),
+        profile(&["POOL_KEY_A", "POOL_KEY_B"]),
+    );
+    jcode_base::provider_catalog::apply_named_provider_profile_env_from_config("gateway", &config)
+        .unwrap();
+    let source = jcode_base::provider_catalog::active_named_provider_profile_credential_source();
+    assert_eq!(
+        source.map(|(key_env, _)| key_env).as_deref(),
+        Some("POOL_KEY_A")
+    );
+}
