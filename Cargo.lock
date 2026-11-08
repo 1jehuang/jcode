@@ -4917,6 +4917,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "webpki-roots",
  "zbus",
 ]
 
