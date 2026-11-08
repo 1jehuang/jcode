@@ -85,7 +85,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let text = text_cache::cached_segments(&path, &AtomicBool::new(false)).unwrap();
-        assert_eq!(&*text, &["prepared while typing"]);
+        assert_eq!(&text.text, &["prepared while typing"]);
         assert!(text_cache::cached_segments(&path, &query_cancel).is_none());
     }
 

@@ -403,3 +403,33 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     wait(&mut picker);
     assert_eq!(ids(&picker), ["close", "loose"]);
 }
+
+#[test]
+fn user_prompt_transcript_hit_beats_recent_tool_output_hit() {
+    let temp = tempfile::tempdir().unwrap();
+    let user_path = temp.path().join("user.jsonl");
+    let tool_path = temp.path().join("tool.jsonl");
+    std::fs::write(
+        &user_path,
+        concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please fix zanzibar parsing"}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &tool_path,
+        concat!(
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"grep found zanzibar parsing"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let tool = session("tool", "unrelated", 0, &tool_path);
+    let user = session("user", "unrelated", 500, &user_path);
+    let mut picker = SessionPicker::new(vec![tool, user]);
+    picker.search_query = "zanzibar parsing".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["user", "tool"]);
+}
