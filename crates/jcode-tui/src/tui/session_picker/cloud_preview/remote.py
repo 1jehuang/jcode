@@ -8,7 +8,11 @@ import re
 import socket
 import sys
 
-STRUCT = re.compile(br'["{}\[\]]')
+# Consume complete strings in C, including escaped quotes and backslashes.
+STRING = re.compile(br'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+# Coalesce adjacent strings, keys, numbers and punctuation into one C match.
+# Only container delimiters and malformed quotes need a Python iteration.
+STRUCT = re.compile(br'(?P<skip>(?:"[^"\\]*(?:\\.[^"\\]*)*"|[^"{}\[\]]+){1,64})|(?P<brace>[{}\[\]])|(?P<bad>")', re.DOTALL)
 SPACE = b' \r\n\t'
 BULKY = {'env_snapshots', 'memory_injections', 'replay_events', 'compaction', 'system_prompt'}
 MAX_MESSAGES = 80
@@ -19,17 +23,10 @@ INVENTORY_FIELDS = {'id', 'migration_epoch', 'working_dir', 'custom_title', 'tit
 
 
 def string_end(data, start):
-    pos = start + 1
-    while True:
-        end = data.find(b'"', pos)
-        if end < 0:
-            raise ValueError('unterminated string')
-        back = end - 1
-        while back > start and data[back] == 92:
-            back -= 1
-        if (end - back) % 2:
-            return end + 1
-        pos = end + 1
+    match = STRING.match(data, start)
+    if match is None:
+        raise ValueError('unterminated string')
+    return match.end()
 
 
 def skip_space(data, pos):
@@ -38,7 +35,7 @@ def skip_space(data, pos):
     return pos
 
 
-def value_end(data, pos):
+def value_end(data, pos, ranges=None):
     if data[pos] == 34:
         return string_end(data, pos)
     if data[pos] not in (123, 91):
@@ -46,23 +43,28 @@ def value_end(data, pos):
         while end < len(data) and data[end] not in b',}]\r\n \t':
             end += 1
         return end
-    depth = 1
-    pos += 1
-    while depth:
-        match = STRUCT.search(data, pos)
-        if match is None:
-            raise ValueError('unterminated container')
-        pos = match.start()
-        char = data[pos]
-        if char == 34:
-            pos = string_end(data, pos)
+    stack = [125 if data[pos] == 123 else 93]
+    for match in STRUCT.finditer(data, pos + 1):
+        kind = match.lastgroup
+        if kind == 'skip':
             continue
-        depth += 1 if char in (123, 91) else -1
-        pos += 1
-    return pos
+        if kind == 'bad':
+            raise ValueError('unterminated string')
+        char = data[match.start()]
+        if char in (123, 91):
+            if ranges is not None and len(stack) == 1:
+                begin = match.start()
+            stack.append(125 if char == 123 else 93)
+        elif char != stack.pop():
+            raise ValueError('mismatched container')
+        elif not stack:
+            return match.end()
+        elif ranges is not None and len(stack) == 1:
+            ranges.append((begin, match.end()))
+    raise ValueError('unterminated container')
 
 
-def fields(data, pos=0):
+def fields(data, pos=0, message_ranges=None):
     pos = skip_space(data, pos)
     if data[pos] != 123:
         raise ValueError('expected object')
@@ -77,7 +79,12 @@ def fields(data, pos=0):
         if data[pos] != 58:
             raise ValueError('expected colon')
         pos = skip_space(data, pos + 1)
-        end = value_end(data, pos)
+        ranges = message_ranges if key in ('messages', 'append_messages') else None
+        if ranges is not None:
+            ranges.clear()
+            if data[pos] != 91:
+                raise ValueError('expected message array')
+        end = value_end(data, pos, ranges)
         yield key, pos, end
         pos = skip_space(data, end)
         if data[pos] == 125:
@@ -87,17 +94,18 @@ def fields(data, pos=0):
         pos += 1
 
 
-def recent_messages(data, start, end, messages):
+def recent_messages(data, start, end, messages, ranges=None):
     # Locate the tail without deserializing old message bodies. The range deque
     # is bounded even for snapshots with millions of messages.
-    ranges = collections.deque(maxlen=MAX_MESSAGES)
-    pos = skip_space(data, start + 1)
-    while pos < end and data[pos] != 93:
-        stop = value_end(data, pos)
-        ranges.append((pos, stop))
-        pos = skip_space(data, stop)
-        if data[pos] == 44:
-            pos = skip_space(data, pos + 1)
+    if ranges is None:
+        ranges = collections.deque(maxlen=MAX_MESSAGES)
+        pos = skip_space(data, start + 1)
+        while pos < end and data[pos] != 93:
+            stop = value_end(data, pos)
+            ranges.append((pos, stop))
+            pos = skip_space(data, stop)
+            if data[pos] == 44:
+                pos = skip_space(data, pos + 1)
     for pos, stop in ranges:
         # Oversized individual messages are projected without decoding their
         # potentially enormous tool payloads. Recent ordinary text is retained.
@@ -129,10 +137,11 @@ def project(path, preview):
     session = {}
     messages = collections.deque(maxlen=MAX_MESSAGES)
     with path.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
-        for key, start, end in fields(data):
+        ranges = collections.deque(maxlen=MAX_MESSAGES) if preview else None
+        for key, start, end in fields(data, message_ranges=ranges):
             if key == 'messages':
                 if preview:
-                    recent_messages(data, start, end, messages)
+                    recent_messages(data, start, end, messages, ranges)
             elif key not in BULKY and (preview or key in INVENTORY_FIELDS) and end - start <= 256 * 1024:
                 session[key] = json.loads(data[start:end])
     journal = path.with_suffix('.journal.jsonl')

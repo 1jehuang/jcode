@@ -14,8 +14,73 @@
 // Prior 97 MB inventory baseline was 702 ms: no inventory speedup demonstrated.
 // Reproduction script/results: ~/.jcode/scratch/bounded-preview-measure.py and
 // ~/.jcode/scratch/bounded-preview-measure-results.jsonl on the measurement host.
+// Scanner follow-up, 2026-11-08 UTC, same unchanged 97,722,380-byte snapshot:
+// Whole-string regex alone did not improve latency. Coalescing scalar tokens
+// plus retaining the last 80 message ranges during the first scan avoids the
+// second full messages scan. Actual mmap preview remote ms: 768.34, 1381.58,
+// 1376.54, fresh SSH ms: 4695.30, 5622.85, 5616.78. All retain 80 messages.
+// Journal grew externally between samples (363,579 -> 384,539 bytes), but each
+// individual read verified snapshot/journal size+mtime unchanged during projection.
+// Paired comparison freezes both files in process RAM, no remote file writes:
+// old preview ms 1419.64, 2489.48, 1444.72; new 1315.81, 1160.17, 772.47.
+// Every pair is byte-identical (168,621 bytes, without framing/telemetry), SHA256
+// cc39e053c4a2e80dd767fee2a4142f784a44c2cd10d6685a97493d5a04cf75fc.
+// Inventory actual mmap ms 1019.11, 1507.74, 742.82: no consistent speedup.
+// Evidence: ~/.jcode/scratch/bounded-preview-final-scanner-results.jsonl and
+// paired-projection-final-results.txt, reproduced by paired-projection.py.
 use super::*;
 use std::io::Write;
+
+#[test]
+fn remote_scanner_handles_escaped_nested_strings_and_rejects_truncation() {
+    let checks = r#"
+import random
+random.seed(37)
+samples = ['', '"', '\\', '\\"', '\\\\"', '{}[]', '\n\t', '雪😀']
+for _ in range(200):
+    samples.append(''.join(random.choices('abc"\\{}[]\n雪', k=120)))
+for text in samples:
+    value = {'nested': [{'text': text, 'braces': ']}{['}, [text]], 'tail': text}
+    encoded = json.dumps(value, ensure_ascii=False).encode()
+    assert value_end(encoded + b',trailer', 0) == len(encoded)
+    quoted = json.dumps(text, ensure_ascii=False).encode()
+    assert string_end(quoted + b',trailer', 0) == len(quoted)
+    assert json.loads(encoded) == value
+messages = [{'id': str(i), 'content': [{'text': samples[i % len(samples)]}]} for i in range(300)]
+encoded = json.dumps({'messages': messages}).encode()
+ranges = collections.deque(maxlen=MAX_MESSAGES)
+list(fields(encoded, message_ranges=ranges))
+assert len(ranges) == MAX_MESSAGES
+assert [json.loads(encoded[a:b]) for a,b in ranges] == messages[-MAX_MESSAGES:]
+encoded = b'{"messages":[{"id":"old"}],"messages":[]}'
+for key,a,b in fields(encoded, message_ranges=ranges):
+    pass
+assert not ranges
+for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'[{]}'):
+    try:
+        value_end(malformed, 0)
+    except (ValueError, IndexError):
+        pass
+    else:
+        raise AssertionError(repr(malformed))
+"#;
+    let mut child = std::process::Command::new("python3")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let definitions = REMOTE_PROJECTOR.split("if __name__ ==").next().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    write!(input, "{definitions}\n{checks}").unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 fn run_projection(home: &std::path::Path, mode: &str, id: &str) -> std::process::Output {
     let mut child = std::process::Command::new("python3")
@@ -69,7 +134,7 @@ fn oversized_remote_snapshot_is_bounded_valid_and_keeps_late_journal_updates() {
     for i in 0..100 {
         writeln!(journal, "{}", serde_json::json!({
             "meta": {"title": format!("Late journal title {i}"), "working_dir": "/latest/repository", "updated_at": "2026-11-08T05:00:00Z"},
-            "append_messages": [{"id": format!("late-{i}"), "role": "user", "content": [{"type": "text", "text": format!("Late journal prompt {i}")}]}]
+            "append_messages": [{"id": format!("late-{i}"), "role": "user", "content": [{"type": "text", "text": format!("Late journal prompt {i} escaped quote \" slash \\ nested {{[}}] 雪")}]}]
         })).unwrap();
     }
     drop(journal);
@@ -81,11 +146,10 @@ fn oversized_remote_snapshot_is_bounded_valid_and_keeps_late_journal_updates() {
     assert_eq!(loaded.messages.len(), 80);
     assert_eq!(loaded.messages.last().unwrap().id, "late-99");
     assert_eq!(loaded.migration_epoch, 19);
-    assert!(
-        build_messages_preview(&loaded)
-            .iter()
-            .any(|m| m.content.contains("Late journal prompt 99"))
-    );
+    assert!(build_messages_preview(&loaded).iter().any(|m| {
+        m.content
+            .contains("Late journal prompt 99 escaped quote \" slash \\ nested {[}] 雪")
+    }));
     let inventory = run_projection(home.path(), "inventory", id);
     let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
     assert_eq!(inventory["sessions"][0]["title"], "Late journal title 99");
