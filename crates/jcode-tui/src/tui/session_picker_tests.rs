@@ -1806,9 +1806,8 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 #[test]
 fn test_preview_transcript_omits_picker_metadata() {
     let _lock = crate::tui::ui::render_state_test_lock();
-    // The startup header renders an "Updates" box when this machine has unseen
-    // changelog entries, and its border would trip the border-glyph assertion.
-    // Force it empty so the transcript only contains real session content.
+    // The startup header's "Updates" box depends on machine-local unseen
+    // changelog state; force it empty so only session content renders.
     let _fixture =
         crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
@@ -1825,12 +1824,7 @@ fn test_preview_transcript_omits_picker_metadata() {
     let text = cache
         .wrapped_lines
         .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
+        .map(jcode_tui_render::line_plain_text)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("1› hello"), "{text}");
