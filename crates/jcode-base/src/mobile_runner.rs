@@ -15,7 +15,33 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+#[path = "mobile_runner_process.rs"]
+mod process;
+#[cfg(test)]
+#[path = "mobile_runner_process_tests.rs"]
+mod process_tests;
+
+struct StageTimer {
+    stage: &'static str,
+    start: std::time::Instant,
+}
+impl StageTimer {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        crate::logging::info(&format!(
+            "mobile runner timing stage={} elapsed_ms={}",
+            self.stage,
+            self.start.elapsed().as_millis()
+        ));
+    }
+}
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const TURN_TIMEOUT: Duration = Duration::from_secs(40 * 60);
@@ -183,6 +209,7 @@ async fn import_local_session(
     key: &str,
     id: &str,
 ) -> Result<String> {
+    let _timing = StageTimer::new("transfer");
     let (metadata, messages) = fetch_local_transcript(client, base, key, id).await?;
     let mut session = transfer_session(&metadata, messages, &workspace_dir())?;
     session.save()?;
@@ -296,61 +323,15 @@ async fn run_turn(command: &MobileCommand, session_id: Option<&str>) -> Result<S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().context("starting jcode run")?;
-    let stdout = child.stdout.take().context("no stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut session = session_id.map(str::to_owned);
-    let marker = busy_marker();
-    let mut touch = tokio::time::interval(BUSY_TOUCH_INTERVAL);
-    let deadline = tokio::time::sleep(TURN_TIMEOUT);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            line = lines.next_line() => match line? {
-                Some(line) => {
-                    if session.is_none() {
-                        session = session_id_from_ndjson_line(&line);
-                    }
-                }
-                None => break,
-            },
-            _ = touch.tick() => {
-                if let Some(m) = &marker
-                    && let Err(error) = std::fs::write(m, b"")
-                {
-                    crate::logging::warn(&format!("mobile runner busy marker update failed: {error}"));
-                }
-            }
-            _ = &mut deadline => {
-                if let Err(error) = child.kill().await {
-                    crate::logging::warn(&format!("mobile runner timed-out child cleanup failed: {error}"));
-                }
-                anyhow::bail!("turn timed out");
-            }
-        }
-    }
-    let output = child.wait_with_output().await?;
-    if let Some(m) = &marker
-        && let Err(error) = std::fs::remove_file(m)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logging::warn(&format!(
-            "mobile runner busy marker removal failed: {error}"
-        ));
-    }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr
-            .chars()
-            .rev()
-            .take(600)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        anyhow::bail!("jcode run failed ({}): {}", output.status, tail.trim());
-    }
-    session.context("jcode run did not report a session id")
+    let _timing = StageTimer::new("turn");
+    process::run(
+        cmd,
+        session_id,
+        busy_marker(),
+        TURN_TIMEOUT,
+        BUSY_TOUCH_INTERVAL,
+    )
+    .await
 }
 
 /// Claim and run at most one queued command. Returns whether one ran.
@@ -360,13 +341,13 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
     let base = subscription_api::configured_api_base()
         .trim_end_matches('/')
         .to_string();
-    let Some(command) = claim(client, &base, &key).await? else {
+    let claimed = {
+        let _timing = StageTimer::new("claim");
+        claim(client, &base, &key).await?
+    };
+    let Some(command) = claimed else {
         return Ok(false);
     };
-    crate::logging::info(&format!(
-        "mobile runner: {} command {}",
-        command.kind, command.command_id
-    ));
     let outcome = async {
         let session_id = match command.kind.as_str() {
             "transfer" => Some(
@@ -393,10 +374,17 @@ pub async fn run_one(client: &reqwest::Client) -> Result<bool> {
         run_turn(&command, session_id.as_deref()).await
     }
     .await;
-    if let Err(error) = mobile_sync::sync_once(client).await {
+    let sync_result = {
+        let _timing = StageTimer::new("sync");
+        mobile_sync::sync_once(client).await
+    };
+    if let Err(error) = sync_result {
         crate::logging::warn(&format!("mobile runner transcript sync failed: {error:#}"));
     }
-    complete(client, &base, &key, &command.command_id, &outcome).await?;
+    {
+        let _timing = StageTimer::new("complete");
+        complete(client, &base, &key, &command.command_id, &outcome).await?;
+    }
     outcome.map(|_| true)
 }
 
@@ -420,7 +408,10 @@ pub fn spawn_cloud_runner() {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            {
+                let _timing = StageTimer::new("pollwait");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
             if let Err(err) = run_one(&client).await {
                 crate::logging::warn(&format!("mobile runner: {err:#}"));
                 tokio::time::sleep(Duration::from_secs(20)).await;
