@@ -358,7 +358,7 @@ fn verification_script_reads_authoritative_metadata_and_skips_moved_sessions() {
         let output = std::process::Command::new("sh")
             .args([
                 "-c",
-                VERIFY_SCRIPT,
+                &super::super::super::cloud_preview::projection_script("inventory"),
                 "verify",
                 &format!("{id}\nsession_missing\n../escape"),
             ])

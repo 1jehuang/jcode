@@ -2,21 +2,18 @@
 use super::*;
 
 mod cache;
+#[cfg(test)]
+#[path = "cloud_preview/projection_tests.rs"]
+mod projection_tests;
 
 type CloudSnapshot = (Session, Option<crate::session_telemetry::SessionTelemetry>);
 
-const SCRIPT: &str = r#"
-case "$1" in ''|*[!a-zA-Z0-9_-]*) exit 1 ;; esac
-base="${JCODE_HOME:-$HOME/.jcode}/sessions/$1"
-cat -- "$base.json" || exit 1
-printf '\000'
-if [ -f "$base.journal.jsonl" ]; then cat -- "$base.journal.jsonl" || exit 1; fi
-printf '\000'
-state="${JCODE_HOME:-$HOME/.jcode}/state"
-if [ -n "$JCODE_RUNTIME_DIR" ]; then state="$JCODE_RUNTIME_DIR/durable-state"; fi
-telemetry="$state/session-telemetry/$1.json"
-if [ -f "$telemetry" ]; then cat -- "$telemetry" || :; fi
-"#;
+pub(in crate::tui::session_picker) const REMOTE_PROJECTOR: &str =
+    include_str!("cloud_preview/remote.py");
+
+pub(in crate::tui::session_picker) fn projection_script(mode: &str) -> String {
+    format!("python3 - {mode} \"$1\" <<'JCODE_REMOTE_PY'\n{REMOTE_PROJECTOR}\nJCODE_REMOTE_PY\n")
+}
 
 pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
     if session_id.is_empty()
@@ -116,7 +113,7 @@ fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
         Some(host),
         config.is_file().then_some(config.as_path()),
         session_id,
-        SCRIPT,
+        &projection_script("preview"),
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -1,30 +1,6 @@
 //! Discover mobile-created sessions without copying their transcripts locally.
 use super::*;
 
-const VERIFY_SCRIPT: &str = r#"
-python3 - "$1" <<'PY'
-import json, os, socket, sys
-from pathlib import Path
-base = Path(os.environ.get('JCODE_HOME', str(Path.home() / '.jcode')))
-result = []
-for sid in sys.argv[1].splitlines():
-    if not sid or not all(c.isascii() and (c.isalnum() or c in '_-') for c in sid):
-        continue
-    try:
-        session = json.loads((base / 'sessions' / (sid + '.json')).read_text())
-        if session.get('id') != sid:
-            continue
-        lease_path = base / 'session_leases' / (sid + '.json')
-        lease = json.loads(lease_path.read_text()) if lease_path.exists() else {}
-        if lease.get('away_host'):
-            continue
-        result.append({'session_id': sid, 'epoch': max(session.get('migration_epoch', 0), lease.get('epoch', 0)), 'cwd': session.get('working_dir'), 'title': session.get('custom_title') if session.get('custom_title') is not None else session.get('title'), 'updated_at': session.get('updated_at')})
-    except (OSError, ValueError, TypeError):
-        continue
-print(json.dumps({'host': socket.gethostname(), 'sessions': result}))
-PY
-"#;
-
 #[derive(Deserialize)]
 struct VerifiedInventory {
     host: String,
@@ -75,7 +51,7 @@ pub(super) fn refresh() -> Result<bool> {
             Some("jcode-cloud"),
             Some(&config),
             &ids,
-            VERIFY_SCRIPT,
+            &super::super::cloud_preview::projection_script("inventory"),
         );
         let (status, bytes) =
             crate::tui::cloud_git::bounded_output(command, Duration::from_secs(10), 1024 * 1024)
