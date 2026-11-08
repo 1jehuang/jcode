@@ -1,89 +1,107 @@
 use super::*;
 use ratatui::style::Modifier;
 
-use super::compact_status::composer_processing_status_line;
+use super::stable_status::{
+    live_processing_status_line_at_width, stable_status_elapsed, stable_status_line,
+    stable_status_telemetry, status_cell,
+};
 
 #[test]
-fn compact_status_absent_telemetry_does_not_render_placeholders_or_gaps() {
-    let status = crate::protocol::SwarmLiveStatus {
-        phase: "streaming".into(),
-        elapsed_ms: 12_300,
-        ..Default::default()
-    };
-    let text = composer_processing_status_line(&status, None, "*").to_string();
-    assert_eq!(text, "* streaming  12s");
-    assert!(!text.contains('│') && !text.contains('↑') && !text.contains('↓'));
-    assert!(!text.ends_with(' '));
+fn stable_status_elapsed_keeps_cell_width_across_time_boundaries() {
+    for elapsed in [
+        0,
+        999,
+        59_999,
+        60_000,
+        3_599_999,
+        3_600_000,
+        360_000_000,
+        u64::MAX,
+    ] {
+        let value = stable_status_elapsed(elapsed);
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(value.as_str()),
+            8,
+            "{value}"
+        );
+    }
+    assert_eq!(stable_status_elapsed(12_300).trim(), "00:12");
+    assert_eq!(stable_status_elapsed(3_600_000).trim(), "1:00:00");
 }
 
 #[test]
-fn compact_status_partial_telemetry_only_shows_known_counts() {
-    for (input_tokens, output_tokens, expected) in [
-        (Some(1200), None, "↑1k"),
-        (None, Some(456), "↓456"),
-        (Some(0), Some(0), "↑0 ↓0"),
-    ] {
-        let status = crate::protocol::SwarmLiveStatus {
-            phase: "streaming".into(),
-            input_tokens,
-            output_tokens,
-            ..Default::default()
-        };
-        let text = composer_processing_status_line(&status, None, "*").to_string();
-        assert!(text.contains(expected), "{text}");
-        assert!(!text.contains('?') && !text.contains('│'), "{text}");
+fn stable_status_cells_fit_unicode_and_normalize_controls() {
+    for width in 0..40 {
+        let value = status_cell("界\n tests\tand \x1bmore", width);
+        assert_eq!(unicode_width::UnicodeWidthStr::width(value.as_str()), width);
+        assert!(!value.chars().any(char::is_control));
     }
 }
 
 #[test]
-fn compact_status_prefix_clock_is_consistent_across_phases() {
-    let mut column = None;
-    for phase in [
-        "sending",
-        "thinking",
-        "connecting",
-        "streaming",
-        "running_tool",
-    ] {
-        let status = crate::protocol::SwarmLiveStatus {
-            phase: phase.into(),
-            elapsed_ms: 12_300,
-            tool_name: Some("bash".into()),
-            ..Default::default()
+fn stable_status_telemetry_stays_anchored_as_values_and_intent_change() {
+    let mut status = crate::protocol::SwarmLiveStatus {
+        phase: "streaming".into(),
+        elapsed_ms: 12_300,
+        ..Default::default()
+    };
+    for width in [60, 80, 100, 120] {
+        let unknown = live_processing_status_line_at_width(&status, None, "*", width).to_string();
+        status.input_tokens = Some(123_456);
+        status.output_tokens = Some(1234);
+        status.output_tps_milli = Some(12_500);
+        status.tool_intent = Some("界 long intent ".repeat(30));
+        let known = live_processing_status_line_at_width(&status, None, "*", width).to_string();
+        let column = |text: &str, needle: char| {
+            text.find(needle)
+                .map(|offset| unicode_width::UnicodeWidthStr::width(&text[..offset]))
         };
-        let text = composer_processing_status_line(&status, None, "*").to_string();
-        let offset = text.find("12s").expect(&text);
-        assert_eq!(*column.get_or_insert(offset), offset, "{text}");
-        assert!(!text.contains('│'), "{text}");
+        assert_eq!(
+            column(&unknown, '↑'),
+            column(&known, '↑'),
+            "{unknown}\n{known}"
+        );
+        assert_eq!(
+            column(&unknown, '↓'),
+            column(&known, '↓'),
+            "{unknown}\n{known}"
+        );
+        assert_eq!(unicode_width::UnicodeWidthStr::width(known.as_str()), width);
+        status.input_tokens = None;
+        status.output_tokens = None;
+        status.output_tps_milli = None;
+        status.tool_intent = None;
     }
 }
 
 #[test]
-fn compact_status_detail_normalizes_unicode_and_controls() {
-    let status = crate::protocol::SwarmLiveStatus {
-        phase: "running_tool".into(),
-        elapsed_ms: 12_300,
-        tool_name: Some("bash".into()),
-        tool_intent: Some("Verify 界\n tests\tand \u{001b}more".into()),
-        ..Default::default()
-    };
-    let text = composer_processing_status_line(&status, None, "*").to_string();
-    assert!(text.contains("Verify 界 tests and more"), "{text}");
-    assert!(!text.chars().any(char::is_control), "{text}");
-}
-
-#[test]
-fn compact_status_empty_intent_does_not_add_a_leading_separator() {
+fn stable_status_empty_intent_does_not_add_a_leading_separator() {
     let status = crate::protocol::SwarmLiveStatus {
         phase: "streaming".into(),
-        elapsed_ms: 12_300,
         tool_intent: Some(String::new()),
         status_detail: Some("fresh websocket".into()),
         ..Default::default()
     };
-    let text = composer_processing_status_line(&status, None, "*").to_string();
-    assert!(text.ends_with("12s · opening websocket"), "{text}");
-    assert!(!text.contains("· ·"), "{text}");
+    let text = live_processing_status_line_at_width(&status, None, "*", 120).to_string();
+    assert!(text.contains("│ opening websocket"), "{text}");
+    assert!(!text.contains("│ ·"), "{text}");
+}
+
+#[test]
+fn stable_status_fits_every_terminal_cell_width() {
+    let telemetry = stable_status_telemetry(&crate::protocol::SwarmLiveStatus::default());
+    for width in 0..160 {
+        let line = stable_status_line(
+            "*",
+            "thinking",
+            123_456,
+            &"界\nlong\tintent".repeat(40),
+            &telemetry,
+            width,
+        );
+        assert!(line.width() <= width, "width={width}: {line}");
+        assert!(!line.to_string().chars().any(char::is_control));
+    }
 }
 
 #[test]
@@ -220,7 +238,7 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
         tool_intent: Some("Verify 界\noutput".into()),
         ..Default::default()
     };
-    let line = composer_processing_status_line(&status, Some(0.0), "⠋");
+    let line = live_processing_status_line_at_width(&status, Some(0.0), "⠋", 160);
     let text = line.to_string();
     assert!(
         text.contains("bash") && text.contains("Verify 界 output"),
@@ -230,7 +248,7 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
         text.contains("↑12k")
             && text.contains("↓456")
             && text.contains("existing websocket")
-            && text.contains("12s"),
+            && text.contains("00:12"),
         "{text}"
     );
     assert_eq!(line.spans[0].style.fg, Some(ai_color()));
@@ -238,19 +256,19 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     status.phase = "streaming".into();
     status.output_tps_milli = Some(12_500);
     assert!(
-        composer_processing_status_line(&status, None, "⠋")
+        live_processing_status_line_at_width(&status, None, "⠋", 160)
             .to_string()
-            .contains("12.5 tps")
+            .contains("12.5/s")
     );
     status.input_tokens = None;
     status.output_tokens = None;
     status.connection_type = None;
-    let text = composer_processing_status_line(&status, None, "⠋").to_string();
+    let text = live_processing_status_line_at_width(&status, None, "⠋", 160).to_string();
     assert!(!text.contains("↑0") && !text.contains("websocket"));
-    assert!(!text.contains('↑') && !text.contains('↓'), "{text}");
+    assert!(text.contains("↑-") && text.contains("↓-"), "{text}");
     status.phase = "stopped".into();
     status.stop_reason = Some("Rate limit\nretry later".into());
-    let text = composer_processing_status_line(&status, None, "⠋").to_string();
+    let text = live_processing_status_line_at_width(&status, None, "⠋", 160).to_string();
     assert!(text.contains("Rate limit retry later") && !text.contains('⠋'));
 }
 
@@ -706,13 +724,13 @@ fn streaming_liveness_stays_in_activity_and_only_warns_during_streaming() {
         elapsed_ms: 12_000,
         ..Default::default()
     };
-    let quiet = composer_processing_status_line(&status, Some(3.4), "*").to_string();
+    let quiet = live_processing_status_line_at_width(&status, Some(3.4), "*", 120).to_string();
     assert!(quiet.contains("no tokens 3s"), "{quiet}");
-    let stalled = composer_processing_status_line(&status, Some(12.1), "*").to_string();
+    let stalled = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
     assert!(stalled.contains("stalled 12s"), "{stalled}");
-    assert_eq!(quiet.find("12s"), stalled.find("12s"));
+    assert_eq!(quiet.find("00:12"), stalled.find("00:12"));
     status.stream_message_ended = true;
-    let ended = composer_processing_status_line(&status, Some(12.1), "*").to_string();
+    let ended = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
     assert!(
         ended.starts_with('*') && !ended.contains("stalled"),
         "{ended}"
@@ -720,7 +738,7 @@ fn streaming_liveness_stays_in_activity_and_only_warns_during_streaming() {
     status.stream_message_ended = false;
     for phase in ["thinking", "running_tool", "sending", "connecting"] {
         status.phase = phase.into();
-        let text = composer_processing_status_line(&status, Some(12.1), "*").to_string();
+        let text = live_processing_status_line_at_width(&status, Some(12.1), "*", 120).to_string();
         assert!(
             !text.contains("stalled") && !text.contains("no tokens"),
             "{text}"
