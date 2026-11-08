@@ -8,7 +8,7 @@ pub(crate) enum CloudRuntimeCommand {
     Status,
     /// Upload a Linux x86_64 runtime package and select dev policy.
     /// Active daemons keep their executable until their next start, or until
-    /// `--reload` restarts the daemon once no session is mid-turn.
+    /// `--reload` hands the daemon off once no session is mid-turn.
     #[command(group(clap::ArgGroup::new("source").required(true).args(["artifact", "from_source"])))]
     Push {
         /// Compatible jcode-linux-x86_64.tar.gz package, not a laptop executable.
@@ -17,15 +17,16 @@ pub(crate) enum CloudRuntimeCommand {
         /// Build a portable Linux package from this jcode checkout first.
         #[arg(long)]
         from_source: bool,
-        /// After upload, restart the cloud daemon onto it once no session is mid-turn.
+        /// After upload, hand the cloud daemon off to it once no session is mid-turn.
         #[arg(long)]
         reload: bool,
         /// Seconds to wait for running turns before giving up (with --reload).
         #[arg(long, default_value_t = 1800)]
         wait_secs: u64,
     },
-    /// Restart the cloud daemon onto the selected runtime once no session is
-    /// mid-turn. Sessions are saved and resume when clients reconnect.
+    /// Hand the cloud daemon off to the selected runtime once no session is
+    /// mid-turn. Daemons with live reload exec in place and keep clients
+    /// attached. Older ones restart, and sessions resume on reconnect.
     Reload {
         /// Restart immediately even if turns are running (they are interrupted).
         #[arg(long)]
