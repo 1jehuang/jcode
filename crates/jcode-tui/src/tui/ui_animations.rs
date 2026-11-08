@@ -291,7 +291,9 @@ pub(crate) fn idle_donut_reserved_height(show_donut: bool, input_height: u16) ->
 pub(super) fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     // Remember the animated rows so the run loop can repaint only them between
     // full frames. Sizes the animation rejects are recorded as "no animation".
-    record_idle_animation_area((area.width >= 4 && area.height >= 2).then_some(area));
+    if !super::secondary_render_active() {
+        record_idle_animation_area((area.width >= 4 && area.height >= 2).then_some(area));
+    }
     render_idle_animation(frame.buffer_mut(), area, app.animation_elapsed());
 }
 

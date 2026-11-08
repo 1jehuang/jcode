@@ -1,6 +1,89 @@
 use super::*;
 use std::time::Duration;
 
+#[test]
+fn recent_history_negotiation_preserves_local_verified_prefix() {
+    let base = HistoryBase {
+        count: 7,
+        fingerprint: 123,
+        images_fingerprint: Some(456),
+        recent_messages: None,
+    };
+    let local = subscribe_history_base(Some(base), false).unwrap();
+    assert_eq!(local.count, 7);
+    assert_eq!(local.fingerprint, 123);
+    let remote = subscribe_history_base(Some(base), true).unwrap();
+    assert_eq!(remote.count, 0);
+    assert_eq!(remote.recent_messages, Some(128));
+    assert!(subscribe_history_base(None, false).is_none());
+    assert_eq!(
+        subscribe_history_base(None, true).unwrap().recent_messages,
+        Some(128)
+    );
+}
+
+#[tokio::test]
+async fn recent_history_page_request_explicitly_selects_normal_transcript() {
+    let mut remote = RemoteConnection::dummy();
+    let id = remote.get_compacted_history(192, true).await.unwrap();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    peer.readable().await.unwrap();
+    let mut bytes = [0; 256];
+    let count = peer.try_read(&mut bytes).unwrap();
+    assert!(
+        matches!(serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+        Request::GetCompactedHistory { id: actual, visible_messages: 192, recent_history: true } if actual == id)
+    );
+}
+
+#[tokio::test]
+async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let hydration = RemoteConnection::spawn_usage_hydration(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        false
+    });
+    started_rx.await.unwrap();
+    let remote = RemoteConnection::dummy();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_millis(250), async {
+        remote
+            .send_request(Request::GetHistory { id: 9 })
+            .await
+            .unwrap();
+        let mut bytes = [0; 256];
+        peer.readable().await.unwrap();
+        let count = peer.try_read(&mut bytes).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+            Request::GetHistory { id: 9 }
+        ));
+    })
+    .await;
+    let elapsed = start.elapsed();
+    release_tx.send(()).unwrap();
+    hydration.await.unwrap();
+    result.expect("quota disk reads must not delay bootstrap requests");
+    eprintln!(
+        "bootstrap while snapshot read blocked: {}us",
+        elapsed.as_micros()
+    );
+}
+
+#[test]
+fn measure_local_quota_hydration_cost() {
+    let socket = server::socket_path();
+    let started = Instant::now();
+    let imported = crate::usage::hydrate_remote_account_usage(&socket);
+    eprintln!(
+        "local quota hydration: {}us, imported={imported}",
+        started.elapsed().as_micros()
+    );
+}
+
 #[tokio::test]
 async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
     let mut remote = RemoteConnection::dummy();
@@ -722,4 +805,25 @@ fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
         1,
     ));
     assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
+}
+
+#[tokio::test]
+async fn request_send_does_not_block_ui_when_server_stops_reading() {
+    // Regression: the TUI awaited socket writes inline, so when the daemon's
+    // receive buffer filled while it was blocked writing to us, the UI loop
+    // stopped reading and both ends deadlocked (frozen session).
+    let mut remote = RemoteConnection::dummy();
+    let writer = remote.writer();
+    let _guard = writer.lock().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        for _ in 0..64 {
+            remote.request_todos().await.expect("queued");
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "request sends must not wait on the socket writer"
+    );
 }

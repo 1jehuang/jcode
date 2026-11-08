@@ -383,9 +383,13 @@ pub(super) async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
+    // App name from the API Hello, used to enable mobile push per session.
+    let mut connection_client_name: Option<String> = None;
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
+    // Keep only the window preference, never a session-specific prefix fingerprint.
+    let mut recent_history_messages = None;
     let mut supports_user_response = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
@@ -1076,6 +1080,11 @@ pub(super) async fn handle_client(
             continue;
         }
         let sdk_session_before_request = client_session_id.clone();
+        if let Request::Subscribe { client_name: Some(name), .. }
+        | Request::ResumeSession { client_name: Some(name), .. } = &request
+        {
+            connection_client_name = Some(name.clone());
+        }
         match request {
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
@@ -1539,6 +1548,7 @@ pub(super) async fn handle_client(
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
+                client_name: _,
             } => {
                 if let Err(message) =
                     validated_subscribe_working_dir(
@@ -1566,6 +1576,7 @@ pub(super) async fn handle_client(
                 // rather than retaining a prior pane's values.
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
+                recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
@@ -1777,7 +1788,7 @@ pub(super) async fn handle_client(
                     None,
                     supports_pdf_panels,
                     supports_turn_identity,
-                    None,
+                    recent_history_messages.map(crate::protocol::HistoryBase::recent),
             )
                 .await
                 .is_err()
@@ -1811,6 +1822,7 @@ pub(super) async fn handle_client(
             Request::GetCompactedHistory {
                 id,
                 visible_messages,
+                recent_history,
             } => {
                 if handle_get_compacted_history(
                     id,
@@ -1818,6 +1830,7 @@ pub(super) async fn handle_client(
                     &agent,
                     &writer,
                     visible_messages,
+                    recent_history,
                 )
                 .await
                 .is_err()
@@ -1856,6 +1869,7 @@ pub(super) async fn handle_client(
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
+                client_name: _,
             } => {
                 let pre_resume_session_id = client_session_id.clone();
                 let resume_working_dir = {
@@ -1877,7 +1891,7 @@ pub(super) async fn handle_client(
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
-                        None,
+                        recent_history_messages.map(crate::protocol::HistoryBase::recent),
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,
@@ -2530,6 +2544,21 @@ pub(super) async fn handle_client(
                         });
                     }
                 }
+            }
+
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = super::debug::forward_voice_activity(
+                    id,
+                    &session_id,
+                    activity,
+                    &swarm_members,
+                )
+                .await;
+                let _ = client_event_tx.send(event);
             }
 
             Request::InputShell { id, command } => {
@@ -3203,6 +3232,9 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if let Some(name) = connection_client_name.as_deref() {
+            crate::mobile_push::note_client_attached(&client_session_id, name);
+        }
         if sdk_session_before_request != client_session_id {
             drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
         }
@@ -3248,6 +3280,7 @@ pub(super) async fn handle_client(
                 &sessions,
                 &client_session_id,
                 client_is_processing,
+                continue_on_disconnect,
                 &mut processing_task,
                 event_handle,
                 &swarm_members,
@@ -3353,6 +3386,7 @@ pub(super) async fn handle_client(
             &sessions,
             &client_session_id,
             client_is_processing,
+            continue_on_disconnect,
             &mut processing_task,
             event_handle,
             &swarm_members,

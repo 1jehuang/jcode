@@ -932,7 +932,7 @@ impl McpManagementTool {
 
         // Connect
         let manager = self.manager.read().await;
-        match manager.connect(&server_name, &config).await {
+        match crate::mcp::interactive_connect(manager.connect(&server_name, &config)).await {
             Ok(()) => {
                 let tools = manager.all_tools().await;
                 let connected = manager.connected_servers().await;

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 #[derive(Default)]
 struct RemoteAccounts {
+    generation: u64,
     received: Option<Instant>,
     anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
@@ -12,18 +13,47 @@ struct RemoteAccounts {
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
 
-/// Enter daemon-only mode without claiming that a response has arrived.
-pub fn clear_remote_account_usage() {
-    if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
-        *state = RemoteAccounts::default();
+fn try_remote_lock(
+    mutex: &Mutex<RemoteAccounts>,
+) -> Option<std::sync::MutexGuard<'_, RemoteAccounts>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            crate::logging::info("Remote account usage cache poisoned, skipping snapshot");
+            None
+        }
     }
+}
+
+/// Enter daemon-only mode without claiming that a response has arrived.
+pub fn clear_remote_account_usage() -> u64 {
+    if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
+        let generation = state.generation.wrapping_add(1);
+        *state = RemoteAccounts {
+            generation,
+            ..Default::default()
+        };
+        generation
+    } else {
+        0
+    }
+}
+
+/// Capture the current connection generation before reading advisory disk data.
+pub(super) fn remote_account_usage_generation() -> u64 {
+    REMOTE
+        .get_or_init(Mutex::default)
+        .lock()
+        .map(|state| state.generation)
+        .unwrap_or(0)
 }
 
 /// An empty authoritative response is received; an initial reset is not.
 pub fn remote_account_usage_received() -> bool {
     REMOTE
         .get()
-        .and_then(|state| state.try_lock().ok())
+        .and_then(try_remote_lock)
         .is_some_and(|state| state.received.is_some())
 }
 
@@ -44,6 +74,7 @@ pub(super) fn set_remote_account_usage_with_age(
 ) {
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
         *state = RemoteAccounts {
+            generation: state.generation.wrapping_add(1),
             received: Instant::now().checked_sub(age),
             anthropic,
             openai,
@@ -51,9 +82,39 @@ pub(super) fn set_remote_account_usage_with_age(
     }
 }
 
+pub(super) fn import_remote_account_usage(
+    generation: u64,
+    anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
+    openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+    age: std::time::Duration,
+) -> bool {
+    let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() else {
+        return false;
+    };
+    state.import_snapshot(generation, anthropic, openai, age)
+}
+
+impl RemoteAccounts {
+    fn import_snapshot(
+        &mut self,
+        generation: u64,
+        anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
+        openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+        age: std::time::Duration,
+    ) -> bool {
+        if self.generation != generation || self.received.is_some() {
+            return false;
+        }
+        self.received = Instant::now().checked_sub(age);
+        self.anthropic = anthropic;
+        self.openai = openai;
+        true
+    }
+}
+
 /// Daemon-reported OAuth accounts `(anthropic, openai)`, once a response arrived.
 pub fn remote_account_list() -> Option<(Vec<AccountUsageSnapshot>, Vec<AccountUsageSnapshot>)> {
-    let state = REMOTE.get()?.try_lock().ok()?;
+    let state = try_remote_lock(REMOTE.get()?)?;
     state.received?;
     let convert = |list: &[jcode_protocol::AccountUsageSnapshot]| {
         list.iter()
@@ -116,9 +177,51 @@ impl RemoteAccounts {
     }
 }
 
+/// Daemon-reported banked resets for one account, when the daemon knows them.
+pub fn remote_account_banked_resets(
+    provider: MultiAccountProviderKind,
+    label: &str,
+) -> Option<super::AccountBankedResets> {
+    let state = try_remote_lock(REMOTE.get()?)?;
+    state.received?;
+    let accounts = match provider {
+        MultiAccountProviderKind::Anthropic => &state.anthropic,
+        MultiAccountProviderKind::OpenAI => &state.openai,
+    };
+    let data = accounts.iter().find(|data| data.label == label.trim())?;
+    if data.banked_resets.is_none() && data.banked_next_at.is_none() {
+        return None;
+    }
+    Some(super::AccountBankedResets {
+        available: data.banked_resets.unwrap_or(0),
+        next_available_at: data.banked_next_at.clone(),
+        expires_at: data.banked_expires_at.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_snapshot_cannot_overwrite_live_or_reconnected_usage() {
+        let mut state = RemoteAccounts {
+            generation: 7,
+            ..Default::default()
+        };
+        let age = std::time::Duration::from_secs(20);
+        assert!(!state.import_snapshot(6, Vec::new(), Vec::new(), age));
+        assert!(state.received.is_none());
+        assert!(state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        assert!(state.received.unwrap().elapsed() >= age);
+        // Even an empty live response is authoritative over a startup hint.
+        state.received = Some(Instant::now());
+        assert!(!state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        state.generation = 8;
+        state.received = None;
+        assert!(!state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        assert!(state.import_snapshot(8, Vec::new(), Vec::new(), age));
+    }
 
     #[test]
     fn connection_reset_is_not_an_empty_authoritative_response() {
@@ -156,6 +259,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         });
         assert_eq!(
             state

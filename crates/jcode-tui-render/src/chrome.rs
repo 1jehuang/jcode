@@ -2,10 +2,21 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 pub fn clear_area(frame: &mut Frame, area: Rect) {
-    for x in area.left()..area.right() {
-        for y in area.top()..area.bottom() {
-            frame.buffer_mut()[(x, y)].reset();
-        }
+    let buffer = frame.buffer_mut();
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let width = usize::from(area.width);
+    // Full-width areas are one contiguous run of cells.
+    if area.left() == buffer.area.left() && area.width == buffer.area.width {
+        let start = buffer.index_of(area.left(), area.top());
+        buffer.reset_range(start..start + width * usize::from(area.height));
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        let start = buffer.index_of(area.left(), y);
+        buffer.reset_range(start..start + width);
     }
 }
 

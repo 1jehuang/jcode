@@ -12,8 +12,8 @@
 //! the terminal's own (light) default background shows through, exactly like
 //! it does on dark themes today.
 //!
-//! The mode itself is set once at startup by the TUI's terminal-background
-//! detection (OSC 11 query / `JCODE_THEME` / `display.theme` config) and
+//! The mode is initialized by the TUI's terminal-background detection and
+//! refreshed during auto-theme sessions (OSC 11 / `JCODE_THEME` / config). It
 //! defaults to dark, which keeps every existing code path byte-identical.
 
 use ratatui::buffer::Buffer;
@@ -32,8 +32,8 @@ pub enum ThemeMode {
 
 static THEME_MODE: AtomicU8 = AtomicU8::new(0);
 
-/// Set the global theme mode. Called once at startup after terminal
-/// background detection (and again if the user overrides it).
+/// Set the global theme mode at startup and when the terminal background
+/// changes during an auto-theme session (or the user overrides it).
 pub fn set_theme_mode(mode: ThemeMode) {
     THEME_MODE.store(
         match mode {

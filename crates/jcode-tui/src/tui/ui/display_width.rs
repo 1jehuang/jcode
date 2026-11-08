@@ -1,4 +1,7 @@
 pub(super) fn line_display_width(text: &str) -> usize {
+    if text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return text.len();
+    }
     unicode_width::UnicodeWidthStr::width(text)
 }
 
