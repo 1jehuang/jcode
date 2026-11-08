@@ -20,15 +20,11 @@ impl App {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
     ) {
-        // Local resumes know their session before the server sends History.
-        // SSH sessions must never read potentially unrelated local state.
-        let session_id = self.active_client_session_id().or_else(|| {
-            if crate::tui::is_ssh_remote() {
-                None
-            } else {
-                self.resume_session_id.as_deref()
-            }
-        });
+        // A session-bound remote snapshot can arrive before History. SSH still
+        // never reads local todo files, including for the requested resume id.
+        let session_id = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
         if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
             let payload = self
                 .remote_todos_payload
@@ -84,7 +80,10 @@ impl App {
     }
 
     pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
-        if self.active_client_session_id() != Some(session_id.as_str()) {
+        let expected = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
+        if expected != Some(session_id.as_str()) {
             return;
         }
         self.remote_todos_payload = Some((session_id, payload));

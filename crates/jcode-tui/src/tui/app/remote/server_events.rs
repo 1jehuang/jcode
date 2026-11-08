@@ -1856,7 +1856,15 @@ fn handle_server_event_inner(
             if session_changed {
                 // Drop the previous session's snapshot and polling deadlines.
                 // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
-                app.remote_todos_payload = None;
+                // A resume sends its authoritative todo snapshot before the
+                // large History frame. Keep that snapshot, never the old one.
+                if app
+                    .remote_todos_payload
+                    .as_ref()
+                    .is_some_and(|(id, _)| id != &session_id)
+                {
+                    app.remote_todos_payload = None;
+                }
                 app.remote_todos_requested_at = None;
                 app.pinned_todos_checked_at = None;
                 app.remote_available_service_tiers = None;

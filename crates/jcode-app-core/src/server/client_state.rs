@@ -25,6 +25,36 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+/// Resume chrome must not queue behind a multi-megabyte History frame. Write
+/// the small, session-bound authoritative snapshot before acquiring that frame's
+/// writer lock. This does not require the agent lock, even during a live turn.
+pub(super) async fn send_resume_todos(
+    session_id: &str,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let started = Instant::now();
+    let payload = serde_json::json!({
+        "todos": crate::todo::load_todos(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load resume todos for {session_id}: {error}"));
+            Vec::new()
+        }),
+        "plan": crate::todo::load_plan(session_id).unwrap_or_default(),
+        "goals": crate::todo::load_goals(session_id).unwrap_or_default(),
+    });
+    let event = ServerEvent::Todos {
+        session_id: session_id.to_owned(),
+        payload: payload.to_string(),
+    };
+    let json = encode_event(&event);
+    writer.lock().await.write_all(json.as_bytes()).await?;
+    crate::logging::info(&format!(
+        "[TIMING] resume todos: session={session_id}, bytes={}, total={}ms",
+        json.len(),
+        started.elapsed().as_millis(),
+    ));
+    Ok(())
+}
+
 /// Do not probe any identity until telemetry is enabled. Only the provider
 /// may identify its effective OAuth credential. An API-key route must not expose the email
 /// of an unrelated saved subscription account.

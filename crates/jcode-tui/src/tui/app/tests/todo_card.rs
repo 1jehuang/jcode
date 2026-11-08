@@ -1,6 +1,80 @@
 // Tests for the inline chat todo card (`/todos` command + todo-card hotkey).
 
 #[test]
+fn ssh_pinned_todos_arrive_before_history_and_survive_it() {
+    if super::commands_dispatch::ssh_test_runs_in_child(
+        "ssh_pinned_todos_arrive_before_history_and_survive_it",
+    ) {
+        return;
+    }
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = None;
+    app.resume_session_id = Some("remote-early-todos".into());
+    app.onboarding_flow = None;
+    app.onboarding_startup_checked = true;
+    crate::todo::save_todos(
+        "remote-early-todos",
+        &[pinned_band_todo(
+            "local",
+            "Unrelated local todo must not leak",
+            "pending",
+        )],
+    )
+    .unwrap();
+    app.refresh_pinned_todos_now();
+    assert!(app.pinned_todos_payload_ref().is_none());
+    let payload = serde_json::json!({
+        "todos": [pinned_band_todo("remote", "Authoritative early remote task", "pending")],
+        "plan": {}, "goals": []
+    })
+    .to_string();
+    app.receive_remote_todos("wrong-remote-session".into(), payload.clone());
+    assert!(app.remote_todos_payload.is_none());
+    let started = std::time::Instant::now();
+    app.receive_remote_todos("remote-early-todos".into(), payload);
+    assert!(
+        app.remote_session_id.is_none(),
+        "todo snapshot must not claim the connection's session"
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("Authoritative early remote task"), "{text}");
+    assert!(!text.contains("Unrelated local todo"), "{text}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    eprintln!(
+        "authoritative pre-History todo rendered in {:?}",
+        started.elapsed()
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _runtime_guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let history = serde_json::from_value(serde_json::json!({
+        "type": "history", "id": 1, "session_id": "remote-early-todos",
+        "messages": [], "mcp_servers": [], "skills": [], "all_sessions": []
+    }))
+    .unwrap();
+    app.handle_server_event(history, &mut remote);
+    assert!(app.remote_todos_payload.is_some());
+    assert!(
+        app.pinned_todos_payload_ref()
+            .unwrap()
+            .contains("Authoritative early remote task")
+    );
+    // An old payload must still be rejected after the session is established.
+    app.receive_remote_todos("wrong-remote-session".into(), "{}".into());
+    assert!(
+        app.pinned_todos_payload_ref()
+            .unwrap()
+            .contains("Authoritative early remote task")
+    );
+    crate::todo::save_todos("remote-early-todos", &[]).unwrap();
+}
+
+#[test]
 fn ssh_todos_command_renders_remote_card() {
     if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
         return;
