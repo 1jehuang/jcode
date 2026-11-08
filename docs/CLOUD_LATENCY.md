@@ -14,6 +14,7 @@ From the repository root:
 python3 scripts/cloud_latency_report.py --slow-ms 1000
 python3 scripts/cloud_latency_report.py ~/.jcode/logs/jcode-2026-11-07.log
 python3 scripts/cloud_latency_report.py downloaded-cloud-daemon.log --slow-ms 250
+python3 scripts/cloud_latency_report.py --since 2026-11-08T00:28:00 --until 2026-11-08T00:38:00
 ```
 
 The report ranks stage/operation/metric groups by maximum observed duration and
@@ -23,6 +24,11 @@ logs, so narrow the files when comparing before/after builds. Percentiles descri
 only the selected observed samples, not a statistically controlled benchmark.
 The report prints only allowlisted label syntax and numeric fields, never raw log
 lines. Do not combine overlapping stage/total metrics by summing them.
+Time windows use the local wall-clock timestamps printed in the selected logs,
+with an inclusive start and exclusive end. Do not pass UTC offsets. Undated or
+invalid timestamp records are excluded when a window is selected. A time window
+does not identify a binary: several old and new processes can write to one log,
+so a post-reload window alone is not proof that every sample used the new build.
 
 Most records use `[CLOUD_TIMING]`; mobile records use `mobile_sync stage=...`.
 Common fields are `stage`, `operation`, `outcome`, and `duration_ms`. Additional
