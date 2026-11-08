@@ -1164,3 +1164,26 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
         "{text}"
     );
 }
+
+#[test]
+fn expanded_pinned_todo_band_scrolls_when_taller_than_budget() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.pinned_todos_expanded = true;
+    let todos: Vec<_> = (0..40)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("Task number {i}"), "pending"))
+        .collect();
+    app.pinned_todos_payload = Some(serde_json::json!({ "todos": todos }).to_string());
+    crate::tui::ui::viewport::reset_pinned_todo_scroll();
+
+    let (lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    assert!(lines.len() <= 21, "expanded band is bounded: {}", lines.len());
+    assert!(lines[0].to_string().contains("scroll"));
+    crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
+    assert!(crate::tui::ui::viewport::scroll_pinned_todos(3));
+    let (scrolled, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    assert_ne!(lines[1].to_string(), scrolled[1].to_string());
+    crate::tui::ui::viewport::reset_pinned_todo_scroll();
+}
