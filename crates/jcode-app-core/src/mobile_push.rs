@@ -108,6 +108,13 @@ pub fn build_payload(
     } else {
         truncate_words(&collapsed, BODY_MAX_CHARS)
     };
+    // Lead the title with a per-kind marker so the kinds are told apart at a
+    // glance on the lock screen, not only by the small subtitle.
+    let title = Some(format!(
+        "{} {}",
+        kind_marker(kind),
+        title.as_deref().unwrap_or("jcode")
+    ));
     PushPayload {
         kind,
         session_id: session_id.to_string(),
@@ -120,6 +127,15 @@ pub fn build_payload(
 }
 
 const JS_SAFE_INT_MASK: u64 = (1 << 53) - 1;
+
+pub fn kind_marker(kind: PushKind) -> &'static str {
+    match kind {
+        PushKind::TurnDone => "\u{2705}",   // white check mark
+        PushKind::TurnError => "\u{274C}",  // cross mark
+        PushKind::NeedsInput => "\u{2753}", // question mark
+        PushKind::Wake => "\u{23F0}",       // alarm clock
+    }
+}
 
 fn lookup_session_title(session_id: &str) -> Option<String> {
     if cfg!(test) || session_id.is_empty() {
@@ -918,7 +934,7 @@ mod tests {
             serde_json::json!({
                 "kind": "turn_done",
                 "session_id": "session_x",
-                "session_title": "Fix login",
+                "session_title": "\u{2705} Fix login",
                 "body": "Done. All tests pass",
                 "turn_id": 42
             })
@@ -930,7 +946,7 @@ mod tests {
         let p = build_payload(PushKind::NeedsInput, "s", Some("  "), "", None);
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["kind"], "needs_input");
-        assert!(v.get("session_title").is_none());
+        assert_eq!(v["session_title"], "\u{2753} jcode");
         assert!(v.get("turn_id").is_none());
         assert_eq!(v["body"], "Waiting for your input");
         let long = "a".repeat(500);
@@ -963,7 +979,16 @@ mod tests {
         let answer = "## Summary\n\nFixed the **login** bug in `auth.rs`; all 12 tests pass.\n\n- detail one\n- detail two\n\n```rust\nfn x() {}\n```";
         let p = build_payload(PushKind::TurnDone, "s", Some("Fix `login`"), answer, None);
         assert_eq!(p.body, "Fixed the login bug in auth.rs; all 12 tests pass.");
-        assert_eq!(p.session_title.as_deref(), Some("Fix login"));
+        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Fix login"));
+        for (kind, body, marker) in [
+            (PushKind::TurnDone, "done", "\u{2705}"),
+            (PushKind::TurnDone, "Should I push?", "\u{2753}"),
+            (PushKind::TurnError, "boom", "\u{274C}"),
+            (PushKind::Wake, "bash completed", "\u{23F0}"),
+        ] {
+            let t = build_payload(kind, "s", Some("T"), body, None).session_title.unwrap();
+            assert_eq!(t, format!("{marker} T"));
+        }
         let bullets = "- Updated parser\n- Added tests\n- Shipped v2 to production servers today";
         assert_eq!(
             build_payload(PushKind::TurnDone, "s", None, bullets, None).body,
