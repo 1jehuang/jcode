@@ -65,7 +65,11 @@ impl App {
     }
 
     pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
-        if !crate::tui::is_ssh_remote()
+        // Any client that renders from a server snapshot must keep polling it.
+        // A local resume seeds `remote_todos_payload` before History, and from
+        // then on `current_todo_state` ignores disk. Without polling, the card
+        // froze at the resume snapshot while the stored plan kept advancing.
+        if !(crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some())
             || !(self.todos_view_enabled
                 || self.latest_todo_card_index().is_some()
                 || crate::config::config().display.pin_todos)

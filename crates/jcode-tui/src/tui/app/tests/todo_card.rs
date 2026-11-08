@@ -75,6 +75,34 @@ fn ssh_pinned_todos_arrive_before_history_and_survive_it() {
 }
 
 #[test]
+fn resumed_local_snapshot_keeps_polling_so_card_does_not_go_stale() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("resumed-local-snapshot".into());
+    let payload = |status: &str| {
+        serde_json::json!({
+            "todos": [{"id":"lane", "content":"Integrate lane", "priority":"high", "status":status}],
+            "plan": {}, "goals": []
+        })
+        .to_string()
+    };
+    // Resume seeds an authoritative snapshot, after which disk is ignored.
+    app.receive_remote_todos("resumed-local-snapshot".into(), payload("in_progress"));
+    app.toggle_todo_card();
+    assert!(
+        app.remote_todos_refresh_due(),
+        "a snapshot-backed card must request fresh todos, not freeze"
+    );
+    app.receive_remote_todos("resumed-local-snapshot".into(), payload("completed"));
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.role == "todos")
+        .unwrap();
+    assert!(card.content.contains("completed"), "{}", card.content);
+}
+
+#[test]
 fn ssh_todos_command_renders_remote_card() {
     if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
         return;
