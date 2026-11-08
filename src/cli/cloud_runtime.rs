@@ -58,8 +58,19 @@ if [ {force} = 0 ]; then
   done
 fi
 before=$(readlink /opt/jcode-cloud/jcode)
+pending=0
+sudo -n /usr/local/sbin/jcode-cloud-runtime status 2>/dev/null | grep -q '"pending": {{' && pending=1
 say "restarting cloud daemon"
-systemctl --user restart jcode-cloud.service || {{ say "restart failed"; exit 1; }}
+# A daemon may have handed itself off outside systemd on an earlier stop. If it
+# keeps the socket, the unit start fails and the new runtime is falsely rolled
+# back. Turns are idle here (or --force), so stop every daemon first.
+systemctl --user stop jcode-cloud.service 2>/dev/null
+for p in $(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$'); do say "stopping detached daemon pid $p"; kill -TERM "$p" 2>/dev/null; done
+for i in $(seq 1 20); do pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$' >/dev/null || break; sleep 1; done
+pkill -KILL -u "$(id -u)" -f '/opt/jcode-cloud/.* serve$' 2>/dev/null
+rm -f "$XDG_RUNTIME_DIR/jcode.sock"
+systemctl --user reset-failed jcode-cloud.service 2>/dev/null
+systemctl --user start jcode-cloud.service || {{ say "start failed"; exit 1; }}
 for i in $(seq 1 60); do
   pid=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
   if [ "${{pid:-0}}" != 0 ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
@@ -67,23 +78,14 @@ for i in $(seq 1 60); do
     pid2=$(systemctl --user show jcode-cloud.service --property=MainPID --value)
     if [ "$pid2" = "$pid" ]; then
       after=$(readlink /opt/jcode-cloud/jcode)
+      if [ "$pending" = 1 ] && [ "$after" = "$before" ]; then
+        say "new runtime failed to start and was rolled back; daemon is on: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
+        exit 1
+      fi
       [ "$after" = "$before" ] || say "activated new runtime"
       say "daemon ready: $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
       exit 0
     fi
-  fi
-  # The old daemon may hand its sessions to a detached successor on stop. The
-  # unit then fails with "already running" while that successor serves.
-  if [ "$i" -ge 10 ] && [ -S "$XDG_RUNTIME_DIR/jcode.sock" ]; then
-    target=$(dirname "$(readlink -f /opt/jcode-cloud/jcode)")
-    for p in $(pgrep -u "$(id -u)" -f ' serve$'); do
-      exe=$(readlink -f /proc/$p/exe 2>/dev/null)
-      case "$exe" in "$target"/*)
-        systemctl --user reset-failed jcode-cloud.service 2>/dev/null
-        say "daemon ready outside systemd (pid $p, handed off): $(/opt/jcode-cloud/jcode --version 2>/dev/null)"
-        exit 0;;
-      esac
-    done
   fi
   sleep 1
 done
