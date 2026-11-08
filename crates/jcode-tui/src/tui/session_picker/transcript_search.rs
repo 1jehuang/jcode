@@ -19,7 +19,7 @@ use std::time::Instant;
 mod text_cache;
 mod word_scores;
 use word_scores::WordScores;
-mod source;
+pub(super) mod source;
 mod token_cache;
 mod warmup;
 use source::Source;

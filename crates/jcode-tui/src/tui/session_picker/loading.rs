@@ -415,8 +415,12 @@ fn send_session_list_updates_with_discovery(
 
 #[path = "loading_search_text.rs"]
 mod search_text;
+use super::transcript_search::source::{
+    BucketSink, Source, SourceBuckets, Walk, message_role_source, push_mark,
+};
 pub(super) use search_text::{
-    build_search_index, push_sampled_search_text, raw_value_display_text, raw_value_search_excerpt,
+    build_search_index, classified_search_excerpt, push_sampled_search_text,
+    raw_value_display_text, raw_value_search_excerpt,
 };
 
 #[cfg(test)]
@@ -1271,7 +1275,7 @@ struct SessionMessageSummaryData {
     assistant_message_count: usize,
     estimated_tokens: usize,
     first_user_prompt: Option<String>,
-    search_text: String,
+    search_text: SourceBuckets,
     /// Newest stored message timestamp, of any role (prompts, replies, tools).
     last_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -1300,12 +1304,9 @@ impl SessionMessageSummaryData {
                 .estimated_tokens
                 .saturating_add(usage.total_tokens() as usize);
         }
-        if let Some(raw_content) = message.content_raw.as_deref() {
-            push_sampled_search_text(
-                &mut self.search_text,
-                raw_content,
-                INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
-            );
+        if let Some(content) = &message.content_search {
+            self.search_text
+                .merge(content, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
         }
     }
 
@@ -1327,11 +1328,8 @@ impl SessionMessageSummaryData {
         if self.first_user_prompt.is_none() {
             self.first_user_prompt = other.first_user_prompt;
         }
-        push_sampled_search_text(
-            &mut self.search_text,
-            &other.search_text,
-            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
-        );
+        self.search_text
+            .merge(&other.search_text, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
     }
 }
 
@@ -1397,7 +1395,8 @@ struct SessionMessageSummary {
     // allocating or walking it. After display metadata is known, we inspect only
     // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
-    content_raw: Option<String>,
+    /// Bounded per-source samples of the content, classified by block type.
+    content_search: Option<SourceBuckets>,
     content_text: Option<String>,
     display_role: Option<StoredDisplayRole>,
     token_usage: Option<SessionTokenUsageSummary>,
@@ -1463,8 +1462,9 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
-        let content_raw = if display_role.is_none() && !content_starts_with_system_reminder {
-            content.and_then(|raw| raw_value_search_excerpt(raw, self.content_excerpt_budget))
+        let content_search = if display_role.is_none() && !content_starts_with_system_reminder {
+            content
+                .and_then(|raw| classified_search_excerpt(raw, &role, self.content_excerpt_budget))
         } else {
             None
         };
@@ -1476,7 +1476,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
-            content_raw,
+            content_search,
             content_text,
             display_role,
             token_usage,
@@ -1779,7 +1779,11 @@ fn parse_jcode_session_info(
         &title,
         session.working_dir.as_deref(),
         session.save_label.as_deref(),
-        &session.messages.search_text,
+        &{
+            let mut text = String::new();
+            session.messages.search_text.render(&mut text);
+            text
+        },
     );
 
     Some(SessionInfo {
@@ -2867,9 +2871,11 @@ fn include_cloud_sessions(
             }
             session.server_name = Some(format!("cloud: {host}"));
             session.server_icon = Some("☁".to_string());
+            // Host metadata, not transcript text from the preceding section.
+            push_mark(&mut session.search_index, Source::Other);
             session
                 .search_index
-                .push_str(&format!(" cloud {}", host.to_lowercase()));
+                .push_str(&format!("cloud {}", host.to_lowercase()));
         }
     }
 }

@@ -51,10 +51,79 @@ pub(crate) fn stronger(a: Option<Source>, b: Option<Source>) -> Option<Source> {
     }
 }
 
+/// Starts a section of the in-memory search index. The marker is a separate
+/// whitespace-delimited word, so it never joins a query word, and a control
+/// character, so a typed query never matches it.
+const MARK: char = '\u{1f}';
+
+impl Source {
+    const ALL: [Source; 6] = [
+        Source::ToolOutput,
+        Source::Thinking,
+        Source::ToolInput,
+        Source::Other,
+        Source::Assistant,
+        Source::User,
+    ];
+
+    fn tag(self) -> char {
+        match self {
+            Source::ToolOutput => '0',
+            Source::Thinking => '1',
+            Source::ToolInput => '2',
+            Source::Other => '3',
+            Source::Assistant => '4',
+            Source::User => '5',
+        }
+    }
+
+    fn from_tag(tag: char) -> Option<Self> {
+        Self::ALL.into_iter().find(|source| source.tag() == tag)
+    }
+
+    /// Index of this source in [`SourceBuckets`].
+    fn slot(self) -> usize {
+        self.tag() as usize - '0' as usize
+    }
+}
+
+/// Marks where the following search index text came from.
+pub(crate) fn push_mark(index: &mut String, source: Source) {
+    index.push(' ');
+    index.push(MARK);
+    index.push(source.tag());
+    index.push(' ');
+}
+
+/// Origin of the index text at byte `pos`. Unmarked text, including indexes
+/// built before sections existed, is treated as untagged metadata.
+fn source_at(index: &str, pos: usize) -> Source {
+    index[..pos]
+        .rfind(MARK)
+        .and_then(|at| index[at + MARK.len_utf8()..].chars().next())
+        .and_then(Source::from_tag)
+        .unwrap_or(Source::Other)
+}
+
+/// Bounds per-token work on the keystroke path for very common words.
+const MAX_CLASSIFIED_MATCHES: usize = 64;
+
+/// Best origin among a token's occurrences in a sectioned search index.
+fn best_index_source(index: &str, token: &str) -> Option<Source> {
+    let mut best = None;
+    for (pos, _) in index.match_indices(token).take(MAX_CLASSIFIED_MATCHES) {
+        best = stronger(best, Some(source_at(index, pos)));
+        if best == Some(Source::User) {
+            break;
+        }
+    }
+    best
+}
+
 /// Cheap per-token estimate from in-memory metadata, never transcript IO.
 /// Title, saved label, and opening prompt are user intent. Other index hits
-/// came from an unclassified transcript sample, so they get the lowest weight
-/// and can only be upgraded by a transcript classification pass.
+/// use the section they were indexed under, and a transcript classification
+/// pass can still upgrade them.
 pub(crate) fn metadata_sources(
     intent_fields: &[&str],
     index: &str,
@@ -68,13 +137,80 @@ pub(crate) fn metadata_sources(
                 .any(|field| field.contains(token.as_str()))
             {
                 Some(Source::User)
-            } else if index.contains(token.as_str()) {
-                Some(Source::ToolOutput)
             } else {
-                None
+                best_index_source(index, token)
             }
         })
         .collect()
+}
+
+/// Bounded per-source transcript samples. Sampling each source separately
+/// keeps a flood of tool output from evicting the user's prompts.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SourceBuckets {
+    text: [String; 6],
+}
+
+impl SourceBuckets {
+    /// Byte budget for one source, out of `total` for all of them. User prompts
+    /// and replies get most of it since they are the strongest evidence.
+    fn budget(source: Source, total: usize) -> usize {
+        match source {
+            Source::User => total * 3 / 8,
+            Source::Assistant => total / 4,
+            _ => total / 16,
+        }
+    }
+
+    pub(crate) fn push(&mut self, source: Source, text: &str, total: usize) {
+        crate::tui::session_picker::loading::push_sampled_search_text(
+            &mut self.text[source.slot()],
+            text,
+            Self::budget(source, total),
+        );
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self, total: usize) {
+        for source in Source::ALL {
+            self.push(source, &other.text[source.slot()], total);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.text.iter().all(String::is_empty)
+    }
+
+    /// Appends every non-empty sample under its section marker, strongest first.
+    pub(crate) fn render(&self, index: &mut String) {
+        for source in Source::ALL.into_iter().rev() {
+            let text = self.text[source.slot()].trim();
+            if !text.is_empty() {
+                push_mark(index, source);
+                index.push_str(text);
+            }
+        }
+    }
+}
+
+/// Collects decoded transcript strings into per-source samples.
+pub(crate) struct BucketSink<'a> {
+    pub(crate) buckets: &'a mut SourceBuckets,
+    pub(crate) total: usize,
+}
+
+impl Sink for BucketSink<'_> {
+    fn text(&mut self, text: &str, source: Source) -> Result<(), &'static str> {
+        let text = text.trim();
+        if !text.is_empty() {
+            self.buckets.push(source, text, self.total);
+        }
+        Ok(())
+    }
+}
+
+/// Source of a preview or stored message role, such as `user` or `tool`.
+pub(crate) fn message_role_source(role: &str) -> Source {
+    role_source(role).unwrap_or(Source::Other)
 }
 
 pub(crate) trait Sink {
@@ -382,10 +518,57 @@ mod tests {
         );
         let tokens = vec!["deploy".to_owned(), "api".to_owned(), "zzz".to_owned()];
         let sources = metadata_sources(&["deploy the thing"], "deploy api", &tokens);
+        assert_eq!(sources, [Some(Source::User), Some(Source::Other), None]);
+        assert_eq!(source_weight(&sources), 10);
+    }
+
+    #[test]
+    fn sectioned_index_reports_strongest_section_per_token() {
+        let mut index = String::from("title words");
+        push_mark(&mut index, Source::ToolOutput);
+        index.push_str("grep zebra kiwi");
+        push_mark(&mut index, Source::User);
+        index.push_str("find the kiwi");
+        push_mark(&mut index, Source::Thinking);
+        index.push_str("pondering mango");
+        let tokens: Vec<String> = ["zebra", "kiwi", "mango", "title"].map(String::from).into();
         assert_eq!(
-            sources,
-            [Some(Source::User), Some(Source::ToolOutput), None]
+            metadata_sources(&[], &index, &tokens),
+            [
+                Some(Source::ToolOutput),
+                Some(Source::User),
+                Some(Source::Thinking),
+                Some(Source::Other),
+            ]
         );
-        assert_eq!(source_weight(&sources), 9);
+    }
+
+    #[test]
+    fn buckets_keep_user_prompts_when_tool_output_floods_the_budget() {
+        let mut buckets = SourceBuckets::default();
+        let mut sink = BucketSink {
+            buckets: &mut buckets,
+            total: 1024,
+        };
+        Walk {
+            sink: &mut sink,
+            source: Source::User,
+        }
+        .deserialize(&mut serde_json::Deserializer::from_str(
+            r#"[{"type":"text","text":"ORIGINAL ASK"}]"#,
+        ))
+        .unwrap();
+        let flood = "x".repeat(4096);
+        for _ in 0..8 {
+            buckets.push(Source::ToolOutput, &flood, 1024);
+        }
+        let mut index = String::new();
+        buckets.render(&mut index);
+        let tokens = vec!["original".to_owned(), "ask".to_owned()];
+        assert!(index.len() < 1024);
+        assert_eq!(
+            metadata_sources(&[], &index.to_lowercase(), &tokens),
+            [Some(Source::User), Some(Source::User)]
+        );
     }
 }

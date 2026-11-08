@@ -104,12 +104,19 @@ pub(crate) fn build_search_index(
     }
 
     let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
+    let mut current = None;
     for msg in messages_preview {
         let content = msg.content.trim();
         if content.is_empty() {
             continue;
         }
-        combined.push(' ');
+        let source = message_role_source(&msg.role);
+        if current != Some(source) {
+            push_mark(&mut combined, source);
+            current = Some(source);
+        } else {
+            combined.push(' ');
+        }
         push_with_byte_budget(&mut combined, content, &mut budget);
         if budget == 0 {
             break;
@@ -167,4 +174,36 @@ pub(crate) fn raw_value_display_text(raw: &RawValue) -> Option<String> {
     collect_text(&value, &mut text);
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Per-source samples of one stored message's content. Content blocks are
+/// classified by type, so tool results and reasoning inside a user or
+/// assistant message are not indexed as that role's own words.
+pub(crate) fn classified_search_excerpt(
+    raw: &RawValue,
+    role: &crate::message::Role,
+    budget: usize,
+) -> Option<SourceBuckets> {
+    use serde::de::DeserializeSeed;
+    if budget == 0 {
+        return None;
+    }
+    let source = match role {
+        crate::message::Role::User => Source::User,
+        crate::message::Role::Assistant => Source::Assistant,
+    };
+    let mut buckets = SourceBuckets::default();
+    let mut sink = BucketSink {
+        buckets: &mut buckets,
+        total: budget.min(MESSAGE_SEARCH_EXCERPT_BYTES),
+    };
+    let walk = Walk {
+        sink: &mut sink,
+        source,
+    };
+    let mut de = serde_json::Deserializer::from_str(raw.get());
+    if let Err(error) = walk.deserialize(&mut de) {
+        crate::logging::debug(&format!("Invalid transcript search content: {error}"));
+    }
+    (!buckets.is_empty()).then_some(buckets)
 }
