@@ -1,6 +1,49 @@
 use super::*;
 use jcode_session_types::StoredMessage;
 
+#[test]
+fn sync_timing_records_only_static_fields_and_elapsed_milliseconds() {
+    let mut timing = SyncTiming::new("test_stage");
+    timing.started = Instant::now() - Duration::from_millis(12);
+    for outcome in ["success", "error", "skipped_disabled", "incomplete"] {
+        timing.outcome = outcome;
+        let record = timing.record();
+        let fields: Vec<_> = record.split_whitespace().collect();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0], "mobile_sync");
+        assert_eq!(fields[1], "stage=test_stage");
+        assert_eq!(fields[2], format!("outcome={outcome}"));
+        let elapsed: u128 = fields[3]
+            .strip_prefix("duration_ms=")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(elapsed >= 12);
+    }
+}
+
+#[tokio::test]
+async fn upload_failure_does_not_retain_private_server_response() {
+    let secret = "private-transcript-and-auth-token";
+    let (base, request) = mock_listing("500 Internal Server Error", secret).await;
+    let body = UploadBody {
+        title: Some(secret),
+        source: "local",
+        host: None,
+        cwd: None,
+        model: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        messages: &[],
+    };
+    let error = upload(&reqwest::Client::new(), &base, secret, "test", &body)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("500"));
+    assert!(!format!("{error:#}").contains(secret));
+    request.await.unwrap();
+}
+
 struct TestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl TestEnv {

@@ -22,7 +22,41 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// Only compile-time labels enter timing records. Never include session IDs,
+// endpoints, credentials, payloads, or error strings here. Drop also covers
+// early returns, propagated errors and cancellation without changing budgets.
+struct SyncTiming {
+    stage: &'static str,
+    outcome: &'static str,
+    started: Instant,
+}
+
+impl SyncTiming {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            outcome: "incomplete",
+            started: Instant::now(),
+        }
+    }
+
+    fn record(&self) -> String {
+        format!(
+            "mobile_sync stage={} outcome={} duration_ms={}",
+            self.stage,
+            self.outcome,
+            self.started.elapsed().as_millis()
+        )
+    }
+}
+
+impl Drop for SyncTiming {
+    fn drop(&mut self) {
+        crate::logging::info(&self.record());
+    }
+}
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MESSAGES_PER_UPLOAD: usize = 200;
@@ -141,6 +175,8 @@ async fn list_cloud_sessions_with_endpoint(
     api_base: &str,
     api_key: &str,
 ) -> Result<Vec<SyncedSession>> {
+    let mut timing = SyncTiming::new("http_list");
+    timing.outcome = "error";
     #[derive(Deserialize)]
     struct SessionsResponse {
         sessions: Vec<SyncedSession>,
@@ -163,6 +199,7 @@ async fn list_cloud_sessions_with_endpoint(
         .json()
         .await
         .context("invalid mobile session listing response")?;
+    timing.outcome = "success";
     Ok(response
         .sessions
         .into_iter()
@@ -466,6 +503,8 @@ async fn upload(
     session_id: &str,
     body: &UploadBody<'_>,
 ) -> Result<()> {
+    let mut timing = SyncTiming::new("http_upload");
+    timing.outcome = "error";
     let url = format!(
         "{}/mobile/sessions/{}",
         api_base.trim_end_matches('/'),
@@ -481,14 +520,11 @@ async fn upload(
         .context("mobile sync upload failed")?;
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.with_context(|| {
-            format!("mobile sync upload returned {status}, response body unreadable")
-        })?;
-        anyhow::bail!(
-            "mobile sync upload returned {status}: {}",
-            text.chars().take(300).collect::<String>()
-        );
+        timing.outcome = "http_error";
+        // Response bodies can echo private content or credentials.
+        anyhow::bail!("mobile sync upload returned {status}");
     }
+    timing.outcome = "success";
     Ok(())
 }
 
@@ -506,9 +542,19 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
 }
 
 async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncReport> {
+    let mut queue = SyncTiming::new("queue_wait");
     let _pass = SYNC_PASS.lock().await;
+    queue.outcome = "acquired";
+    drop(queue);
+    let mut timing = SyncTiming::new(if reconcile {
+        "pass_reconcile"
+    } else {
+        "pass_incremental"
+    });
+    timing.outcome = "error";
     let mut state = load_state();
     if !state.enabled {
+        timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
     }
     let api_key = crate::subscription_catalog::configured_api_key()
@@ -540,10 +586,13 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
 
     let mut candidates = candidates.into_iter();
     while let Some((id, path, mtime)) = candidates.next() {
+        let mut upload_timing = SyncTiming::new("upload");
         if !sync_still_enabled(state.generation) {
+            upload_timing.outcome = "skipped_disabled";
             break;
         }
         if !valid_session_id(&id) {
+            upload_timing.outcome = "skipped_invalid";
             continue;
         }
         // No previous upload means a new session, not an error.
@@ -554,16 +603,19 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             .unwrap_or_else(SessionProgress::default);
         let revision = session_revision(&path);
         if progress.revision == Some(revision) && !dirty.contains(&id) {
+            upload_timing.outcome = "skipped_unchanged";
             continue;
         }
         let session = match Session::load_from_path(&path) {
             Ok(s) => s,
             Err(_) => {
+                upload_timing.outcome = "load_error";
                 mark_dirty(&id);
                 continue;
             }
         };
         if session.is_debug || session.messages.is_empty() {
+            upload_timing.outcome = "skipped_empty_or_debug";
             state.sessions.insert(
                 id,
                 SessionProgress {
@@ -586,6 +638,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         };
         for chunk in chunks {
             if !sync_still_enabled(state.generation) {
+                upload_timing.outcome = "skipped_disabled";
                 ok = false;
                 break;
             }
@@ -599,8 +652,11 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 updated_at: session.updated_at.to_rfc3339(),
                 messages: chunk,
             };
-            if let Err(err) = upload(client, &api_base, &api_key, &id, &body).await {
-                crate::logging::debug(&format!("mobile sync {id}: {err:#}"));
+            if upload(client, &api_base, &api_key, &id, &body)
+                .await
+                .is_err()
+            {
+                upload_timing.outcome = "error";
                 report.errors += 1;
                 ok = false;
                 break;
@@ -608,6 +664,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             report.messages_uploaded += chunk.len();
         }
         if ok {
+            upload_timing.outcome = "success";
             report.sessions_uploaded += 1;
             state.sessions.insert(
                 id,
@@ -640,12 +697,22 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     }
     // Merge under a cross-process lock, never write a stale enabled flag or
     // overwrite another process's unrelated session progress.
+    let mut commit = SyncTiming::new("progress_commit");
+    commit.outcome = "error";
     commit_progress(state.generation, &state.sessions)?;
+    commit.outcome = "success";
+    timing.outcome = if report.errors == 0 {
+        "success"
+    } else {
+        "partial_failure"
+    };
     Ok(report)
 }
 
 /// Delete everything this account has stored for mobile.
 pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
+    let mut timing = SyncTiming::new("http_wipe");
+    timing.outcome = "error";
     let api_key = crate::subscription_catalog::configured_api_key()
         .context("no Jcode account credential is configured")?;
     let url = format!(
@@ -659,8 +726,10 @@ pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
         .send()
         .await?;
     if !response.status().is_success() {
+        timing.outcome = "http_error";
         anyhow::bail!("server returned {}", response.status());
     }
+    timing.outcome = "success";
     Ok(())
 }
 
@@ -679,15 +748,15 @@ async fn background_sync() {
             _ = PERSISTED.notified() => {
                 // A bounded coalescing window, not a trailing debounce:
                 // continuous token saves cannot postpone sync forever.
+                let mut debounce = SyncTiming::new("debounce_wait");
                 tokio::time::sleep(SYNC_DEBOUNCE).await;
+                debounce.outcome = "success";
                 false
             }
         };
-        if !is_enabled() {
-            continue;
-        }
-        if let Err(err) = sync_pass(&client, reconcile).await {
-            crate::logging::debug(&format!("mobile sync pass failed: {err:#}"));
+        // sync_pass records failures and disabled skips without error text.
+        if sync_pass(&client, reconcile).await.is_err() {
+            crate::logging::debug("mobile sync pass failed (see stage timing)");
         }
     }
 }
