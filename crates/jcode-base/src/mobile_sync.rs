@@ -288,10 +288,8 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
     }
     let _lock = state_lock()?;
     let mut current = load_state();
-    if current.enabled && current.generation == generation {
-        if merge_progress(&mut current, updates) {
-            storage::write_json_secret(&state_path()?, &current)?;
-        }
+    if current.enabled && current.generation == generation && merge_progress(&mut current, updates) {
+        storage::write_json_secret(&state_path()?, &current)?;
     }
     Ok(())
 }
