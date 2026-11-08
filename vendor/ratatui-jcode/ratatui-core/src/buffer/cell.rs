@@ -115,7 +115,16 @@ impl Cell {
 
     /// Sets the symbol of the cell.
     pub fn set_symbol(&mut self, symbol: &str) -> &mut Self {
-        self.symbol = Some(CompactString::new(symbol));
+        // ratatui-jcode: reuse the existing inline string when it already
+        // holds this symbol, and avoid constructing a new CompactString.
+        match &mut self.symbol {
+            Some(s) if s.as_str() == symbol => {}
+            Some(s) if !s.is_heap_allocated() && symbol.len() <= 24 => {
+                s.clear();
+                s.push_str(symbol);
+            }
+            slot => *slot = Some(CompactString::new(symbol)),
+        }
         self
     }
 
@@ -187,6 +196,22 @@ impl Cell {
     pub const fn set_skip(&mut self, skip: bool) -> &mut Self {
         self.skip = skip;
         self
+    }
+
+    /// ratatui-jcode: true when the cell is structurally identical to
+    /// [`Cell::EMPTY`] (no symbol, reset colors, no modifiers, not skipped).
+    #[inline]
+    pub fn is_empty_cell(&self) -> bool {
+        #[cfg(feature = "underline-color")]
+        let ul = self.underline_color == Color::Reset;
+        #[cfg(not(feature = "underline-color"))]
+        let ul = true;
+        self.symbol.is_none()
+            && self.fg == Color::Reset
+            && self.bg == Color::Reset
+            && ul
+            && self.modifier.is_empty()
+            && !self.skip
     }
 
     /// ratatui-jcode: true when the symbol is empty or a single byte, which

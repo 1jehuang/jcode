@@ -972,25 +972,29 @@ fn process_rss_mb() -> Option<u64> {
     None
 }
 
-#[cfg(target_os = "linux")]
+/// Process CPU time (user + system) in microseconds. One `getrusage` syscall
+/// per call instead of opening and parsing `/proc/self/stat` every frame.
+#[cfg(unix)]
 fn process_cpu_ticks() -> Option<u64> {
-    let contents = std::fs::read_to_string("/proc/self/stat").ok()?;
-    let after_comm = contents.rsplit_once(") ")?.1;
-    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    let user_ticks: u64 = fields.get(11)?.parse().ok()?;
-    let system_ticks: u64 = fields.get(12)?.parse().ok()?;
-    Some(user_ticks.saturating_add(system_ticks))
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage fully initialises `usage` when it returns 0.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let micros = |tv: libc::timeval| (tv.tv_sec as u64) * 1_000_000 + tv.tv_usec as u64;
+    Some(micros(usage.ru_utime).saturating_add(micros(usage.ru_stime)))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn process_cpu_ticks() -> Option<u64> {
     None
 }
 
 #[cfg(unix)]
 fn clock_ticks_per_second() -> Option<f64> {
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks > 0 { Some(ticks as f64) } else { None }
+    // `process_cpu_ticks` reports microseconds.
+    Some(1_000_000.0)
 }
 
 #[cfg(not(unix))]

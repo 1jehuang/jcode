@@ -435,9 +435,16 @@ impl Buffer {
 
     /// Reset all cells in the buffer
     pub fn reset(&mut self) {
-        // ratatui-jcode: bulk fill. Dropping heap symbols still happens, but the
-        // per-cell call and its bounds checks go away.
-        self.content.fill(Cell::EMPTY);
+        // ratatui-jcode: only touch cells that are not already empty. After a
+        // swap most of the back buffer is blank, so this avoids rewriting (and
+        // drop-checking) the bulk of the cells.
+        reset_cells(&mut self.content);
+    }
+
+    /// ratatui-jcode: reset `range` of the content (by cell index) to
+    /// [`Cell::EMPTY`], skipping cells that are already empty.
+    pub fn reset_range(&mut self, range: core::ops::Range<usize>) {
+        reset_cells(&mut self.content[range]);
     }
 
     /// Merge an other buffer into this one
@@ -567,6 +574,16 @@ impl Buffer {
             i += 1;
         }
         updates
+    }
+}
+
+/// ratatui-jcode: reset cells to [`Cell::EMPTY`], skipping ones already empty.
+#[inline]
+fn reset_cells(cells: &mut [Cell]) {
+    for cell in cells {
+        if !cell.is_empty_cell() {
+            *cell = Cell::EMPTY;
+        }
     }
 }
 
