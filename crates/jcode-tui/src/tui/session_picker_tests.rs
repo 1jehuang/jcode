@@ -1344,6 +1344,15 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
     session
 }
 
+fn picker_buffer(picker: &mut SessionPicker, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render picker");
+    terminal.backend().buffer().clone()
+}
+
 fn buffer_text(picker: &mut SessionPicker, w: u16, h: u16) -> String {
     let backend = ratatui::backend::TestBackend::new(w, h);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -1719,12 +1728,7 @@ fn test_preview_transcript_omits_picker_metadata() {
         text.contains("client: Metadata-monkey"),
         "the real startup header belongs to the scrolling transcript"
     );
-    for metadata in [
-        "metadata-video-title",
-        "/metadata-only-directory",
-        "▶ Active",
-        "────",
-    ] {
+    for metadata in ["metadata-video-title", "▶ Active", "────"] {
         assert!(
             !text.contains(metadata),
             "unexpected picker metadata: {text}"
@@ -2604,18 +2608,15 @@ fn search_highlights_match_in_preview_and_scrolls_to_it() {
         "matched term should be visible in the preview after scrolling"
     );
 
-    // The match should be highlighted (bold) in the cached wrapped lines.
-    let highlighted = picker
-        .preview_cache
-        .as_ref()
-        .expect("preview cache built")
-        .wrapped_lines
-        .iter()
-        .flat_map(|line| line.spans.iter())
-        .any(|s| {
-            s.content.to_lowercase().contains("flibbertigibbet")
-                && s.style.add_modifier.contains(Modifier::BOLD)
-        });
+    // The match should be highlighted (bold) where the renderer drew it.
+    let buffer = picker_buffer(&mut picker, w, h);
+    let highlighted = (0..h).any(|y| {
+        let row: String = (0..w).map(|x| buffer[(x, y)].symbol()).collect();
+        row.find("flibbertigibbet").is_some_and(|byte| {
+            let x = row[..byte].chars().count() as u16;
+            buffer[(x, y)].modifier.contains(Modifier::BOLD)
+        })
+    });
     assert!(
         highlighted,
         "matched term in preview body should be highlighted"

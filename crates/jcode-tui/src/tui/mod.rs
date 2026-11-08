@@ -1170,6 +1170,11 @@ pub trait TuiState {
     fn git_branch(&self) -> Option<String> {
         None
     }
+    /// Remote machine this session runs on (SSH host or cloud VM), shown on
+    /// the status line. Embedded views override it with their own host.
+    fn remote_machine(&self) -> Option<String> {
+        ssh_remote_host()
+    }
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
     /// UI state for live copy badge highlighting / feedback

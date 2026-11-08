@@ -821,7 +821,9 @@ fn live_status_snapshot(app: &dyn TuiState, elapsed: f32) -> crate::protocol::Sw
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
     if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
-        crate::tui::app::oauth_telemetry::note_status_render(area);
+        if !super::secondary_render_active() {
+            crate::tui::app::oauth_telemetry::note_status_render(area);
+        }
         frame.render_widget(
             Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
                 .style(Style::default().fg(accent_color())),
@@ -1524,7 +1526,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
-        machine: crate::tui::ssh_remote_host(),
+        machine: app.remote_machine(),
         dir: overscroll_directory_transition(
             data.original_working_dir.as_deref(),
             app.working_dir().as_deref(),
@@ -2383,7 +2385,9 @@ pub(super) fn draw_input(
     if app.input_drag_scroll_offset().is_some() {
         return None;
     }
-    frame.set_cursor_position(cursor);
+    if !super::secondary_render_active() {
+        frame.set_cursor_position(cursor);
+    }
     Some(cursor)
 }
 

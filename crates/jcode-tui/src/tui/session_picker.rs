@@ -56,6 +56,8 @@ mod preview_refresh;
 mod progressive_preview;
 mod render;
 mod saved_placement;
+mod session_view;
+use session_view::highlight_buffer_matches;
 mod transcript_search;
 
 #[cfg(test)]
@@ -245,6 +247,8 @@ struct PreviewCacheKey {
 /// materializes the visible window.
 struct PreviewRenderCache {
     key: PreviewCacheKey,
+    /// Transcript handed to the real chat renderer.
+    messages: Vec<DisplayMessage>,
     /// Wrapped lines at the final (post-scrollbar-decision) width.
     wrapped_lines: Vec<Line<'static>>,
     image_regions: Vec<jcode_tui_messages::ImageRegion>,
@@ -1642,12 +1646,6 @@ impl SessionPicker {
             return;
         }
 
-        let inner =
-            preview_chrome::draw(frame, inner, session, self.preview_extras.get(&session.id));
-        let todos_payload = self
-            .preview_extras
-            .get(&session.id)
-            .and_then(|extras| extras.todos_payload.clone());
         let preview_still_loading = session.messages_preview.is_empty()
             && self
                 .pending_preview_load
@@ -1656,11 +1654,6 @@ impl SessionPicker {
         let Some(content_hash) = self.selected_preview_content_hash(session_ref, diff_mode) else {
             return;
         };
-
-        // Build (or reuse) the fully-wrapped preview content. The expensive
-        // markdown render + wrap only runs on a cache miss; scrolling, focus
-        // changes, and idle redraws reuse the cached wrapped lines. This mirrors
-        // the main chat viewport, whose prepared frame is cached the same way.
         let key = PreviewCacheKey {
             content_hash,
             inner_width: inner.width,
@@ -1674,181 +1667,36 @@ impl SessionPicker {
             let Some(session) = self.session_by_ref(session_ref) else {
                 return;
             };
-            // Shared markdown renderers also center structured blocks via a
-            // thread-local setting. Scope it so lists/code/tools stay flush
-            // left here without changing the chat rendered behind the picker.
-            let rebuilt = markdown::with_center_code_blocks(false, || {
-                self.build_preview_cache(session, area, inner, key, align, diff_mode)
-            });
+            let rebuilt = self.build_preview_cache(session, area, inner, key, align, diff_mode);
             self.install_preview(rebuilt);
         }
-        // Read cache geometry through a short-lived borrow so the scroll-offset
-        // clamp below can take `&mut self` without conflict.
-        let (show_scrollbar, total_lines, first_match_line) = {
-            let Some(cache) = self.preview_cache.as_ref() else {
-                return;
-            };
-            (
-                cache.show_scrollbar,
-                cache.wrapped_lines.len(),
-                cache.first_match_line,
-            )
-        };
 
-        let (text_area, scrollbar_area) =
-            super::ui::split_native_scrollbar_area(inner, show_scrollbar);
-        let inset = super::ui::left_aligned_content_inset(text_area.width, false);
-        let text_area = Rect {
-            x: text_area.x + inset,
-            width: text_area.width.saturating_sub(inset),
-            ..text_area
-        };
-        // The picker is an overlay, not a narrower conversation viewport.
-        // Keep prompt and todo wrapping identical to the opened session.
-        let band_width = text_area.width;
-
-        // Pinned todo band, rendered beneath the sticky previous-prompt header
-        // exactly like the live chat viewport (`display.pin_todos`).
-        let (todo_band, _) = super::ui::viewport::pinned_todo_band_lines_for_payload(
-            todos_payload.as_deref(),
-            false,
-            diff_mode,
-            band_width,
-            text_area.height,
-        );
-        let todo_lines = todo_band.len() as u16;
-
-        // Max scroll accounts for the rows the top bands reserve, iterating
-        // like the live viewport since the header height depends on scroll.
-        let mut max_scroll =
-            total_lines.saturating_sub(text_area.height.saturating_sub(todo_lines) as usize);
-        for _ in 0..4 {
-            let header = self
-                .preview_prompt_header_lines(max_scroll, band_width, align)
-                .len() as u16;
-            let top_band = (header + todo_lines).min(text_area.height);
-            let body = Rect {
-                y: text_area.y + top_band,
-                height: text_area.height - top_band,
-                ..text_area
-            };
-            let adjusted = total_lines.saturating_sub(body.height as usize);
-            if adjusted == max_scroll {
-                break;
-            }
-            max_scroll = adjusted;
-        }
-        let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
-        self.preview_max_scroll = max_scroll;
-        // The transcript for the selected session may still be loading on a
-        // background thread, in which case this frame only shows a "Loading…"
-        // placeholder (max_scroll == 0). Keep the auto-scroll armed until the
-        // real content lands; otherwise the flag is consumed on the placeholder
-        // frame and the populated transcript stays pinned at the top, hiding the
-        // sticky "previous prompt" header that should appear once we snap to the
-        // bottom.
-        if self.auto_scroll_preview {
-            // When a search is active and the selected session has a match in the
-            // preview body, scroll the first hit into view (a few lines of lead-in
-            // context) instead of jumping to the bottom of the transcript.
-            self.scroll_offset = match first_match_line {
-                Some(line) if !self.search_query.trim().is_empty() => {
-                    (line.saturating_sub(2) as u16).min(max_scroll)
-                }
-                _ => max_scroll,
-            };
-            if !preview_still_loading {
-                self.auto_scroll_preview = false;
+        let tokens = self.active_highlight_tokens();
+        let mut scroll = if self.auto_scroll_preview {
+            match self.preview_cache.as_ref().and_then(|c| c.first_match_line) {
+                Some(line) if !tokens.is_empty() => Some(line.saturating_sub(2)),
+                _ => None,
             }
         } else {
-            self.scroll_offset = self.scroll_offset.min(max_scroll);
-        }
-        let scroll = self.scroll_offset as usize;
-
-        let header_lines = self.preview_prompt_header_lines(scroll, band_width, align);
-        let header_height = (header_lines.len() as u16).min(text_area.height);
-        let top_band = (header_height + todo_lines).min(text_area.height);
-        let content_area = Rect {
-            x: text_area.x,
-            y: text_area.y + top_band,
-            width: text_area.width,
-            height: text_area.height - top_band,
+            Some(self.scroll_offset as usize)
         };
-        let visible_height = content_area.height as usize;
-
-        // Materialize only the visible window of wrapped lines instead of cloning
-        // and `.scroll()`ing the whole preview every frame (the main chat
-        // viewport uses the same visible-slice strategy). This makes a scroll
-        // tick O(viewport height) rather than O(total wrapped lines).
-        let visible_end = (scroll + visible_height).min(total_lines);
-        let (visible_lines, source_rows): (Vec<Line<'static>>, Vec<usize>) = {
-            let Some(cache) = self.preview_cache.as_ref() else {
-                return;
-            };
-            if scroll < visible_end {
-                (
-                    cache.wrapped_lines[scroll..visible_end].to_vec(),
-                    (scroll..visible_end).collect(),
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            }
-        };
-        frame.render_widget(Paragraph::new(visible_lines.clone()), content_area);
-        if let Some(cache) = self.preview_cache.as_ref() {
-            preview_chrome::draw_images(
-                frame,
-                content_area,
-                &cache.image_regions,
-                &source_rows,
-                None,
-            );
+        let mut geometry = self.draw_selected_view(frame, inner, session_ref, scroll);
+        // The first match is only known once the renderer prepared the frame.
+        if self.auto_scroll_preview
+            && scroll.is_none()
+            && !tokens.is_empty()
+            && let Some(line) = self.preview_cache.as_ref().and_then(|c| c.first_match_line)
+        {
+            scroll = Some(line.saturating_sub(2));
+            geometry = self.draw_selected_view(frame, inner, session_ref, scroll);
         }
-        if let (Some(session), Some(cache)) = (
-            self.session_by_ref(session_ref),
-            self.preview_cache.as_ref(),
-        ) {
-            preview_chrome::draw_widgets(
-                frame,
-                content_area,
-                &visible_lines,
-                session,
-                self.preview_extras.get(&session.id),
-                &cache.image_regions,
-                scroll,
-            );
+        if !tokens.is_empty() {
+            highlight_buffer_matches(frame.buffer_mut(), inner, &tokens);
         }
-
-        if todo_lines > 0 && header_height < text_area.height {
-            let band_area = Rect {
-                x: text_area.x,
-                y: text_area.y + header_height,
-                width: band_width,
-                height: todo_lines.min(text_area.height - header_height),
-            };
-            frame.render_widget(Clear, band_area);
-            frame.render_widget(Paragraph::new(todo_band), band_area);
-        }
-        if header_height > 0 {
-            let header_area = Rect {
-                x: text_area.x,
-                y: text_area.y,
-                width: band_width.saturating_sub(1),
-                height: header_height,
-            };
-            frame.render_widget(Clear, header_area);
-            frame.render_widget(Paragraph::new(header_lines), header_area);
-        }
-
-        if let Some(scrollbar_area) = scrollbar_area {
-            super::ui::render_native_scrollbar(
-                frame,
-                scrollbar_area,
-                scroll,
-                total_lines,
-                visible_height,
-                self.focus == PaneFocus::Preview,
-            );
+        self.preview_max_scroll = geometry.max_scroll.min(u16::MAX as usize) as u16;
+        self.scroll_offset = geometry.scroll.min(u16::MAX as usize) as u16;
+        if self.auto_scroll_preview && !preview_still_loading {
+            self.auto_scroll_preview = false;
         }
         self.latency_transcript_rendered = !preview_still_loading
             && !self.pending_preview_load.as_ref().is_some_and(|pending| {
@@ -1857,6 +1705,70 @@ impl SessionPicker {
             && !self
                 .preview_load_failures
                 .contains(&self.latency_selection_id().unwrap_or_default());
+    }
+
+    /// Draw the selected session through the real chat renderer.
+    fn draw_selected_view(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        session_ref: SessionRef,
+        scroll: Option<usize>,
+    ) -> super::ui::SecondaryGeometry {
+        let Some(session) = self.session_by_ref(session_ref) else {
+            return Default::default();
+        };
+        let Some(cache) = self.preview_cache.as_ref() else {
+            return Default::default();
+        };
+        let extras = self.preview_extras.get(&session.id);
+        let host = (session.server_icon.as_deref() == Some("☁"))
+            .then(|| session.server_name.as_deref()?.strip_prefix("cloud: "))
+            .flatten()
+            .map(str::to_string);
+        let view = session_view::SessionView {
+            messages: &cache.messages,
+            version: session_view::preview_messages_version(cache.key.content_hash),
+            hidden_prompts: extras.map_or(0, |extras| extras.hidden_prompts),
+            info: preview_chrome::selected_info(session, extras),
+            todos_payload: extras.and_then(|extras| extras.todos_payload.as_deref()),
+            session_name: Some(session.short_name.clone()),
+            model: session.model.clone(),
+            provider: session.provider_key.clone(),
+            server_name: session.server_name.clone(),
+            server_icon: session.server_icon.clone(),
+            is_canary: session.is_canary,
+            working_dir: session.working_dir.clone(),
+            local_auth: host.is_none(),
+            machine: host,
+            scroll,
+            live: None,
+            now_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+        };
+        let (geometry, prepared) = session_view::draw_session_view(frame, area, &view);
+        if let (Some(prepared), Some(cache)) = (prepared, self.preview_cache.as_mut())
+            && cache.wrapped_lines.is_empty()
+        {
+            cache.wrapped_lines = prepared.materialize_all_lines();
+            cache.image_regions = prepared.image_regions.clone();
+            cache.show_scrollbar = geometry.max_scroll > 0;
+            cache.user_prompt_markers = prepared
+                .wrapped_user_prompt_starts
+                .iter()
+                .zip(prepared.user_prompt_texts.iter())
+                .enumerate()
+                .map(|(idx, (&line, text))| (line, idx + 1, text.clone()))
+                .collect();
+            let tokens = loading::search_query_tokens(&cache.key.search_query);
+            cache.first_match_line = cache.wrapped_lines.iter().position(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let lower = text.to_lowercase();
+                tokens.iter().any(|token| lower.contains(token.as_str()))
+            });
+        }
+        geometry
     }
 
     /// Fingerprint everything that affects the *content* of the preview pane so
@@ -1921,100 +1833,14 @@ impl SessionPicker {
     fn build_preview_cache(
         &self,
         session: &SessionInfo,
-        area: Rect,
-        inner: Rect,
+        _area: Rect,
+        _inner: Rect,
         key: PreviewCacheKey,
         _align: Alignment,
-        diff_mode: crate::config::DiffDisplayMode,
+        _diff_mode: crate::config::DiffDisplayMode,
     ) -> PreviewRenderCache {
-        let hidden_prompts = self
-            .preview_extras
-            .get(&session.id)
-            .map_or(0, |extras| extras.hidden_prompts);
-        let messages: Vec<DisplayMessage> = session
-            .messages_preview
-            .iter()
-            .map(|msg| DisplayMessage {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-                tool_calls: msg.tool_calls.clone(),
-                duration_secs: msg.duration_secs,
-                title: msg.title.clone(),
-                tool_data: msg.tool_data.clone(),
-            })
-            .collect();
-        let wide_width = inner
-            .width
-            .saturating_sub(super::ui::left_aligned_content_inset(inner.width, false));
-        let mut header = super::ui::header::build_preview_header(session, wide_width);
-        let mut padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
-        let render_width = inner.width.saturating_sub(1);
-        let narrow_width =
-            render_width.saturating_sub(super::ui::left_aligned_content_inset(render_width, false));
-        let header_height = padding + header.len();
-        let (prepared, show_scrollbar) = if inner.width <= 1 || inner.height == 0 {
-            (
-                super::ui::prepare::prepare_history_preview(
-                    &messages,
-                    hidden_prompts,
-                    wide_width,
-                    diff_mode,
-                ),
-                false,
-            )
-        } else if header_height > inner.height as usize {
-            (
-                super::ui::prepare::prepare_history_preview(
-                    &messages,
-                    hidden_prompts,
-                    narrow_width,
-                    diff_mode,
-                ),
-                true,
-            )
-        } else {
-            super::ui::prepare::prepare_history_preview_for_viewport(
-                &messages,
-                hidden_prompts,
-                wide_width,
-                narrow_width,
-                diff_mode,
-                inner.height as usize - header_height,
-            )
-        };
-        if show_scrollbar {
-            header = super::ui::header::build_preview_header(session, narrow_width);
-            padding = super::ui::prepare::initial_header_pad_top(area.height, header.len());
-        }
-        // The real startup header is a scrolling transcript section. Never
-        // pin a synthetic jcode/client/model banner above a long conversation.
-        let header_height = padding + header.len();
-        let mut wrapped_lines = vec![Line::default(); padding];
-        wrapped_lines.extend(header);
-        let body_empty = prepared.wrapped_lines.is_empty();
-        wrapped_lines.extend(prepared.wrapped_lines);
-        let mut image_regions = prepared.image_regions;
-        for region in &mut image_regions {
-            region.abs_line_idx += header_height;
-            region.end_line += header_height;
-        }
-        // The live viewport consumes these marker rows as image metadata, never
-        // printable text. Preserve their reserved rows and draw the images below.
-        for region in &image_regions {
-            if let Some(line) = wrapped_lines.get_mut(region.abs_line_idx) {
-                *line = Line::default();
-            }
-        }
-        let user_prompt_markers = prepared
-            .wrapped_user_prompt_starts
-            .iter()
-            .zip(prepared.user_prompt_texts.iter())
-            .enumerate()
-            .map(|(idx, (&line, text))| {
-                (line + header_height, hidden_prompts + idx + 1, text.clone())
-            })
-            .collect();
-        if body_empty {
+        let mut messages = session_view::display_messages_from_preview(&session.messages_preview);
+        if messages.is_empty() {
             let loading = self
                 .pending_preview_load
                 .as_ref()
@@ -2026,22 +1852,16 @@ impl SessionPicker {
             } else {
                 "(empty session)"
             };
-            wrapped_lines.push(Line::styled(text, Style::default().fg(rgb(80, 80, 80))));
+            messages.push(DisplayMessage::system(text));
         }
-        // Highlight active search matches in the wrapped preview body and record
-        // the first wrapped line that contains a hit, so the caller can scroll it
-        // into view. Highlighting after wrapping keeps wrapped-line indices exact.
-        let highlight_tokens = self.active_highlight_tokens();
-        let first_match_line =
-            Self::highlight_lines_in_place(&mut wrapped_lines, &highlight_tokens);
-
         PreviewRenderCache {
             key,
-            wrapped_lines,
-            image_regions,
-            user_prompt_markers,
-            show_scrollbar,
-            first_match_line,
+            messages,
+            wrapped_lines: Vec::new(),
+            image_regions: Vec::new(),
+            user_prompt_markers: Vec::new(),
+            show_scrollbar: false,
+            first_match_line: None,
         }
     }
 

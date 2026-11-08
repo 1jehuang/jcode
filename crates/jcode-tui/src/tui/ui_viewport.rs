@@ -1485,6 +1485,9 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
 
 fn set_pinned_todo_more_area(area: Option<Rect>) {
+    if super::secondary_render_active() {
+        return;
+    }
     if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
         *current = area;
     }

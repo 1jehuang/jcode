@@ -1103,6 +1103,9 @@ pub(super) fn finalize_frame_metrics(
     draw_elapsed: Duration,
     messages_ms: Option<f64>,
 ) {
+    if super::secondary_render_active() {
+        return;
+    }
     if profile_enabled() {
         record_profile(prep_elapsed, draw_elapsed, total_start.elapsed());
     }

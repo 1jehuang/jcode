@@ -867,6 +867,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
