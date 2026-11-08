@@ -90,6 +90,8 @@ struct DaemonSession {
     next_request_id: AtomicU64,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
+    /// Set by `session/cancel` while a prompt is running; scoped to that prompt.
+    cancel_requested: AtomicBool,
     ui_state: Mutex<SessionUiState>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
@@ -195,6 +197,86 @@ fn add_optional_tokens(total: &mut Option<u64>, tokens: Option<u64>) {
     }
 }
 
+/// Tracks daemon events for one ACP prompt and derives its ACP stop reason.
+///
+/// Only the terminal outcome of the whole turn counts: a limit or refusal
+/// followed by another model request (a successful continuation) is reset.
+#[derive(Debug, Default)]
+struct TurnOutcome {
+    acked: bool,
+    interrupted: bool,
+    terminal: Option<&'static str>,
+}
+
+impl TurnOutcome {
+    fn observe(&mut self, event: &ServerEvent, prompt_id: u64) {
+        match event {
+            ServerEvent::Ack { id } if *id == prompt_id => self.acked = true,
+            // Interrupts read before our prompt was acknowledged are stale
+            // leftovers from an earlier turn, not this prompt's outcome.
+            ServerEvent::Interrupted if self.acked => self.interrupted = true,
+            ServerEvent::KvCacheRequest { .. } | ServerEvent::RetryRollback { .. } => {
+                self.terminal = None;
+            }
+            ServerEvent::TurnStopped {
+                reason,
+                message,
+                provider_stop_reason,
+            } => match reason {
+                crate::protocol::TurnStopReason::LimitReached => {
+                    let raw = provider_stop_reason.as_deref().unwrap_or_default();
+                    let lower = message.to_ascii_lowercase();
+                    self.terminal = Some(
+                        if raw.contains("turn_requests")
+                            || lower.contains("request limit")
+                            || lower.contains("max turn")
+                        {
+                            "max_turn_requests"
+                        } else {
+                            "max_tokens"
+                        },
+                    );
+                }
+                crate::protocol::TurnStopReason::ProviderGuardrail => {
+                    self.terminal = Some("refusal");
+                }
+                crate::protocol::TurnStopReason::Interrupted if self.acked => {
+                    self.interrupted = true;
+                }
+                _ => {}
+            },
+            ServerEvent::ProviderGuardrail { stop_reason, .. } => {
+                if stop_reason.as_deref().is_some_and(is_refusal_stop_reason) {
+                    self.terminal = Some("refusal");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stop_reason(&self, cancel_requested: bool) -> &'static str {
+        if cancel_requested || self.interrupted {
+            "cancelled"
+        } else {
+            self.terminal.unwrap_or("end_turn")
+        }
+    }
+}
+
+fn is_refusal_stop_reason(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    [
+        "refusal",
+        "content_filter",
+        "safety",
+        "blocked",
+        "prohibited",
+        "guardrail",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
+}
+
 fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     let mut response = json!({ "stopReason": stop_reason });
     if let Some(usage) = usage.to_acp() {
@@ -243,6 +325,7 @@ impl DaemonSession {
             next_request_id: AtomicU64::new(next_request_id),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
+            cancel_requested: AtomicBool::new(false),
             ui_state: Mutex::new(SessionUiState::default()),
             working_dir: None,
             active_skill: Mutex::new(None),
@@ -608,8 +691,14 @@ impl AcpRuntime {
             sessions.get(&session_id).cloned()
         };
         if let Some(session) = session {
-            let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            // Only forward a cancel when an ACP prompt is in flight. An idle
+            // daemon cancel can emit a stray interrupt that the next prompt
+            // would otherwise misattribute to itself.
+            if session.prompt_running.load(Ordering::SeqCst) {
+                session.cancel_requested.store(true, Ordering::SeqCst);
+                let cancel_id = session.next_id();
+                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            }
         }
         if let Some(id) = message.id {
             self.write_result(id, json!({})).await?;
@@ -1089,6 +1178,7 @@ impl AcpRuntime {
         let active_skill = session.active_skill.lock().await.clone();
 
         let prompt_id = session.next_id();
+        session.cancel_requested.store(false, Ordering::SeqCst);
         {
             let mut active = session.active_prompt_id.lock().await;
             *active = Some(prompt_id);
@@ -1110,7 +1200,7 @@ impl AcpRuntime {
         }
 
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
-        let mut stop_reason = "end_turn".to_string();
+        let mut outcome = TurnOutcome::default();
         let mut turn_usage = TurnUsage::default();
         loop {
             let event = match session.read_event().await {
@@ -1124,13 +1214,21 @@ impl AcpRuntime {
                 self.write_jcode_extension_event(&session.session_id, &event)
                     .await?;
             }
+            outcome.observe(&event, prompt_id);
             match event {
                 ServerEvent::Ack { .. } => {}
                 ServerEvent::Done { id } if id == prompt_id => break,
-                ServerEvent::Interrupted => {
-                    stop_reason = "cancelled".to_string();
-                }
+                ServerEvent::Interrupted
+                | ServerEvent::TurnStopped { .. }
+                | ServerEvent::ProviderGuardrail { .. } => {}
                 ServerEvent::Error { id, message, .. } if id == prompt_id => {
+                    if session.cancel_requested.load(Ordering::SeqCst) {
+                        // Cancellation-induced failures still complete as cancelled.
+                        cleanup_prompt_state(&session).await;
+                        self.write_result(rpc_id, prompt_response("cancelled", &turn_usage))
+                            .await?;
+                        return Ok(());
+                    }
                     cleanup_prompt_state(&session).await;
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
@@ -1225,8 +1323,9 @@ impl AcpRuntime {
             }
         }
 
+        let stop_reason = outcome.stop_reason(session.cancel_requested.load(Ordering::SeqCst));
         cleanup_prompt_state(&session).await;
-        self.write_result(rpc_id, prompt_response(&stop_reason, &turn_usage))
+        self.write_result(rpc_id, prompt_response(stop_reason, &turn_usage))
             .await?;
         Ok(())
     }
@@ -1400,6 +1499,7 @@ async fn cleanup_prompt_state(session: &DaemonSession) {
         let mut active = session.active_prompt_id.lock().await;
         *active = None;
     }
+    session.cancel_requested.store(false, Ordering::SeqCst);
     session.prompt_running.store(false, Ordering::SeqCst);
 }
 
