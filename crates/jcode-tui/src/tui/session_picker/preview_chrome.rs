@@ -99,7 +99,10 @@ fn snapshot_account_info(
     (auth, usage)
 }
 
-fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoWidgetData {
+pub(super) fn selected_info(
+    session: &SessionInfo,
+    extras: Option<&PreviewExtras>,
+) -> InfoWidgetData {
     let mut data = extras
         .and_then(|extras| extras.info_data.clone())
         .unwrap_or_else(|| InfoWidgetData {

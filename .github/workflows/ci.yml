@@ -146,6 +146,7 @@ jobs:
           python3 tests/test_bash_platform_guards.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
+          python3 scripts/test_reconcile_preview_release.py
           python3 tests/test_preview_linux_hosted.py
           python3 tests/test_package_preview_linux_hosted.py
           python3 tests/test_verify_public_release.py
@@ -552,6 +553,18 @@ jobs:
             -Name 'Windows adopted background cancellation tests' `
             -TimeoutSeconds 300 `
             -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'background::tests::adopted_task_', '--', '--nocapture')
+
+      - name: Run Windows launcher backup sweep test
+        shell: pwsh
+        run: |
+          # `platform_support.rs` is `#[cfg(windows)]`, so its sweep regression can
+          # only execute on a Windows runner. Without this step the test is
+          # compiled on Windows but never run, which is the same
+          # looks-green-but-never-ran shape the secret-input cohort above calls out.
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows launcher backup sweep test' `
+            -TimeoutSeconds 300 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-build-support', '--lib', 'sweep_removes_only_old_launcher_backups', '--', '--nocapture')
 
       - name: Run Windows e2e smoke tests
         shell: pwsh

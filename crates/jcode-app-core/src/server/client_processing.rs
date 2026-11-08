@@ -13,7 +13,14 @@ pub(super) async fn reconcile_processing_completions(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     while let Some((done_id, result, completion_report, owner, _finalization)) =
-        completion.take().or_else(|| receiver.try_recv().ok())
+        completion.take().or_else(|| match receiver.try_recv() {
+            Ok(completion) => Some(completion),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                crate::logging::debug("Processing completion channel disconnected");
+                None
+            }
+        })
     {
         if Some(done_id) != *state.message_id
             || state.task.as_ref().map(|task| task.id()) != Some(owner)
@@ -149,6 +156,33 @@ pub(super) async fn append_context_message(
     }
 }
 
+/// A send whose reload continuation reminder was already delivered is a pure
+/// replay only when it carries no user content. A queued follow-up combined
+/// with that reminder must still run (only the reminder is dropped).
+fn delivered_replay_is_reminder_only(content: &str, image_count: usize) -> bool {
+    content.trim().is_empty() && image_count == 0
+}
+
+#[cfg(test)]
+mod delivered_replay_tests {
+    use super::delivered_replay_is_reminder_only;
+
+    #[test]
+    fn reminder_only_replay_is_suppressed() {
+        assert!(delivered_replay_is_reminder_only("", 0));
+        assert!(delivered_replay_is_reminder_only("  \n", 0));
+    }
+
+    #[test]
+    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
+        assert!(!delivered_replay_is_reminder_only(
+            "please also fix the tests",
+            0
+        ));
+        assert!(!delivered_replay_is_reminder_only("", 1));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
@@ -164,7 +198,7 @@ pub(super) async fn start_processing_message(
         id,
         content,
         images,
-        system_reminder,
+        mut system_reminder,
         active_skill,
         server_failover,
     } = message;
@@ -200,23 +234,45 @@ pub(super) async fn start_processing_message(
             return;
         }
     };
-    if let Some(reminder) = system_reminder.as_deref() {
-        match super::super::reload_recovery::is_delivered_continuation(client_session_id, reminder)
-        {
-            Ok(true) => {
-                crate::logging::info(&format!(
-                    "Suppressing delivered reload recovery replay session={} id={}",
-                    client_session_id, id
-                ));
-                let _ = client_event_tx.send(ServerEvent::Done { id });
-                return;
+    let reminder_already_delivered = match system_reminder.as_deref() {
+        Some(reminder) => {
+            match super::super::reload_recovery::is_delivered_continuation(
+                client_session_id,
+                reminder,
+            ) {
+                Ok(delivered) => delivered,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Failed to inspect reload recovery replay session={}: {}",
+                        client_session_id, error
+                    ));
+                    false
+                }
             }
-            Ok(false) => {}
-            Err(error) => crate::logging::warn(&format!(
-                "Failed to inspect reload recovery replay session={}: {}",
-                client_session_id, error
-            )),
         }
+        None => false,
+    };
+    if reminder_already_delivered {
+        if delivered_replay_is_reminder_only(&content, images.len()) {
+            crate::logging::info(&format!(
+                "Suppressing delivered reload recovery replay session={} id={}",
+                client_session_id, id
+            ));
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+            return;
+        }
+        // After a reload the client combines a queued user follow-up with the
+        // reload continuation reminder into one send. Only the reminder is a
+        // replay. Suppressing the whole message silently dropped the user's
+        // queued prompt, so strip the reminder and run the real content.
+        crate::logging::info(&format!(
+            "Stripping delivered reload recovery reminder but keeping queued content session={} id={} content_chars={} images={}",
+            client_session_id,
+            id,
+            content.chars().count(),
+            images.len()
+        ));
+        system_reminder = None;
     }
     if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
@@ -240,9 +296,11 @@ pub(super) async fn start_processing_message(
             client_session_id, id, error
         ));
     }
+    let status_title = agent_guard.session_display_title_or_name();
     drop(agent_guard);
 
     *state.client_is_processing = true;
+    crate::agents_status::turn_started(client_session_id, &status_title);
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
 
@@ -284,6 +342,9 @@ pub(super) async fn start_processing_message(
     );
     let tx = events.sender();
     let done_tx = processing_done_tx.clone();
+    let push_session_id = client_session_id.to_string();
+    crate::mobile_push::clear_cancelled(&push_session_id);
+    let turn_started = Instant::now();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
         let event_tx = tx.clone();
@@ -330,10 +391,58 @@ pub(super) async fn start_processing_message(
                 id, error
             )),
         }
-        let completion_report = {
+        let (completion_report, push_body, push_title) = {
             let agent = report_agent.lock().await;
-            agent.recent_assistant_output_tail_after(start_message_index)
+            (
+                agent.recent_assistant_output_tail_after(start_message_index),
+                agent
+                    .final_assistant_text_after(start_message_index)
+                    .unwrap_or_default(),
+                agent.session_display_title_or_name(),
+            )
         };
+        crate::agents_status::turn_finished(
+            &push_session_id,
+            result
+                .as_ref()
+                .err()
+                .map(|error| crate::util::format_error_chain(error))
+                .as_deref(),
+        );
+        // Mobile push: fire-and-forget, skipped for user cancellation and for
+        // swarm worker sessions (their coordinator reports instead).
+        if !owned_worker && !crate::mobile_push::take_cancelled(&push_session_id) {
+            match &result {
+                Ok(())
+                    if crate::mobile_push::should_push_turn_done(
+                        &push_session_id,
+                        turn_started.elapsed(),
+                    ) =>
+                {
+                    crate::mobile_push::notify(
+                        crate::mobile_push::PushKind::TurnDone,
+                        &push_session_id,
+                        Some(&push_title),
+                        &push_body,
+                        Some(id),
+                    );
+                }
+                Ok(()) => crate::mobile_push::note_skipped(
+                    crate::mobile_push::PushKind::TurnDone,
+                    &format!(
+                        "turn too short ({}s) for a non-iOS session",
+                        turn_started.elapsed().as_secs()
+                    ),
+                ),
+                Err(error) => crate::mobile_push::notify(
+                    crate::mobile_push::PushKind::TurnError,
+                    &push_session_id,
+                    Some(&push_title),
+                    &crate::util::format_error_chain(error),
+                    Some(id),
+                ),
+            }
+        }
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could
         // race ahead of the final MessageEnd for newly attached clients.

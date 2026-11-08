@@ -16,10 +16,11 @@ use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
     InputShellCompleted,
 };
+use crate::tui::terminal_events::EventStream;
 use crate::util::truncate_str;
 use anyhow::Result;
 use base64::Engine;
-use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -1542,7 +1543,9 @@ impl App {
             self.todo_confidence_spike_challenged = false;
             self.last_todo_ownership_fingerprint = None;
         }
-        if !todos.is_empty()
+        let quality_reviews_enabled = crate::config::config().features.todo_gate_digest;
+        if quality_reviews_enabled
+            && !todos.is_empty()
             && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
             self.push_display_message(DisplayMessage::system(
@@ -1589,8 +1592,8 @@ impl App {
                     return true;
                 }
             }
-            let ownership_needs_followup =
-                !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
+            let ownership_needs_followup = quality_reviews_enabled
+                && !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
             let ownership_message =
@@ -1626,11 +1629,12 @@ impl App {
                 return true;
             }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
-            let needs_spike_challenge = confidence_summary.confidence_spike_detected
+            let needs_spike_challenge = quality_reviews_enabled
+                && confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
-                && gate_budget_left
-            {
+            let needs_validation = quality_reviews_enabled
+                && confidence_summary.completion_confidence_needs_validation;
+            if (needs_validation || needs_spike_challenge) && gate_budget_left {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
@@ -1651,9 +1655,7 @@ impl App {
                 self.pending_queued_dispatch = true;
                 return true;
             }
-            if (ownership_needs_followup
-                || confidence_summary.completion_confidence_needs_validation
-                || needs_spike_challenge)
+            if (ownership_needs_followup || needs_validation || needs_spike_challenge)
                 && !gate_budget_left
             {
                 // The gate keeps failing but the model is no longer making

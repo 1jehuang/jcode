@@ -8,8 +8,9 @@ use crate::message::{
     format_background_task_notification_markdown,
 };
 use crate::session::StoredDisplayRole;
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Receiver;
@@ -90,7 +91,9 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // draw site. Excluding it here instead would mean animation ticks request
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
-    let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = reset_redraw
+        | crate::tui::periodic_redraw_required(app)
+        | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
@@ -145,6 +148,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+    needs_redraw |= app.poll_session_picker_search_submission();
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.poll_compaction_completion();
@@ -156,6 +160,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.check_stable_version();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
     needs_redraw |= app.maybe_finish_background_client_reload();
+    needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     if app.pending_migration.is_some() && !app.is_processing && !app.cloud_handoff_blocks_work() {
         app.execute_migration();
         needs_redraw = true;
@@ -188,11 +193,10 @@ pub(super) fn handle_terminal_event(
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            break;
-        }
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(Some(event)) = crate::tui::terminal_events::try_read() {
             needs_redraw |= apply_terminal_event(app, terminal, Some(Ok(event)))?;
+        } else {
+            break;
         }
     }
     Ok(needs_redraw)
@@ -237,6 +241,7 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::GitInfoRefreshed) => true,
+        Ok(BusEvent::ClientBinaryChanged) => app.maybe_hot_reload_onto_new_binary(),
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true

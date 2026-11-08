@@ -52,6 +52,12 @@ mod repo_tests;
 #[path = "cloud_replace.rs"]
 mod replace;
 
+#[path = "cloud_session_ops.rs"]
+mod ops;
+
+#[path = "cloud_diagnostics.rs"]
+mod diagnostics;
+
 #[path = "cloud_env.rs"]
 pub(super) mod environment;
 
@@ -417,20 +423,8 @@ fn mark_memory_sent(host: &str, memory: &Path, bytes: &[u8]) {
     }
 }
 
-fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = std::time::Instant::now();
-    let result = operation();
-    crate::logging::info(&format!(
-        "cloud move: {stage} {} in {:.3}s",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        },
-        started.elapsed().as_secs_f64()
-    ));
-    result
-}
+mod timing;
+use timing::timed_move_stage;
 
 pub(crate) fn run_move(
     session_ref: Option<&str>,
@@ -2044,6 +2038,52 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::Fork {
+            session,
+            prompt,
+            target,
+            json,
+        } => ops::fork(
+            session.as_deref(),
+            prompt.as_deref(),
+            &target_of(target),
+            json,
+        ),
+        C::Send {
+            session,
+            message,
+            json,
+        } => ops::send(&session, &message, json),
+        C::Status {
+            session,
+            messages,
+            json,
+        } => ops::status(&session, messages, json),
+        C::Wait {
+            session,
+            timeout,
+            messages,
+            json,
+        } => {
+            let result = ops::wait(&session, timeout, messages, json);
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.downcast_ref::<ops::WaitTimeout>().is_some())
+            {
+                std::process::exit(2);
+            }
+            result
+        }
+        C::Logs { session, lines } => ops::logs(&session, lines),
+        C::Problems { limit, json } => diagnostics::problems(limit, json),
+        C::Doctor { target, json } => diagnostics::doctor(&target_of(target), json),
+        C::Inspect {
+            session,
+            messages,
+            log_lines,
+        } => ops::inspect(&session, messages, log_lines),
+        C::RunDetached { session, message } => ops::run_detached(&session, &message),
         C::GroupProtocol => {
             println!("{}", serde_json::json!({ "version": 1 }));
             Ok(())
@@ -2057,6 +2097,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::ReplaceReceive { dry_run } => replace::receive(dry_run),
         C::Env { action } => environment::run_cli(action),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
+        C::Runtime { action } => super::cloud_runtime::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {
             let host = prepare_host(&target_of(target))?;
@@ -2196,6 +2237,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Machine { action } => {
             use super::args::CloudMachineAction as A;
             let reply = match action {
+                A::PrepareSsh => return super::cloud_managed::prepare_ssh(),
                 A::Status => super::cloud_managed::status()?,
                 A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
                 A::Stop => super::cloud_managed::stop()?,

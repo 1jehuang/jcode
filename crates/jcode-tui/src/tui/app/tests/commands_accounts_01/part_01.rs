@@ -16,6 +16,62 @@ fn slash_resume_opens_session_picker_overlay_locally() {
 }
 
 #[test]
+fn session_picker_cloud_warning_keeps_refresh_pending_and_survives_fresh() {
+    use crate::tui::session_picker::{SessionListUpdate, SessionPicker};
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(SessionPicker::loading()));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+    let warning = "Cloud sessions could not be refreshed. Reopen /resume to retry.";
+    sender
+        .send(SessionListUpdate::CloudUnavailable(warning.into()))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.pending_session_picker_load.is_some());
+    assert_eq!(
+        app.session_picker_overlay
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .cloud_warning
+            .as_deref(),
+        Some(warning)
+    );
+    sender
+        .send(SessionListUpdate::Fresh(Ok((vec![], vec![]))))
+        .unwrap();
+    assert!(app.poll_session_picker_load());
+    assert!(app.pending_session_picker_load.is_none());
+    assert_eq!(
+        app.session_picker_overlay
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .cloud_warning
+            .as_deref(),
+        Some(warning)
+    );
+}
+
+#[test]
+fn session_picker_cloud_warning_does_not_reopen_closed_overlay() {
+    use crate::tui::session_picker::SessionListUpdate;
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.pending_session_picker_load = Some(PendingSessionPickerLoad { receiver });
+    sender
+        .send(SessionListUpdate::CloudUnavailable(
+            "Reopen /resume to retry.".into(),
+        ))
+        .unwrap();
+    assert!(!app.poll_session_picker_load());
+    assert!(app.session_picker_overlay.is_none());
+    assert!(app.pending_session_picker_load.is_some());
+}
+
+#[test]
 fn session_picker_cached_update_keeps_fresh_refresh_pending() {
     use crate::tui::session_picker::{SessionListUpdate, SessionPicker};
     let mut app = create_test_app();

@@ -6,6 +6,47 @@ pub(crate) fn prompt_preview_lines(
     width: u16,
     align: ratatui::layout::Alignment,
 ) -> Vec<Line<'static>> {
+    // The pinned preview is rebuilt every frame with the same prompt; memoize
+    // the last result (keyed on every input, including theme colors) so the
+    // grapheme walk over the whole prompt runs only when something changes.
+    type Key = (usize, u64, usize, u16, ratatui::layout::Alignment, [Color; 4]);
+    thread_local! {
+        static MEMO: std::cell::RefCell<Option<(Key, Vec<Line<'static>>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let text_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        h.finish()
+    };
+    let key: Key = (
+        number,
+        text_hash,
+        text.len(),
+        width,
+        align,
+        [user_bg(), dim_color(), user_color(), user_text()],
+    );
+    if let Some(hit) = MEMO.with(|m| {
+        m.borrow()
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, lines)| lines.clone())
+    }) {
+        return hit;
+    }
+    let lines = prompt_preview_lines_uncached(number, text, width, align);
+    MEMO.with(|m| *m.borrow_mut() = Some((key, lines.clone())));
+    lines
+}
+
+fn prompt_preview_lines_uncached(
+    number: usize,
+    text: &str,
+    width: u16,
+    align: ratatui::layout::Alignment,
+) -> Vec<Line<'static>> {
     use unicode_segmentation::UnicodeSegmentation;
     let text = text.trim().replace('\n', " ");
     if text.is_empty() {

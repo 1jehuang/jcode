@@ -60,6 +60,9 @@ struct Fixture {
     sessions: SessionAgents,
     members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    swarms: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    coordinators: Arc<RwLock<HashMap<String, String>>>,
+    history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     events: mpsc::UnboundedSender<ServerEvent>,
 }
 impl Fixture {
@@ -114,6 +117,9 @@ impl Fixture {
             sessions,
             members,
             connections,
+            swarms: Arc::new(RwLock::new(HashMap::new())),
+            coordinators: Arc::new(RwLock::new(HashMap::new())),
+            history: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             events,
         }
     }
@@ -132,16 +138,28 @@ impl Fixture {
         grace: Duration,
         task: &mut Option<tokio::task::JoinHandle<()>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
+        self.cleanup_with_continuation(processing, false, grace, task)
+            .await
+    }
+
+    async fn cleanup_with_continuation(
+        &self,
+        processing: bool,
+        continue_on_disconnect: bool,
+        grace: Duration,
+        task: &mut Option<tokio::task::JoinHandle<()>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let (swarm_events, _) = broadcast::channel(8);
         cleanup_client_connection(
             &self.sessions,
             &self.id,
             processing,
+            continue_on_disconnect,
             task,
             tokio::spawn(std::future::pending()),
             &self.members,
-            &Arc::new(RwLock::new(HashMap::new())),
-            &Arc::new(RwLock::new(HashMap::new())),
+            &self.swarms,
+            &self.coordinators,
             &Arc::new(RwLock::new(HashMap::new())),
             &FileTouchService::new(),
             &Arc::new(RwLock::new(HashMap::new())),
@@ -152,7 +170,7 @@ impl Fixture {
             "original",
             &Arc::new(RwLock::new(HashMap::new())),
             &Arc::new(RwLock::new(HashMap::new())),
-            &Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            &self.history,
             &Arc::new(std::sync::atomic::AtomicU64::new(0)),
             &swarm_events,
             &self.events,
@@ -202,6 +220,97 @@ fn connection(name: &str, id: &str) -> ClientConnectionInfo {
         terminal_env: vec![],
         disconnect_tx,
     }
+}
+
+#[tokio::test]
+async fn continued_idle_coordinator_survives_disconnect_without_reconnect_grace() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    for persisted in [false, true] {
+        let fixture = Fixture::new(persisted).await;
+        fixture
+            .swarms
+            .write()
+            .await
+            .insert("remote-swarm".into(), HashSet::from([fixture.id.clone()]));
+        fixture
+            .coordinators
+            .write()
+            .await
+            .insert("remote-swarm".into(), fixture.id.clone());
+        {
+            let mut members = fixture.members.write().await;
+            let member = members.get_mut(&fixture.id).unwrap();
+            member.role = "coordinator".into();
+            member.swarm_id = Some("remote-swarm".into());
+            member.swarm_enabled = true;
+        }
+        assert!(
+            timeout(
+                Duration::from_secs(1),
+                fixture.cleanup_with_continuation(false, true, Duration::from_secs(30), &mut None),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(fixture.connections.read().await.is_empty());
+        assert!(
+            fixture.history.read().await.is_empty(),
+            "no stopped/member-left event"
+        );
+        assert!(fixture.swarms.read().await["remote-swarm"].contains(&fixture.id));
+        assert_eq!(
+            fixture.coordinators.read().await["remote-swarm"],
+            fixture.id
+        );
+        assert!(Arc::ptr_eq(
+            fixture.sessions.read().await.get(&fixture.id).unwrap(),
+            &fixture.agent
+        ));
+        let members = fixture.members.read().await;
+        let member = members
+            .get(&fixture.id)
+            .expect("worker reports still resolve coordinator");
+        assert_eq!(member.status, "ready");
+        assert_eq!(member.swarm_id.as_deref(), Some("remote-swarm"));
+        assert!(member.event_txs.is_empty(), "transport sender was detached");
+        drop(members);
+        fixture.attach_successor().await;
+    }
+}
+
+#[tokio::test]
+async fn continued_turn_remains_live_after_owner_finishes() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let fixture = Fixture::new(true).await;
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let mut task = Some(tokio::spawn(async move { wait.await.unwrap() }));
+    let writer = fixture
+        .cleanup_with_continuation(true, true, Duration::ZERO, &mut task)
+        .await
+        .expect("lifecycle retains completion ownership");
+    finish.send(()).unwrap();
+    task.take()
+        .unwrap()
+        .await
+        .expect("disconnect must not cancel turn");
+    writer.abort();
+    // Mirrors the lifecycle's final cleanup after recording completion. The
+    // continuation policy must still apply when there is no processing task.
+    assert!(
+        fixture
+            .cleanup_with_continuation(false, true, Duration::ZERO, &mut task)
+            .await
+            .is_none()
+    );
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert_eq!(fixture.members.read().await[&fixture.id].status, "ready");
+    assert!(!matches!(
+        fixture.agent.lock().await.session_for_split().status,
+        SessionStatus::Closed | SessionStatus::Crashed { .. }
+    ));
 }
 
 #[tokio::test]
