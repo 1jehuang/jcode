@@ -228,7 +228,8 @@ pub(crate) async fn stream_response(
     let mut saw_message_end = false;
     let mut progress = StreamProgress::new();
 
-    // Idle timeout between streamed events. Without this, a silently dead
+    // Idle timeout between nonempty transport chunks, including SSE comments
+    // and status frames that do not yield agent events. Without this, a silently dead
     // connection (or a provider that never emits) would hang forever; with a
     // hardcoded short value, slow reasoning models that think silently for
     // minutes get cancelled prematurely. Resolved from
@@ -236,8 +237,9 @@ pub(crate) async fn stream_response(
     // (issue #434).
     use futures::StreamExt;
     loop {
+        let remaining_idle = idle_timeout.saturating_sub(stream.transport_idle_for());
         let Some(next) =
-            while_consumer_open(&tx, tokio::time::timeout(idle_timeout, stream.next())).await
+            while_consumer_open(&tx, tokio::time::timeout(remaining_idle, stream.next())).await
         else {
             return Ok(());
         };
@@ -245,7 +247,18 @@ pub(crate) async fn stream_response(
             Ok(Some(result)) => result,
             Ok(None) => break, // stream ended normally
             Err(_) => {
+                // next() may consume comments or unhandled status events without
+                // yielding. They still prove the transport is alive. Do not
+                // cancel a live response just because it has no visible output.
+                if stream.transport_idle_for() < idle_timeout {
+                    continue;
+                }
                 let mut fields = vec![
+                    ("transport_bytes", stream.transport_bytes().to_string()),
+                    (
+                        "transport_idle_ms",
+                        stream.transport_idle_for().as_millis().to_string(),
+                    ),
                     ("model", request_model.clone()),
                     ("idle_timeout_secs", idle_timeout.as_secs().to_string()),
                     (
@@ -316,6 +329,11 @@ pub(crate) async fn stream_response(
                         ],
                     );
                     return Ok(());
+                }
+                // Completion is authoritative, even when the HTTP connection
+                // remains open. Waiting for EOF can turn success into a timeout.
+                if saw_message_end {
+                    break;
                 }
             }
             Err(e) => {

@@ -164,6 +164,16 @@ pub enum ApiEvent {
         cache_read_input: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
+        /// Authoritative effective context budget, when supplied by the daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_budget: Option<usize>,
+    },
+
+    /// A session context override changed, including its resolved budget.
+    ContextCapChanged {
+        session_id: String,
+        max_context_tokens: Option<usize>,
+        effective_budget: usize,
     },
 
     /// The provider request that just completed missed the KV (prompt) cache:
@@ -349,6 +359,10 @@ pub enum ApiEvent {
         /// or the daemon did not report it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_method: Option<String>,
+        /// Label of the OAuth account the session's requests are routed to,
+        /// as chosen by the daemon's account router. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
     },
 
     /// Reply to `ListModels`: the models this session can switch to.
@@ -377,6 +391,10 @@ pub enum ApiEvent {
         /// key route.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_method: Option<String>,
+        /// Label of the OAuth account the session's requests are routed to,
+        /// as chosen by the daemon's account router. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
         routes: Vec<ModelRouteInfo>,
     },
 
@@ -570,6 +588,19 @@ pub struct HistoryMessage {
     /// "user" | "assistant" | "tool".
     pub role: String,
     pub content: String,
+    /// On "tool" rows: the call this result answers, so clients can rebuild
+    /// tool cards after a reload. `content` is the tool output. Absent from
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<HistoryTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryTool {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub input: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

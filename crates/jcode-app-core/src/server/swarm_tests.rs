@@ -15,6 +15,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 
+#[test]
+fn inline_worker_environment_is_removed_when_its_scope_ends() {
+    let parent = "inline-env-cleanup-parent";
+    let child = "inline-env-cleanup-child";
+    let env = HashMap::from([("INLINE_WORKER_SECRET".into(), "test-only".into())]);
+    crate::session_env::set_session_env(parent, env.clone()).unwrap();
+    {
+        crate::session_env::inherit_session_env(parent, child);
+        let _guard = super::InlineWorkerEnv(child.into());
+        assert_eq!(crate::session_env::session_env(child), env);
+    }
+    assert!(crate::session_env::session_env(child).is_empty());
+    assert_eq!(crate::session_env::session_env(parent), env);
+    crate::session_env::remove_session_env(parent);
+}
+
 fn plan_item(id: &str, content: &str) -> PlanItem {
     PlanItem {
         content: content.to_string(),
@@ -113,6 +129,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             output: 45,
             cache_read_input: Some(999),
             cache_creation_input: None,
+            effective_budget: None,
         },
         ServerEvent::ToolStart {
             id: "call".into(),
@@ -157,6 +174,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             output: 46,
             cache_read_input: None,
             cache_creation_input: None,
+            effective_budget: None,
         },
     )
     .await;

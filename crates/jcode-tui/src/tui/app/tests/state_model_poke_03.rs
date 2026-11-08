@@ -12,6 +12,8 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -61,6 +63,8 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
             crate::todo::save_todos(
                 &app.session.id,
                 &[crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2338,6 +2342,8 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2376,6 +2382,8 @@ fn test_poke_status_reports_current_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2435,6 +2443,8 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2489,6 +2499,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2530,6 +2542,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2547,6 +2561,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2605,6 +2621,8 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2637,11 +2655,14 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
 #[test]
 fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2661,6 +2682,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -2835,6 +2858,7 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
 #[test]
 fn test_finish_turn_challenges_confidence_spike_once() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
             &app.session.id,
@@ -2944,6 +2968,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -2984,6 +3010,8 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -3100,16 +3128,5 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
     });
 }
 
-#[test]
-fn test_remote_alt_e_toggles_prompt_history_without_typing() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    let before = crate::tui::ui::viewport::prompt_history_expanded();
-    rt.block_on(app.handle_remote_key(KeyCode::Char('e'), KeyModifiers::ALT, &mut remote))
-        .unwrap();
-    assert!(app.input.is_empty(), "Alt+E must not type: {:?}", app.input);
-    assert_ne!(crate::tui::ui::viewport::prompt_history_expanded(), before);
-    crate::tui::ui::viewport::toggle_prompt_history_expanded();
-}
+#[path = "state_model_poke_03/prompt_history_keys.rs"]
+mod prompt_history_keys;

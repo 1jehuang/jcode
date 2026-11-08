@@ -337,6 +337,19 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
+        Request::NotifyAuthChanged {
+            id, provider, auth, ..
+        } => {
+            super::provider_control::handle_unbound_notify_auth_changed(
+                id,
+                provider,
+                auth,
+                provider_template,
+                sessions,
+                &client_event_tx,
+            )
+            .await;
+        }
         Request::NotifySession {
             id,
             session_id,
@@ -1069,7 +1082,7 @@ mod lightweight_swarm_member_tests {
 
     fn empty_state() -> (SessionAgents, Members, Swarms) {
         (
-            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(crate::server::session_manager::SessionManager::new()),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )

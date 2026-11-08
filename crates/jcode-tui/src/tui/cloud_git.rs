@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+#[path = "cloud_git_stderr.rs"]
+mod stderr_timing;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum RepoState {
@@ -61,8 +63,36 @@ pub(crate) fn script_command(
     dir: &str,
     script: &str,
 ) -> tokio::process::Command {
+    script_command_inner(host, config, dir, script, false)
+}
+
+/// Large JSON transcripts benefit from SSH's negotiated stream compression.
+/// Small workspace probes keep their existing uncompressed transport.
+pub(crate) fn compressed_script_command(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+    script: &str,
+) -> tokio::process::Command {
+    script_command_inner(host, config, dir, script, true)
+}
+
+fn script_command_inner(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+    script: &str,
+    compressed: bool,
+) -> tokio::process::Command {
     let mut cmd = if let Some(host) = host {
         let mut cmd = tokio::process::Command::new("ssh");
+        let managed_config = host == "jcode-cloud"
+            && config.is_some_and(|path| {
+                crate::storage::jcode_dir().is_ok_and(|home| path == home.join("cloud/ssh_config"))
+            });
+        if compressed {
+            cmd.arg("-C");
+        }
         if let Some(config) = config {
             cmd.arg("-F").arg(config);
         }
@@ -92,8 +122,6 @@ pub(crate) fn script_command(
             "SessionType=default",
             "-o",
             "ControlMaster=no",
-            "-S",
-            "none",
             "-o",
             "ConnectTimeout=8",
             "-o",
@@ -101,6 +129,11 @@ pub(crate) fn script_command(
             "-o",
             "ServerAliveCountMax=1",
         ]);
+        // Borrow the account-scoped managed master without owning or stopping
+        // it. Custom SSH configurations remain isolated from arbitrary muxes.
+        if !managed_config {
+            cmd.args(["-S", "none"]);
+        }
         cmd.arg("--")
             .arg(host)
             .arg(format!("sh -c {} sh {}", quote(script), quote(dir)));
@@ -112,7 +145,7 @@ pub(crate) fn script_command(
     };
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     cmd
 }
@@ -121,8 +154,21 @@ async fn probe(command: tokio::process::Command) -> RepoState {
     probe_with_timeout(command, Duration::from_secs(12)).await
 }
 
+/// Read a specific workspace without consulting the active TUI attachment.
+/// Used by selected-session previews on their background loader thread.
+pub(crate) async fn probe_workspace(
+    host: Option<&str>,
+    config: Option<&std::path::Path>,
+    dir: &str,
+) -> RepoState {
+    if dir.is_empty() || host.is_some_and(|host| host.is_empty() || host.starts_with('-')) {
+        return RepoState::Unavailable;
+    }
+    probe(command(host, config, dir)).await
+}
+
 async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration) -> RepoState {
-    match bounded_output(command, deadline, 1024 * 1024).await {
+    match bounded_output_for(command, deadline, 1024 * 1024, WorkspaceOperation::GitProbe).await {
         Some((status, _)) if status.code() == Some(42) => RepoState::NoRepository,
         Some((status, bytes)) if status.success() => parse(&bytes)
             .map(RepoState::Ready)
@@ -131,11 +177,47 @@ async fn probe_with_timeout(command: tokio::process::Command, deadline: Duration
     }
 }
 
+/// Fixed vocabulary only: never include paths, commands, hosts, or session content.
+#[derive(Clone, Copy)]
+pub(crate) enum WorkspaceOperation {
+    GitProbe,
+    InventoryPrepare,
+    InventoryProjection,
+    Preview,
+    CloudStatus,
+    CloudStatusDirectories,
+}
+
+impl WorkspaceOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::GitProbe => "git_probe",
+            Self::InventoryPrepare => "inventory_prepare",
+            Self::InventoryProjection => "inventory_projection",
+            Self::Preview => "preview",
+            Self::CloudStatus => "cloud_status",
+            Self::CloudStatusDirectories => "cloud_status_directories",
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn bounded_output(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     deadline: Duration,
     limit: usize,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    bounded_output_for(command, deadline, limit, WorkspaceOperation::GitProbe).await
+}
+
+pub(crate) async fn bounded_output_for(
+    mut command: tokio::process::Command,
+    deadline: Duration,
+    limit: usize,
+    operation: WorkspaceOperation,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    let mut timing = super::cloud_latency::Span::new("workspace_command");
+    timing.operation(operation.label());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -157,27 +239,48 @@ pub(crate) async fn bounded_output(
             }
         }
     }
+    command
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let Ok(mut child) = command.spawn() else {
         return None;
     };
+    let _process_group = stderr_timing::ProcessGroup(child.id());
     let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
     let result = tokio::time::timeout(deadline, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take((limit + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .ok()?;
-        if bytes.len() > limit {
-            return None;
+        let output = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .ok()?;
+            if bytes.len() > limit {
+                return None;
+            }
+            let status = child.wait().await.ok()?;
+            Some((status, bytes))
+        };
+        let diagnostics = async {
+            stderr_timing::drain(stderr, |record| crate::logging::info(&record)).await;
+            Ok::<(), ()>(())
+        };
+        // No detached reader can outlive cancellation or this deadline. An
+        // oversized stdout cancels the stderr drain immediately.
+        match tokio::try_join!(async { output.await.ok_or(()) }, diagnostics) {
+            Ok((output, ())) => Some(output),
+            Err(()) => None,
         }
-        let status = child.wait().await.ok()?;
-        Some((status, bytes))
     })
     .await;
     match result {
-        Ok(Some(output)) => Some(output),
-        _ => {
+        Ok(Some(output)) => {
+            timing.finish(if output.0.success() { "ok" } else { "error" });
+            Some(output)
+        }
+        result => {
+            timing.finish(if result.is_err() { "timeout" } else { "error" });
             #[cfg(unix)]
             if let Some(pid) = child.id() {
                 // Own process group only, including ProxyCommand descendants.
@@ -257,6 +360,42 @@ fn parse(bytes: &[u8]) -> Option<GitInfo> {
     Some(info)
 }
 
+static CLIENT_FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn probe_wake() -> &'static tokio::sync::Notify {
+    static WAKE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    WAKE.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Each probe spawns a shell and git (plus ssh for the cloud side). A
+/// backgrounded window shows nothing, so it only needs a slow safety refresh;
+/// regaining focus or a repo-mutating tool wakes the workers immediately.
+fn probe_period() -> Duration {
+    if CLIENT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(120)
+    }
+}
+
+pub(crate) fn note_client_focus(focused: bool) {
+    let was = CLIENT_FOCUSED.swap(focused, std::sync::atomic::Ordering::Relaxed);
+    if focused && !was {
+        refresh_soon();
+    }
+}
+
+/// Re-probe both repos now instead of at the next period.
+pub(crate) fn refresh_soon() {
+    probe_wake().notify_waiters();
+}
+
+/// Sleep until the next SSH probe is due: the focus-dependent period, or an
+/// earlier wake from focus regain or a repo-mutating tool.
+pub(crate) async fn wait_for_next_probe() {
+    let _ = tokio::time::timeout(probe_period(), probe_wake().notified()).await;
+}
+
 /// Starts exactly two independent workers for this attach. No shared cache
 /// with the ordinary local status-line probe, and no stale success on failure.
 #[cfg(not(test))]
@@ -312,7 +451,7 @@ pub(crate) fn gather() -> Option<DualGitInfo> {
                             crate::bus::Bus::global()
                                 .publish(crate::bus::BusEvent::GitInfoRefreshed);
                         }
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        wait_for_next_probe().await;
                     }
                 });
             });
@@ -420,6 +559,63 @@ mod tests {
             RepoState::Unavailable
         );
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn transcript_compression_does_not_change_workspace_probe_transport() {
+        let config = std::path::Path::new("/private/config");
+        let args = |cmd: tokio::process::Command| {
+            cmd.as_std()
+                .get_args()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        };
+        let compressed = args(compressed_script_command(
+            Some("cloud-host"),
+            Some(config),
+            "session",
+            "printf test",
+        ));
+        let ordinary = args(script_command(
+            Some("cloud-host"),
+            Some(config),
+            "session",
+            "printf test",
+        ));
+        assert_eq!(compressed[0], "-C");
+        assert_eq!(&compressed[1..], ordinary.as_slice());
+        assert!(
+            compressed
+                .iter()
+                .any(|arg| arg == "StrictHostKeyChecking=yes")
+        );
+    }
+
+    #[test]
+    fn managed_cloud_reads_borrow_mux_but_custom_transports_remain_isolated() {
+        let _lock = crate::storage::lock_test_env();
+        let home = crate::storage::jcode_dir().unwrap();
+        let managed = home.join("cloud/ssh_config");
+        for (host, config, borrow) in [
+            ("jcode-cloud", managed.as_path(), true),
+            ("custom-host", managed.as_path(), false),
+            (
+                "jcode-cloud",
+                std::path::Path::new("/private/config"),
+                false,
+            ),
+        ] {
+            let cmd = compressed_script_command(Some(host), Some(config), "session", "true");
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy())
+                .collect();
+            assert_eq!(args.iter().any(|a| a == "-S"), !borrow);
+            assert!(args.iter().any(|a| a == "ControlMaster=no"));
+            assert!(!args.iter().any(|a| a == "ControlMaster=auto"));
+            assert!(args.iter().any(|a| a == "ClearAllForwardings=yes"));
+        }
     }
 
     #[test]

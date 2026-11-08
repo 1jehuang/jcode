@@ -82,14 +82,15 @@ fn same_repository(path: &Path, root: &Path) -> Result<bool> {
 }
 
 fn reject_lease(root: &Path, lease: &storage::SessionLease) -> Result<()> {
-    if lease.is_here()
+    if (lease.is_here() || lease.away_host.as_deref() == Some("return-pending"))
         && match lease.repo_root.as_deref() {
             Some(path) => same_repository(Path::new(path), root)?,
             None => true,
         }
     {
         bail!(
-            "repository is owned by cloud session {}; return that session before replacing",
+            "repository is owned by cloud session {}; inactivity does not release its unreturned work. On the source machine run `jcode cloud return --session {} --refs-only`, then retry replacement. This preserves cloud work as Git refs without changing your local checkout and permanently fences the old cloud owner. If return was interrupted, rerun the same command to finish recovery; do not delete the lease",
+            lease.session_id,
             lease.session_id
         );
     }
@@ -394,6 +395,13 @@ mod tests {
                 .contains("another-session")
         );
         lease.away_host = Some("returned".into());
+        // Historical returns have no completion receipt and must remain usable.
+        assert!(reject_lease(root, &lease).is_ok());
+        lease.away_host = Some("return-pending".into());
+        let error = reject_lease(root, &lease).unwrap_err().to_string();
+        assert!(error.contains("jcode cloud return --session another-session --refs-only"));
+        assert!(error.contains("do not delete the lease"));
+        lease.away_host = Some("returned-complete".into());
         assert!(reject_lease(root, &lease).is_ok());
         lease.away_host = None;
         lease.repo_root = Some("/unrelated".into());
@@ -405,6 +413,170 @@ mod tests {
         );
         assert!(reject_active_session(root, "different-session", Some("/unrelated")).is_ok());
         assert!(reject_active_session(root, "unknown-session", None).is_err());
+    }
+
+    #[test]
+    fn durable_return_replays_original_work_after_replacement() {
+        if isolated("durable_return_replays_original_work_after_replacement") {
+            return;
+        }
+        let (cloud, _stage, _) = super::super::repo_tests::repository();
+        std::fs::write(cloud.path().join("cloud-only"), "unreturned work").unwrap();
+        let id = "recover-session";
+        let mut sess = session::Session::create_with_id(id.into(), None, None);
+        sess.working_dir = Some(cloud.path().to_string_lossy().into_owned());
+        sess.migration_epoch = 1;
+        sess.save_prepared().unwrap();
+        storage::write_session_lease(&storage::SessionLease {
+            session_id: id.into(),
+            epoch: 1,
+            away_host: None,
+            repo_root: sess.working_dir.clone(),
+            last_sync_snapshot: None,
+            last_sync_head: None,
+            updated_at: String::new(),
+        })
+        .unwrap();
+        let original = export_return_archive(id, 2, true).unwrap();
+        let lease = storage::read_session_lease(id).unwrap();
+        assert_eq!(lease.away_host.as_deref(), Some("return-pending"));
+        assert!(reject_lease(cloud.path(), &lease).is_err());
+        assert!(complete_return(id, 1).is_err());
+        complete_return(id, 2).unwrap();
+        complete_return(id, 2).unwrap(); // Lost completion response is retryable.
+        let lease = storage::read_session_lease(id).unwrap();
+        assert!(reject_lease(cloud.path(), &lease).is_ok());
+        let (_source, stage, mut repo) = source();
+        repo.root = cloud.path().to_string_lossy().into_owned();
+        let backup = install(&repo, &stage.path().join("repo.bundle"), "replacement")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(backup.join("cloud-only")).unwrap(),
+            "unreturned work"
+        );
+        assert!(!cloud.path().join("cloud-only").exists());
+        assert_eq!(export_return_archive(id, 2, true).unwrap(), original);
+        let archive = tempfile::tempdir().unwrap();
+        let tar = archive.path().join("return.tar");
+        std::fs::write(&tar, &original).unwrap();
+        untar(&tar, archive.path()).unwrap();
+        let manifest: MoveManifest = read_json(&archive.path().join("manifest.json")).unwrap();
+        let snapshot = manifest.repo.unwrap().snapshot;
+        git(
+            cloud.path(),
+            &[
+                "fetch",
+                archive.path().join("repo.bundle").to_str().unwrap(),
+                &snapshot,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            git(cloud.path(), &["show", &format!("{snapshot}:cloud-only")]).unwrap(),
+            "unreturned work"
+        );
+        assert!(
+            run_cli(super::super::super::args::CloudCommand::CancelReturn {
+                session: id.into(),
+                epoch: 2
+            })
+            .is_err()
+        );
+        // Even a leftover staged activation cannot revive the old owner.
+        let staged = inbox_dir().unwrap().join(format!("{id}.1"));
+        std::fs::create_dir_all(staged).unwrap();
+        assert!(
+            run_activate(id, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("stale activation")
+        );
+        std::fs::remove_file(return_state_path(id, 2, "export.tar").unwrap()).unwrap();
+        assert!(
+            export_return_archive(id, 2, true)
+                .unwrap_err()
+                .to_string()
+                .contains("possibly replaced checkout")
+        );
+    }
+
+    #[test]
+    fn legacy_export_does_not_require_completion_and_pending_export_can_cancel() {
+        if isolated("legacy_export_does_not_require_completion_and_pending_export_can_cancel") {
+            return;
+        }
+        for (id, require_completion) in [("legacy-client", false), ("new-client", true)] {
+            let mut sess = session::Session::create_with_id(id.into(), None, None);
+            sess.working_dir = None;
+            sess.migration_epoch = 1;
+            sess.save_prepared().unwrap();
+            storage::write_session_lease(&storage::SessionLease {
+                session_id: id.into(),
+                epoch: 1,
+                away_host: None,
+                repo_root: None,
+                last_sync_snapshot: None,
+                last_sync_head: None,
+                updated_at: String::new(),
+            })
+            .unwrap();
+            let bytes = export_return_archive(id, 2, require_completion).unwrap();
+            let lease = storage::read_session_lease(id).unwrap();
+            assert_eq!(
+                lease.away_host.as_deref(),
+                Some(if require_completion {
+                    "return-pending"
+                } else {
+                    "returned"
+                })
+            );
+            let archive = tempfile::tempdir().unwrap();
+            let tar = archive.path().join("return.tar");
+            std::fs::write(&tar, bytes).unwrap();
+            untar(&tar, archive.path()).unwrap();
+            assert_eq!(
+                archive.path().join("return-completion-v1").exists(),
+                require_completion
+            );
+            if require_completion {
+                run_cli(super::super::super::args::CloudCommand::CancelReturn {
+                    session: id.into(),
+                    epoch: 2,
+                })
+                .unwrap();
+                assert!(storage::read_session_lease(id).unwrap().is_here());
+                assert!(!return_state_path(id, 2, "export.tar").unwrap().exists());
+            } else {
+                assert!(reject_lease(Path::new("/repo"), &lease).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn durable_return_state_is_private_and_rejects_path_traversal() {
+        assert!(return_state_path("../escape", 1, "export.tar").is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("return/export.tar");
+        write_return_state(&path, b"first").unwrap();
+        write_return_state(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]

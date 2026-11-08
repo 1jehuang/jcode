@@ -406,6 +406,10 @@ fn test_prepare_messages_does_not_guess_when_spawn_label_is_ambiguous() {
 
 #[test]
 fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
+    // Embedded update subjects can contain "batch" or "bash" too. This test
+    // only measures the live batch rows, not the independently rendered box.
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let state = TestState {
         display_messages: vec![DisplayMessage::user("build it")],
         status: ProcessingStatus::RunningTool("batch".to_string()),
@@ -466,6 +470,8 @@ fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
 
 #[test]
 fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() {
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let state = TestState {
         centered_mode: true,
         display_messages: vec![DisplayMessage::user("build it")],
@@ -1182,166 +1188,157 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
 }
 
 #[test]
-fn test_prepare_messages_renders_reasoning_role_dim_italic_without_sentinel() {
-    let _guard = crate::storage::lock_test_env();
-    clear_test_render_state_for_tests();
-
-    // A collapsing reasoning message carries sentinel-wrapped dim/italic markup.
-    let mut content = String::new();
-    content.push_str(&jcode_tui_markdown::reasoning_line_markup(
-        "weighing the options",
-    ));
-    content.push_str(&jcode_tui_markdown::reasoning_line_markup(
-        "▸ thought for 3s",
-    ));
-
-    let state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("hi"),
-            DisplayMessage::reasoning(content),
-        ],
-        ..Default::default()
-    };
-
-    let prepared = prepare::prepare_messages(&state, 100, 30);
-    let lines = prepared.materialize_all_lines();
-
-    // The visible reasoning body is present, dim+italic, and sentinel-free.
-    let body = lines
-        .iter()
-        .find(|l| {
-            let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            joined.contains("weighing the options")
-        })
-        .expect("reasoning body line present");
-    let rendered: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(
-        !rendered.contains(jcode_tui_markdown::REASONING_SENTINEL),
-        "sentinel must be stripped from visible reasoning: {rendered:?}"
-    );
-    let span = body
-        .spans
-        .iter()
-        .find(|s| s.content.as_ref().contains("weighing"))
-        .expect("body span");
-    assert!(
-        span.style
-            .add_modifier
-            .contains(ratatui::style::Modifier::ITALIC),
-        "reasoning body should be italic: {:?}",
-        span.style
-    );
-
-    // The summary line is present too.
-    assert!(
-        lines.iter().any(|l| {
-            let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            joined.contains("thought for 3s")
-        }),
-        "summary line should render"
-    );
+fn test_prepare_messages_thinking_and_tools_have_no_blank_rows() {
+    for compact in [false, true] {
+        with_compact_thinking_config(compact, || {
+            assert_thinking_tool_adjacency(false, compact);
+            assert_thinking_tool_adjacency(true, compact);
+        });
+    }
 }
 
-#[test]
-fn test_prepare_messages_renders_anchored_reasoning_message_in_flow() {
+fn with_compact_thinking_config(compact: bool, f: impl FnOnce()) {
     let _guard = crate::storage::lock_test_env();
-    clear_test_render_state_for_tests();
-
-    // Anchored reasoning traces are ordinary display messages in the body:
-    // they render dim+italic (sentinel stripped) between surrounding entries.
-    let mut trace = String::new();
-    trace.push_str(&jcode_tui_markdown::reasoning_line_markup(
-        "anchored thinking",
-    ));
-
-    let state = TestState {
-        display_messages: vec![
-            DisplayMessage::user("hi"),
-            DisplayMessage::reasoning(trace),
-            DisplayMessage::assistant("Answer body"),
-        ],
-        ..Default::default()
-    };
-
-    let prepared = prepare::prepare_messages(&state, 100, 30);
-    let lines = prepared.materialize_all_lines();
-    let joined: Vec<String> = lines
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-        .collect();
-
-    let reasoning_idx = joined
-        .iter()
-        .position(|l| l.contains("anchored thinking"))
-        .expect("anchored reasoning rendered");
-    let answer_idx = joined
-        .iter()
-        .position(|l| l.contains("Answer body"))
-        .expect("answer rendered");
-    assert!(
-        reasoning_idx < answer_idx,
-        "anchored reasoning renders in transcript order: {joined:?}"
-    );
-    // Sentinel is stripped from the visible reasoning text.
-    assert!(
-        !joined[reasoning_idx].contains(jcode_tui_markdown::REASONING_SENTINEL),
-        "sentinel must be stripped: {:?}",
-        joined[reasoning_idx]
-    );
+    let _render_guard = viewport_snapshot_test_lock();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    // Omit the setting in the default case to verify existing configurations.
+    std::fs::write(
+        home.path().join("config.toml"),
+        if compact {
+            "[display]\ncompact_thinking = true\n"
+        } else {
+            "[display]\n"
+        },
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+    assert_eq!(crate::config::config().display.compact_thinking, compact);
+    f();
 }
 
-#[test]
-fn test_prepare_messages_restored_history_matches_live_tool_rows() {
-    // History restore populates assistant `tool_calls`; live turns do not.
-    // The prepared transcript must be identical so a reload never adds a
-    // purple `tool: bash` summary above the real tool rows.
-    let tool_row = DisplayMessage {
-        role: "tool".to_string(),
-        content: "ok".to_string(),
-        tool_calls: Vec::new(),
+fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
+    clear_test_render_state_for_tests();
+    let tool = |id: &str, title: &str| DisplayMessage {
+        role: "tool".into(),
+        content: "ok".into(),
+        tool_calls: vec![],
         duration_secs: None,
-        title: None,
+        title: Some(title.into()),
         tool_data: Some(ToolCall {
-            id: "call-bash-restore".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({"command": "git status"}),
-            intent: Some("Check repo state".to_string()),
+            id: id.into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "true"}),
+            intent: Some(title.into()),
             thought_signature: None,
         }),
     };
-    let assistant = |tool_calls: Vec<String>| DisplayMessage {
-        role: "assistant".to_string(),
-        content: "Checking the repo.".to_string(),
-        tool_calls,
-        duration_secs: None,
-        title: None,
-        tool_data: None,
+    let state = TestState {
+        display_messages: vec![
+            tool("before", "Before thinking"),
+            if embedded_assistant {
+                DisplayMessage::assistant(format!(
+                    "{}\n",
+                    jcode_tui_markdown::reasoning_line_markup("**Thinking compactly**",)
+                ))
+            } else {
+                DisplayMessage::reasoning(jcode_tui_markdown::reasoning_line_markup(
+                    "Thinking compactly",
+                ))
+            },
+            tool("after", "After thinking"),
+            DisplayMessage::assistant("Final answer"),
+        ],
+        ..Default::default()
     };
-    let render = |messages: Vec<DisplayMessage>| {
+    let prepared = prepare::prepare_messages(&state, 100, 30);
+    let rows: Vec<String> = prepared
+        .materialize_all_lines()
+        .iter()
+        .map(extract_line_text)
+        .collect();
+    let thinking = rows
+        .iter()
+        .position(|row| row.contains("Thinking compactly"))
+        .unwrap();
+    let before = rows
+        .iter()
+        .position(|row| row.contains("Before thinking"))
+        .unwrap();
+    assert_eq!(thinking - before, if compact { 1 } else { 2 }, "{rows:?}");
+    assert!(rows[thinking + 1].contains("After thinking"), "{rows:?}");
+    let answer = rows
+        .iter()
+        .position(|row| row.contains("Final answer"))
+        .unwrap();
+    assert!(
+        rows[answer - 1].trim().is_empty(),
+        "prose keeps its separator: {rows:?}"
+    );
+}
+
+#[test]
+fn test_prepare_messages_streaming_thinking_has_no_blank_prefix() {
+    for compact in [false, true] {
+        with_compact_thinking_config(compact, || assert_streaming_thinking_spacing(compact));
+    }
+}
+
+fn assert_streaming_thinking_spacing(compact: bool) {
+    for thinking in [true, false] {
+        clear_test_render_state_for_tests();
         let state = TestState {
-            display_messages: messages,
+            display_messages: vec![DisplayMessage::system("Previous activity")],
+            status: ProcessingStatus::Streaming,
+            streaming_text: if thinking {
+                jcode_tui_markdown::reasoning_partial_markup("**Live thinking**")
+            } else {
+                "Ordinary answer".into()
+            },
             ..Default::default()
         };
-        prepare::prepare_messages(&state, 110, 30)
+        let prepared = prepare::prepare_messages(&state, 100, 30);
+        let rows: Vec<String> = prepared
             .materialize_all_lines()
             .iter()
             .map(extract_line_text)
-            .collect::<Vec<_>>()
-    };
-    let live = render(vec![assistant(Vec::new()), tool_row.clone()]);
-    let restored = render(vec![assistant(vec!["bash".to_string()]), tool_row]);
-    assert!(
-        restored.iter().all(|line| !line.contains("tool: ")),
-        "restored={restored:#?}"
-    );
-    assert!(
-        restored
+            .collect();
+        let previous = rows
             .iter()
-            .any(|line| line.contains("bash · Check repo state")),
-        "restored={restored:#?}"
-    );
-    assert_eq!(live, restored);
+            .position(|row| row.contains("Previous activity"))
+            .unwrap();
+        let next = rows
+            .iter()
+            .position(|row| {
+                row.contains(if thinking {
+                    "Live thinking"
+                } else {
+                    "Ordinary answer"
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            next - previous,
+            if thinking && compact { 1 } else { 2 },
+            "{rows:?}"
+        );
+    }
 }
+
+#[path = "prepare/reasoning_history.rs"]
+mod reasoning_history;
 
 #[path = "prepare_error_tests.rs"]
 mod error_rows;

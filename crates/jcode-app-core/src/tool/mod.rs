@@ -44,6 +44,7 @@ mod read;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
+pub(crate) mod session_http;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
@@ -574,7 +575,7 @@ impl Registry {
                 codemode::CodemodeTool::new(registry.downgrade()),
             );
         }
-        // Integration discovery is on by default (opt-out); when disabled the
+        // Integration discovery is opt-in via `[sponsors] enabled = true`; when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
         if crate::config::config().sponsors.enabled {
@@ -986,7 +987,8 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See

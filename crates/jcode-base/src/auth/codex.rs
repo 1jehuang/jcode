@@ -608,6 +608,18 @@ pub fn extract_email(id_token: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+/// Read plan metadata as a routing hint, never as proof of authorization.
+pub fn extract_subscription_type(token: &str) -> Option<String> {
+    let payload = decode_jwt_payload(token)?;
+    payload
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_plan_type")?
+        .as_str()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(str::to_owned)
+}
+
 fn decode_jwt_payload(token: &str) -> Option<Value> {
     let payload_b64 = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload_b64.as_bytes()).ok()?;

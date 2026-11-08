@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 mod tool_duration;
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
@@ -30,6 +31,7 @@ include!("tests/service_tier_dedup.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
+include!("tests/idle_soft_interrupt_cancel.rs");
 include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
@@ -42,6 +44,7 @@ include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
+include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
@@ -49,6 +52,7 @@ include!("tests/onboarding_eval.rs");
 include!("tests/onboarding_sim.rs");
 include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
+include!("tests/long_transcript_scroll_perf.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/background_todo_dependencies.rs");
@@ -914,6 +918,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -937,6 +942,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),

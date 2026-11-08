@@ -814,7 +814,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::StatusDetail { detail } => {
-                                        self.status_detail = Some(detail);
+                                        self.apply_status_detail(detail);
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }

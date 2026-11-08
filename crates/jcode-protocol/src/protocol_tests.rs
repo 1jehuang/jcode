@@ -1,4 +1,25 @@
 use super::*;
+
+#[test]
+fn todos_request_and_snapshot_roundtrip() {
+    let request: Request = serde_json::from_str(r#"{"type":"get_todos","id":41}"#).unwrap();
+    assert!(matches!(request, Request::GetTodos { id: 41 }));
+    assert_eq!(request.id(), 41);
+    // A todo snapshot needs an attached session, unlike one-shot control requests.
+    assert!(!request.is_lightweight_control_request());
+    let payload = serde_json::json!({"todos": [], "plan": {}, "goals": []}).to_string();
+    let event = ServerEvent::Todos {
+        session_id: "attached-session".into(),
+        payload: payload.clone(),
+    };
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(encoded["type"], "todos");
+    let decoded: ServerEvent = serde_json::from_value(encoded).unwrap();
+    assert!(
+        matches!(decoded, ServerEvent::Todos { session_id, payload: actual }
+        if session_id == "attached-session" && actual == payload)
+    );
+}
 use anyhow::{Result, anyhow};
 
 fn parse_request_json(json: &str) -> Result<Request> {
@@ -16,6 +37,8 @@ include!("protocol_tests/comm_format_awaited.rs");
 include!("protocol_tests/misc_events.rs");
 include!("protocol_tests/randomized.rs");
 include!("protocol_tests/model_usage.rs");
+#[path = "protocol_tests/turn_identity.rs"]
+mod turn_identity;
 #[test]
 fn swarm_runtime_wait_metadata_is_optional_and_nonempty() {
     let empty: super::SwarmMemberRuntime = serde_json::from_str("{}").unwrap();
@@ -72,4 +95,14 @@ fn swarm_live_status_defaults_and_roundtrips() {
         .unwrap(),
         runtime
     );
+}
+
+#[test]
+fn sdk_login_notify_is_accepted_without_subscribe() {
+    // The SDK login flow sends exactly this frame on a fresh connection.
+    // Requiring Subscribe first dropped it, so Desktop never saw new models.
+    let request: Request =
+        serde_json::from_str(r#"{"type":"notify_auth_changed","id":1,"provider":"claude"}"#)
+            .unwrap();
+    assert!(request.is_lightweight_control_request());
 }

@@ -18,6 +18,7 @@
 
 pub mod allocator;
 pub mod background_progress;
+pub mod timing;
 pub mod translate;
 
 #[cfg(all(test, unix))]
@@ -323,6 +324,7 @@ where
 {
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
+    let mut pending = timing::Pending::default();
 
     // 1. Handshake: first frame must be hello with a compatible version.
     read_frame(&mut reader, &mut line).await?;
@@ -360,13 +362,21 @@ where
         write_json_line(&mut write_half, &frame).await?;
         return Ok(());
     }
+    let hello_at = std::time::Instant::now();
     // Do not claim a usable connection before the native daemon is reachable.
     let legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
+    let daemon_connected = hello_at.elapsed();
     let daemon_caps = daemon_capabilities(&legacy_socket)
         .await
         .unwrap_or_default();
+    timing::log(&format!(
+        "hello client={client_name} first_frame={:.1}ms daemon_connect={:.1}ms daemon_caps={:.1}ms",
+        timing::ms(pending.connection_age() - hello_at.elapsed()),
+        timing::ms(daemon_connected),
+        timing::ms(hello_at.elapsed() - daemon_connected),
+    ));
     let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
@@ -417,6 +427,7 @@ where
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
+    state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
 
@@ -452,6 +463,7 @@ where
                 let parsed = serde_json::from_slice(&api_frame);
                 api_frame.clear();
                 release_large_frame(&mut api_frame);
+                let received = std::time::Instant::now();
                 let request: Value = match parsed {
                     Ok(value) => value,
                     Err(error) => {
@@ -495,9 +507,18 @@ where
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
                 // the accept loop and fresh-client handshakes scheduled.
+                let translate_started = std::time::Instant::now();
                 let outbound = tokio::task::block_in_place(|| {
                     state.api_request_to_legacy(&request)
                 });
+                if let Some(id) = request["id"].as_u64() {
+                    pending.begin(
+                        id,
+                        request["req"].as_str().unwrap_or("?"),
+                        received,
+                        translate_started.elapsed(),
+                    );
+                }
                 let heavy = allocator::request_is_heavy(&request);
                 drop(request);
                 for out in outbound {
@@ -506,7 +527,7 @@ where
                             write_json_line(&mut legacy_write, &value).await?;
                         }
                         translate::Outbound::Reply(frame) => {
-                            write_json_line(&mut write_half, &frame).await?;
+                            write_frame_timed(&mut write_half, &frame, &mut pending, "bridge").await?;
                         }
                     }
                 }
@@ -542,14 +563,23 @@ where
                 // block_in_place handed the worker core to a fresh blocking
                 // thread per event: a busy session grew the bridge to 69 idle
                 // threads, each pinning its own allocator arena.
+                let translate_started = std::time::Instant::now();
                 let frames = if translate::legacy_event_may_block(&event) {
                     tokio::task::block_in_place(|| state.legacy_event_to_api(&event))
                 } else {
                     state.legacy_event_to_api(&event)
                 };
+                let translated = translate_started.elapsed();
+                if translated > timing::SLOW_TRANSLATE {
+                    timing::log(&format!(
+                        "slow_event {} translate={:.1}ms",
+                        event["type"].as_str().unwrap_or("?"),
+                        timing::ms(translated),
+                    ));
+                }
                 drop(event);
                 for frame in frames {
-                    write_json_line(&mut write_half, &frame).await?;
+                    write_frame_timed(&mut write_half, &frame, &mut pending, "daemon").await?;
                 }
                 if large {
                     release_large_frame(&mut legacy_frame);
@@ -557,6 +587,31 @@ where
             }
         }
     }
+}
+
+/// Write a frame and, if it answers a timed request, log that request.
+async fn write_frame_timed<W>(
+    writer: &mut W,
+    frame: &ServerFrame,
+    pending: &mut timing::Pending,
+    source: &str,
+) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let mut line = serde_json::to_string(frame)?;
+    line.push('\n');
+    writer.write_all(line.as_bytes()).await?;
+    writer.flush().await?;
+    if let Some(reply_to) = frame.reply_to {
+        // Avoid a second serialization of large replies just for the name.
+        let event = line
+            .split_once("\"ev\":\"")
+            .and_then(|(_, rest)| rest.split('"').next())
+            .unwrap_or_default();
+        pending.finish(reply_to, event, line.len(), source);
+    }
+    Ok(())
 }
 
 async fn write_json_line<W, T>(writer: &mut W, value: &T) -> Result<()>

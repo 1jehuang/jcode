@@ -64,7 +64,7 @@ def publish(repository, sha, tag, directory):
     validate(repository, sha, tag)
     files = inventory(directory)
     # Recheck CI after the builds as well as before them. No stale/rerun evidence.
-    authorize(repository, sha, timeout=0)
+    authorize(repository, sha, timeout=0, preview=True)
     require_preview_window(repository)
     require_head(repository, sha)
     changes = change_notes(repository, sha, tag, gh)

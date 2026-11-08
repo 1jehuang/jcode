@@ -39,6 +39,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
         crate::todo::save_plan(
             &session_id,
             &crate::todo::TodoPlan {
+                title: None,
                 user_intention: Some("Show all evidence without another agent turn".into()),
                 understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
                 understands_user_intent_history: vec![
@@ -108,7 +109,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
             if width == 80 {
                 assert_eq!(
                     lines[0].to_string(),
-                    format!("✓ Todo completion  {}", "●".repeat(12))
+                    format!("✓ Todo completion  {}  finished 0s ago", "●".repeat(12))
                 );
             }
             // Removing wrap whitespace lets us assert every detail even when
@@ -198,8 +199,8 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
             .collect::<Vec<_>>()
             .join(" ");
         let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains("Disabled gates that would have fired"));
-        assert!(normalized.contains("• Intent understanding"));
+        assert!(!normalized.contains("Disabled gates that would have fired"));
+        assert!(!normalized.contains("• Intent understanding"));
         assert!(!normalized.contains("started this work without understanding"));
         assert!(!normalized.contains("flagged 2 times this turn"));
         assert!(!plain.contains("[auto]"));
@@ -232,7 +233,7 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
         .collect::<Vec<_>>()
         .join(" ");
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(text.contains("• Intent understanding"));
+        assert!(!text.contains("• Intent understanding"));
         assert!(!text.contains("never became solid"));
         assert!(!text.contains("flagged 2 times this turn"));
         // This updated snapshot is the immutable record for the earlier cycle.

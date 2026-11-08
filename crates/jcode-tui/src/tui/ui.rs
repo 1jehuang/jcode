@@ -57,6 +57,8 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[cfg(test)]
+pub(crate) use frame_metrics::body_last_path_for_tests;
 #[path = "ui_header.rs"]
 pub(crate) mod header;
 #[path = "ui_inline_image.rs"]
@@ -130,6 +132,7 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{draw_inline_ui, inline_ui_height};
+pub(crate) use layout_support::{SIDE_PANEL_DISMISSED_HINT, side_panel_restore_area};
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
@@ -259,7 +262,64 @@ pub fn last_max_scroll() -> usize {
     }
 }
 
+thread_local! {
+    static SECONDARY_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SECONDARY_FRAME: std::cell::RefCell<Option<Arc<PreparedChatFrame>>> =
+        const { std::cell::RefCell::new(None) };
+    static SECONDARY_GEOMETRY: std::cell::Cell<SecondaryGeometry> =
+        const { std::cell::Cell::new(SecondaryGeometry { max_scroll: 0, scroll: 0, total_lines: 0, viewport_height: 0 }) };
+}
+
+/// Transcript geometry a secondary render resolved. The live session's
+/// globals stay untouched, so embedders read their own results from here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SecondaryGeometry {
+    pub max_scroll: usize,
+    pub scroll: usize,
+    pub total_lines: usize,
+    pub viewport_height: usize,
+}
+
+fn note_secondary_geometry(update: impl FnOnce(&mut SecondaryGeometry)) {
+    SECONDARY_GEOMETRY.with(|cell| {
+        let mut geometry = cell.get();
+        update(&mut geometry);
+        cell.set(geometry);
+    });
+}
+
+/// True while drawing a non-live view (for example the resume preview).
+/// Such renders must not publish layout, scroll, copy, or status state that
+/// the live session's input handling reads back.
+pub(crate) fn secondary_render_active() -> bool {
+    SECONDARY_RENDER.with(std::cell::Cell::get)
+}
+
+/// Run `f` with secondary-render isolation enabled on this thread.
+/// Returns the geometry the render resolved alongside `f`'s result.
+pub(crate) fn with_secondary_render<R>(f: impl FnOnce() -> R) -> (R, SecondaryGeometry) {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SECONDARY_RENDER.with(|c| c.set(self.0));
+        }
+    }
+    SECONDARY_GEOMETRY.with(|cell| cell.set(SecondaryGeometry::default()));
+    SECONDARY_FRAME.with(|slot| slot.borrow_mut().take());
+    let _reset = Reset(SECONDARY_RENDER.with(|c| c.replace(true)));
+    let result = f();
+    (result, SECONDARY_GEOMETRY.with(std::cell::Cell::get))
+}
+
+/// The prepared transcript the most recent secondary render drew.
+pub(crate) fn take_secondary_chat_frame() -> Option<Arc<PreparedChatFrame>> {
+    SECONDARY_FRAME.with(|slot| slot.borrow_mut().take())
+}
+
 fn set_last_chat_scrollbar_visible(visible: bool) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_SCROLLBAR_VISIBLE.with(|state| state.set(visible));
@@ -276,6 +336,9 @@ fn set_last_chat_scrollbar_visible(visible: bool) {
 /// instead of both the wide and narrow variants (which thrashes the prep caches
 /// on long transcripts during streaming).
 fn last_chat_scrollbar_visible() -> bool {
+    if secondary_render_active() {
+        return false;
+    }
     #[cfg(test)]
     {
         return TEST_LAST_CHAT_SCROLLBAR_VISIBLE.with(Cell::get);
@@ -325,6 +388,10 @@ pub fn last_diff_pane_max_scroll() -> usize {
 }
 
 pub(crate) fn set_last_max_scroll(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.max_scroll = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_MAX_SCROLL.with(|cell| cell.set(value));
@@ -337,6 +404,9 @@ pub(crate) fn set_last_max_scroll(value: usize) {
 }
 
 pub(crate) fn set_pinned_pane_total_lines(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PINNED_PANE_TOTAL_LINES.with(|cell| cell.set(value));
@@ -349,6 +419,9 @@ pub(crate) fn set_pinned_pane_total_lines(value: usize) {
 }
 
 pub(crate) fn set_last_diff_pane_effective_scroll(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL.with(|cell| cell.set(value));
@@ -361,6 +434,9 @@ pub(crate) fn set_last_diff_pane_effective_scroll(value: usize) {
 }
 
 pub(crate) fn set_last_diff_pane_max_scroll(value: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_DIFF_PANE_MAX_SCROLL.with(|cell| cell.set(value));
@@ -386,6 +462,10 @@ pub fn last_total_wrapped_lines() -> usize {
 }
 
 pub(crate) fn set_last_total_wrapped_lines(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.total_lines = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_TOTAL_WRAPPED_LINES.with(|cell| cell.set(value));
@@ -411,6 +491,10 @@ pub(crate) fn last_chat_viewport_height() -> usize {
 }
 
 pub(crate) fn set_last_chat_viewport_height(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.viewport_height = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_VIEWPORT_HEIGHT.with(|cell| cell.set(value));
@@ -425,6 +509,9 @@ pub(crate) fn set_last_chat_viewport_height(value: usize) {
 /// The chat scroll offset the renderer actually used on the most recent frame
 /// (after clamping and after resolving any pending history anchor).
 pub fn last_resolved_chat_scroll() -> usize {
+    if secondary_render_active() {
+        return 0;
+    }
     #[cfg(test)]
     {
         return TEST_LAST_RESOLVED_CHAT_SCROLL.with(Cell::get);
@@ -436,6 +523,10 @@ pub fn last_resolved_chat_scroll() -> usize {
 }
 
 pub(crate) fn set_last_resolved_chat_scroll(value: usize) {
+    if secondary_render_active() {
+        note_secondary_geometry(|g| g.scroll = value);
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_RESOLVED_CHAT_SCROLL.with(|cell| cell.set(value));
@@ -461,6 +552,9 @@ pub(crate) fn tail_catchup_active() -> bool {
 }
 
 pub(crate) fn set_tail_catchup_active(active: bool) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_TAIL_CATCHUP_ACTIVE.with(|cell| cell.set(active));
@@ -492,6 +586,9 @@ pub(crate) fn request_tail_follow_snap() {
 }
 
 pub(crate) fn take_tail_follow_snap_request() -> bool {
+    if secondary_render_active() {
+        return false;
+    }
     #[cfg(test)]
     {
         return TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.replace(false));
@@ -515,9 +612,9 @@ mod status_support;
 #[path = "ui_theme.rs"]
 mod theme_support;
 use super::color_support::rgb;
-pub(crate) use layout_support::align_if_unset;
+pub(crate) use layout_support::{align_if_unset, left_aligned_content_inset};
 use layout_support::{
-    centered_content_block_width, clear_area, draw_right_rail_chrome, left_aligned_content_inset,
+    centered_content_block_width, clear_area, draw_right_rail_chrome,
     left_pad_lines_to_block_width, right_rail_border_style,
 };
 #[cfg(test)]
@@ -596,6 +693,9 @@ fn visible_expand_edit_badge_rect_state() -> &'static Mutex<Option<Rect>> {
 }
 
 pub(crate) fn set_visible_expand_edit_badge_rect(rect: Option<Rect>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_EXPAND_EDIT_BADGE_RECT.with(|state| state.set(rect));
@@ -626,6 +726,9 @@ pub(crate) fn visible_expand_edit_badge_at(column: u16, row: u16) -> bool {
 }
 
 pub(crate) fn set_visible_expand_edit_badge(visible: bool, line: Option<usize>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_EXPAND_EDIT_BADGE.with(|state| state.set(visible));
@@ -679,6 +782,9 @@ pub(crate) fn visible_expand_edit_badge_line() -> Option<usize> {
 }
 
 fn set_visible_copy_targets(targets: Vec<VisibleCopyTarget>) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_VISIBLE_COPY_TARGETS.with(|state| {
@@ -799,6 +905,9 @@ fn active_prompt_entry_animation(now_ms: u64) -> Option<PromptViewportAnimation>
 }
 
 fn record_prompt_viewport(visible_start: usize, visible_end: usize) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PROMPT_VIEWPORT_STATE.with(|state| {
@@ -829,6 +938,9 @@ fn update_prompt_entry_animation(
     visible_end: usize,
     now_ms: u64,
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_PROMPT_VIEWPORT_STATE.with(|state| {
@@ -936,6 +1048,7 @@ struct BodyCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    compact_thinking: bool,
     /// Mermaid render geometry depends on the scoped transcript/pane aspect
     /// profile as well as width. A vertical terminal resize can change this
     /// bucket without changing `width`, so it must invalidate the prepared body.
@@ -956,6 +1069,7 @@ struct BodyCacheKey {
     /// member, so status/todo/tool-intent updates must invalidate the body.
     swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Clone)]
@@ -988,30 +1102,42 @@ impl BodyCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &BodyCacheKey,
-    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedMessages>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &BodyCacheKey) -> Option<Arc<PreparedMessages>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
     #[cfg(test)]
@@ -1029,6 +1155,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1039,6 +1166,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1051,6 +1179,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1061,6 +1190,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -1092,6 +1222,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1102,6 +1233,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (false, idx, entry.msg_count));
@@ -1115,6 +1247,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1125,6 +1258,7 @@ impl BodyCacheState {
                     && entry.key.expanded_images_version == key.expanded_images_version
                     && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (true, idx, entry.msg_count));
@@ -1150,6 +1284,7 @@ impl BodyCacheState {
         Some((entry.prepared, msg_count, entry.prompt_offset))
     }
 
+    #[cfg(test)]
     fn insert(
         &mut self,
         key: BodyCacheKey,
@@ -1158,6 +1293,17 @@ impl BodyCacheState {
         prompt_offset: usize,
     ) {
         let prepared_bytes = estimate_prepared_messages_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes, msg_count, prompt_offset);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: BodyCacheKey,
+        prepared: Arc<PreparedMessages>,
+        prepared_bytes: usize,
+        msg_count: usize,
+        prompt_offset: usize,
+    ) {
         if prepared_bytes > BODY_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries
@@ -1188,6 +1334,16 @@ impl BodyCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // An entry that differs only by an older `messages_version` can never
+        // be an exact hit again, and the new entry is a better incremental
+        // base for the same layout. Keeping it only holds memory.
+        self.entries.retain(|entry| {
+            !(entry.key.messages_version < key.messages_version
+                && BodyCacheKey {
+                    messages_version: key.messages_version,
+                    ..entry.key.clone()
+                } == key)
+        });
         self.entries.push_front(BodyCacheEntry {
             key,
             prepared,
@@ -1217,6 +1373,7 @@ struct FullPrepCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    compact_thinking: bool,
     /// The scoped Mermaid profile can also change when pane geometry changes
     /// while the transcript rectangle stays the same.
     mermaid_aspect_bucket: Option<u16>,
@@ -1233,6 +1390,7 @@ struct FullPrepCacheKey {
     /// Signature of live swarm member cards embedded beneath spawn tool calls.
     swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Clone)]
@@ -1265,34 +1423,56 @@ impl FullPrepCacheState {
         self.entries.iter().map(|entry| entry.prepared_bytes).sum()
     }
 
+    /// Returns the cached frame, its entry kind, and the byte estimate taken
+    /// once at insert time. Re-estimating walks every wrapped line, which is
+    /// milliseconds on long transcripts and used to run on every cache hit.
     fn get_exact_with_kind(
         &mut self,
         key: &FullPrepCacheKey,
-    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind)> {
+    ) -> Option<(Arc<PreparedChatFrame>, CacheEntryKind, usize)> {
         if let Some(pos) = self.entries.iter().position(|entry| &entry.key == key) {
             let entry = self.entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Regular,
+                entry.prepared_bytes,
+            );
             self.entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Regular))
+            Some(found)
         } else {
             let pos = self
                 .oversized_entries
                 .iter()
                 .position(|entry| &entry.key == key)?;
             let entry = self.oversized_entries.remove(pos)?;
-            let prepared = entry.prepared.clone();
+            let found = (
+                entry.prepared.clone(),
+                CacheEntryKind::Oversized,
+                entry.prepared_bytes,
+            );
             self.oversized_entries.push_front(entry);
-            Some((prepared, CacheEntryKind::Oversized))
+            Some(found)
         }
     }
 
     #[cfg(test)]
     fn get_exact(&mut self, key: &FullPrepCacheKey) -> Option<Arc<PreparedChatFrame>> {
-        self.get_exact_with_kind(key).map(|(prepared, _)| prepared)
+        self.get_exact_with_kind(key)
+            .map(|(prepared, _, _)| prepared)
     }
 
+    #[cfg(test)]
     fn insert(&mut self, key: FullPrepCacheKey, prepared: Arc<PreparedChatFrame>) {
         let prepared_bytes = estimate_prepared_chat_frame_bytes(&prepared);
+        self.insert_with_bytes(key, prepared, prepared_bytes);
+    }
+
+    fn insert_with_bytes(
+        &mut self,
+        key: FullPrepCacheKey,
+        prepared: Arc<PreparedChatFrame>,
+        prepared_bytes: usize,
+    ) {
         if prepared_bytes > FULL_PREP_CACHE_MAX_BYTES {
             if let Some(pos) = self
                 .oversized_entries
@@ -1321,6 +1501,12 @@ impl FullPrepCacheState {
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
             self.entries.remove(pos);
         }
+        // A frame keyed on partial streaming text can never be hit again once
+        // the stream advances: text only grows, and the turn ending bumps
+        // `messages_version`. Holding them just pins multi-MB snapshots of the
+        // whole transcript (measured: 4 entries, 13.6 MB on one client).
+        self.entries
+            .retain(|entry| entry.key.streaming_text_len == 0);
         self.entries.push_front(FullPrepCacheEntry {
             key,
             prepared,
@@ -1338,6 +1524,43 @@ static FULL_PREP_CACHE: OnceLock<Mutex<FullPrepCacheState>> = OnceLock::new();
 
 fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
+}
+
+/// Drop every frame-level reference to `base` except the caller's, so the
+/// incremental body build can mutate it in place. Otherwise `Arc::make_mut`
+/// deep-clones the whole wrapped transcript (tens of ms on long sessions) on
+/// every appended message.
+///
+/// The base was just taken out of the body cache because no body entry matched
+/// the current key, so any full-prep frame embedding it is keyed on an older
+/// transcript and cannot be hit again. The last drawn frame is republished by
+/// the draw that triggered this build.
+pub(super) fn release_frame_refs_to_body(base: &Arc<PreparedMessages>) {
+    let holds = |frame: &Arc<PreparedChatFrame>| {
+        frame
+            .sections
+            .iter()
+            .any(|section| Arc::ptr_eq(&section.prepared, base))
+    };
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        cache.entries.retain(|entry| !holds(&entry.prepared));
+        cache
+            .oversized_entries
+            .retain(|entry| !holds(&entry.prepared));
+    }
+    #[cfg(test)]
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(holds) {
+            *slot = None;
+        }
+    });
+    #[cfg(not(test))]
+    if let Ok(mut slot) = last_chat_frame_state().lock()
+        && slot.as_ref().is_some_and(holds)
+    {
+        *slot = None;
+    }
 }
 
 /// Drop only reconstructible presentation data. Call after retaining a bounded
@@ -1388,6 +1611,9 @@ fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
 }
 
 pub(crate) fn record_status_area(area: Rect) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_STATUS_AREA.with(|snapshot| {
@@ -1432,8 +1658,8 @@ pub(crate) use frame_metrics::{
     set_frame_input_attribution, wall_clock_ms,
 };
 pub(crate) use frame_metrics::{
-    debug_draw_call_history, debug_flicker_frame_history, debug_slow_frame_history,
-    recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
+    changed_cells_wanted, debug_draw_call_history, debug_flicker_frame_history,
+    debug_slow_frame_history, recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
 };
 #[cfg(test)]
 pub(crate) use smoothness::frame_from_buffer as smoothness_frame_from_buffer;
@@ -1478,6 +1704,9 @@ pub fn record_layout_snapshot(
     diff_pane_area: Option<Rect>,
     input_area: Option<Rect>,
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_LAYOUT.with(|snapshot| {
@@ -1537,6 +1766,10 @@ fn terminal_clear_start(app: &dyn TuiState, prepared: &PreparedChatFrame) -> Opt
 
 /// Record the prepared transcript frame the renderer just drew.
 pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
+    if secondary_render_active() {
+        SECONDARY_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
+        return;
+    }
     #[cfg(test)]
     {
         TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
@@ -1691,6 +1924,7 @@ pub(crate) fn draw_onboarding_welcome_for_tests(
 #[derive(Clone)]
 enum CopyViewportData {
     Dense {
+        link_lines: Option<Arc<Vec<Line<'static>>>>,
         wrapped_plain_lines: Arc<Vec<String>>,
         wrapped_copy_offsets: Arc<Vec<usize>>,
         raw_plain_lines: Arc<Vec<String>>,
@@ -1859,6 +2093,9 @@ fn copy_snapshot_for_pane(pane: crate::tui::CopySelectionPane) -> Option<CopyVie
 }
 
 pub(crate) fn clear_copy_viewport_snapshot() {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
@@ -1887,12 +2124,16 @@ fn record_copy_pane_snapshot(
     content_area: Rect,
     left_margins: &[u16],
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
             *copy_snapshot_slot_mut(&mut state.borrow_mut(), pane) = Some(CopyViewportSnapshot {
                 pane,
                 data: CopyViewportData::Dense {
+                    link_lines: None,
                     wrapped_plain_lines,
                     wrapped_copy_offsets,
                     raw_plain_lines,
@@ -1911,6 +2152,7 @@ fn record_copy_pane_snapshot(
         *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
             pane,
             data: CopyViewportData::Dense {
+                link_lines: None,
                 wrapped_plain_lines,
                 wrapped_copy_offsets,
                 raw_plain_lines,
@@ -1931,6 +2173,9 @@ fn record_copy_viewport_frame_snapshot(
     content_area: Rect,
     left_margins: &[u16],
 ) {
+    if secondary_render_active() {
+        return;
+    }
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|state| {
@@ -1965,6 +2210,7 @@ fn record_copy_viewport_frame_snapshot(
     reason = "Viewport snapshot helpers carry explicit render state to avoid hidden globals in call sites"
 )]
 pub(crate) fn record_side_pane_snapshot_precomputed(
+    lines: &[Line<'static>],
     wrapped_plain_lines: Arc<Vec<String>>,
     wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
@@ -1985,6 +2231,36 @@ pub(crate) fn record_side_pane_snapshot_precomputed(
         content_area,
         left_margins,
     );
+    record_link_lines(crate::tui::CopySelectionPane::SidePane, lines);
+}
+
+fn record_link_lines(pane: crate::tui::CopySelectionPane, lines: &[Line<'static>]) {
+    if secondary_render_active() {
+        return;
+    }
+    // Only retain styled lines when they contain links. The common plain-text
+    // pane path should not duplicate an entire rendered document every frame.
+    let lines = lines
+        .iter()
+        .any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        })
+        .then(|| Arc::new(lines.to_vec()));
+    let update = |state: &mut CopyViewportSnapshots| {
+        if let Some(snapshot) = copy_snapshot_slot_mut(state, pane).as_mut()
+            && let CopyViewportData::Dense { link_lines, .. } = &mut snapshot.data
+        {
+            *link_lines = lines;
+        }
+    };
+    #[cfg(test)]
+    TEST_COPY_VIEWPORT.with(|state| update(&mut state.borrow_mut()));
+    #[cfg(not(test))]
+    if let Ok(mut state) = copy_viewport_state().lock() {
+        update(&mut state);
+    }
 }
 
 #[expect(
@@ -2034,9 +2310,14 @@ pub(crate) fn line_left_margins_for_area(lines: &[Line<'static>], area_width: u1
     lines
         .iter()
         .map(|line| {
+            let alignment = line.alignment.unwrap_or(Alignment::Left);
+            if alignment == Alignment::Left {
+                // Left-aligned lines never have a margin, so skip measuring them.
+                return 0;
+            }
             let used = line.width().min(area_width as usize) as u16;
             let total_margin = area_width.saturating_sub(used);
-            match line.alignment.unwrap_or(Alignment::Left) {
+            match alignment {
                 Alignment::Left => 0,
                 Alignment::Center => total_margin / 2,
                 Alignment::Right => total_margin,
@@ -2140,6 +2421,7 @@ fn record_pane_snapshot_from_lines(
         content_area,
         visible_left_margins,
     );
+    record_link_lines(pane, wrapped_lines);
 }
 
 pub(crate) fn copy_point_from_screen(
@@ -2389,6 +2671,70 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     link_target_from_snapshot(&snapshot, point)
 }
 
+/// Resolve styled markdown labels against their owning source before falling
+/// back to the existing bare-URL hit tester. No global label-to-URL registry is
+/// used, so repeated labels cannot leak destinations between messages.
+pub(crate) fn link_target_from_screen_with_state(
+    column: u16,
+    row: u16,
+    app: &dyn TuiState,
+) -> Option<String> {
+    let point = copy_point_from_screen(column, row)?;
+    if point.pane == crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let target = match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared.sections.iter().find_map(|section| {
+            let local = point.abs_line.checked_sub(section.line_start)?;
+            if local >= section.prepared.wrapped_lines.len() {
+                return None;
+            }
+            let (source, start, end) = match section.kind {
+                PreparedSectionKind::Body => {
+                    let boundaries = &section.prepared.message_boundaries;
+                    let index =
+                        boundaries.partition_point(|boundary| boundary.wrapped_len <= local);
+                    let message = app.display_messages().get(index)?;
+                    let end = boundaries.get(index)?.wrapped_len;
+                    let start = index
+                        .checked_sub(1)
+                        .map(|i| boundaries[i].wrapped_len)
+                        .unwrap_or(0);
+                    (message.content.as_str(), start, end)
+                }
+                PreparedSectionKind::Streaming => (
+                    app.streaming_text(),
+                    0,
+                    section.prepared.wrapped_lines.len(),
+                ),
+                _ => return None,
+            };
+            jcode_tui_markdown::markdown_link_target(
+                source,
+                section.prepared.wrapped_lines.get(start..end)?,
+                local - start,
+                point.column,
+            )
+        }),
+        CopyViewportData::Dense {
+            link_lines: Some(lines),
+            ..
+        } if point.pane == crate::tui::CopySelectionPane::SidePane => {
+            app.side_panel().focused_page().and_then(|page| {
+                jcode_tui_markdown::markdown_link_target(
+                    &page.content,
+                    lines,
+                    point.abs_line,
+                    point.column,
+                )
+            })
+        }
+        _ => None,
+    };
+    target.or_else(|| link_target_from_screen(column, row))
+}
+
 /// Short OAuth link labels resolve against the source card, not a printed URL.
 pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Option<usize> {
     let point = copy_point_from_screen(column, row)?;
@@ -2556,36 +2902,13 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 /// Conservatively detect overflow without rendering Markdown. This lets a cold
 /// reload skip preparing a wide transcript that would immediately be discarded
 /// to reserve the scrollbar column. Only count rows the body must emit.
-fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: usize) -> bool {
-    let mut rows = 0usize;
-    for message in messages {
-        let role = message.effective_role();
-        // Tool results can be hidden (notably pinned todos). These three roles
-        // do not add the usual inter-message separator either.
-        if rows > 0 && messages::needs_message_separator(message) {
-            rows = rows.saturating_add(1);
-        }
-        rows = rows.saturating_add(match role {
-            // Voice/transcription normalization can remove source lines, but
-            // even an empty user prompt still emits its numbered first row.
-            "user" | "meta" | "error" => 1,
-            "spacer" => message
-                .content
-                .trim()
-                .parse::<usize>()
-                .unwrap_or(0)
-                .saturating_sub(1),
-            _ => 0,
-        });
-        if rows > available_rows {
-            return true;
-        }
-    }
-    false
-}
-
+#[path = "ui/overflow.rs"]
+mod overflow;
+use overflow::transcript_definitely_overflows;
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
-    record_idle_animation_area(None);
+    if !secondary_render_active() {
+        record_idle_animation_area(None);
+    }
     if let Some(frozen) = app.hibernation_frame()
         && frozen.area == frame.area()
     {
@@ -2625,7 +2948,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
             capture
                 .render_order
                 .push("frozen_hibernation_frame".to_string());
-            visual_debug::record_frame(capture.build());
+            if !secondary_render_active() {
+                visual_debug::record_frame(capture.build());
+            }
         }
         return;
     }
@@ -2636,7 +2961,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
-        Ok(()) => {}
+        Ok(()) => layout_support::draw_side_panel_restore(frame, app),
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
     // Adapt the finished frame at buffer level so every widget and overlay
@@ -2647,21 +2972,27 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Classic Kitty placements must follow all text writes. Unlike Unicode
     // placeholders they survive scrolling, so finalize even an image-free frame.
-    // This also drains deferred cache-eviction deletions when no image remains.
     crate::tui::mermaid::finish_terminal_image_frame(frame.buffer_mut());
+    if !secondary_render_active() {
+        crate::tui::cloud_latency::rendered();
+    }
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
-    panel_image_preview::clear_regions();
+    let secondary = secondary_render_active();
+    if !secondary {
+        panel_image_preview::clear_regions();
+    }
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let total_start = Instant::now();
-    reset_frame_perf_stats();
-    begin_frame_resource_sample();
-
-    clear_copy_viewport_snapshot();
+    if !secondary {
+        reset_frame_perf_stats();
+        begin_frame_resource_sample();
+        clear_copy_viewport_snapshot();
+    }
 
     // Clear full frame to prevent stale cells from prior layouts.
     // This is critical on macOS terminals where ratatui's diff-based updates
@@ -2994,8 +3325,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let queued_height = pending_count.min(3) as u16;
 
     // Count user messages to show next prompt number
-    let user_count = app.display_user_message_count();
-    let next_prompt = user_count + 1;
+    let next_prompt = input_ui::next_input_prompt_number(app);
+    let user_count = next_prompt.saturating_sub(1);
 
     // Calculate input height based on the same wrapping logic used for rendering
     // (max 10 lines visible, scrolls if more).
@@ -3004,7 +3335,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
+    let blocker_height = blocker_lines
+        .len()
+        .min(usize::from(chat_area.height.saturating_sub(6))) as u16;
+    let inline_ui_gap_height: u16 = blocker_height.max(if inline_block_height > 0 { 1 } else { 0 });
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
@@ -3166,12 +3501,40 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .0
             .len()
     };
+    // A fresh cloud transcript is short even on a tall terminal. Keep enough
+    // packed rows for the cloud card stack instead of hiding directory counts
+    // above an otherwise unused lower half of the screen.
+    let widget_data_start = Instant::now();
+    let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
+    let cloud_card_height = if app.info_widget_overlays_enabled()
+        && widget_data.cloud_info.is_some()
+        && chat_area.width >= 120
+        && !show_donut
+        && !swarm_page_active
+        && !side_panel_fullscreen
+    {
+        [
+            info_widget::WidgetKind::Overview,
+            info_widget::WidgetKind::CloudVm,
+            info_widget::WidgetKind::CloudDirectories,
+        ]
+        .into_iter()
+        .map(|kind| info_widget::calculate_widget_height(kind, &widget_data, 40, available_height))
+        .fold(0u16, u16::saturating_add)
+        // Placement reserves breathing room around the card stack.
+        .saturating_add(8)
+        .min(available_height.saturating_sub(fixed_height))
+    } else {
+        0
+    };
     let content_height = prepared
         .total_wrapped_lines()
         .saturating_sub(clear_start.unwrap_or(0))
         .saturating_add(pinned_band_height)
         .max(1)
         .min(u16::MAX as usize) as u16;
+    let content_height = content_height.max(cloud_card_height);
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
     // transcript row blank, so a normal bottom-anchored layout would park the
@@ -3468,6 +3831,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
+    if blocker_height > 0 {
+        frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
+    }
+
     let _input_cursor = input_ui::draw_input(
         frame,
         app,
@@ -3486,9 +3853,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let chrome_elapsed = chrome_start.elapsed();
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
-    let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
-    let widget_data_elapsed = widget_data_start.elapsed();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
@@ -3639,7 +4003,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.side_panel = crate::tui::side_panel_debug_json();
         capture.markdown = crate::tui::markdown::debug_stats_json();
         capture.theme = overlays::debug_palette_json();
-        visual_debug::record_frame(capture.build());
+        if !secondary_render_active() {
+            visual_debug::record_frame(capture.build());
+        }
     }
 
     finalize_frame_metrics(

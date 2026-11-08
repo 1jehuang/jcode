@@ -34,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal, TodoGoalChange,
-    TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    IterationMaturity, LANE_OWNER_WORKER, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -665,7 +665,9 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
     let mut message = build_auto_poke_message(actionable.len());
     message.push_str("\nActionable todos:");
     for todo in actionable.iter().take(GATE_NAMED_TODO_LIMIT) {
-        message.push_str(&format!("\n- {}: {}", todo.id, quoted_todo_label(todo)));
+        // Names are the public lookup key. Keep the full, escaped name rather
+        // than an internal ID or a truncated label the model cannot reference.
+        message.push_str(&format!("\n- {}", serde_json::json!(todo.content)));
     }
     if actionable.len() > GATE_NAMED_TODO_LIMIT {
         message.push_str(&format!(
@@ -891,6 +893,10 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
+    }
+
+    if let Some(title) = non_empty(plan.title.as_deref()) {
+        return Some(title);
     }
 
     let current = todos

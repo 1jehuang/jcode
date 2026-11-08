@@ -69,6 +69,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             supports_pdf_panels: false,
             supports_user_response: false,
             supports_server_failover: false,
+            supports_turn_identity: false,
             id,
             working_dir: working_dir.clone(),
             selfdev,
@@ -80,6 +81,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect,
             continue_on_disconnect,
             terminal_env: Vec::new(),
+            client_name: None,
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Subscribe {
@@ -87,6 +89,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             supports_pdf_panels: _,
             supports_user_response: _,
             supports_server_failover: _,
+            supports_turn_identity: _,
             id: decoded_id,
             working_dir: decoded_working_dir,
             selfdev: decoded_selfdev,
@@ -98,6 +101,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect: decoded_crash_on_disconnect,
             continue_on_disconnect: decoded_continue_on_disconnect,
             terminal_env: _,
+            client_name: _,
         } = decoded
         else {
             return Err(anyhow!("expected randomized Subscribe"));
@@ -124,6 +128,7 @@ fn test_resume_session_roundtrip_preserves_client_sync_flags() -> Result<()> {
         client_instance_id: Some("client-456".to_string()),
         client_has_local_history: true,
         allow_session_takeover: true,
+        client_name: None,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"resume_session\""));
@@ -134,6 +139,7 @@ fn test_resume_session_roundtrip_preserves_client_sync_flags() -> Result<()> {
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        client_name: _,
     } = decoded
     else {
         return Err(anyhow!("expected ResumeSession"));

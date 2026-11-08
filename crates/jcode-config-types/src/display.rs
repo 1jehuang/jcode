@@ -30,6 +30,9 @@ pub struct DisplayConfig {
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
+    /// Remove blank rows before thinking activity (default: false).
+    /// Applies to retained, embedded assistant, and live-streaming reasoning.
+    pub compact_thinking: bool,
     /// How to display reasoning/thinking content (off/full/current).
     /// When unset, falls back to `show_thinking` (true => full, false => off).
     #[serde(
@@ -45,6 +48,8 @@ pub struct DisplayConfig {
     /// Markdown block spacing style (compact/document, default: compact)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub markdown_spacing: MarkdownSpacingMode,
+    /// Append link destinations after Markdown link labels (default: false).
+    pub show_link_urls: bool,
     /// LaTeX rendering style (none/unicode/image, default: image)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub latex_rendering: LatexRenderingMode,
@@ -95,8 +100,9 @@ pub struct DisplayConfig {
     #[serde(default = "default_true")]
     pub keybinding_hints: bool,
     /// Color theme: "auto" (detect terminal background), "dark", or "light".
-    /// Auto queries the terminal's background color (OSC 11) at startup and
-    /// adapts jcode's palette for light backgrounds. Default: auto.
+    /// Auto queries the terminal's background color (OSC 11) at startup,
+    /// periodically during the session, and on focus. Adapts jcode's palette
+    /// when the terminal switches light/dark mode. Default: auto.
     #[serde(default)]
     pub theme: String,
     /// Per-role color overrides, e.g. `user = "#8ab4f8"`. Any TUI color can be
@@ -122,8 +128,46 @@ pub struct DisplayConfig {
     /// Resume is intentionally global by default; `s` cycles filters either way.
     #[serde(default)]
     pub resume_project_scope: bool,
+    /// Highlight and prioritize sessions whose last client transport closed
+    /// within this many seconds in Resume (default: 30). Zero disables it.
+    /// This uses socket-disconnect events, never transcript/message activity.
+    pub resume_recent_close_seconds: u64,
+    /// Which timestamp Resume shows as "x ago" and sorts by
+    /// (message/activity/opened/created, default: message).
+    #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub resume_time: ResumeTimeMode,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+}
+
+/// Timestamp used for Resume's "x ago" label and recency ordering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResumeTimeMode {
+    /// Newest conversation message of any role: prompts, replies, tool
+    /// results (default). Opening a session without working does not count.
+    #[default]
+    #[serde(alias = "messages", alias = "last_message")]
+    Message,
+    /// Newest of the last message and the last open/resume.
+    Activity,
+    /// Last time the session was opened, resumed, or attached.
+    #[serde(alias = "active", alias = "resumed")]
+    Opened,
+    /// When the session was created.
+    Created,
+}
+
+impl ResumeTimeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "message" | "messages" | "last_message" => Some(Self::Message),
+            "activity" => Some(Self::Activity),
+            "opened" | "active" | "resumed" => Some(Self::Opened),
+            "created" => Some(Self::Created),
+            _ => None,
+        }
+    }
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -139,9 +183,11 @@ impl Default for DisplayConfig {
             emoji: true,
             centered: false,
             show_thinking: true,
+            compact_thinking: false,
             reasoning_display: Some(ReasoningDisplayMode::Full),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
+            show_link_urls: false,
             latex_rendering: LatexRenderingMode::default(),
             idle_animation: false,
             prompt_entry_animation: true,
@@ -162,6 +208,8 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             resume_project_scope: false,
+            resume_recent_close_seconds: 30,
+            resume_time: ResumeTimeMode::default(),
             usage_display: "left".to_string(),
         }
     }
@@ -219,6 +267,57 @@ mod tests {
     use crate::ReasoningDisplayMode;
 
     #[test]
+    fn link_urls_are_opt_in_and_roundtrip() {
+        assert!(!DisplayConfig::default().show_link_urls);
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert!(!missing.show_link_urls);
+        for value in [true, false] {
+            let config: DisplayConfig = serde_json::from_value(serde_json::json!({
+                "show_link_urls": value
+            }))
+            .unwrap();
+            assert_eq!(config.show_link_urls, value);
+            let roundtrip: DisplayConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(roundtrip.show_link_urls, value);
+        }
+    }
+
+    #[test]
+    fn resume_time_defaults_to_message_and_parses_modes() {
+        use super::ResumeTimeMode;
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.resume_time, ResumeTimeMode::Message);
+        for (raw, mode) in [
+            ("message", ResumeTimeMode::Message),
+            ("activity", ResumeTimeMode::Activity),
+            ("opened", ResumeTimeMode::Opened),
+            ("created", ResumeTimeMode::Created),
+        ] {
+            let config: DisplayConfig =
+                serde_json::from_value(serde_json::json!({ "resume_time": raw })).unwrap();
+            assert_eq!(config.resume_time, mode);
+            assert_eq!(ResumeTimeMode::parse(raw), Some(mode));
+        }
+        let bogus: DisplayConfig =
+            serde_json::from_value(serde_json::json!({ "resume_time": "bogus" })).unwrap();
+        assert_eq!(bogus.resume_time, ResumeTimeMode::Message);
+    }
+
+    #[test]
+    fn recent_close_window_defaults_to_thirty_and_is_configurable() {
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.resume_recent_close_seconds, 30);
+        for seconds in [0, 5, 120] {
+            let config: DisplayConfig = serde_json::from_value(serde_json::json!({
+                "resume_recent_close_seconds": seconds
+            }))
+            .unwrap();
+            assert_eq!(config.resume_recent_close_seconds, seconds);
+        }
+    }
+
+    #[test]
     fn thinking_is_shown_in_full_by_default() {
         let default = DisplayConfig::default();
         assert!(default.show_thinking);
@@ -227,6 +326,18 @@ mod tests {
         let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
         assert!(missing.show_thinking);
         assert_eq!(missing.reasoning_display(), ReasoningDisplayMode::Full);
+    }
+
+    #[test]
+    fn compact_thinking_is_opt_in() {
+        assert!(!DisplayConfig::default().compact_thinking);
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert!(!missing.compact_thinking);
+        let enabled: DisplayConfig = serde_json::from_str(r#"{"compact_thinking":true}"#).unwrap();
+        assert!(enabled.compact_thinking);
+        let roundtrip: DisplayConfig =
+            serde_json::from_str(&serde_json::to_string(&enabled).unwrap()).unwrap();
+        assert!(roundtrip.compact_thinking);
     }
 
     #[test]

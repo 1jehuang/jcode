@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const MEMORY_INCIDENT_WINDOW_MS: u128 = 15 * 60 * 1_000;
@@ -1171,11 +1171,11 @@ mod tests {
 
     #[tokio::test]
     async fn connected_session_snapshot_releases_connections_before_waiting_for_sessions() {
-        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let sessions = Arc::new(crate::server::session_manager::SessionManager::new());
         let client_connections = Arc::new(RwLock::new(HashMap::new()));
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
 
-        let sessions_gate = sessions.write().await;
+        let sessions_gate = sessions.write_for_test().await;
         let snapshot = connected_session_snapshot(&sessions, &client_connections, &swarm_members);
         tokio::pin!(snapshot);
         tokio::select! {

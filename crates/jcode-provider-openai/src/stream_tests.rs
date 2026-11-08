@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn responses_transport_activity_includes_ignored_sse_frames() {
+    use futures::StreamExt;
+    use futures::task::noop_waker;
+    for payload in [
+        ": keepalive\n\n",
+        "data: {\"type\":\"response.in_progress\"}\n\n",
+        "data: {\"type\":\"future.status.event\"}\n\n",
+    ] {
+        let input =
+            futures::stream::iter([Ok(Bytes::from(payload))]).chain(futures::stream::pending());
+        let mut stream = OpenAIResponsesStream::new(input);
+        stream.last_transport_activity =
+            std::time::Instant::now() - std::time::Duration::from_secs(300);
+        let waker = noop_waker();
+        let mut cx = TaskContext::from_waker(&waker);
+        assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+        assert_eq!(stream.transport_bytes(), payload.len() as u64);
+        assert!(stream.transport_idle_for() < std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn responses_empty_chunks_do_not_reset_transport_idle() {
+    use futures::StreamExt;
+    use futures::task::noop_waker;
+    let input = futures::stream::iter([Ok(Bytes::new())]).chain(futures::stream::pending());
+    let mut stream = OpenAIResponsesStream::new(input);
+    stream.last_transport_activity =
+        std::time::Instant::now() - std::time::Duration::from_secs(300);
+    let waker = noop_waker();
+    let mut cx = TaskContext::from_waker(&waker);
+    assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+    assert_eq!(stream.transport_bytes(), 0);
+    assert!(stream.transport_idle_for() >= std::time::Duration::from_secs(300));
+}
+
+#[test]
 fn cache_response_evidence_records_native_diagnosis_without_response_contents() {
     let response = serde_json::json!({
         "id": "resp_private_identifier", "model": "gpt-6.1-sol", "service_tier": "default",
@@ -257,10 +294,29 @@ fn structured_stream_read_error_is_extracted_and_classified_as_transient() {
 }
 
 #[test]
-fn parse_text_wrapped_tool_call_rejects_non_object_json() {
-    let text = "prefix to=functions.read [1,2,3]";
-    let parsed = parse_text_wrapped_tool_call(text);
-    assert!(parsed.is_none());
+fn tool_call_examples_stay_literal_in_text_events() {
+    for text in [
+        "to=functions.read {\"file_path\":\"README.md\"}",
+        "The literal marker `to=functions.read` is followed by {}.",
+        "```json\nto=functions.read {\"file_path\":\"README.md\"}\n```\nEnd of example.",
+        r#""to=functions.read {\"file_path\":\"README.md\"}""#,
+    ] {
+        let mut pending = VecDeque::new();
+        let mut calls = HashMap::new();
+        let mut completed = HashSet::new();
+        let event = parse_openai_response_event(
+            &serde_json::json!({"type":"response.output_text.delta", "delta":text}).to_string(),
+            &mut false,
+            &mut false,
+            &mut calls,
+            &mut completed,
+            &mut pending,
+        );
+        assert!(matches!(event, Some(StreamEvent::TextDelta(actual)) if actual == text));
+        assert!(pending.is_empty());
+        assert!(calls.is_empty());
+        assert!(completed.is_empty());
+    }
 }
 
 #[test]

@@ -1,14 +1,142 @@
-use super::loading::session_matches_picker_query;
 use super::*;
 
-impl SessionPicker {
-    fn normalized_search_query(query: &str) -> String {
-        query.trim().to_lowercase()
+#[derive(Default)]
+pub(super) struct SearchSelection {
+    query: String,
+    follow_until: Option<std::time::Instant>,
+    last_publish: Option<std::time::Instant>,
+    unpublished_results: bool,
+}
+
+impl SearchSelection {
+    fn update_query(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        if self.query != query {
+            self.follow_until = (!query.is_empty())
+                .then(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
+            self.query = query;
+            self.last_publish = Some(std::time::Instant::now());
+            self.unpublished_results = false;
+        }
     }
 
-    /// Check if a session matches the current search query.
-    fn session_matches_search(session: &SessionInfo, query: &str) -> bool {
-        session_matches_picker_query(session, query)
+    pub(super) fn following(&self) -> bool {
+        self.follow_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.follow_until = None;
+    }
+
+    /// Coalesce worker batches into at most eight list/preview updates per
+    /// second. Completion always flushes, including a channel disconnect with
+    /// no new results in that poll.
+    fn publish_results(&mut self, changed: bool, pending: bool) -> bool {
+        self.unpublished_results |= changed;
+        let ready = !pending
+            || self
+                .last_publish
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(125));
+        if self.unpublished_results && ready {
+            self.unpublished_results = false;
+            self.last_publish = Some(std::time::Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_next_poll_for_test(&mut self) {
+        self.last_publish = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire_for_test(&mut self) {
+        self.follow_until = Some(std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod search_selection_tests {
+    use super::*;
+
+    #[test]
+    fn progressive_batches_wait_for_publish_interval_but_completion_flushes() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(!selection.publish_results(true, true));
+        assert!(!selection.publish_results(true, true));
+        selection.last_publish =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(126));
+        assert!(selection.publish_results(false, true));
+        assert!(!selection.publish_results(false, true));
+        assert!(!selection.publish_results(true, true));
+        assert!(selection.publish_results(false, false));
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn changing_query_discards_unpublished_results() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("old");
+        assert!(!selection.publish_results(true, true));
+        selection.update_query("new");
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn follows_for_one_second_without_extending_on_rebuild() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle");
+        assert!(selection.following());
+        let deadline = selection.follow_until.unwrap();
+        selection.update_query("needle");
+        assert_eq!(selection.follow_until, Some(deadline));
+        selection.follow_until = Some(std::time::Instant::now());
+        assert!(!selection.following());
+        selection.update_query("needle");
+        assert!(
+            !selection.following(),
+            "same query must not restart an expired window"
+        );
+        selection.update_query("another query");
+        assert!(selection.following());
+        selection.stop();
+        selection.update_query("another query");
+        assert!(
+            !selection.following(),
+            "refresh must not undo a manual override"
+        );
+        selection.update_query("");
+        assert!(!selection.following());
+    }
+}
+
+impl SessionPicker {
+    /// Commit the best evidence available when queued Enter completes or its
+    /// time budget expires. This never restarts the auto-follow deadline.
+    pub(super) fn rebuild_items_following(&mut self) {
+        let selected = self.selected_session().map(|session| session.id.clone());
+        let scroll = self.scroll_offset;
+        let auto_scroll = self.auto_scroll_preview;
+        self.cached_search_query.clear();
+        self.cached_search_refs.clear();
+        self.rebuild_items();
+        self.list_state
+            .select(self.item_to_session.iter().position(Option::is_some));
+        if self.selected_session().map(|session| &session.id) == selected.as_ref() {
+            self.scroll_offset = scroll;
+            self.auto_scroll_preview = auto_scroll;
+        } else {
+            self.scroll_offset = 0;
+            self.auto_scroll_preview = true;
+        }
+    }
+
+    fn normalized_search_query(query: &str) -> String {
+        query.trim().to_lowercase()
     }
 
     fn all_session_refs(&self) -> Vec<SessionRef> {
@@ -31,34 +159,69 @@ impl SessionPicker {
 
     fn search_matched_session_refs(&mut self, query: &str) -> Vec<SessionRef> {
         let normalized = Self::normalized_search_query(query);
+        let mut transcript_search = std::mem::take(&mut self.transcript_search);
+        transcript_search.reset(
+            &normalized,
+            self.all_sessions
+                .iter()
+                .chain(self.all_orphan_sessions.iter())
+                .chain(
+                    self.all_server_groups
+                        .iter()
+                        .flat_map(|group| group.sessions.iter()),
+                ),
+        );
+        self.transcript_search = transcript_search;
         if normalized.is_empty() {
             self.cached_search_query.clear();
             self.cached_search_refs.clear();
             return self.all_session_refs();
         }
 
-        let can_narrow_cached = !self.cached_search_query.is_empty()
-            && normalized.starts_with(&self.cached_search_query);
-        // When narrowing, reuse the previous match set in place via mem::take
-        // instead of cloning it into `candidates` and then cloning the new
-        // matches back into the cache (two full-list clones per keystroke).
-        let candidates = if can_narrow_cached {
-            std::mem::take(&mut self.cached_search_refs)
-        } else {
-            self.all_session_refs()
-        };
+        // Keep literal matches immediate. Expensive typo-tolerant matching is
+        // scheduled immediately on the worker alongside transcript search,
+        // never on the UI thread. Reconsider all sessions for new worker results.
+        let candidates = self.all_session_refs();
+        let tokens = loading::search_query_tokens(&normalized);
 
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
-                self.session_by_ref(*session_ref)
-                    .is_some_and(|session| Self::session_matches_search(session, &normalized))
+                self.session_by_ref(*session_ref).is_some_and(|session| {
+                    identity_search::rank(session, &tokens).0
+                        || (!self.transcript_search.defers_metadata()
+                            && tokens
+                                .iter()
+                                .all(|token| session.search_index.contains(token)))
+                        || self.transcript_search.contains(&session.id)
+                })
             })
             .collect::<Vec<_>>();
 
         self.cached_search_query = normalized;
         self.cached_search_refs = matches.clone();
         matches
+    }
+
+    /// Called once per rendered frame, so completed scans update results even
+    /// when the user is not typing. Never wait for the worker on the UI thread.
+    pub(super) fn poll_transcript_search(&mut self) {
+        let changed = self.transcript_search.poll();
+        if self
+            .search_selection
+            .publish_results(changed, self.transcript_search.pending())
+        {
+            let selected = self.selected_session().map(|session| session.id.clone());
+            let preview_scroll = self.scroll_offset;
+            let auto_scroll = self.auto_scroll_preview;
+            self.cached_search_query.clear();
+            self.cached_search_refs.clear();
+            self.rebuild_items();
+            if self.selected_session().map(|session| &session.id) == selected.as_ref() {
+                self.scroll_offset = preview_scroll;
+                self.auto_scroll_preview = auto_scroll;
+            }
+        }
     }
 
     fn filtered_session_refs(
@@ -78,18 +241,71 @@ impl SessionPicker {
             })
             .collect::<Vec<_>>();
 
-        filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        filtered.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
-        if filter_mode == SessionFilterMode::Active {
+        // Cache once per candidate, never run matching from the comparator.
+        // Stable sorting keeps recency as the deterministic final tie-break.
+        if !self.search_query.trim().is_empty() {
+            let normalized = Self::normalized_search_query(&self.search_query);
+            let tokens = loading::search_query_tokens(&normalized);
+            filtered.sort_by_cached_key(|session_ref| {
+                std::cmp::Reverse(self.session_by_ref(*session_ref).map(|session| {
+                    let rank = if self.transcript_search.contains(&session.id) {
+                        self.transcript_search.rank(&session.id)
+                    } else if self.transcript_search.defers_metadata() {
+                        transcript_search::SearchRank::default()
+                    } else {
+                        transcript_search::literal_metadata_rank(&session.search_index, &tokens)
+                            .with_exact_field(transcript_search::exact_metadata_field(
+                                session,
+                                &normalized,
+                            ))
+                    };
+                    // A renamed conversation's opening request is stronger
+                    // intent evidence than incidental matches in tool output.
+                    let fields = [
+                        session.title.as_str(),
+                        session.save_label.as_deref().unwrap_or(""),
+                        session.first_user_prompt.as_deref().unwrap_or(""),
+                    ];
+                    let fields = fields.map(transcript_search::lowercase_field);
+                    let intent_terms = tokens
+                        .iter()
+                        .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
+                        .count();
+                    let rank = if self.transcript_search.contains(&session.id) {
+                        rank
+                    } else {
+                        let [title, label, prompt] = &fields;
+                        rank.with_source_weight(transcript_search::metadata_source_weight(
+                            &[title, label, prompt],
+                            &session.search_index,
+                            &tokens,
+                            self.transcript_search.idf(),
+                        ))
+                    };
+                    (
+                        identity_search::rank(session, &tokens),
+                        rank.with_intent_terms(intent_terms),
+                    )
+                }))
+            });
+        }
+        if filter_mode != SessionFilterMode::Active && self.search_query.trim().is_empty() {
+            filtered.sort_by_key(|session_ref| {
+                std::cmp::Reverse(self.session_by_ref(*session_ref).and_then(|session| {
+                    self.session_recently_closed(session)
+                        .then(|| self.recent_window_closures.get(&session.id).copied())
+                        .flatten()
+                }))
+            });
+        }
+        if filter_mode == SessionFilterMode::Active && self.search_query.trim().is_empty() {
             // Triage order for the active sessions manager: sessions that are
             // ready for input (done streaming) float above ones still working,
             // each group keeping the recency order from the sort above.
@@ -164,6 +380,7 @@ impl SessionPicker {
             SessionFilterMode::CurrentDir => self.session_in_current_dir(session),
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
+            SessionFilterMode::Cloud => session.server_icon.as_deref() == Some("☁"),
             SessionFilterMode::Active => self.session_is_live(session),
             SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
             SessionFilterMode::Codex => Self::session_is_codex(session),
@@ -186,6 +403,9 @@ impl SessionPicker {
         let show_test = self.show_test_sessions;
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
+        self.search_selection.update_query(&search_query);
+        let current_selected_id =
+            current_selected_id.filter(|_| !self.search_selection.following());
         let search_matches = self.search_matched_session_refs(&search_query);
         let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 
@@ -193,7 +413,9 @@ impl SessionPicker {
         self.visible_sessions.clear();
         self.item_to_session.clear();
 
-        if filter_mode != SessionFilterMode::All {
+        // Search is one globally ranked list. Saved/server sections otherwise
+        // promote weak matches over better hits and defeat the relevance sort.
+        if filter_mode != SessionFilterMode::All || !search_query.trim().is_empty() {
             for session_ref in filtered_refs {
                 self.push_visible_session(session_ref);
             }
@@ -218,10 +440,25 @@ impl SessionPicker {
         let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        // Put genuinely closed windows ahead of saved and server sections.
+        // They still obey search, project, and debug visibility filters. Use
+        // the same exclusion set as saved rows to avoid duplicate entries.
+        if self.search_query.trim().is_empty() {
+            for session_ref in &filtered_refs {
+                if let Some(session) = self.session_by_ref(*session_ref)
+                    && self.session_recently_closed(session)
+                {
+                    saved_ids.insert(session.id.clone());
+                    self.push_visible_session(*session_ref);
+                }
+            }
+        }
+
         let placement = saved_placement::SavedPlacement::load();
         let now = chrono::Utc::now();
         for session_ref in &filtered_refs {
             if let Some(session) = self.session_by_ref(*session_ref)
+                && !saved_ids.contains(&session.id)
                 && placement.boosted(session, now)
             {
                 saved_ids.insert(session.id.clone());
@@ -229,16 +466,12 @@ impl SessionPicker {
             }
         }
 
-        saved_sessions.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        saved_sessions.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
 
         if !saved_sessions.is_empty() {
@@ -277,6 +510,11 @@ impl SessionPicker {
 
             let mut grouped_sections: Vec<(String, String, String, Vec<SessionRef>)> = Vec::new();
             for (group_idx, group) in self.all_server_groups.iter().enumerate() {
+                // Cloud lease groups describe storage ownership, not a live
+                // server. Keep them in the chronological history below.
+                if group.icon == "☁" && !group.is_running {
+                    continue;
+                }
                 let visible = std::mem::take(&mut group_buckets[group_idx]);
                 if visible.is_empty() {
                     continue;
@@ -311,14 +549,31 @@ impl SessionPicker {
                         .all_orphan_sessions
                         .get(*idx)
                         .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    SessionRef::Group {
+                        group_idx,
+                        session_idx,
+                    } => self
+                        .all_server_groups
+                        .get(*group_idx)
+                        .filter(|group| group.icon == "☁" && !group.is_running)
+                        .and_then(|group| group.sessions.get(*session_idx))
+                        .is_some_and(|session| !saved_ids.contains(&session.id)),
                     _ => false,
                 })
                 .collect();
             if !visible_orphans.is_empty() {
-                self.items.push(PickerItem::OrphanHeader {
-                    session_count: visible_orphans.len(),
-                });
-                self.item_to_session.push(None);
+                // Only separate history when an actual server section precedes
+                // it. A cloud-only group must not introduce artificial chrome.
+                if self
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, PickerItem::ServerHeader { .. }))
+                {
+                    self.items.push(PickerItem::OrphanHeader {
+                        session_count: visible_orphans.len(),
+                    });
+                    self.item_to_session.push(None);
+                }
 
                 for session_ref in visible_orphans {
                     self.push_visible_session(session_ref);

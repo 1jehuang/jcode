@@ -27,9 +27,17 @@ pub(super) struct SessionJournalMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) model_usage_turn_id: Option<String>,
     pub(super) provider_key: Option<String>,
+    #[serde(default)]
+    pub(super) route_api_method: Option<String>,
+    /// Old journals did not record account routes. Distinguish those entries
+    /// from a new entry explicitly clearing the route to `None`.
+    #[serde(default)]
+    pub(super) route_api_method_present: bool,
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) context_cap: Option<usize>,
     pub(super) subagent_model: Option<String>,
     #[serde(default)]
     pub(super) agent_model_overrides: super::AgentModelOverrides,
@@ -39,6 +47,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) is_canary: bool,
     pub(super) testing_build: Option<String>,
     pub(super) working_dir: Option<String>,
+    #[serde(default)]
+    pub(super) original_working_dir: Option<String>,
     pub(super) short_name: Option<String>,
     pub(super) status: SessionStatus,
     pub(super) last_pid: Option<u32>,
@@ -96,7 +106,9 @@ pub(super) fn metadata_requires_snapshot(
         || prev.custom_title != current.custom_title
         || prev.system_prompt != current.system_prompt
         || prev.provider_key != current.provider_key
+        || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort
+        || prev.context_cap != current.context_cap
         || prev.subagent_model != current.subagent_model
         || prev.agent_model_overrides != current.agent_model_overrides
         || prev.improve_mode != current.improve_mode
@@ -105,6 +117,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.is_canary != current.is_canary
         || prev.testing_build != current.testing_build
         || prev.working_dir != current.working_dir
+        || prev.original_working_dir != current.original_working_dir
         || prev.short_name != current.short_name
         || prev.status != current.status
         || prev.is_debug != current.is_debug

@@ -477,11 +477,12 @@ pub(super) fn prepare_messages(
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
     super::note_prep_restage(restage_start.elapsed());
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
 
     let key = FullPrepCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         height,
         diff_mode: app.diff_mode(),
@@ -514,6 +515,7 @@ pub(super) fn prepare_messages(
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
+        show_link_urls: crate::config::config().display.show_link_urls,
     };
 
     super::note_full_prep_request();
@@ -529,7 +531,7 @@ pub(super) fn prepare_messages(
             }
         };
         let mut cache = cache;
-        if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+        if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
             // A completed deferred mermaid render does not bump
             // `messages_version`/`streaming_text_hash`, so an exact hit can
             // still bake in a stale "rendering..." placeholder. Fall through
@@ -539,7 +541,7 @@ pub(super) fn prepare_messages(
                 .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
             if !stale {
                 super::note_full_prep_cache_lookup(cache_lookup_start.elapsed());
-                super::note_full_prep_cache_hit(kind, prepared.as_ref());
+                super::note_full_prep_cache_hit(kind, prepared.as_ref(), prepared_bytes);
                 return prepared;
             }
         }
@@ -550,11 +552,13 @@ pub(super) fn prepare_messages(
 
     let build_start = Instant::now();
     let prepared = Arc::new(prepare_messages_inner(app, width, height));
-    super::note_full_prep_built(prepared.as_ref(), build_start.elapsed());
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_chat_frame_bytes(&prepared);
+    super::note_full_prep_built(prepared.as_ref(), prepared_bytes, build_elapsed);
 
     {
         if let Ok(mut cache) = full_prep_cache().lock() {
-            cache.insert(key, prepared.clone());
+            cache.insert_with_bytes(key, prepared.clone(), prepared_bytes);
         }
     }
 
@@ -565,7 +569,7 @@ pub(super) fn prepare_messages(
 /// screen. Derived only from the persistent header height (not suggestions)
 /// so the same value can be re-applied above the header once messages exist,
 /// keeping the header from jumping when the first prompt is sent.
-fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
+pub(crate) fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
     // Input chrome plus the always-pinned session status line below it.
     let input_reserve = 5;
     let available = (height as usize).saturating_sub(input_reserve);
@@ -649,6 +653,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
     let stream_prefix_blank = has_streaming
+        && !(crate::config::config().display.compact_thinking
+            && super::messages::starts_with_reasoning(app.streaming_text()))
         && (!body_prepared.wrapped_lines.is_empty()
             || !batch_progress_prepared.wrapped_lines.is_empty()
             || !reasoning_prepared.wrapped_lines.is_empty());
@@ -861,6 +867,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -932,7 +945,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return build();
     }
 
@@ -958,13 +971,14 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_body(app, width, false));
     }
 
     super::note_body_request();
 
     let key = BodyCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         diff_mode: app.diff_mode(),
         // Pinning changes which tool messages participate in the transcript.
@@ -981,6 +995,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
+        show_link_urls: crate::config::config().display.show_link_urls,
     };
     let msg_count = app.display_messages().len();
     let cache_lookup_start = Instant::now();
@@ -995,7 +1010,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     };
 
     let mut cache = cache;
-    if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+    if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
         // A deferred mermaid render completing does not bump
         // `messages_version`, so an exact hit can still be stale: it bakes in
         // a "rendering..." placeholder whose background render has since
@@ -1006,7 +1021,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
             .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
         if !stale {
             super::note_body_cache_lookup(cache_lookup_start.elapsed());
-            super::note_body_cache_hit(kind, prepared.as_ref());
+            super::note_body_cache_hit(kind, prepared.as_ref(), prepared_bytes);
             return prepared;
         }
     }
@@ -1018,6 +1033,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
 
     drop(cache);
 
+    if let Some((base, _, _)) = incremental_base.as_ref() {
+        super::release_frame_refs_to_body(base);
+    }
+
     let build_start = Instant::now();
     let (prepared, build_path) = match incremental_base {
         Some((prev, prev_count, prev_prompt_offset)) => {
@@ -1026,15 +1045,18 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         None => (Arc::new(prepare_body(app, width, false)), "full"),
     };
 
-    super::note_body_built(prepared.as_ref(), build_start.elapsed(), build_path);
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_messages_bytes(&prepared);
+    super::note_body_built(prepared.as_ref(), prepared_bytes, build_elapsed, build_path);
 
     let mut cache = match body_cache().lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.insert(
+    cache.insert_with_bytes(
         key,
         prepared.clone(),
+        prepared_bytes,
         msg_count,
         app.compacted_hidden_user_prompts(),
     );
@@ -1144,7 +1166,8 @@ pub(super) fn build_body_from_base(
 /// builders. Holding this in one place keeps the single per-message renderer
 /// (`render_message_into`) free of divergence between the two entry points.
 struct BodyRenderCtx<'a> {
-    app: &'a dyn TuiState,
+    app: Option<&'a dyn TuiState>,
+    diff_mode: crate::config::DiffDisplayMode,
     width: u16,
     centered: bool,
     /// Number rendered next to the first user prompt = global prompt count +
@@ -1157,6 +1180,106 @@ struct BodyRenderCtx<'a> {
     messages: &'a [DisplayMessage],
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
 }
+
+/// Render saved history through the live dispatcher and wrapping pipeline.
+/// No active App is borrowed: expansion state, images and in-flight swarm work
+/// from the session behind the picker must never leak into this transcript.
+pub(crate) fn prepare_history_preview(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> PreparedMessages {
+    prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
+        .unwrap_or_else(|| preview_fallback::unavailable(width))
+}
+
+#[path = "ui_prepare/preview_fallback.rs"]
+mod preview_fallback;
+
+/// Choose scrollbar width without fully rendering overflowing history twice.
+/// The budget excludes caller-owned header and padding rows. The flag is the
+/// wide layout's strict overflow decision, not a second narrow-layout decision.
+pub(crate) fn prepare_history_preview_for_viewport(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    wide_width: u16,
+    narrow_width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: usize,
+) -> (PreparedMessages, bool) {
+    if wide_width == narrow_width {
+        let prepared = prepare_history_preview(messages, hidden_prompts, wide_width, diff_mode);
+        let overflow = prepared.wrapped_lines.len() > max_body_rows;
+        return (prepared, overflow);
+    }
+    if let Some(wide) = prepare_history_preview_bounded(
+        messages,
+        hidden_prompts,
+        wide_width,
+        diff_mode,
+        Some(max_body_rows),
+    ) && wide.wrapped_lines.len() <= max_body_rows
+    {
+        return (wide, false);
+    }
+    (
+        prepare_history_preview(messages, hidden_prompts, narrow_width, diff_mode),
+        true,
+    )
+}
+
+fn prepare_history_preview_bounded(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: Option<usize>,
+) -> Option<PreparedMessages> {
+    markdown::with_center_code_blocks(false, || {
+        let ctx = BodyRenderCtx {
+            app: None,
+            diff_mode,
+            width,
+            centered: false,
+            prompt_number_offset: hidden_prompts,
+            total_prompts: messages
+                .iter()
+                .filter(|msg| msg.effective_role() == "user")
+                .count(),
+            pending_count: 0,
+            anchored_images: Arc::new(Default::default()),
+            inline_images_visible: false,
+            messages,
+            swarm_members: Vec::new(),
+        };
+        let mut acc = BodyAcc::default();
+        for (idx, msg) in messages.iter().enumerate() {
+            render_message_into(&ctx, &mut acc, msg, idx);
+            // Wrapping preserves at least one row per input line, including
+            // blanks and zero-width viewports. Equality may still fit.
+            if max_body_rows.is_some_and(|budget| acc.lines.len() > budget) {
+                return None;
+            }
+        }
+        Some(wrap_lines_with_map(
+            acc.lines,
+            &acc.raw_plain_lines,
+            &acc.line_raw_overrides,
+            &acc.line_copy_offsets,
+            &acc.user_line_indices,
+            &acc.user_prompt_texts,
+            width,
+            &acc.edit_tool_line_ranges,
+            &acc.copy_targets,
+            &acc.segments,
+        ))
+    })
+}
+
+#[cfg(test)]
+#[path = "ui_prepare/viewport_preview_tests.rs"]
+mod viewport_preview_tests;
 
 /// Mutable accumulator for one body build. Both `prepare_body` (full) and
 /// `prepare_body_incremental` (tail only) push into one of these via the shared
@@ -1231,7 +1354,7 @@ fn render_message_into(
 ) {
     let width = ctx.width;
     let centered = ctx.centered;
-    let app = ctx.app;
+    let diff_mode = ctx.diff_mode;
     let role = msg.effective_role();
     // The pinned band is the canonical todo presentation while enabled. Keep
     // todo tool messages in display_messages for history/session fidelity, but
@@ -1283,7 +1406,9 @@ fn render_message_into(
             if !crate::session::is_attached_image_label_text(&msg.content) {
                 let ordinal = acc.anchor_prompt_ordinal;
                 acc.anchor_prompt_ordinal += 1;
-                if let Some(items) = ctx.anchored_images.by_prompt.get(&ordinal) {
+                if let (Some(app), Some(items)) =
+                    (ctx.app, ctx.anchored_images.by_prompt.get(&ordinal))
+                {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,
                         width,
@@ -1297,25 +1422,14 @@ fn render_message_into(
         }
         "assistant" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_assistant_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_assistant_message);
             let message_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
             for target in message_copy_targets {
                 acc.copy_targets
                     .push(offset_copy_target(target, acc.lines.len()));
             }
-            let aux = assistant_aux_data(
-                msg,
-                &cached,
-                content_width,
-                centered,
-                app.diff_mode(),
-                align,
-            );
+            let aux = assistant_aux_data(msg, &cached, content_width, centered, diff_mode, align);
             let content_line_count = aux.content_line_count;
             let logical_plain_lines = &aux.logical_plain_lines;
             let raw_base = acc.raw_plain_lines.len();
@@ -1376,7 +1490,7 @@ fn render_message_into(
         }
         "tool" => {
             let tool_start_line = acc.lines.len();
-            let cached = get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
+            let cached = get_cached_message_lines(msg, width, diff_mode, render_tool_message);
             if let Some(target) = tool_message_copy_target(msg, cached.len()) {
                 acc.copy_targets
                     .push(offset_copy_target(target, tool_start_line));
@@ -1422,7 +1536,7 @@ fn render_message_into(
                         .unwrap_or_else(|| "unknown".to_string());
                     // Outside the inline modes the diff body is hidden entirely,
                     // so any edit with a diff can be expanded into full inline.
-                    let expandable = if app.diff_mode().is_inline() {
+                    let expandable = if diff_mode.is_inline() {
                         messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
                     } else {
                         messages::edit_tool_has_inline_diff(tc, &msg.content)
@@ -1435,7 +1549,8 @@ fn render_message_into(
                         expandable,
                     ));
                 }
-                if let Some(items) = ctx.anchored_images.by_tool.get(&tc.id) {
+                if let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
+                {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,
                         width,
@@ -1449,12 +1564,8 @@ fn render_message_into(
         }
         "system" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_system_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_system_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1471,12 +1582,8 @@ fn render_message_into(
         }
         "reasoning" => {
             let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_reasoning_message,
-            );
+            let cached =
+                get_cached_message_lines(msg, content_width, diff_mode, render_reasoning_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1486,7 +1593,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 render_background_task_message,
             );
             for line in cached {
@@ -1496,7 +1603,7 @@ fn render_message_into(
         "swarm" => {
             let content_width = width.saturating_sub(4);
             let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_swarm_message);
+                get_cached_message_lines(msg, content_width, diff_mode, render_swarm_message);
             for line in cached {
                 let line = align_if_unset(line, align);
                 let plain = ui::line_plain_text(&line);
@@ -1544,7 +1651,7 @@ fn render_message_into(
         "usage" => {
             let content_width = width.saturating_sub(4);
             let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_usage_message);
+                get_cached_message_lines(msg, content_width, diff_mode, render_usage_message);
             for line in cached {
                 acc.push_auto(align_if_unset(line, align));
             }
@@ -1554,7 +1661,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 super::messages::render_overnight_message,
             );
             for line in cached {
@@ -1566,7 +1673,7 @@ fn render_message_into(
             let cached = get_cached_message_lines(
                 msg,
                 content_width,
-                app.diff_mode(),
+                diff_mode,
                 super::messages::render_todos_message,
             );
             for line in cached {
@@ -1661,7 +1768,8 @@ pub(super) fn prepare_body_incremental(
     };
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -1987,7 +2095,8 @@ pub(super) fn prepare_body_prepended(
     markdown::set_center_code_blocks(centered);
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -2240,7 +2349,8 @@ pub(super) fn prepare_body(
     let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
     let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -2428,6 +2538,7 @@ fn wrap_lines(
     }
 
     let image_regions = compute_image_regions(&wrapped_lines);
+    shrink_wrapped_lines(&mut wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -2453,6 +2564,16 @@ fn wrap_lines(
     clippy::too_many_arguments,
     reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
 )]
+/// Drop spare span and line capacity before a body is cached. Wrapping builds
+/// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
+/// and these bodies live in the body cache for the session's lifetime.
+fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
+    for line in wrapped_lines.iter_mut() {
+        line.spans.shrink_to_fit();
+    }
+    wrapped_lines.shrink_to_fit();
+}
+
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],
@@ -2589,6 +2710,7 @@ fn wrap_lines_with_map(
         });
     }
 
+    shrink_wrapped_lines(&mut wrapped_lines);
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
     // Translate the per-message unwrapped-line boundaries into wrapped-line
@@ -2633,3 +2755,29 @@ fn wrap_lines_with_map(
 #[cfg(test)]
 #[path = "ui_prepare/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    // Thread-local so a probe that opts into the caches does not make tests
+    // running in parallel share (and clobber) its cache entries and metrics.
+    static ENABLE_PREP_CACHE_IN_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests bypass the prep caches by default for determinism. Perf probes opt in
+/// so they measure the production cached path.
+#[cfg(test)]
+pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
+    ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.set(enabled));
+}
+
+#[inline]
+fn prep_cache_bypassed() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}

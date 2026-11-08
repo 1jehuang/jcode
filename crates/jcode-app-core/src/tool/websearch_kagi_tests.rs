@@ -100,7 +100,12 @@ fn kagi_maps_v1_results_and_limits_valid_rows() {
 
 #[tokio::test]
 async fn kagi_zero_results_never_resolves_credentials_or_sends_request() {
-    assert!(search("q", 0, "").await.unwrap().is_empty());
+    assert!(
+        search(&client().unwrap(), "q", 0, "")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

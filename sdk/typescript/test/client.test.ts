@@ -83,7 +83,7 @@ test("error frames reject as HarnessError", async () => {
   await server.close();
 });
 
-test("run() collects a full turn and auto-approves permissions", async () => {
+test("run() collects a full turn and auto-approves permissions", async (t) => {
   const server = await startMockHarness({
     onRequest(request, send) {
       if (request.req === "send_message") {
@@ -119,16 +119,18 @@ test("run() collects a full turn and auto-approves permissions", async () => {
       }
     },
   });
+  t.after(() => server.close());
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
   const turn = await client.run("s1", "hi", { autoApprove: true });
   assert.equal(turn.text, "hello world");
   assert.equal(turn.reasoning, "think");
   assert.deepEqual(turn.toolCalls, [
     { callId: "c1", name: "bash", output: "ok", error: undefined },
   ]);
-  assert.deepEqual(turn.usage, { input: 10, output: 4, cacheReadInput: undefined });
-  client.close();
-  await server.close();
+  assert.deepEqual(turn.usage, {
+    input: 10, output: 4, cacheReadInput: undefined, effectiveBudget: undefined,
+  });
 });
 
 test("softInterrupt preserves images and the legacy text-only wire shape", async () => {
@@ -154,6 +156,26 @@ test("softInterrupt preserves images and the legacy text-only wire shape", async
     client.close();
     await server.close();
   }
+});
+
+test("run() includes the effective context budget from token usage", async (t) => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req !== "send_message") return;
+      send({ v: 1, reply_to: request.id, ev: "ok" });
+      send({ v: 1, ev: "message_accepted", session_id: "s1" });
+      send({ v: 1, ev: "token_usage", session_id: "s1", input: 10, output: 4,
+        cache_read_input: 5, effective_budget: 90_000 });
+      send({ v: 1, ev: "turn_done", session_id: "s1" });
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  const turn = await client.run("s1", "hi");
+  assert.deepEqual(turn.usage, {
+    input: 10, output: 4, cacheReadInput: 5, effectiveBudget: 90_000,
+  });
 });
 
 test("soft interrupt ids: tag, cancel by id, and background result", async () => {
@@ -755,6 +777,28 @@ test("run retains an abnormal stop without leaking another session's reason", as
     const result = await client.run("s1", "hello");
     assert.equal(result.stopReason, "interrupted");
     assert.equal(result.stopMessage, "Cancelled by user");
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+test("setContextCap returns effective budget and supports zero/null clearing", async () => {
+  const seen: unknown[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req !== "set_context_cap") return;
+      seen.push(request.max_context_tokens);
+      send({ v: 1, reply_to: request.id, ev: "context_cap_changed", session_id: request.session_id,
+        max_context_tokens: request.max_context_tokens || null, effective_budget: 90_000 });
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    for (const cap of [100_000, 0, null]) assert.equal(await client.setContextCap("s1", cap), 90_000);
+    assert.deepEqual(seen, [100_000, 0, null]);
+    for (const cap of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(() => client.setContextCap("s1", cap), RangeError);
+    }
   } finally {
     client.close();
     await server.close();

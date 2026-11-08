@@ -279,6 +279,13 @@ fn tmux_spawn_opens_right_split_in_requesting_pane() {
             "/tmp/tmux-1000/default,123,0".to_string(),
         ),
         ("TMUX_PANE".to_string(), "%42".to_string()),
+    ])
+    .runtime_env(vec![
+        (
+            "JCODE_HOME".to_string(),
+            "/tmp/home with spaces/it's 🧪".to_string(),
+        ),
+        ("JCODE_SOCKET".to_string(), "/tmp/custom.sock".to_string()),
     ]);
 
     let cmd = build_spawn_command("tmux", &command, Path::new("/work/dir"))
@@ -297,6 +304,13 @@ fn tmux_spawn_opens_right_split_in_requesting_pane() {
             "%42",
             "-c",
             "/work/dir",
+            "env",
+            "-u",
+            "JCODE_API_SOCKET",
+            "-u",
+            "JCODE_NO_AUTO_UPDATE",
+            "JCODE_HOME=/tmp/home with spaces/it's 🧪",
+            "JCODE_SOCKET=/tmp/custom.sock",
             "/usr/local/bin/jcode",
             "--resume",
             "ses_tmux",
@@ -395,7 +409,8 @@ fn herdr_spawn_splits_calling_pane_and_runs_resume_command() {
             "HERDR_BIN_PATH".to_string(),
             "/opt/herdr/bin/herdr".to_string(),
         ),
-    ]);
+    ])
+    .fresh_spawn();
 
     let cmd = build_spawn_command("herdr", &command, Path::new("/work/a b"))
         .expect("herdr spawn command should build");
@@ -414,6 +429,7 @@ fn herdr_spawn_splits_calling_pane_and_runs_resume_command() {
         args[5],
         "'/usr/local/bin/jcode' '--resume' 'ses herdr' && exit"
     );
+    assert_eq!(env_value(&cmd, "JCODE_FRESH_SPAWN").as_deref(), Some("1"));
 }
 
 #[test]
@@ -528,12 +544,15 @@ fn macos_terminal_inner_script_runs_jcode() {
 #[test]
 #[cfg(unix)]
 fn macos_terminal_inner_script_injects_fresh_spawn() {
-    let command = TerminalCommand::new(std::path::PathBuf::from("/usr/local/bin/jcode"), vec![])
-        .fresh_spawn();
+    let command = TerminalCommand::new(
+        std::path::PathBuf::from("/usr/local/bin/jcode"),
+        vec!["--resume".to_string()],
+    )
+    .fresh_spawn();
     let script = macos_terminal_inner_script(&command, Path::new("/tmp"));
     assert_eq!(
         script,
-        "cd '/tmp' && exec env JCODE_FRESH_SPAWN=1 '/usr/local/bin/jcode'"
+        "cd '/tmp' && exec env JCODE_FRESH_SPAWN=1 '/usr/local/bin/jcode' '--resume'"
     );
 }
 
@@ -752,7 +771,18 @@ fn hook_spawn_command_appends_program_args_and_exports_metadata() {
     .kind("swarm-agent")
     .session_id("ses_abc")
     .spawn_env("JCODE_SPAWN_SWARM_ID", "swarm-1")
-    .fresh_spawn();
+    .fresh_spawn()
+    .runtime_env(vec![
+        (
+            "JCODE_HOME".to_string(),
+            "/tmp/hook home/it's 🧪".to_string(),
+        ),
+        ("JCODE_SOCKET".to_string(), "/tmp/hook.sock".to_string()),
+        (
+            "JCODE_API_KEY".to_string(),
+            "must-not-propagate".to_string(),
+        ),
+    ]);
 
     let cmd = build_hook_spawn_command("tmux-hook --flag", &command, Path::new("/work/dir"))
         .expect("hook command should build");
@@ -762,10 +792,33 @@ fn hook_spawn_command_appends_program_args_and_exports_metadata() {
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(
-        args,
-        vec!["--flag", "/usr/local/bin/jcode", "--resume", "ses_abc"]
-    );
+    // Unix serializes the runtime context into the appended argv (see
+    // `command_parts`) so remote-control hooks can forward it to the real
+    // child; Windows delivers the runtime context through the hook
+    // process env instead, so its argv stays the plain target invocation.
+    #[cfg(unix)]
+    let expected_args = vec![
+        "--flag".to_string(),
+        "env".to_string(),
+        "-u".to_string(),
+        "JCODE_API_SOCKET".to_string(),
+        "-u".to_string(),
+        "JCODE_NO_AUTO_UPDATE".to_string(),
+        "JCODE_FRESH_SPAWN=1".to_string(),
+        "JCODE_HOME=/tmp/hook home/it's 🧪".to_string(),
+        "JCODE_SOCKET=/tmp/hook.sock".to_string(),
+        "/usr/local/bin/jcode".to_string(),
+        "--resume".to_string(),
+        "ses_abc".to_string(),
+    ];
+    #[cfg(not(unix))]
+    let expected_args = vec![
+        "--flag".to_string(),
+        "/usr/local/bin/jcode".to_string(),
+        "--resume".to_string(),
+        "ses_abc".to_string(),
+    ];
+    assert_eq!(args, expected_args);
     assert_eq!(
         cmd.get_current_dir(),
         Some(Path::new("/work/dir")),
@@ -795,13 +848,75 @@ fn hook_spawn_command_appends_program_args_and_exports_metadata() {
     #[cfg(unix)]
     assert_eq!(
         env_value(&cmd, "JCODE_SPAWN_COMMAND").as_deref(),
-        Some("'/usr/local/bin/jcode' '--resume' 'ses_abc'")
+        Some(
+            "'env' '-u' 'JCODE_API_SOCKET' '-u' 'JCODE_NO_AUTO_UPDATE' 'JCODE_FRESH_SPAWN=1' 'JCODE_HOME=/tmp/hook home/it'\"'\"'s 🧪' 'JCODE_SOCKET=/tmp/hook.sock' '/usr/local/bin/jcode' '--resume' 'ses_abc'"
+        )
     );
     assert_eq!(
         env_value(&cmd, "JCODE_SPAWN_SWARM_ID").as_deref(),
         Some("swarm-1")
     );
+    assert_eq!(
+        env_value(&cmd, "JCODE_HOME").as_deref(),
+        Some("/tmp/hook home/it's 🧪")
+    );
+    assert_eq!(
+        env_value(&cmd, "JCODE_SOCKET").as_deref(),
+        Some("/tmp/hook.sock")
+    );
+    assert_eq!(env_value(&cmd, "JCODE_API_KEY").as_deref(), None);
     assert_eq!(env_value(&cmd, "JCODE_FRESH_SPAWN").as_deref(), Some("1"));
+}
+
+#[test]
+#[cfg(unix)]
+fn contextual_hook_invocation_delivers_runtime_to_executed_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!(
+        "jcode-hook-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("target child");
+    let output = dir.join("child output");
+    std::fs::write(
+        &target,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${{JCODE_HOME-}}\" \"${{JCODE_SOCKET-}}\" \"$*\" > {}\n",
+            sh_escape(&output.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let command = TerminalCommand::new(&target, vec!["--resume".into(), "ses quote's 🧪".into()])
+        .runtime_env(vec![
+            ("JCODE_HOME".into(), "/tmp/home with spaces/it's 🧪".into()),
+            ("JCODE_SOCKET".into(), "/tmp/connected socket.sock".into()),
+            ("JCODE_API_KEY".into(), "must-not-propagate".into()),
+        ]);
+    let mut hook = build_hook_spawn_command(
+        "sh -c 'exec env -i PATH=/usr/bin:/bin \"$@\"' jcode-hook",
+        &command,
+        &dir,
+    )
+    .unwrap();
+    assert!(hook.status().unwrap().success());
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        "/tmp/home with spaces/it's 🧪|/tmp/connected socket.sock|--resume ses quote's 🧪"
+    );
+    assert!(
+        !std::fs::read_to_string(&output)
+            .unwrap()
+            .contains("must-not-propagate")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

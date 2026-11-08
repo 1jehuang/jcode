@@ -1,4 +1,3 @@
-use crate::agent::Agent;
 use crate::server::reload_recovery::ReloadRecoveryRole;
 use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
 use crate::tool::selfdev::ReloadContext;
@@ -7,9 +6,9 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, broadcast, watch};
+use tokio::sync::{RwLock, broadcast, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 const RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -27,6 +26,50 @@ fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path:
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+}
+
+/// Global flags the daemon was launched with that select its provider. The
+/// replacement must serve the same provider (managed cloud hosts start with
+/// `--provider jcode` when they have no model login of their own).
+fn inherited_serve_flags(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "serve" {
+            break;
+        }
+        match arg.as_str() {
+            "-p" | "--provider" | "-m" | "--model" => {
+                if let Some(value) = args.next() {
+                    out.push(arg);
+                    out.push(value);
+                }
+            }
+            _ if arg.starts_with("--provider=") || arg.starts_with("--model=") => out.push(arg),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod inherited_serve_flags_tests {
+    use super::inherited_serve_flags;
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn keeps_provider_and_model_before_serve_only() {
+        assert_eq!(
+            inherited_serve_flags(args(&["jcode", "--provider", "jcode", "serve", "--socket", "/x"])),
+            args(&["--provider", "jcode"])
+        );
+        assert_eq!(
+            inherited_serve_flags(args(&["jcode", "--no-update", "--model=x", "serve", "--provider", "y"])),
+            args(&["--model=x"])
+        );
+        assert!(inherited_serve_flags(args(&["jcode", "serve"])).is_empty());
+    }
 }
 
 async fn receive_reload_signal(
@@ -55,7 +98,7 @@ async fn receive_reload_signal(
 }
 
 pub(super) async fn await_reload_signal(
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: crate::server::SessionAgents,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
@@ -196,6 +239,9 @@ pub(super) async fn await_reload_signal(
                     }),
                 );
                 let mut cmd = ProcessCommand::new(&binary);
+                if label == "managed-cloud" {
+                    cmd.args(inherited_serve_flags(std::env::args()));
+                }
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
                 // Auto provider detection is dominated by credential-file probes.
                 // The replacement process is the same trusted daemon with the same

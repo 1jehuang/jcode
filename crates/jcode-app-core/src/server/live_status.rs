@@ -55,6 +55,10 @@ impl Projection {
     }
 
     fn observe(&mut self, event: &ServerEvent, now: Instant) {
+        let event = match event {
+            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
+            event => event,
+        };
         match event {
             ServerEvent::ConnectionType { connection } => {
                 self.value.connection_type = Some(connection.clone())
@@ -314,6 +318,7 @@ mod tests {
             output,
             cache_read_input: None,
             cache_creation_input: None,
+            effective_budget: None,
         };
         p.observe(&request(), now);
         p.observe(&usage(20), now);
@@ -365,6 +370,7 @@ mod tests {
                 output: 20,
                 cache_read_input: Some(900),
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -376,6 +382,7 @@ mod tests {
                 output: 20,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -392,6 +399,7 @@ mod tests {
                 output: 20,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(2),
         );
@@ -440,6 +448,7 @@ mod tests {
                 output: 10,
                 cache_read_input: None,
                 cache_creation_input: None,
+                effective_budget: None,
             },
             start + Duration::from_secs(103),
         );

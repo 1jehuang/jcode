@@ -9,6 +9,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -57,6 +59,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -74,6 +78,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -169,6 +175,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,

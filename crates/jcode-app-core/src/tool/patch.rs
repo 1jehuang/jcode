@@ -279,6 +279,11 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Result<Hunk> {
 /// is not permission to splice some other text in the fallback applier.
 fn render_patch(patch: &FilePatch, old: &str) -> Result<String> {
     let mut lines: Vec<String> = old.split_terminator('\n').map(str::to_owned).collect();
+    // The parser's str::lines() removes CRLF terminators. Compare logical
+    // lines too, but keep the original bytes outside the replaced hunks.
+    let crlf = old
+        .split_once('\n')
+        .is_some_and(|(line, _)| line.ends_with('\r'));
     let mut previous_end = 0;
     let mut delta: i128 = 0;
     let mut trailing_newline = old.ends_with('\n');
@@ -303,7 +308,15 @@ fn render_patch(patch: &FilePatch, old: &str) -> Result<String> {
             patch.path
         );
         anyhow::ensure!(
-            lines[start..end] == hunk.old_lines,
+            lines[start..end].iter().enumerate().all(|(offset, line)| {
+                let terminated = start + offset + 1 < lines.len() || old.ends_with('\n');
+                let logical = if terminated {
+                    line.strip_suffix('\r').unwrap_or(line)
+                } else {
+                    line
+                };
+                logical == hunk.old_lines[offset]
+            }),
             "{}: context mismatch at old line {}; stale coordinates, regenerate patch against current contents; no files changed",
             patch.path,
             hunk.old_start
@@ -353,7 +366,14 @@ fn render_patch(patch: &FilePatch, old: &str) -> Result<String> {
         };
         lines.splice(
             start..start + hunk.old_count,
-            hunk.new_lines.iter().cloned(),
+            hunk.new_lines.iter().enumerate().map(|(index, line)| {
+                let terminated = index + 1 < hunk.new_lines.len() || !hunk.new_no_newline;
+                if crlf && terminated {
+                    format!("{line}\r")
+                } else {
+                    line.clone()
+                }
+            }),
         );
     }
     let mut content = lines.join("\n");
@@ -512,6 +532,59 @@ mod tests {
     fn render(diff: &str, old: &str) -> Result<String> {
         let patches = parse_patch(diff)?;
         render_patch(&patches[0], old)
+    }
+
+    #[tokio::test]
+    async fn unified_line_endings_survive_both_tool_paths() {
+        for apply_patch in [false, true] {
+            for eol in ["\n", "\r\n"] {
+                for patch_eol in ["\n", "\r\n"] {
+                    for eof in [false, true] {
+                        let dir = tempfile::tempdir().unwrap();
+                        let file = dir.path().join("f");
+                        let ending = if eof { eol } else { "" };
+                        let old = format!("anchor{eol}old{ending}");
+                        let expected = format!("anchor{eol}new{eol}added{ending}");
+                        let marker = if eof {
+                            ""
+                        } else {
+                            "\\ No newline at end of file\n"
+                        };
+                        let diff = format!("--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n anchor\n-old\n{marker}+new\n+added\n{marker}")
+                            .replace('\n', patch_eol);
+                        std::fs::write(&file, &old).unwrap();
+                        let tool: Box<dyn Tool> = if apply_patch {
+                            Box::new(super::super::apply_patch::ApplyPatchTool::new())
+                        } else {
+                            Box::new(PatchTool::new())
+                        };
+                        tool.execute(json!({"patch_text": diff}), context(dir.path()))
+                            .await
+                            .unwrap();
+                        assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes());
+                        // A repeated patch must fail rather than matching stale text.
+                        assert!(
+                            tool.execute(json!({"patch_text": diff}), context(dir.path()))
+                                .await
+                                .is_err()
+                        );
+                        assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unified_crlf_multiple_hunks_preserve_untouched_bytes() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n-b\n+B\n+extra\n@@ -4 +5 @@\n-d\n+D\n";
+        assert_eq!(
+            render(diff, "a\r\nb\r\nc\nd\r\n").unwrap(),
+            "a\r\nB\r\nextra\r\nc\nD\r\n"
+        );
+        // A final bare CR is content, not a CRLF terminator.
+        let eof = "--- a/f\n+++ b/f\n@@ -2 +2 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+        assert!(render(eof, "a\r\nold\r").is_err());
     }
 
     #[test]

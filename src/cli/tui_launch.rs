@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::process::Command as ProcessCommand;
 
 use crate::{
-    id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
+    build, id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
 };
 
 use super::hot_exec::{execute_requested_action, has_requested_action};
@@ -48,20 +48,8 @@ pub async fn run_client() -> Result<()> {
             Ok(msg_id) => loop {
                 match client.read_event().await {
                     Ok(event) => {
-                        use crate::protocol::ServerEvent;
-                        match event {
-                            ServerEvent::TextDelta { text } => {
-                                print!("{}", crate::output_style::terminal_text(&text));
-                                std::io::stdout().flush()?;
-                            }
-                            ServerEvent::Done { id } if id == msg_id => {
-                                break;
-                            }
-                            ServerEvent::Error { message, .. } => {
-                                eprintln!("Error: {}", message);
-                                break;
-                            }
-                            _ => {}
+                        if emit_terminal_client_event(&mut io::stdout(), event, msg_id)? {
+                            break;
                         }
                     }
                     Err(e) => {
@@ -79,6 +67,71 @@ pub async fn run_client() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn emit_terminal_client_event(
+    output: &mut impl Write,
+    event: crate::protocol::ServerEvent,
+    message_id: u64,
+) -> Result<bool> {
+    use crate::protocol::ServerEvent;
+    match super::commands::unwrap_turn_event(event) {
+        ServerEvent::TextDelta { text } => {
+            write!(output, "{}", crate::output_style::terminal_text(&text))?;
+            output.flush()?;
+        }
+        ServerEvent::Done { id } if id == message_id => return Ok(true),
+        ServerEvent::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+            return Ok(true);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod turn_envelope_tests {
+    use super::*;
+    use crate::protocol::{ServerEvent, TurnIdentity};
+
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn terminal_client_prints_wrapped_text_and_honors_wrapped_done() {
+        let mut output = Vec::new();
+        assert!(
+            !emit_terminal_client_event(
+                &mut output,
+                envelope(ServerEvent::TextDelta {
+                    text: "hello".into()
+                }),
+                42
+            )
+            .unwrap()
+        );
+        assert_eq!(output, b"hello");
+        assert!(
+            !emit_terminal_client_event(&mut output, envelope(ServerEvent::Done { id: 41 }), 42)
+                .unwrap()
+        );
+        assert!(
+            emit_terminal_client_event(
+                &mut output,
+                envelope(envelope(ServerEvent::Done { id: 42 })),
+                42
+            )
+            .unwrap()
+        );
+    }
 }
 
 pub async fn run_tui_client(
@@ -105,6 +158,7 @@ pub async fn run_tui_client(
     if !native_ssh {
         spawn_session_signal_watchers();
     }
+    super::companion_autostart::spawn_if_needed(native_ssh);
 
     if native_ssh {
         let host = std::env::var("JCODE_SSH_REMOTE").unwrap_or_default();
@@ -180,6 +234,12 @@ pub async fn run_tui_client(
             // `/local` from a cloud attach: the SSH guard in `ssh.rs` must
             // close before we exec, so hand the target back to it.
             super::cloud_move::stash_handoff(handoff);
+            return Ok(());
+        }
+        if let Some(session_id) = run_result.reload_session.as_deref() {
+            // The owning SSH guard closes its transport before the re-exec.
+            // Never hand a remote ID to hot_reload, which resumes locally.
+            super::ssh::stash_client_reload(session_id.to_string());
             return Ok(());
         }
         if has_requested_action(&run_result) {
@@ -532,6 +592,17 @@ fn cloud_resume_target_args(
     Some(args)
 }
 
+/// Binary a session picker launches its selection with. A picker window can
+/// sit open for hours while builds move on, and `current_exe()` is the frozen
+/// versioned binary it started from. Resume onto the active channel instead,
+/// the same candidate reload uses, so stale pickers do not revive old builds.
+fn picker_resume_exe() -> Result<std::path::PathBuf> {
+    match build::client_update_candidate(false) {
+        Some((exe, _)) => Ok(exe),
+        None => Ok(std::env::current_exe()?),
+    }
+}
+
 pub fn list_sessions() -> Result<()> {
     fn build_resume_target_command(
         exe: &std::path::Path,
@@ -644,7 +715,7 @@ pub fn list_sessions() -> Result<()> {
             else {
                 anyhow::bail!("Claude takeover did not produce a Jcode session");
             };
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let mut session_cwd = std::env::current_dir()?;
             if let Ok(sess) = session::Session::load(session_id)
                 && let Some(dir) = sess.working_dir.as_deref()
@@ -664,7 +735,7 @@ pub fn list_sessions() -> Result<()> {
             tui::session_picker::PickerResult::Selected(targets)
             | tui::session_picker::PickerResult::SelectedInCurrentTerminal(targets),
         ) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
 
             if targets.len() == 1 {
@@ -744,7 +815,7 @@ pub fn list_sessions() -> Result<()> {
             }
         }
         Some(tui::session_picker::PickerResult::SelectedInNewTerminal(targets)) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;
@@ -807,7 +878,7 @@ pub fn list_sessions() -> Result<()> {
                 recovered.len()
             );
 
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;

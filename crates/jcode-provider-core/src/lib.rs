@@ -25,8 +25,7 @@ pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
     anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
-    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
-    anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_strip_1m_suffix,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -598,6 +597,23 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 );
             }
             Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::MessageEnd { stop_reason })
+                if is_guardrail_stop_reason(stop_reason.as_deref()) =>
+            {
+                // A refusal or content-filter stop is not a usable answer. Callers
+                // such as compaction would otherwise persist the refusal text as
+                // if it were real output (issue #2089).
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(
+                        "simple completion stopped by provider guardrail (stop_reason={})",
+                        stop_reason.as_deref().unwrap_or_default()
+                    ),
+                }
+                .into());
+            }
             Ok(StreamEvent::Error { message, .. }) => {
                 return Err(SimpleCompletionError {
                     usage,
@@ -621,6 +637,18 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     }
 
     Ok((result, usage))
+}
+
+/// True when a provider stop reason is a model-side refusal, safety, or
+/// content-filter stop rather than a normal end of turn or truncation.
+pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
+    let Some(reason) = stop_reason else {
+        return false;
+    };
+    let reason = reason.trim().to_ascii_lowercase();
+    matches!(reason.as_str(), "refusal" | "content_filter" | "safety")
+        || reason.contains("guardrail")
+        || reason.contains("policy_violation")
 }
 
 /// Failed simple completion with the usage already observed before failure.

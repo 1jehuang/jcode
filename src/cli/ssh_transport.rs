@@ -19,10 +19,13 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
+mod timing;
+
 const PROTOCOL: u32 = 1;
 const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CLOUD_WAKE_TIMEOUT: Duration = Duration::from_secs(150);
 const MAX_CONNECTIONS: usize = 32;
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
@@ -42,6 +45,9 @@ impl ReconnectBackoff {
     }
     fn blocked(&self, now: std::time::Instant) -> bool {
         self.retry_after.is_some_and(|at| now < at)
+    }
+    fn should_defer(&self, now: std::time::Instant, user_requested_retry: bool) -> bool {
+        !user_requested_retry && self.blocked(now)
     }
     /// Record a failure. Returns true when it should be logged (first failure,
     /// then every power of two) so long outages produce a handful of lines.
@@ -114,19 +120,16 @@ impl NativeSsh {
             );
         }
         options.working_dir = remote_working_dir.map(str::to_owned);
-        // Fail before entering the TUI, with authentication/host-key diagnostics.
-        let mut probe = SshConnection::connect(&options).await?;
+        let probe = SshConnection::connect(&options).await?;
         let handshake = probe.handshake.clone();
-        probe.shutdown().await;
-        // Remote --cwd already verified the directory and the header contains
-        // its resolved path. Keep reconnects on that same verified workspace.
+        // Keep reconnects on the workspace already resolved and verified by remote --cwd.
         options.working_dir = Some(handshake.working_dir.clone());
 
         let directory = private_directory()?;
         let socket = directory.path().join("native.sock");
         let listener = UnixListener::bind(&socket)?;
         let (stop, stopped) = watch::channel(false);
-        let manager = tokio::spawn(accept_connections(listener, options, stopped));
+        let manager = tokio::spawn(accept_connections(listener, options, stopped, Some(probe)));
         Ok(Self {
             _directory: directory,
             socket,
@@ -225,6 +228,7 @@ impl SshOptions {
 
     fn command(&self) -> Command {
         let mut command = Command::new("ssh");
+        let mut managed_config = false;
         if let Some(id) = super::cloud_ephemeral::host_id(&self.host) {
             // The caller validates/prepares this private config before connecting.
             // Never fall through to the persistent host's SSH identity.
@@ -235,38 +239,9 @@ impl SshOptions {
             && let Ok(args) = super::cloud_managed::ssh_args()
         {
             command.args(args);
+            managed_config = true;
         }
-        command.args([
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ForwardAgent=no",
-            "-o",
-            "ClearAllForwardings=yes",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=2",
-            "-o",
-            "PermitLocalCommand=no",
-            "-o",
-            "ForkAfterAuthentication=no",
-            "-o",
-            "StdinNull=no",
-            "-o",
-            "RemoteCommand=none",
-            "-o",
-            "SessionType=default",
-            "-o",
-            "ControlMaster=no",
-            "-S",
-            "none",
-            "-o",
-            "ConnectTimeout=30",
-        ]);
+        configure_transport(&mut command, managed_config);
         let binary = format!("'{}'", self.remote_binary.replace('\'', "'\\''"));
         let socket = self
             .daemon_socket
@@ -283,6 +258,49 @@ impl SshOptions {
         );
         command.arg("--").arg(&self.host).arg(remote);
         command
+    }
+}
+
+fn configure_transport(command: &mut Command, managed_config: bool) {
+    command.args([
+        "-T",
+        "-C",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "ForkAfterAuthentication=no",
+        "-o",
+        "StdinNull=no",
+        "-o",
+        "RemoteCommand=none",
+        "-o",
+        "SessionType=default",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPersist=no",
+        "-o",
+        "ConnectTimeout=30",
+    ]);
+    // Only the generated managed config has an account/API-scoped path in
+    // a private directory. Borrow an existing master, never create one or
+    // send it exit/stop commands. The owned child is just its session client.
+    // With no master, ControlMaster=no falls back to an owned direct SSH.
+    // Compression on a borrowed master is determined when it was created.
+    if !managed_config {
+        command.args(["-S", "none"]);
     }
 }
 
@@ -315,17 +333,35 @@ struct SshConnection {
 
 impl SshConnection {
     async fn connect(options: &SshOptions) -> Result<Self> {
-        Self::spawn(options.command(), STARTUP_TIMEOUT)
-            .await
-            .with_context(|| format!("connecting native Jcode on {}", options.host))
+        // Waking cloud hosts and starting their daemon exceeds the plain SSH deadline.
+        let cloud = super::cloud_managed::is_managed(&options.host)
+            || super::cloud_ephemeral::host_id(&options.host).is_some();
+        let (deadline, attempts) = if cloud {
+            (CLOUD_WAKE_TIMEOUT, 2)
+        } else {
+            (STARTUP_TIMEOUT, 1)
+        };
+        let mut last = match Self::spawn(options.command(), deadline).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => error,
+        };
+        for _ in 1..attempts {
+            match Self::spawn(options.command(), deadline).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last = error,
+            }
+        }
+        Err(last.context(format!("connecting native Jcode on {}", options.host)))
     }
 
     async fn spawn(command: Command, deadline: Duration) -> Result<Self> {
+        let mut timing = timing::StartupTiming::new();
         let mut connection = Self::spawn_process(command)?;
         if let Err(error) = connection.establish(deadline).await {
             connection.shutdown().await;
             return Err(error.context(connection.diagnostic()));
         }
+        timing.success();
         Ok(connection)
     }
 
@@ -334,8 +370,7 @@ impl SshConnection {
         #[cfg(target_os = "linux")]
         {
             let parent_pid = std::process::id();
-            // SIGKILL/process::exit do not run guards. Do not leave SSH holding
-            // a remote bridge open if the local UI disappears abruptly.
+            // SIGKILL/process::exit skip guards, so bind SSH lifetime to this UI.
             unsafe {
                 command.as_std_mut().pre_exec(move || {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
@@ -489,6 +524,7 @@ async fn accept_connections(
     listener: UnixListener,
     options: SshOptions,
     mut stopped: watch::Receiver<bool>,
+    mut initial: Option<SshConnection>,
 ) {
     let mut connections = JoinSet::new();
     let backoff = Arc::new(Mutex::new(ReconnectBackoff::default()));
@@ -500,15 +536,18 @@ async fn accept_connections(
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { break; };
                 if connections.len() >= MAX_CONNECTIONS { continue; }
-                if backoff.lock().map(|b| b.blocked(std::time::Instant::now())).unwrap_or(false) {
+                let user_requested_retry = crate::tui::take_immediate_ssh_reconnect_request();
+                if backoff.lock().map(|b| b.should_defer(std::time::Instant::now(), user_requested_retry)).unwrap_or(false) {
                     // Drop the stream: the client sees a closed connection and retries later.
                     continue;
                 }
                 let backoff = backoff.clone();
                 let options = options.clone();
                 let mut stopped = stopped.clone();
+                let initial = initial.take();
                 connections.spawn(async move {
-                    let mut ssh = match SshConnection::spawn_process(options.command()) {
+                    let established = initial.is_some();
+                    let mut ssh = match initial.map(Ok).unwrap_or_else(|| SshConnection::spawn_process(options.command())) {
                         Ok(ssh) => ssh,
                         Err(error) => {
                             let (log, failures) = record_reconnect_failure(&backoff);
@@ -519,7 +558,7 @@ async fn accept_connections(
                     let connected = tokio::select! {
                         biased;
                         _ = stopped.changed() => None,
-                        connected = ssh.establish(STARTUP_TIMEOUT) => Some(connected),
+                        connected = async { if established { Ok(()) } else { ssh.establish(STARTUP_TIMEOUT).await } } => Some(connected),
                     };
                     if !matches!(connected, Some(Ok(()))) {
                         ssh.shutdown().await;
@@ -550,6 +589,9 @@ async fn accept_connections(
         }
     }
     drop(listener);
+    if let Some(mut ssh) = initial.take() {
+        ssh.shutdown().await;
+    }
     // Guard drop wakes all children, which explicitly kill and reap SSH.
     while connections.join_next().await.is_some() {}
 }
@@ -637,6 +679,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn managed_mux_only_borrows_existing_master_and_enables_compression() {
+        for managed in [false, true] {
+            let mut command = Command::new("ssh");
+            configure_transport(&mut command, managed);
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|s| s.to_str().unwrap())
+                .collect();
+            for required in [
+                "-C",
+                "ControlMaster=no",
+                "ControlPersist=no",
+                "ForwardAgent=no",
+                "ClearAllForwardings=yes",
+            ] {
+                assert!(args.contains(&required), "{required}");
+            }
+            assert_eq!(args.contains(&"-S"), !managed);
+            assert!(!args.contains(&"-O"));
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_socket_reuses_probe_and_preserves_buffered_bytes() {
+        let mut probe = SshConnection::spawn(
+            shell(&format!(
+                "printf '%s' '{}'; exec cat",
+                hello() + "buffered-history\n"
+            )),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let pid = probe.child.0.id().unwrap();
+        // Ensure bytes past the handshake are already in the BufReader.
+        assert!(!probe.reader.fill_buf().await.unwrap().is_empty());
+        let directory = private_directory().unwrap();
+        let socket = directory.path().join("native.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (stop, stopped) = watch::channel(false);
+        // Invalid hostname must never be contacted for the first socket.
+        let manager = tokio::spawn(accept_connections(
+            listener,
+            SshOptions::new("unused.invalid", "jcode").unwrap(),
+            stopped,
+            Some(probe),
+        ));
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        stream.write_all(b"request\n").await.unwrap();
+        let mut received = vec![0; b"buffered-history\nrequest\n".len()];
+        tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, b"buffered-history\nrequest\n");
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), manager)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+
+    #[tokio::test]
+    async fn unused_probe_is_reaped_when_manager_stops() {
+        let probe = SshConnection::spawn(
+            shell(&format!("printf '%s' '{}'; exec sleep 60", hello())),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let pid = probe.child.0.id().unwrap();
+        let directory = private_directory().unwrap();
+        let listener = UnixListener::bind(directory.path().join("native.sock")).unwrap();
+        let (stop, stopped) = watch::channel(false);
+        stop.send(true).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            accept_connections(
+                listener,
+                SshOptions::new("unused.invalid", "jcode").unwrap(),
+                stopped,
+                Some(probe),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+
+    #[test]
     fn reconnect_backoff_grows_caps_and_throttles_logs() {
         let now = std::time::Instant::now();
         let mut b = ReconnectBackoff::default();
@@ -650,6 +784,19 @@ mod tests {
         assert_eq!(b.succeed(), Some(8));
         assert!(!b.blocked(now));
         assert_eq!(b.succeed(), None);
+    }
+
+    #[test]
+    fn reconnect_backoff_user_submission_bypasses_only_one_attempt() {
+        let now = std::time::Instant::now();
+        let mut backoff = ReconnectBackoff::default();
+        for _ in 0..8 {
+            backoff.fail(now);
+        }
+        assert!(backoff.should_defer(now, false));
+        assert!(!backoff.should_defer(now, true));
+        assert!(backoff.should_defer(now, false));
+        assert_eq!(backoff.failures, 8);
     }
 
     fn hello() -> String {
@@ -949,6 +1096,109 @@ mod tests {
             .unwrap();
         // client_write deliberately remains open: daemon EOF must still exit.
         drop(client_write);
+    }
+
+    #[tokio::test]
+    async fn bridge_forwards_background_tool_before_busy_tool_completes() {
+        use crate::protocol::{Request, ServerEvent};
+
+        // Exercise the production remote stdio bridge, not a JSON echo. The
+        // mock daemon deliberately keeps its tool unfinished until the client
+        // receives the background acknowledgement. Waiting for tool completion
+        // (or EOF) before forwarding either direction therefore deadlocks.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (client, bridge) = tokio::io::duplex(4096);
+            let (input, output) = tokio::io::split(bridge);
+            let bridge_task = tokio::spawn(bridge_stream(input, output, socket));
+            let (finished, finish_tool) = tokio::sync::oneshot::channel();
+
+            let daemon = async {
+                let (daemon, _) = listener.accept().await.unwrap();
+                let (read, mut write) = daemon.into_split();
+                let mut read = BufReader::new(read);
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::Ping { id: 0 }
+                ));
+                write
+                    .write_all(b"{\"type\":\"pong\",\"id\":0,\"native_ssh_protocol\":1}\n")
+                    .await
+                    .unwrap();
+                let event = ServerEvent::ToolExec {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+
+                // No ToolDone or further output: the download copy is pending
+                // while the upload must still deliver the control request.
+                line.clear();
+                assert!(read.read_line(&mut line).await.unwrap() > 0);
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::BackgroundTool { id: 73 }
+                ));
+                let event = ServerEvent::BackgroundToolResult {
+                    id: 73,
+                    moved: true,
+                    tool_call_id: Some("busy-tool".into()),
+                    tool_name: Some("bash".into()),
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                finish_tool.await.unwrap();
+                let event = ServerEvent::ToolDone {
+                    id: "busy-tool".into(),
+                    name: "bash".into(),
+                    output: "finished after background acknowledgement".into(),
+                    error: None,
+                };
+                let frame = serde_json::to_string(&event).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+            };
+            let client = async {
+                let (read, mut write) = tokio::io::split(client);
+                let mut read = BufReader::new(read);
+                read_handshake(&mut read).await.unwrap();
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolExec { id, .. } if id == "busy-tool"
+                ));
+                let frame =
+                    serde_json::to_string(&Request::BackgroundTool { id: 73 }).unwrap() + "\n";
+                write.write_all(frame.as_bytes()).await.unwrap();
+                // Keep stdin open throughout: interactive requests cannot rely
+                // on EOF to flush, and the tool is still blocked on our signal.
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::BackgroundToolResult {
+                        id: 73, moved: true, tool_call_id: Some(id), tool_name: Some(name)
+                    } if id == "busy-tool" && name == "bash"
+                ));
+                finished.send(()).unwrap();
+                line.clear();
+                read.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                    ServerEvent::ToolDone { id, .. } if id == "busy-tool"
+                ));
+                bridge_task.await.unwrap().unwrap();
+                drop(write);
+            };
+            tokio::join!(daemon, client);
+        })
+        .await
+        .expect("native SSH must forward BackgroundTool and its reply while the tool is busy");
     }
 
     #[tokio::test]

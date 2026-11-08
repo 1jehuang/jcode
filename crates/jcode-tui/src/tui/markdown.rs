@@ -69,6 +69,7 @@ pub fn install_jcode_markdown_hooks() {
         jcode_tui_markdown::MarkdownConfigSnapshot {
             diagram_mode: to_markdown_diagram_mode(cfg.display.diagram_mode),
             markdown_spacing: to_markdown_spacing_mode(cfg.display.markdown_spacing),
+            show_link_urls: cfg.display.show_link_urls,
             mermaid_enabled: cfg.features.mermaid,
             latex_rendering: to_markdown_latex_mode(cfg.display.latex_rendering),
         }

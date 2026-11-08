@@ -399,7 +399,7 @@ impl DeadMemberSalvage {
             ));
         }
         parts.push(
-            "Queued tasks will be picked up by assign_next/run_plan; check plan_status for details."
+            "Queued worker lanes start automatically as dependencies and capacity allow; check plan_status for details."
                 .to_string(),
         );
         parts.join(" ")
@@ -856,7 +856,10 @@ pub(super) async fn monitor_wait_status(
 ) {
     let mut changes = crate::wait_registry::subscribe_changes();
     let mut live_changes = super::live_status::subscribe_changes();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    // Transitions are pushed by the watch channels above. The tick only ages
+    // displayed wait/elapsed counters, and each tick fans a full swarm status
+    // out to every attached client, so keep it coarse to let clients sleep.
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut previous = HashSet::<String>::new();
     loop {
@@ -1172,6 +1175,7 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
+    crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",
         vec![
@@ -1875,6 +1879,19 @@ pub(super) async fn update_member_status_with_report_tldr(
                     .unwrap_or(&session_id[..8.min(session_id.len())]);
                 let msg =
                     completion_notification_message(name, status, completion_report.as_deref());
+                // Display notifications alone never enter the owner's model
+                // context. Deliver reports through the reliable runtime bus,
+                // which wakes idle owners and queues reports for busy ones.
+                // Explicit stops are cancellation, not permission to restart.
+                if report_back_to_session_id.is_some() && status != "stopped" {
+                    crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
+                        crate::bus::SwarmWorkerReported {
+                            session_id: recipient_session_id.clone(),
+                            worker_session_id: session_id.to_string(),
+                            notification: msg.clone(),
+                        },
+                    ));
+                }
                 let _ = fanout_session_event(
                     swarm_members,
                     &recipient_session_id,
@@ -1892,6 +1909,16 @@ pub(super) async fn update_member_status_with_report_tldr(
                 .await;
             }
         }
+    }
+}
+
+/// Inline workers have no entry in the server's live-session map. Clean their
+/// ephemeral environment on normal completion, errors, and future cancellation.
+struct InlineWorkerEnv(String);
+
+impl Drop for InlineWorkerEnv {
+    fn drop(&mut self) {
+        crate::session_env::remove_session_env(&self.0);
     }
 }
 
@@ -1951,6 +1978,8 @@ pub(super) async fn run_swarm_task(
         .apply_to_allowed_set(&mut allowed);
 
     let mut worker = Agent::new_with_session(provider, registry, session, Some(allowed));
+    crate::session_env::inherit_session_env(&parent_session_id, &child_session_id);
+    let _environment_cleanup = InlineWorkerEnv(child_session_id.clone());
     match worker.run_once_capture(prompt).await {
         Ok(output) => {
             log_swarm_lifecycle(

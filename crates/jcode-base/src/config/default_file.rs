@@ -25,6 +25,11 @@ impl Config {
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
 
+[cloud]
+# Scoped local resource access after handoff, in seconds (default: 24 hours).
+# Set to 0 to disable. Disconnecting or switching sessions still revokes access.
+local_access_seconds = 86400
+
 [keybindings]
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key
@@ -152,6 +157,10 @@ timeout_secs = 90
 # without Jcode Desktop. Empty disables it.
 # global_devices = []
 
+# Show live voice input inside the input box: a waveform row above the prompt
+# and the transcript streaming in as ghost text. false uses the status line.
+# composer_preview = true
+
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
@@ -198,6 +207,10 @@ reasoning_display = "full"
 
 # Markdown spacing style: "compact" (chat/TUI) or "document" (docs-like)
 # markdown_spacing = "compact"
+
+# Append destinations after Markdown link labels, e.g. label (https://example.com).
+# Link labels remain visible and styled when disabled (default: false).
+# show_link_urls = false
 
 # LaTeX rendering: "none" (show source), "unicode" (terminal text), or "image" (typeset PNG, default).
 # Image mode uses `latex` + `dvipng`, or `pdflatex` + `pdftocairo` as a fallback.
@@ -250,6 +263,20 @@ prompt_entry_animation = true
 # (default: false). Resume is global by default. Press `s` to cycle filters.
 # resume_project_scope = false
 
+# Highlight just-closed sessions and put them first in Resume for this many
+# seconds (default: 30). Set 0 to disable. Uses the final client socket closing,
+# not the last message time. Reattaching clears it. Explicit detach/switch and
+# server reload are excluded. Applies to local native sessions, including a
+# disconnected SDK client, since the server cannot observe OS windows directly.
+# resume_recent_close_seconds = 30
+
+# Which time Resume shows as "x ago" and sorts by (default: "message").
+#   "message":  newest message of any role (prompts, replies, tool results)
+#   "activity": newest of the last message and the last open/resume
+#   "opened":   last time the session was opened, resumed, or attached
+#   "created":  when the session was created
+# resume_time = "message"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -275,6 +302,7 @@ prompt_entry_animation = true
 # copy_badge_alt_label = ""
 
 # Color theme: "auto" (query the terminal background), "dark", or "light".
+# Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
@@ -326,9 +354,13 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
-# Optional aggregate weak-point follow-up, once per completed todo cycle.
+# Optional automatic todo quality reviews (confidence, ownership, long-session,
+# and aggregate weak-point checks). Disabled by default.
 # Requires auto-poke. Does not control the display-only completion report.
 todo_gate_digest = false
+# Show which disabled end-of-turn gates would have fired in completion reports.
+# Display only. Does not enable gates or follow-up turns.
+todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
@@ -400,6 +432,14 @@ bing_market = "en-US"
 # snippet_pointer = "/snippet"
 
 [tools]
+# Opt into Jev browser handoff. Default off, direct browser actions still work.
+# Env override: JCODE_BROWSER_HANDOFF=1 to enable.
+browser_handoff = false
+# Automatically hand long-running tool calls to the background after this many
+# milliseconds. Default: 3000 (3 seconds). Set 0 to disable automatic handoff.
+# Applies to streaming, nonstreaming, and SDK calls. bg wait stays foreground.
+# This does not kill tools or change their own execution timeouts.
+auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
 # Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
 # acp keeps core coding tools plus batch for generic ACP clients.
@@ -816,6 +856,29 @@ prevent_sleep_while_streaming = true
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
 
+[companion]
+# `jcode companion` is a per-login helper that handles desktop effects for the
+# shared server. Toggles apply when the companion starts. Restart it
+# (`systemctl --user restart jcode-companion`, or kill it and relaunch Jcode)
+# after changing them.
+# Start it in the background when a Jcode client launches and none is running.
+autostart = true
+# Copilot-key push-to-talk (Linux). Also needs [dictation] global_devices.
+voice = true
+# Live waveform and transcript in the focused Jcode CLI while recording.
+voice_waveform = true
+# Desktop notifications for voice state. When off, recording still needs the
+# waveform to be shown in a Jcode CLI as its visible indicator.
+voice_notifications = true
+# Open URLs and files for the server. Off: clients use their own opener.
+open = true
+# Open new terminal windows for the server. Off: clients launch locally.
+spawn_terminal = true
+# Lid-close override while agents work (macOS/Windows, see [power]).
+lid = true
+# Hourly browser bridge auto-update.
+browser_updates = true
+
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to
 # stop the menu bar helper (a running helper exits within a second).
@@ -869,14 +932,14 @@ desktop_notifications = true
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
 
 # [sponsors] # Legacy config section name retained for compatibility.
-# Integration discovery (enabled by default; set enabled = false to opt out).
-# When enabled, the agent gains a `discover_tools` tool listing third-party
+# Integration discovery (disabled by default; set enabled = true to opt in).
+# When enabled, the agent gains an `integration_tools` tool listing third-party
 # developer tools from Jcode's hosted integration directory. These providers
 # have integrated with the agent to make setup and use seamless. Some providers
 # may share revenue with Jcode when a referred user becomes a customer, but
 # commercial relationships never influence recommendations.
 # See https://jcode.sh/discovery-tools
-# enabled = true
+# enabled = false
 # endpoint = "https://api.jcode.sh/v1/discovery"
 	"##;
 
@@ -914,6 +977,7 @@ mod tests {
         );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,

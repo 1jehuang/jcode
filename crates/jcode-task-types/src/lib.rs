@@ -457,6 +457,9 @@ where
     Ok(value)
 }
 
+/// `TodoItem::lane_owner` value that requests an auto-spawned swarm worker.
+pub const LANE_OWNER_WORKER: &str = "worker";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
@@ -469,6 +472,16 @@ pub struct TodoItem {
     /// Also accepted as `lane`: the lane this todo belongs to.
     #[serde(default, alias = "lane", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Explicit prerequisite todo IDs for this lane. `None` retains the default
+    /// phase barrier. All lane members carry the same nonempty list, referring
+    /// only to todos in earlier phases by first appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_after: Option<Vec<String>>,
+    /// Who runs this lane: [`LANE_OWNER_WORKER`] makes the swarm server spawn a
+    /// dedicated worker as soon as the lane is ready; anything else (default)
+    /// means this todo list's own agent runs it. Lane-wide, like `lane_after`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_owner: Option<String>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
     /// closest state on load.
@@ -501,14 +514,16 @@ pub struct TodoItem {
     /// No way forward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completely_blocked: Option<TodoCompleteBlocker>,
+    /// Worker session ID, or reserved `@self` for an explicit start by this
+    /// todo list's agent. Absence means ownership is unknown, not local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// Optional execution stage. Stages run in order: stage 2 starts only
     /// after every todo in stage 1 is done. Inside a stage, todos that share a
     /// `group` form one lane that runs in list order, and different lanes run
     /// in parallel. `None` means "sequential in list order". Deliberately a
-    /// plain number instead of id-based dependencies so a model cannot create
-    /// cycles or dangling references. Older sessions stored this as `wave`.
+    /// plain number. Optional `lane_after` narrows the default phase barrier
+    /// to explicit earlier-phase prerequisites. Older sessions stored this as `wave`.
     #[serde(
         default,
         alias = "wave",
@@ -574,6 +589,10 @@ pub fn parse_stage_value(value: &serde_json::Value) -> Option<u32> {
 /// faithfully the plan and its feedback loops represent that.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoPlan {
+    /// Short session name (a few words) chosen by the agent. Used as the
+    /// session title in pickers ahead of lane names and generated titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The user's underlying reason and desired outcome for this work, kept
     /// distinct from the agent's steps and validation loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -603,6 +622,7 @@ pub struct TodoPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoPlanField {
+    Title,
     UserIntention,
     #[serde(alias = "alignment_score", alias = "user_intention_alignment")]
     UnderstandsUserIntent,

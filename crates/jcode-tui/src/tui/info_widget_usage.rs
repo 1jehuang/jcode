@@ -281,6 +281,37 @@ pub(super) fn render_usage_compact(
     lines
 }
 
+const LABEL_WIDTH: usize = 7;
+/// Card bars stop growing here so every card on screen uses the same bar
+/// length instead of each stretching to its own label column.
+const CARD_MAX_BAR_WIDTH: usize = 16;
+
+/// The same limit bar and percentage as the widget, without its label column.
+pub(crate) fn render_inline_limit_bar(
+    left_pct: u8,
+    cells: u16,
+    display_used: bool,
+) -> Vec<Span<'static>> {
+    let left_pct = left_pct.min(100);
+    let suffix_width = if display_used {
+        format!(" {}% used", 100 - left_pct).len()
+    } else {
+        format!(" {left_pct}% left").len()
+    } as u16;
+    render_labeled_bar(
+        "",
+        100 - left_pct,
+        left_pct,
+        None,
+        LABEL_WIDTH as u16 + cells.min(12) + suffix_width,
+        display_used,
+    )
+    .spans
+    .into_iter()
+    .skip(1)
+    .collect()
+}
+
 pub(crate) fn render_labeled_bar(
     label: &str,
     used_pct: u8,
@@ -289,67 +320,193 @@ pub(crate) fn render_labeled_bar(
     width: u16,
     usage_display_used: bool,
 ) -> Line<'static> {
-    let color = if left_pct <= 20 {
+    LimitBar {
+        label,
+        label_column: LABEL_WIDTH,
+        used_pct,
+        left_pct,
+        reset_time,
+        width,
+        display_used: usage_display_used,
+        columns: None,
+    }
+    .render()
+}
+
+/// Color for a limit with `left_pct` remaining, shared by every usage bar.
+pub(crate) fn limit_color(left_pct: u8) -> Color {
+    if left_pct <= 20 {
         rgb(255, 100, 100)
     } else if left_pct <= 50 {
         rgb(255, 200, 100)
     } else {
         rgb(100, 200, 100)
-    };
+    }
+}
 
-    const LABEL_WIDTH: usize = 7;
-    const MIN_BAR_WIDTH: usize = 4;
+/// One usage limit bar. Every usage indicator renders through this so the
+/// glyphs, colors, and used/left convention stay identical everywhere.
+pub(crate) struct LimitBar<'a> {
+    pub label: &'a str,
+    /// Cells reserved for the label, including the gap before the bar.
+    pub label_column: usize,
+    pub used_pct: u8,
+    pub left_pct: u8,
+    pub reset_time: Option<&'a str>,
+    pub width: u16,
+    pub display_used: bool,
+    /// Card layout: `Some(cells)` reserves a countdown column of that width
+    /// (0 drops countdowns), right-aligns the percentage, dims the countdown,
+    /// and lets the bar grow, so stacked rows form aligned columns. `None`
+    /// keeps the widget's compact wording.
+    pub columns: Option<usize>,
+}
 
-    let (display_pct, display_word) = if usage_display_used {
-        (used_pct, "used")
-    } else {
-        (left_pct, "left")
-    };
-    let percentage_suffix = format!(" {}% {}", display_pct, display_word);
-    let full_suffix = match reset_time {
-        Some(reset) if left_pct == 0 => format!(" resets {}", reset),
-        Some(reset) => format!("{} · {}", percentage_suffix, reset),
-        None => percentage_suffix.clone(),
-    };
-    // On narrow widgets keep the percentage wording unambiguous, dropping the
-    // reset countdown before sacrificing the bar. Exhausted wording is unchanged.
-    let suffix = match reset_time {
-        Some(_) if left_pct > 0 => {
-            let budget = usize::from(width).saturating_sub(LABEL_WIDTH + MIN_BAR_WIDTH);
-            if UnicodeWidthStr::width(full_suffix.as_str()) <= budget {
-                full_suffix
-            } else {
-                percentage_suffix
-            }
+impl LimitBar<'_> {
+    pub(crate) fn render(&self) -> Line<'static> {
+        let Self {
+            label,
+            label_column,
+            used_pct,
+            left_pct,
+            reset_time,
+            width,
+            display_used: usage_display_used,
+            columns,
+        } = *self;
+        let color = limit_color(left_pct);
+
+        const MIN_BAR_WIDTH: usize = 4;
+
+        let (display_pct, display_word) = if usage_display_used {
+            (used_pct, "used")
+        } else {
+            (left_pct, "left")
+        };
+        if let Some(countdown_column) = columns {
+            let percentage = format!(" {display_pct:>3}% {display_word}");
+            let countdown = match reset_time {
+                Some(reset) if countdown_column > 0 => format!("  ↻ {reset}"),
+                _ => String::new(),
+            };
+            let reserved = UnicodeWidthStr::width(percentage.as_str())
+                + countdown_column.max(UnicodeWidthStr::width(countdown.as_str()));
+            let label_width = label_column.min(usize::from(width).saturating_sub(reserved));
+            let bar_width = usize::from(width)
+                .saturating_sub(label_width + reserved)
+                .min(CARD_MAX_BAR_WIDTH);
+            return bar_line(
+                label,
+                label_width,
+                used_pct,
+                bar_width,
+                color,
+                vec![
+                    Span::styled(percentage, Style::default().fg(color)),
+                    Span::styled(countdown, Style::default().fg(rgb(110, 110, 125))),
+                ],
+            );
         }
-        _ => full_suffix,
-    };
-    let suffix_width = UnicodeWidthStr::width(suffix.as_str());
-    let label_width = LABEL_WIDTH.min(usize::from(width).saturating_sub(suffix_width));
-    let bar_width = usize::from(width)
-        .saturating_sub(label_width + suffix_width)
-        .min(12);
 
+        let percentage_suffix = format!(" {}% {}", display_pct, display_word);
+        let full_suffix = match reset_time {
+            Some(reset) if left_pct == 0 => format!(" resets {}", reset),
+            Some(reset) => format!("{} · {}", percentage_suffix, reset),
+            None => percentage_suffix.clone(),
+        };
+        // On narrow widgets keep the percentage wording unambiguous, dropping the
+        // reset countdown before sacrificing the bar. Exhausted wording is unchanged.
+        let suffix = match reset_time {
+            Some(_) if left_pct > 0 => {
+                let budget = usize::from(width).saturating_sub(label_column + MIN_BAR_WIDTH);
+                if UnicodeWidthStr::width(full_suffix.as_str()) <= budget {
+                    full_suffix
+                } else {
+                    percentage_suffix
+                }
+            }
+            _ => full_suffix,
+        };
+        let suffix_width = UnicodeWidthStr::width(suffix.as_str());
+        let label_width = label_column.min(usize::from(width).saturating_sub(suffix_width));
+        let bar_width = usize::from(width)
+            .saturating_sub(label_width + suffix_width)
+            .min(12);
+        bar_line(
+            label,
+            label_width,
+            used_pct,
+            bar_width,
+            color,
+            vec![Span::styled(suffix, Style::default().fg(color))],
+        )
+    }
+}
+
+fn bar_line(
+    label: &str,
+    label_width: usize,
+    used_pct: u8,
+    bar_width: usize,
+    color: Color,
+    suffix: Vec<Span<'static>>,
+) -> Line<'static> {
     let filled = ((used_pct as f32 / 100.0) * bar_width as f32).round() as usize;
+    let filled = filled.min(bar_width);
     let empty = bar_width.saturating_sub(filled);
 
-    let bar_filled = "▰".repeat(filled);
-    let bar_empty = "▱".repeat(empty);
+    let mut visible_label = String::new();
+    let mut visible_cells = 0;
+    for ch in label.chars() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible_cells + cells > label_width {
+            break;
+        }
+        visible_label.push(ch);
+        visible_cells += cells;
+    }
+    let padded_label = format!(
+        "{visible_label}{}",
+        " ".repeat(label_width.saturating_sub(visible_cells))
+    );
 
-    let visible_label: String = label.chars().take(label_width).collect();
-    let padded_label = format!("{visible_label:<label_width$}");
-
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(padded_label, Style::default().fg(rgb(140, 140, 150))),
-        Span::styled(bar_filled, Style::default().fg(color)),
-        Span::styled(bar_empty, Style::default().fg(rgb(50, 50, 60))),
-        Span::styled(suffix, Style::default().fg(color)),
-    ])
+        Span::styled("▰".repeat(filled), Style::default().fg(color)),
+        Span::styled("▱".repeat(empty), Style::default().fg(rgb(50, 50, 60))),
+    ];
+    spans.extend(suffix.into_iter().filter(|span| !span.content.is_empty()));
+    Line::from(spans)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_limit_bar_reuses_widget_colors_and_compacts_without_bar() {
+        for (left, expected_color) in [
+            (100, rgb(100, 200, 100)),
+            (51, rgb(100, 200, 100)),
+            (50, rgb(255, 200, 100)),
+            (21, rgb(255, 200, 100)),
+            (20, rgb(255, 100, 100)),
+            (0, rgb(255, 100, 100)),
+        ] {
+            for used in [false, true] {
+                let spans = render_inline_limit_bar(left, 4, used);
+                assert_eq!(
+                    spans[0].content.chars().count() + spans[1].content.chars().count(),
+                    4
+                );
+                assert_eq!(spans[0].style.fg, Some(expected_color));
+                assert_eq!(spans[2].style.fg, Some(expected_color));
+                let compact = render_inline_limit_bar(left, 0, used);
+                assert!(compact[0].content.is_empty() && compact[1].content.is_empty());
+                assert_eq!(compact[2], spans[2]);
+            }
+        }
+    }
 
     #[test]
     fn usage_footer_metadata_covers_provider_paths() {

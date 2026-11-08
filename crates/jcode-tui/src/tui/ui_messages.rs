@@ -76,7 +76,7 @@ fn render_single_line_system_notice(
     // readable. Markdown or a newline alone is not a reason to expand a notice.
     if matches!(
         msg.title.as_deref(),
-        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion")
+        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
@@ -361,7 +361,19 @@ pub(super) fn is_kv_cache_footer(msg: &DisplayMessage) -> bool {
 
 /// Keep the same separator policy in full/incremental layout and overflow estimates.
 pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
-    !matches!(msg.effective_role(), "tool" | "meta" | "swarm") && !is_kv_cache_footer(msg)
+    let compact_reasoning = crate::config::config().display.compact_thinking
+        && (msg.effective_role() == "reasoning"
+            || (msg.effective_role() == "assistant" && starts_with_reasoning(&msg.content)));
+    !matches!(msg.effective_role(), "tool" | "meta" | "swarm")
+        && !compact_reasoning
+        && !is_kv_cache_footer(msg)
+}
+
+/// In `all` mode and restored history, thinking lives in assistant Markdown,
+/// not a dedicated `reasoning` message. Use the explicit renderer sentinel,
+/// never ordinary italic/bold prose, to identify that activity-stream prefix.
+pub(super) fn starts_with_reasoning(content: &str) -> bool {
+    content.trim_start().starts_with("*\u{2063}")
 }
 
 pub(crate) fn render_system_message(
@@ -956,6 +968,38 @@ pub(crate) fn render_todos_message(
     render_todos_message_with_cap(msg, width, diff_mode, true)
 }
 
+/// Dedicated composer chrome, one non-wrapping row per live blocker.
+pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    let Some(payload) = payload.and_then(|p| serde_json::from_str::<TodoCardPayload>(p).ok())
+    else {
+        return Vec::new();
+    };
+    let (todos, ..) = payload.into_parts();
+    todos
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .filter_map(|todo| {
+            let reason = if crate::todo::todo_completely_blocked(todo) {
+                todo.completely_blocked.as_ref().map(|b| b.reason.clone())
+            } else if crate::todo::todo_has_external_blocker(todo) {
+                todo.external_blocker.as_ref().map(|b| b.reason.clone())
+            } else if !todo.blocked_by.is_empty() {
+                Some(format!("waiting on {}", todo.blocked_by.join(", ")))
+            } else {
+                None
+            }?;
+            let text = format!("Blocked · {}: {}", todo.content, reason)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(super::truncate_line_with_ellipsis_to_width(
+                &Line::styled(text, Style::default().fg(todo_warning_color())),
+                usize::from(width),
+            ))
+        })
+        .collect()
+}
+
 /// Full blocker prose belongs below the response, outside the pinned chrome.
 pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -1011,7 +1055,10 @@ fn render_todos_message_with_cap(
     };
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    let centered = markdown::center_code_blocks();
+    // Pinned todos are viewport chrome, not a centered transcript card. Using
+    // the code-block preference here makes short plans float in the middle of
+    // wide terminals, detached from the conversation's left edge.
+    let centered = cap_width && markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
     let card_width = match (centered, cap_width) {
         (true, true) => (width.saturating_sub(4) as usize).min(120),
@@ -1365,6 +1412,14 @@ fn push_todo_status_pips<'a>(
     max_pips: usize,
 ) {
     let todos: Vec<_> = todos.into_iter().collect();
+    let self_active = todos
+        .iter()
+        .filter(|todo| {
+            todo.status == "in_progress"
+                && todo.assigned_to.as_deref() == Some("@self")
+                && !crate::todo::todo_completely_blocked(todo)
+        })
+        .count();
     let mut max_pips = max_pips;
     // The two-cell hand takes priority over ordinary progress at narrow widths.
     for _ in todos
@@ -1419,7 +1474,17 @@ fn push_todo_status_pips<'a>(
     for _ in 0..done_pips {
         spans.push(Span::styled("●", Style::default().fg(rgb(100, 180, 100))));
     }
-    for _ in 0..active_pips {
+    let self_pips = if self_active == 0 || in_progress == 0 {
+        0
+    } else {
+        (self_active * active_pips)
+            .div_ceil(in_progress)
+            .min(active_pips)
+    };
+    for _ in 0..self_pips {
+        spans.push(Span::styled("●", Style::default().fg(rgb(255, 200, 100))));
+    }
+    for _ in self_pips..active_pips {
         spans.push(Span::styled("●", Style::default().fg(asap_color())));
     }
     for _ in 0..open_pips {
@@ -1726,7 +1791,7 @@ fn render_todo_plan_update(
                     inner_width,
                 )
             }
-            crate::todo::TodoPlanField::UserIntention => {}
+            crate::todo::TodoPlanField::UserIntention | crate::todo::TodoPlanField::Title => {}
         }
     }
 
@@ -2024,9 +2089,12 @@ fn render_todo_item_line_with_background(
     }
     let mut spans = todo_card_item_spans(todo, false);
     spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
     let progress = todo_dependency_progress(
         &dependencies,
-        inner_width.saturating_sub(12).min(inner_width / 2),
+        inner_width
+            .saturating_sub(title_width + 2)
+            .max(inner_width.saturating_sub(12).min(inner_width / 2)),
     );
     let progress_width = progress.width();
     if progress_width > 0 {
@@ -2058,14 +2126,19 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
         if remaining < 10 {
             break;
         }
-        let budget = remaining.min(28);
+        let budget = remaining / (tasks.len() - shown).max(1);
         if shown > 0 {
             spans.push(Span::raw("  "));
         }
-        let label_budget = budget.saturating_sub(15).min(10);
+        let label_budget = budget.saturating_sub(15);
         let clean_label = task.label.split_whitespace().collect::<Vec<_>>().join(" ");
-        let label =
-            super::truncate_line_with_ellipsis_to_width(&Line::raw(clean_label), label_budget);
+        let label = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                clean_label,
+                Style::default().fg(todo_meta_color()),
+            )),
+            label_budget,
+        );
         let label_width = label.width();
         if label_width > 0 {
             spans.extend(label.spans);
@@ -2114,6 +2187,9 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     } else {
         match todo.status.as_str() {
             "completed" => ("✓", rgb(105, 190, 125)),
+            "in_progress" if todo.assigned_to.as_deref() == Some("@self") => {
+                ("●", rgb(255, 200, 100))
+            }
             "in_progress" => ("●", asap_color()),
             "cancelled" => ("✗", rgb(190, 105, 115)),
             _ => ("○", rgb(135, 145, 160)),
@@ -2122,8 +2198,8 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
     let text_color = match todo.status.as_str() {
         "completed" => rgb(135, 150, 145),
         "cancelled" => rgb(145, 130, 135),
-        "in_progress" => rgb(225, 232, 240),
-        _ => rgb(195, 202, 212),
+        "in_progress" => rgb(170, 190, 220),
+        _ => rgb(155, 170, 195),
     };
     let mut spans = vec![
         Span::raw("  "),
@@ -3063,8 +3139,8 @@ fn swarm_notification_style(title: Option<&str>) -> (&'static str, Color, Color)
 
 /// Trailing badge text appended to a collapsed swarm tldr line. Kept as
 /// constants so click hit-testing and rendering stay in sync.
-pub(crate) const SWARM_EXPAND_BADGE: &str = "▸ expand";
-pub(crate) const SWARM_COLLAPSE_BADGE: &str = "▾ collapse";
+pub(crate) const SWARM_EXPAND_BADGE: &str = "⊞";
+pub(crate) const SWARM_COLLAPSE_BADGE: &str = "⊟";
 pub(crate) const SWARM_DIFF_EXPAND_BADGE: &str = "▸ diff";
 pub(crate) const SWARM_DIFF_COLLAPSE_BADGE: &str = "▾ hide";
 pub(crate) const SWARM_AGENT_SNAPSHOT_TITLE: &str = "swarm-agent-snapshot";
@@ -3178,6 +3254,7 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
 fn render_compact_agent_notification(
     title: &str,
     content: &str,
+    since_last_secs: Option<f32>,
     width: u16,
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
@@ -3245,9 +3322,20 @@ fn render_compact_agent_notification(
         };
         // Keep the full click target only when it fits. At very narrow widths
         // the preview wins rather than letting a badge force a second row.
+        // Short plain notes stay clean: usage only appears on collapsible
+        // messages or when the time since this agent's last message is known.
+        let usage_text = (badge.is_some() || since_last_secs.is_some())
+            .then(|| swarm_notification_usage_label(content, since_last_secs))
+            .flatten()
+            .map(|usage| format!("  {usage}"))
+            .filter(|usage| usage.width() + 8 < max_width);
+        let usage_width = usage_text
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
         let badge_text = badge
             .map(|badge| format!("  {badge}"))
-            .filter(|badge| badge.width() < max_width);
+            .filter(|badge| badge.width() + usage_width < max_width);
         let badge_width = badge_text
             .as_deref()
             .map(UnicodeWidthStr::width)
@@ -3255,8 +3343,12 @@ fn render_compact_agent_notification(
         prefix.push(Span::styled(preview, body_style));
         let mut line = super::truncate_line_with_ellipsis_to_width(
             &Line::from(prefix),
-            max_width.saturating_sub(badge_width).max(1),
+            max_width.saturating_sub(badge_width + usage_width).max(1),
         );
+        if let Some(usage_text) = usage_text {
+            line.spans
+                .push(Span::styled(usage_text, Style::default().fg(dim_color())));
+        }
         if let Some(badge_text) = badge_text {
             line.spans.push(Span::styled(
                 badge_text,
@@ -3318,6 +3410,28 @@ fn render_compact_agent_notification(
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     Some(lines)
+}
+
+/// "time since this agent's previous message, approx tokens" for a swarm
+/// notification. Time is omitted when unknown (first message, replay).
+fn swarm_notification_usage_label(content: &str, since_last_secs: Option<f32>) -> Option<String> {
+    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
+        .map(|parsed| format!("{} {}", parsed.tldr, parsed.body))
+        .unwrap_or_else(|| content.to_string());
+    let tokens = crate::util::estimate_tokens(body.trim());
+    if tokens == 0 {
+        return None;
+    }
+    let tokens = crate::util::format_approx_token_count(tokens);
+    Some(
+        match since_last_secs.filter(|secs| secs.is_finite() && *secs >= 0.0) {
+            Some(secs) => format!(
+                "{}, {tokens}",
+                crate::message::Message::format_duration((secs as f64 * 1000.0).round() as u64)
+            ),
+            None => tokens,
+        },
+    )
 }
 
 fn render_compact_swarm_await(
@@ -3414,7 +3528,9 @@ pub(crate) fn render_swarm_message(
 
     let centered = markdown::center_code_blocks();
     let title = msg.title.as_deref().unwrap_or("Swarm").trim();
-    if let Some(lines) = render_compact_agent_notification(title, &msg.content, width) {
+    if let Some(lines) =
+        render_compact_agent_notification(title, &msg.content, msg.duration_secs, width)
+    {
         return lines;
     }
     if let Some(lines) = render_compact_swarm_await(title, &msg.content, width) {

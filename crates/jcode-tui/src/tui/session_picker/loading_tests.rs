@@ -1,4 +1,31 @@
 use super::*;
+
+#[test]
+fn preview_loading_preserves_live_tool_duration_metadata() {
+    let mut session = Session::create_with_id("preview_metadata".into(), None, None);
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "tool-result".into(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool-call".into(),
+            content: "completed".into(),
+            is_error: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: Some(1250),
+        token_usage: None,
+    });
+    let live = crate::tui::display_messages_from_session(&session);
+    let preview = build_messages_preview(&session);
+    assert_eq!(preview.len(), live.len());
+    let tool = preview.iter().find(|msg| msg.role == "tool").unwrap();
+    assert_eq!(tool.duration_secs, Some(1.25));
+    for (preview, live) in preview.iter().zip(live) {
+        assert_eq!(preview.duration_secs, live.duration_secs);
+        assert_eq!(preview.title, live.title);
+    }
+}
 use std::path::Path;
 use std::sync::{
     Arc, OnceLock,
@@ -210,6 +237,70 @@ fn trivial_hidden_only_snapshot_detector_keeps_system_plus_visible_message() {
 }
 
 #[test]
+fn global_recency_budget_merges_sources_without_counting_test_sessions() {
+    let make = |id: &str, age: i64, source: SessionSource, debug: bool| {
+        let now = chrono::Utc::now() - chrono::Duration::seconds(age);
+        SessionInfo {
+            id: id.into(),
+            parent_id: None,
+            short_name: id.into(),
+            icon: String::new(),
+            title: id.into(),
+            message_count: 1,
+            user_message_count: 1,
+            assistant_message_count: 0,
+            created_at: now,
+            last_message_time: now,
+            last_active_at: Some(now),
+            working_dir: None,
+            model: None,
+            provider_key: None,
+            is_canary: false,
+            is_debug: debug,
+            saved: id == "old-saved",
+            save_label: None,
+            status: SessionStatus::Closed,
+            needs_catchup: false,
+            estimated_tokens: 0,
+            first_user_prompt: None,
+            messages_preview: Vec::new(),
+            search_index: String::new(),
+            server_name: None,
+            server_icon: None,
+            source,
+            resume_target: ResumeTarget::JcodeSession {
+                session_id: id.into(),
+            },
+            external_path: None,
+            todo_statuses: Vec::new(),
+        }
+    };
+    let mut sessions = vec![
+        make("old-claude", 100, SessionSource::ClaudeCode, false),
+        make("new-jcode", 1, SessionSource::Jcode, false),
+        make("test", 0, SessionSource::Jcode, true),
+        make("new-codex", 2, SessionSource::Codex, false),
+        make("old-saved", 90, SessionSource::Jcode, false),
+    ];
+    limit_sessions_by_recency(&mut sessions, 2);
+    let visible: Vec<_> = sessions
+        .iter()
+        .filter(|s| !s.is_debug)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(visible, ["new-jcode", "new-codex"]);
+    assert!(sessions.iter().any(|s| s.id == "test"));
+
+    let mut sessions: Vec<_> = (0..501)
+        .map(|i| make(&format!("jcode-{i}"), i, SessionSource::Jcode, false))
+        .chain([make("older-codex", 1000, SessionSource::Codex, false)])
+        .collect();
+    limit_sessions_by_recency(&mut sessions, super::super::DEFAULT_SESSION_SCAN_LIMIT);
+    assert_eq!(sessions.len(), 500);
+    assert!(sessions.iter().all(|s| s.source == SessionSource::Jcode));
+}
+
+#[test]
 fn cached_grouped_sessions_round_trip_from_disk() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
@@ -252,6 +343,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
             session_id: "session_cache_test_1770000000000".to_string(),
         },
         external_path: None,
+        todo_statuses: Vec::new(),
     };
     let cache = GroupedSessionListDiskCache {
         version: SESSION_LIST_DISK_CACHE_VERSION,
@@ -271,6 +363,162 @@ fn cached_grouped_sessions_round_trip_from_disk() {
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "session_cache_test_1770000000000");
     assert_eq!(orphans[0].title, "Cache test");
+}
+
+#[test]
+fn grouped_refresh_bypasses_fresh_in_process_session_cache() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    invalidate_session_list_cache();
+    let _initial = load_sessions().expect("populate in-process cache");
+
+    let id = "session_justclosed_1770000000000";
+    std::fs::write(sessions_dir.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({
+        "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "recover this session"}]}]
+    })).unwrap()).unwrap();
+    // Ordinary callers still use the fresh cache. The explicit refresh must not.
+    assert!(!load_sessions().unwrap().iter().any(|s| s.id == id));
+    let (groups, orphans) = load_sessions_grouped().expect("forced grouped refresh");
+    assert!(
+        orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .any(|s| s.id == id)
+    );
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _account = EnvVarGuard::set_str("JCODE_API_KEY", "");
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set_path("JCODE_RUNTIME_DIR", temp.path());
+    let _limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+    let dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "session_recovered_1770000000000";
+    let path = dir.join(format!("{id}.json"));
+    let write_snapshot =
+        |title: &str| {
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "title": title, "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "recover me"}]}]
+        })).unwrap()).unwrap();
+        };
+    write_snapshot("Stale title");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let stale = parse_jcode_session_info(&dir, id, &catchup).unwrap();
+    write_grouped_session_list_disk_cache(&dir, session_scan_limit(), &[], &[stale]);
+    write_snapshot("Latest title");
+    // The full historical scan must not displace a just-closed transcript
+    // when newer sessions exhaust its bounded candidate budget.
+    std::thread::sleep(Duration::from_millis(10));
+    let newer = std::fs::read(&path).unwrap();
+    for index in 0..55 {
+        std::fs::write(dir.join(format!("session_newer_{index}.json")), &newer).unwrap();
+    }
+    assert!(
+        !load_sessions_inner(true)
+            .unwrap()
+            .iter()
+            .any(|s| s.id == id)
+    );
+    session::record_window_closed(id);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    send_session_list_updates_with_discovery(sender, true, || Ok(true));
+    for _ in 0..3 {
+        let super::super::SessionListUpdate::Cached((groups, orphans)) = receiver.recv().unwrap()
+        else {
+            panic!("recent recovery and cache must precede the history refresh");
+        };
+        let recovered: Vec<_> = orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .filter(|s| s.id == id)
+            .collect();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].title, "Latest title");
+    }
+    let super::super::SessionListUpdate::Fresh(Ok((groups, orphans))) = receiver.recv().unwrap()
+    else {
+        panic!("expected final fresh list");
+    };
+    assert!(
+        orphans
+            .iter()
+            .chain(groups.iter().flat_map(|g| g.sessions.iter()))
+            .any(|s| s.id == id),
+        "bounded history scan must retain recovered session"
+    );
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn failed_cloud_refresh_warns_without_discarding_local_or_last_good_cloud_rows() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let local_id = "session_cloud_failure_local";
+    let mut session = Session::create_with_id(local_id.into(), None, Some("Local work".into()));
+    session.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Keep this local session usable".into(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let cloud_id = "session_cloud_failure_cached";
+    let lease = storage::SessionLease {
+        session_id: cloud_id.into(),
+        epoch: 5,
+        away_host: Some("jcode-cloud".into()),
+        repo_root: Some("/cloud/cached".into()),
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: "2026-11-08T05:00:00Z".into(),
+    };
+    storage::write_session_lease(&lease).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    send_session_list_updates_with_discovery(sender, true, || {
+        anyhow::bail!("synthetic account failure")
+    });
+    let mut warning_seen = false;
+    let mut fresh_seen = false;
+    for update in receiver {
+        match update {
+            super::super::SessionListUpdate::CloudUnavailable(warning) => {
+                assert!(warning.contains("Reopen /resume"));
+                warning_seen = true;
+            }
+            super::super::SessionListUpdate::Fresh(result) => {
+                assert!(
+                    warning_seen,
+                    "explain incomplete discovery before ending refresh"
+                );
+                let (groups, orphans) = result.unwrap();
+                let ids: HashSet<_> = groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter())
+                    .chain(orphans.iter())
+                    .map(|s| s.id.as_str())
+                    .collect();
+                assert!(ids.contains(local_id));
+                assert!(ids.contains(cloud_id));
+                fresh_seen = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(warning_seen && fresh_seen);
+    assert_eq!(storage::read_session_lease(cloud_id), Some(lease));
+    invalidate_session_list_cache();
 }
 
 #[test]
@@ -673,9 +921,19 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         token_usage: None,
     });
     session.save().expect("save session");
+    let sessions_dir = temp.path().join("sessions");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    assert!(
+        parse_jcode_session_info(&sessions_dir, session_id, &catchup)
+            .expect("session without todos")
+            .todo_statuses
+            .is_empty()
+    );
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_after: None,
+            lane_owner: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -702,7 +960,37 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         .find(|session| session.id == session_id)
         .expect("todo-titled session present");
     assert_eq!(loaded.title, "Improve resume session names");
+    assert_eq!(loaded.todo_statuses, ["in_progress"]);
     assert!(loaded.search_index.contains("improve resume session names"));
+
+    let mut legacy = serde_json::to_value(loaded).expect("serialize picker session");
+    legacy.as_object_mut().unwrap().remove("todo_statuses");
+    let legacy: SessionInfo = serde_json::from_value(legacy).expect("legacy picker session");
+    assert!(legacy.todo_statuses.is_empty());
+
+    let mut todos = crate::todo::load_todos(session_id).expect("load todos");
+    for (index, status) in ["pending", "completed", "cancelled", "future_status"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut todo = todos[0].clone();
+        todo.id = format!("status-{index}");
+        todo.status = status.to_string();
+        todos.push(todo);
+    }
+    crate::todo::save_todos(session_id, &todos).expect("save mixed statuses");
+    let loaded = parse_jcode_session_info(&sessions_dir, session_id, &catchup)
+        .expect("session with mixed todo statuses");
+    assert_eq!(
+        loaded.todo_statuses,
+        [
+            "in_progress",
+            "pending",
+            "completed",
+            "cancelled",
+            "future_status"
+        ]
+    );
 }
 
 #[test]
@@ -734,6 +1022,8 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_after: None,
+            lane_owner: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -763,7 +1053,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
 }
 
 #[test]
-fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
+fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -815,8 +1105,8 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
     assert!(
         sessions
             .iter()
-            .any(|session| session.id == "session_saved_beyond_scan_limit"),
-        "saved sessions should remain visible even when the recency scan limit is full"
+            .all(|session| session.id != "session_saved_beyond_scan_limit"),
+        "old saved sessions must not bypass the combined recency budget"
     );
 }
 
@@ -1306,3 +1596,91 @@ fn benchmark_resume_loading_reports_timings() {
 
 #[path = "loading_scope_tests.rs"]
 mod loading_scope;
+
+#[test]
+fn summary_tracks_newest_message_timestamp_across_roles() {
+    let data: SessionMessageSummaryData = serde_json::from_str(
+        r#"[
+            {"role":"user","content":"hi","timestamp":"2026-01-01T00:00:00Z"},
+            {"role":"assistant","content":"later tool reply","timestamp":"2026-01-01T03:00:00Z"},
+            {"role":"user","content":"no ts"}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        data.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-01T03:00:00+00:00".to_string())
+    );
+
+    let mut base: SessionMessageSummaryData = serde_json::from_str(
+        r#"[{"role":"user","content":"a","timestamp":"2026-01-01T00:00:00Z"}]"#,
+    )
+    .unwrap();
+    base.merge(
+        serde_json::from_str(
+            r#"[{"role":"assistant","content":"b","timestamp":"2026-01-02T00:00:00Z"}]"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        base.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-02T00:00:00+00:00".to_string())
+    );
+}
+
+#[test]
+fn external_previews_index_tool_blocks_at_their_own_weight() {
+    use crate::tui::session_picker::transcript_search::source::{Source, metadata_sources};
+    let temp = tempfile::tempdir().expect("temp dir");
+    let claude = temp.path().join("claude.jsonl");
+    std::fs::write(
+        &claude,
+        concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"please fix kiwiflake\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"bash\",\"input\":{\"command\":\"grep mangoroot\",\"intent\":\"find papayaplan\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"zebradump output\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_claude_code_external_preview(&claude).expect("preview");
+    let index = build_classified_search_index("claude:x", "x", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "papayaplan", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::Intent),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+
+    let codex = temp.path().join("codex.jsonl");
+    std::fs::write(
+        &codex,
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"c\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"kiwiflake please\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"mangoroot\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"zebradump\"}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_codex_external_preview(&codex).expect("preview");
+    let index = build_classified_search_index("codex:c", "c", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+}

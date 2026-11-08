@@ -158,6 +158,7 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
     handle_server_event(
         &mut app,
         ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 10_000,
             output: 10,
             cache_read_input: Some(0),
@@ -170,6 +171,7 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
     handle_server_event(
         &mut app,
         ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 10_000,
             output: 10,
             cache_read_input: Some(0),

@@ -21,7 +21,6 @@ use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmEvent, SwarmMember, VersionedPlan,
     debug_control_allowed, fanout_session_event,
 };
-use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::protocol::{Request, ServerEvent, TranscriptMode, decode_request, encode_event};
 use crate::provider::Provider;
@@ -32,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -231,13 +230,32 @@ pub(super) async fn inject_transcript(
     )
     .await?;
 
-    let delivered = fanout_session_event(
-        swarm_members,
-        &session_id,
-        ServerEvent::Transcript { text, mode },
-    )
-    .await
-        > 0;
+    // Every attached client submits a transcript it receives, so a session
+    // open in two windows would send it twice. Deliver to the most recently
+    // active attachment only, falling back to fanout when none is known.
+    let event = ServerEvent::Transcript { text, mode };
+    let newest_connection = client_connections
+        .read()
+        .await
+        .values()
+        .filter(|info| info.session_id == session_id)
+        .max_by_key(|info| info.last_seen)
+        .map(|info| info.client_id.clone());
+    let single_target = match newest_connection {
+        Some(connection_id) => {
+            let members = swarm_members.read().await;
+            members
+                .get(&session_id)
+                .and_then(|member| member.event_txs.get(&connection_id))
+                .filter(|tx| !tx.is_closed())
+                .cloned()
+        }
+        None => None,
+    };
+    let delivered = match single_target {
+        Some(tx) if tx.send(event.clone()).is_ok() => true,
+        _ => fanout_session_event(swarm_members, &session_id, event).await > 0,
+    };
 
     if !delivered {
         anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);
@@ -246,13 +264,30 @@ pub(super) async fn inject_transcript(
     Ok(ServerEvent::Done { id })
 }
 
+/// Forward live push-to-talk state to one session's clients. Best effort:
+/// a session without a live client simply has nothing to show.
+pub(super) async fn forward_voice_activity(
+    id: u64,
+    session_id: &str,
+    activity: crate::protocol::VoiceActivity,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> ServerEvent {
+    fanout_session_event(
+        swarm_members,
+        session_id,
+        ServerEvent::VoiceActivity { activity },
+    )
+    .await;
+    ServerEvent::Done { id }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "debug client wiring fans out across sessions, swarms, files, channels, jobs, and transport state"
 )]
 pub(super) async fn handle_debug_client(
     stream: Stream,
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: crate::server::SessionAgents,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,
@@ -384,6 +419,15 @@ pub(super) async fn handle_debug_client(
                 writer.write_all(json.as_bytes()).await?;
             }
 
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = forward_voice_activity(id, &session_id, activity, &swarm_members).await;
+                writer.write_all(encode_event(&event).as_bytes()).await?;
+            }
+
             Request::DebugCommand {
                 id,
                 command,
@@ -461,7 +505,7 @@ pub(super) async fn handle_debug_client(
                     }
                     _ => {
                         // Server commands (default)
-                        if let Some(output) = super::group_transfer::handle(
+                        match super::group_transfer::handle(
                             cmd,
                             &sessions,
                             &super::SwarmState {
@@ -471,125 +515,134 @@ pub(super) async fn handle_debug_client(
                                 coordinators: Arc::clone(&swarm_coordinators),
                             },
                         )
-                        .await?
+                        .await
                         {
-                            Ok(output)
-                        } else if let Some(output) =
-                            maybe_handle_job_command(cmd, &debug_jobs).await?
-                        {
-                            Ok(output)
-                        } else if let Some(output) = maybe_handle_session_admin_command(
-                            cmd,
-                            &sessions,
-                            &session_id,
-                            &provider,
-                            &swarm_members,
-                            &swarms_by_id,
-                            &swarm_coordinators,
-                            &swarm_plans,
-                            &event_history,
-                            &event_counter,
-                            &swarm_event_tx,
-                            &soft_interrupt_queues,
-                            mcp_pool.clone(),
-                        )
-                        .await?
-                        {
-                            Ok(output)
-                        } else if let Some(output) = maybe_handle_server_state_command(
-                            cmd,
-                            &sessions,
-                            &client_connections,
-                            &swarm_members,
-                            &client_debug_state,
-                            &server_identity,
-                            server_start_time,
-                            &swarms_by_id,
-                            &shared_context,
-                            &swarm_plans,
-                            &swarm_coordinators,
-                            &file_touch,
-                            &channel_subscriptions,
-                            &channel_subscriptions_by_session,
-                            &debug_jobs,
-                            &event_history,
-                            &shutdown_signals,
-                            &soft_interrupt_queues,
-                        )
-                        .await?
-                        {
-                            Ok(output)
-                        } else if let Some(output) = maybe_handle_swarm_read_command(
-                            cmd,
-                            &sessions,
-                            &swarm_members,
-                            &swarms_by_id,
-                            &shared_context,
-                            &swarm_plans,
-                            &swarm_coordinators,
-                            &file_touch,
-                            &channel_subscriptions,
-                            &server_identity,
-                        )
-                        .await?
-                        {
-                            Ok(output)
-                        } else if let Some(output) = maybe_handle_swarm_write_command(
-                            cmd,
-                            &DebugSwarmWriteContext {
-                                session_id: &session_id,
-                                swarm_members: &swarm_members,
-                                swarms_by_id: &swarms_by_id,
-                                shared_context: &shared_context,
-                                swarm_plans: &swarm_plans,
-                                swarm_coordinators: &swarm_coordinators,
-                            },
-                        )
-                        .await?
-                        {
-                            Ok(output)
-                        } else if let Some(output) =
-                            maybe_handle_ambient_command(cmd, &ambient_runner, &provider).await?
-                        {
-                            Ok(output)
-                        } else if maybe_handle_event_subscription_command(
-                            id,
-                            cmd,
-                            &swarm_event_tx,
-                            &mut writer,
-                        )
-                        .await?
-                        {
-                            return Ok(());
-                        } else if let Some(output) =
-                            maybe_handle_event_query_command(cmd, &event_history).await
-                        {
-                            Ok(output)
-                        } else if cmd == "swarm:help" {
-                            Ok(swarm_debug_help_text())
-                        } else if cmd == "help" {
-                            Ok(debug_help_text())
-                        } else {
-                            match resolve_debug_session(&sessions, &session_id, requested_session)
-                                .await
-                            {
-                                Ok((_session, agent)) => {
-                                    execute_debug_command(
-                                        agent,
-                                        cmd,
-                                        Arc::clone(&debug_jobs),
-                                        Some(&server_identity),
-                                        Some(DebugInterruptContext {
-                                            session_id: _session,
-                                            shutdown_signals: Arc::clone(&shutdown_signals),
-                                            soft_interrupt_queues: Arc::clone(
-                                                &soft_interrupt_queues,
-                                            ),
-                                        }),
+                            Err(error) => Err(error),
+                            Ok(Some(output)) => Ok(output),
+                            Ok(None) => {
+                                if let Some(output) =
+                                    maybe_handle_job_command(cmd, &debug_jobs).await?
+                                {
+                                    Ok(output)
+                                } else if let Some(output) = maybe_handle_session_admin_command(
+                                    cmd,
+                                    &sessions,
+                                    &session_id,
+                                    &provider,
+                                    &swarm_members,
+                                    &swarms_by_id,
+                                    &swarm_coordinators,
+                                    &swarm_plans,
+                                    &event_history,
+                                    &event_counter,
+                                    &swarm_event_tx,
+                                    &soft_interrupt_queues,
+                                    mcp_pool.clone(),
+                                )
+                                .await?
+                                {
+                                    Ok(output)
+                                } else if let Some(output) = maybe_handle_server_state_command(
+                                    cmd,
+                                    &sessions,
+                                    &client_connections,
+                                    &swarm_members,
+                                    &client_debug_state,
+                                    &server_identity,
+                                    server_start_time,
+                                    &swarms_by_id,
+                                    &shared_context,
+                                    &swarm_plans,
+                                    &swarm_coordinators,
+                                    &file_touch,
+                                    &channel_subscriptions,
+                                    &channel_subscriptions_by_session,
+                                    &debug_jobs,
+                                    &event_history,
+                                    &shutdown_signals,
+                                    &soft_interrupt_queues,
+                                )
+                                .await?
+                                {
+                                    Ok(output)
+                                } else if let Some(output) = maybe_handle_swarm_read_command(
+                                    cmd,
+                                    &sessions,
+                                    &swarm_members,
+                                    &swarms_by_id,
+                                    &shared_context,
+                                    &swarm_plans,
+                                    &swarm_coordinators,
+                                    &file_touch,
+                                    &channel_subscriptions,
+                                    &server_identity,
+                                )
+                                .await?
+                                {
+                                    Ok(output)
+                                } else if let Some(output) = maybe_handle_swarm_write_command(
+                                    cmd,
+                                    &DebugSwarmWriteContext {
+                                        session_id: &session_id,
+                                        swarm_members: &swarm_members,
+                                        swarms_by_id: &swarms_by_id,
+                                        shared_context: &shared_context,
+                                        swarm_plans: &swarm_plans,
+                                        swarm_coordinators: &swarm_coordinators,
+                                    },
+                                )
+                                .await?
+                                {
+                                    Ok(output)
+                                } else if let Some(output) =
+                                    maybe_handle_ambient_command(cmd, &ambient_runner, &provider)
+                                        .await?
+                                {
+                                    Ok(output)
+                                } else if maybe_handle_event_subscription_command(
+                                    id,
+                                    cmd,
+                                    &swarm_event_tx,
+                                    &mut writer,
+                                )
+                                .await?
+                                {
+                                    return Ok(());
+                                } else if let Some(output) =
+                                    maybe_handle_event_query_command(cmd, &event_history).await
+                                {
+                                    Ok(output)
+                                } else if cmd == "swarm:help" {
+                                    Ok(swarm_debug_help_text())
+                                } else if cmd == "help" {
+                                    Ok(debug_help_text())
+                                } else {
+                                    match resolve_debug_session(
+                                        &sessions,
+                                        &session_id,
+                                        requested_session,
                                     )
                                     .await
+                                    {
+                                        Ok((_session, agent)) => {
+                                            execute_debug_command(
+                                                agent,
+                                                cmd,
+                                                Arc::clone(&debug_jobs),
+                                                Some(&server_identity),
+                                                Some(DebugInterruptContext {
+                                                    session_id: _session,
+                                                    shutdown_signals: Arc::clone(&shutdown_signals),
+                                                    soft_interrupt_queues: Arc::clone(
+                                                        &soft_interrupt_queues,
+                                                    ),
+                                                }),
+                                            )
+                                            .await
+                                        }
+                                        Err(e) => Err(e),
+                                    }
                                 }
-                                Err(e) => Err(e),
                             }
                         }
                     }

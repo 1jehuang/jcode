@@ -6,6 +6,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -13,6 +14,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let key_b = BodyCacheKey {
         width: 41,
@@ -20,6 +22,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
     };
     let different_latex = BodyCacheKey {
         latex_rendering: crate::config::LatexRenderingMode::Unicode,
+        show_link_urls: false,
         ..key_a.clone()
     };
 
@@ -72,6 +75,31 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
     assert!(cache.best_incremental_base(&different_latex, 4).is_none());
+
+    let compact_key = BodyCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = BodyCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone(), 3, 0);
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.best_incremental_base(&key_a, 4).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        assert!(cache.best_incremental_base(&compact_key, 4).is_none());
+        assert!(cache.take_best_incremental_base(&compact_key).is_none());
+        let link_urls_key = BodyCacheKey {
+            show_link_urls: true,
+            ..key_a.clone()
+        };
+        assert!(cache.get_exact(&link_urls_key).is_none());
+        assert!(cache.best_incremental_base(&link_urls_key, 4).is_none());
+        assert!(cache.take_best_incremental_base(&link_urls_key).is_none());
+        assert!(cache.take_best_incremental_base(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -82,6 +110,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         pin_images: true,
         inline_images_visible: true,
@@ -89,6 +118,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let resized_key = BodyCacheKey {
         messages_version: 2,
@@ -115,6 +145,7 @@ fn test_body_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             pin_images: true,
             inline_images_visible: true,
@@ -122,6 +153,7 @@ fn test_body_cache_state_evicts_oldest_entries() {
             expanded_images_version: 0,
             swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
+            show_link_urls: false,
         };
         let prepared = Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from(format!("{idx}"))],
@@ -157,6 +189,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -164,6 +197,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_prepared_messages_with_content_bytes(3 * 1024 * 1024, "body-large-");
 
@@ -187,6 +221,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -194,6 +229,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-");
 
@@ -218,6 +254,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -225,6 +262,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let key_b = BodyCacheKey {
         width: 139,
@@ -256,6 +294,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         pin_images: true,
         inline_images_visible: true,
@@ -263,6 +302,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-base-");
 
@@ -530,6 +570,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -539,6 +580,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {
@@ -547,6 +589,7 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     };
     let different_latex = FullPrepCacheKey {
         latex_rendering: crate::config::LatexRenderingMode::Unicode,
+        show_link_urls: false,
         ..key_a.clone()
     };
 
@@ -598,6 +641,26 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     assert!(Arc::ptr_eq(&hit_b, &prepared_b));
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.get_exact(&different_latex).is_none());
+
+    let compact_key = FullPrepCacheKey {
+        compact_thinking: true,
+        ..key_a.clone()
+    };
+    for oversized in [false, true] {
+        let mut cache = FullPrepCacheState::default();
+        cache.insert(key_a.clone(), prepared_a.clone());
+        if oversized {
+            cache.oversized_entries = std::mem::take(&mut cache.entries);
+        }
+        assert!(cache.get_exact(&key_a).is_some());
+        assert!(cache.get_exact(&compact_key).is_none());
+        let link_urls_key = FullPrepCacheKey {
+            show_link_urls: true,
+            ..key_a.clone()
+        };
+        assert!(cache.get_exact(&link_urls_key).is_none());
+        assert!(cache.get_exact(&key_a).is_some());
+    }
 }
 
 #[test]
@@ -609,6 +672,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         messages_version: 1,
         diagram_mode: crate::config::DiagramDisplayMode::None,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: Some(1500),
         is_processing: false,
         streaming_text_len: 0,
@@ -619,6 +683,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
     };
     let resized_key = FullPrepCacheKey {
         mermaid_aspect_bucket: Some(2500),
@@ -644,6 +709,7 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             messages_version: 1,
             diagram_mode: crate::config::DiagramDisplayMode::Pinned,
             centered: false,
+            compact_thinking: false,
             mermaid_aspect_bucket: None,
             is_processing: false,
             streaming_text_len: 0,
@@ -653,6 +719,7 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             expanded_images_version: 0,
             swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
+            show_link_urls: false,
             inline_images_visible: true,
         };
         let prepared = make_prepared_chat_frame(Arc::new(PreparedMessages {
@@ -690,6 +757,7 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         messages_version: 99,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: false,
         streaming_text_len: 0,
@@ -699,6 +767,7 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let prepared = make_prepared_chat_frame_with_content_bytes(3 * 1024 * 1024, "full-large-");
@@ -723,6 +792,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,
@@ -732,6 +802,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let prepared = make_oversized_prepared_chat_frame("full-oversized-");
@@ -758,6 +829,7 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         messages_version: 120,
         diagram_mode: crate::config::DiagramDisplayMode::Pinned,
         centered: false,
+        compact_thinking: false,
         mermaid_aspect_bucket: None,
         is_processing: true,
         streaming_text_len: 4096,
@@ -767,6 +839,7 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         expanded_images_version: 0,
         swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
         inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {
@@ -970,3 +1043,105 @@ fn test_prepare_body_collapses_anchored_images_when_inline_images_hidden() {
 #[path = "cache_equivalence_tests.rs"]
 mod cache_equivalence;
 use cache_equivalence::assert_prepared_equivalent;
+
+/// Frames keyed on partial streaming text can never be hit again (the stream
+/// only grows and the end of the turn bumps `messages_version`), so a new
+/// insert must not keep them pinned. Settled frames stay cached.
+#[test]
+fn test_full_prep_cache_drops_superseded_streaming_frames() {
+    let mut cache = FullPrepCacheState::default();
+    let key_for = |streaming_text_len: usize, width: u16| FullPrepCacheKey {
+        width,
+        height: 20,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 1,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        compact_thinking: false,
+        mermaid_aspect_bucket: None,
+        is_processing: streaming_text_len > 0,
+        streaming_text_len,
+        streaming_text_hash: streaming_text_len as u64,
+        batch_progress_hash: 0,
+        inline_images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
+        inline_images_visible: true,
+    };
+    let prepared = || {
+        make_prepared_chat_frame(Arc::new(PreparedMessages {
+            wrapped_lines: vec![Line::from("x")],
+            wrapped_plain_lines: Arc::new(vec!["x".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
+            raw_plain_lines: Arc::new(Vec::new()),
+            wrapped_line_map: Arc::new(Vec::new()),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        }))
+    };
+
+    cache.insert(key_for(0, 80), prepared());
+    cache.insert(key_for(10, 80), prepared());
+    cache.insert(key_for(20, 80), prepared());
+
+    assert!(cache.get_exact(&key_for(0, 80)).is_some(), "settled frame kept");
+    assert!(cache.get_exact(&key_for(10, 80)).is_none(), "stale stream frame dropped");
+    assert!(cache.get_exact(&key_for(20, 80)).is_some(), "newest stream frame kept");
+}
+
+#[test]
+fn test_body_cache_drops_superseded_message_versions() {
+    let mut cache = BodyCacheState::default();
+    let key_for = |width: u16, version: u64| BodyCacheKey {
+        width,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: version,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        compact_thinking: false,
+        mermaid_aspect_bucket: None,
+        pin_images: true,
+        inline_images_visible: true,
+        images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        latex_rendering: crate::config::LatexRenderingMode::Image,
+        show_link_urls: false,
+    };
+    let prepared = || {
+        Arc::new(PreparedMessages {
+            wrapped_lines: vec![Line::from("x")],
+            wrapped_plain_lines: Arc::new(vec!["x".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
+            raw_plain_lines: Arc::new(Vec::new()),
+            wrapped_line_map: Arc::new(Vec::new()),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        })
+    };
+    for version in 1..=5 {
+        cache.insert(key_for(80, version), prepared(), version as usize, 0);
+    }
+    // Other layouts are kept for fast width toggles.
+    cache.insert(key_for(120, 3), prepared(), 3, 0);
+
+    assert_eq!(cache.entries.len(), 2);
+    assert!(cache.get_exact(&key_for(80, 5)).is_some());
+    assert!(cache.get_exact(&key_for(120, 3)).is_some());
+}

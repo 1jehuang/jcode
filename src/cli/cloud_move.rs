@@ -52,6 +52,12 @@ mod repo_tests;
 #[path = "cloud_replace.rs"]
 mod replace;
 
+#[path = "cloud_session_ops.rs"]
+mod ops;
+
+#[path = "cloud_diagnostics.rs"]
+mod diagnostics;
+
 #[path = "cloud_env.rs"]
 pub(super) mod environment;
 
@@ -417,20 +423,8 @@ fn mark_memory_sent(host: &str, memory: &Path, bytes: &[u8]) {
     }
 }
 
-fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = std::time::Instant::now();
-    let result = operation();
-    crate::logging::info(&format!(
-        "cloud move: {stage} {} in {:.3}s",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        },
-        started.elapsed().as_secs_f64()
-    ));
-    result
-}
+mod timing;
+use timing::timed_move_stage;
 
 pub(crate) fn run_move(
     session_ref: Option<&str>,
@@ -790,7 +784,7 @@ pub(crate) fn run_move(
     Ok(report)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReturnReport {
     pub session_id: String,
     pub host: String,
@@ -799,7 +793,7 @@ pub(crate) struct ReturnReport {
     pub merge: MergeOutcome,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum MergeOutcome {
     NoRepo,
@@ -822,12 +816,19 @@ pub(crate) fn run_return(
     session_ref: Option<&str>,
     target: &Target,
     refs_only: bool,
+    keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
     group::reject_member_return(&session_id)?;
     let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
+    let receipt_path = return_state_path(&session_id, lease.epoch, "receipt.json")?;
+    if lease.is_here() && receipt_path.exists() {
+        let report: ReturnReport = read_json(&receipt_path)?;
+        complete_remote_return(target, &report)?;
+        return Ok(report);
+    }
     let host = match (&lease.away_host, &target.host) {
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
@@ -837,19 +838,22 @@ pub(crate) fn run_return(
     // ---- export (cloud stops owning at `epoch`) --------------------------
     step("export", &format!("collecting the session from `{host}`"));
     let epoch_arg = epoch.to_string();
+    let completion_supported = target
+        .run_remote(&host, &["cloud", "complete-return", "--help"], None)
+        .is_ok();
     let bytes = retry_ssh(&host, "export", || {
-        target.run_remote(
-            &host,
-            &[
-                "cloud",
-                "export",
-                "--session",
-                &session_id,
-                "--epoch",
-                &epoch_arg,
-            ],
-            None,
-        )
+        let mut args = vec![
+            "cloud",
+            "export",
+            "--session",
+            &session_id,
+            "--epoch",
+            &epoch_arg,
+        ];
+        if completion_supported {
+            args.push("--require-completion");
+        }
+        target.run_remote(&host, &args, None)
     })?;
     let staging = tempfile::Builder::new()
         .prefix("jcode-cloud-return-")
@@ -862,6 +866,9 @@ pub(crate) fn run_return(
     if manifest.session_id != session_id || manifest.epoch != epoch {
         bail!("cloud returned the wrong session/epoch");
     }
+    // Older hosts do not implement completion and use the historical returned
+    // lease. Only opt in when the archive explicitly advertises this protocol.
+    let requires_completion = stage.join("return-completion-v1").is_file();
 
     // The cloud has stopped running turns, so export its final refreshed tokens.
     // On conflict, restore cloud ownership rather than strand the conversation.
@@ -885,7 +892,13 @@ pub(crate) fn run_return(
     } else {
         manifest.auth_accounts.clone()
     };
-    for account in &return_accounts {
+    if keep_local_auth {
+        step(
+            "credentials",
+            "keeping local OAuth credentials; cloud credentials will not be imported",
+        );
+    }
+    for account in return_accounts.iter().filter(|_| !keep_local_auth) {
         step(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
@@ -915,7 +928,7 @@ pub(crate) fn run_return(
                 ..lease.clone()
             })?;
             return Err(
-                error.context("credential return refused; the session remains on the cloud host")
+                error.context("credential return refused; the session remains on the cloud host. To recover without replacing local OAuth credentials, retry with --keep-local-auth")
             );
         }
     }
@@ -962,6 +975,21 @@ pub(crate) fn run_return(
         ),
     );
     install_session(&sess, stage)?;
+    let report = ReturnReport {
+        session_id: session_id.clone(),
+        host,
+        epoch,
+        messages: sess.messages.len(),
+        merge,
+    };
+    // Persist the completion receipt before switching the local lease. A retry
+    // can acknowledge the remote fence even after a lost SSH response/crash.
+    if requires_completion {
+        write_return_state(
+            &return_state_path(&session_id, epoch, "receipt.json")?,
+            &serde_json::to_vec(&report)?,
+        )?;
+    }
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.clone(),
         epoch,
@@ -972,13 +1000,72 @@ pub(crate) fn run_return(
         updated_at: chrono::Utc::now().to_rfc3339(),
     })?;
     let _ = std::fs::remove_file(baseline_path(&session_id)?);
+    if requires_completion {
+        complete_remote_return(target, &report)?;
+    }
     step("done", "session is local again");
-    Ok(ReturnReport {
-        session_id,
-        host,
-        epoch,
-        messages: sess.messages.len(),
-        merge,
+    Ok(report)
+}
+
+fn return_state_path(session_id: &str, epoch: u64, name: &str) -> Result<PathBuf> {
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        bail!("invalid cloud return session id");
+    }
+    Ok(storage::jcode_dir()?
+        .join("cloud-returns")
+        .join(session_id)
+        .join(epoch.to_string())
+        .join(name))
+}
+
+fn write_return_state(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("return state has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn complete_remote_return(target: &Target, report: &ReturnReport) -> Result<()> {
+    retry_ssh(&report.host, "complete return", || {
+        target.run_remote(&report.host, &[
+            "cloud", "complete-return", "--session", &report.session_id,
+            "--epoch", &report.epoch.to_string(),
+        ], None)
+    }).with_context(|| format!(
+        "session is safely local, but the cloud checkout remains protected; upgrade the cloud jcode if needed, then retry `jcode cloud return --session {} --refs-only` to finish recovery",
+        report.session_id
+    ))?;
+    Ok(())
+}
+
+fn complete_return(session_id: &str, epoch: u64) -> Result<()> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    let lease = storage::read_session_lease(session_id).context("missing cloud session lease")?;
+    if lease.epoch != epoch
+        || !matches!(
+            lease.away_host.as_deref(),
+            Some("return-pending" | "returned-complete")
+        )
+    {
+        bail!("cloud return completion has a stale epoch or owner");
+    }
+    storage::write_session_lease(&storage::SessionLease {
+        away_host: Some("returned-complete".to_string()),
+        ..lease
     })
 }
 
@@ -1066,6 +1153,11 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     }
     let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
     group::reject_member_return(session_id)?;
+    if storage::read_session_lease(session_id)
+        .is_some_and(|lease| lease.epoch > epoch || (lease.epoch == epoch && !lease.is_here()))
+    {
+        bail!("stale activation for {session_id} at epoch {epoch}; session ownership has advanced");
+    }
     if !dir.is_dir() {
         // A retried activation whose first attempt succeeded but lost its
         // SSH connection finds the move already installed. Report success.
@@ -1109,19 +1201,44 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
 }
 
 /// Hand the session back: stop owning it here, snapshot repo, stream tarball.
-pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
+pub(crate) fn run_export(session_id: &str, epoch: u64, require_completion: bool) -> Result<()> {
+    let bytes = export_return_archive(session_id, epoch, require_completion)?;
+    std::io::stdout().write_all(&bytes)?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn export_return_archive(
+    session_id: &str,
+    epoch: u64,
+    require_completion: bool,
+) -> Result<Vec<u8>> {
     group::reject_member_return(session_id)?;
     let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
     let lease = storage::read_session_lease(session_id)
         .with_context(|| format!("session {session_id} is not a migrated session on this host"))?;
     // A retried export after a dropped connection finds this host already
-    // released at the same epoch. Snapshotting again only reads, so allow it.
-    let re_export = lease.epoch == epoch && lease.away_host.as_deref() == Some("returned");
+    // released at the same epoch. Replay the durable original archive, never
+    // snapshot a checkout which may have been replaced since the first export.
+    let re_export = lease.epoch == epoch
+        && matches!(
+            lease.away_host.as_deref(),
+            Some("returned" | "return-pending" | "returned-complete")
+        );
     if !re_export && !lease.is_here() {
         bail!("session {session_id} does not live on this host");
     }
     if !re_export && epoch <= lease.epoch {
         bail!("stale export epoch {epoch} (host is at {})", lease.epoch);
+    }
+    let archive_path = return_state_path(session_id, epoch, "export.tar")?;
+    if re_export && archive_path.exists() {
+        return Ok(std::fs::read(&archive_path)?);
+    }
+    if lease.away_host.as_deref() == Some("returned-complete") {
+        bail!(
+            "completed cloud return archive is missing; refusing to snapshot a possibly replaced checkout"
+        );
     }
     if storage::streaming_session_ids().contains(&session_id.to_string()) {
         bail!(
@@ -1130,13 +1247,20 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
     }
     // Stop owning first so nothing new lands after the snapshot.
     storage::write_session_lease(&storage::SessionLease {
-        away_host: Some("returned".to_string()),
+        away_host: Some(
+            if require_completion {
+                "return-pending"
+            } else {
+                "returned"
+            }
+            .to_string(),
+        ),
         epoch,
         updated_at: chrono::Utc::now().to_rfc3339(),
         ..lease.clone()
     })?;
     let result = (|| -> Result<Vec<u8>> {
-        let sess = session::Session::load(session_id)?;
+        let sess = session::Session::load(session_id).context("load cloud return session")?;
         let staging = tempfile::Builder::new()
             .prefix("jcode-cloud-export-")
             .tempdir()?;
@@ -1148,7 +1272,8 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {
             Some(dir) => {
-                let repo = prepare_repo_snapshot(&dir, session_id, stage)?;
+                let repo = prepare_repo_snapshot(&dir, session_id, stage)
+                    .context("snapshot cloud return repository")?;
                 if let Some(repo) = &repo {
                     // The laptop sent `last_sync_head` and the snapshot on top
                     // of it, so it already has that history. Shipping the full
@@ -1201,20 +1326,27 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             serde_json::to_vec_pretty(&manifest)?,
         )?;
         copy_if_exists(&todo_file(session_id)?, &stage.join("todos.json"))?;
+        if require_completion {
+            std::fs::write(stage.join("return-completion-v1"), b"1")?;
+        }
         let tarball = stage.join("return.tar");
         tar_dir(
             stage,
             &tarball,
-            &["manifest.json", "session.json", "todos.json", "repo.bundle"],
+            &[
+                "manifest.json",
+                "session.json",
+                "todos.json",
+                "repo.bundle",
+                "return-completion-v1",
+            ],
         )?;
-        Ok(std::fs::read(&tarball)?)
+        let bytes = std::fs::read(&tarball)?;
+        write_return_state(&archive_path, &bytes)?;
+        Ok(bytes)
     })();
     match result {
-        Ok(bytes) => {
-            std::io::stdout().write_all(&bytes)?;
-            std::io::stdout().flush()?;
-            Ok(())
-        }
+        Ok(bytes) => Ok(bytes),
         Err(error) => {
             // Could not export: keep owning the session here.
             storage::write_session_lease(&lease)?;
@@ -1283,7 +1415,12 @@ pub(crate) fn away_host(session_ref: Option<&str>) -> Result<(String, String)> {
     let lease = storage::read_session_lease(&id).context("session was never moved")?;
     let host = lease
         .away_host
-        .filter(|h| h != "returned")
+        .filter(|h| {
+            !matches!(
+                h.as_str(),
+                "returned" | "return-pending" | "returned-complete"
+            )
+        })
         .context("session lives on this machine")?;
     Ok((id, host))
 }
@@ -1901,6 +2038,52 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::Fork {
+            session,
+            prompt,
+            target,
+            json,
+        } => ops::fork(
+            session.as_deref(),
+            prompt.as_deref(),
+            &target_of(target),
+            json,
+        ),
+        C::Send {
+            session,
+            message,
+            json,
+        } => ops::send(&session, &message, json),
+        C::Status {
+            session,
+            messages,
+            json,
+        } => ops::status(&session, messages, json),
+        C::Wait {
+            session,
+            timeout,
+            messages,
+            json,
+        } => {
+            let result = ops::wait(&session, timeout, messages, json);
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.downcast_ref::<ops::WaitTimeout>().is_some())
+            {
+                std::process::exit(2);
+            }
+            result
+        }
+        C::Logs { session, lines } => ops::logs(&session, lines),
+        C::Problems { limit, json } => diagnostics::problems(limit, json),
+        C::Doctor { target, json } => diagnostics::doctor(&target_of(target), json),
+        C::Inspect {
+            session,
+            messages,
+            log_lines,
+        } => ops::inspect(&session, messages, log_lines),
+        C::RunDetached { session, message } => ops::run_detached(&session, &message),
         C::GroupProtocol => {
             println!("{}", serde_json::json!({ "version": 1 }));
             Ok(())
@@ -1914,6 +2097,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::ReplaceReceive { dry_run } => replace::receive(dry_run),
         C::Env { action } => environment::run_cli(action),
         C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
+        C::Runtime { action } => super::cloud_runtime::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
         C::Prepare { target, json } => {
             let host = prepare_host(&target_of(target))?;
@@ -1973,10 +2157,16 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             session,
             target,
             refs_only,
+            keep_local_auth,
             attach,
             json,
         } => {
-            let report = run_return(session.as_deref(), &target_of(target), refs_only)?;
+            let report = run_return(
+                session.as_deref(),
+                &target_of(target),
+                refs_only,
+                keep_local_auth,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -2047,6 +2237,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Machine { action } => {
             use super::args::CloudMachineAction as A;
             let reply = match action {
+                A::PrepareSsh => return super::cloud_managed::prepare_ssh(),
                 A::Status => super::cloud_managed::status()?,
                 A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
                 A::Stop => super::cloud_managed::stop()?,
@@ -2063,19 +2254,30 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::RouterCredentials => run_router_credentials(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
-        C::Export { session, epoch } => run_export(&session, epoch),
+        C::Export {
+            session,
+            epoch,
+            require_completion,
+        } => run_export(&session, epoch, require_completion),
+        C::CompleteReturn { session, epoch } => complete_return(&session, epoch),
         C::CancelReturn { session, epoch } => {
             group::reject_member_return(&session)?;
             let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
             let lease =
                 storage::read_session_lease(&session).context("missing cloud session lease")?;
-            if lease.epoch != epoch || lease.away_host.as_deref() != Some("returned") {
+            if lease.epoch != epoch || lease.away_host.as_deref() != Some("return-pending") {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
             sess.migration_epoch = epoch;
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
+            // Cancellation is serialized with export. Discard the old snapshot
+            // before restoring ownership so a later return includes new work.
+            let archive = return_state_path(&session, epoch, "export.tar")?;
+            if archive.exists() {
+                std::fs::remove_file(archive)?;
+            }
             storage::write_session_lease(&storage::SessionLease {
                 away_host: None,
                 ..lease

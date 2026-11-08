@@ -1443,7 +1443,7 @@ pub async fn run_transcript_command(
     let request_id = client.send_transcript(&text, mode, session).await?;
 
     loop {
-        match client.read_event().await? {
+        match unwrap_turn_event(client.read_event().await?) {
             crate::protocol::ServerEvent::Ack { id } if id == request_id => {}
             crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
             crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
@@ -1454,7 +1454,32 @@ pub async fn run_transcript_command(
     }
 }
 
-pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+/// `jcode companion --no-*` flags. Each turns a feature off on top of the
+/// `[companion]` config. A flag can never turn on something config disables.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompanionFlags {
+    pub no_voice: bool,
+    pub no_voice_waveform: bool,
+    pub no_voice_notifications: bool,
+    pub no_open: bool,
+    pub no_spawn_terminal: bool,
+    pub no_lid: bool,
+    pub no_browser_updates: bool,
+}
+
+impl CompanionFlags {
+    pub fn apply(self, options: &mut jcode_companion::CompanionOptions) {
+        options.voice &= !self.no_voice;
+        options.voice_waveform &= !self.no_voice_waveform;
+        options.voice_notifications &= !self.no_voice_notifications;
+        options.open &= !self.no_open;
+        options.spawn_terminal &= !self.no_spawn_terminal;
+        options.lid &= !self.no_lid;
+        options.browser_updates &= !self.no_browser_updates;
+    }
+}
+
+pub async fn run_companion_command(status: bool, flags: CompanionFlags) -> Result<()> {
     use crate::companion_client::{CompanionRequest, request_async};
     if status {
         match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
@@ -1470,11 +1495,9 @@ pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
             Err(error) => anyhow::bail!("{error}"),
         }
     }
-    jcode_companion::run(jcode_companion::CompanionOptions {
-        voice: !no_voice,
-        ..Default::default()
-    })
-    .await
+    let mut options = jcode_companion::CompanionOptions::from_config();
+    flags.apply(&mut options);
+    jcode_companion::run(options).await
 }
 
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
@@ -2378,7 +2401,7 @@ async fn run_server_reload_command_to(
     // exec's a new process, which drops this connection after it sends Done;
     // we treat a disconnect after observing Reloading as the expected handoff.
     loop {
-        match client.read_event().await {
+        match client.read_event().await.map(unwrap_turn_event) {
             Ok(ServerEvent::Ack { id }) if id == request_id => {}
             Ok(ServerEvent::Reloading { .. }) => {
                 reloading = true;
@@ -2894,6 +2917,7 @@ async fn run_single_message_command_plain_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
@@ -3011,6 +3035,7 @@ async fn run_single_message_command_capture_with_auto_poke(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
@@ -3208,6 +3233,7 @@ async fn run_single_message_command_ndjson(
             crate::config::config().features.todo_gate_digest,
         );
         match build_run_auto_poke_follow_up_from_todos(
+            crate::config::config().features.todo_gate_digest,
             &actionable_todos,
             confidence_spike_challenged,
             gate_digest,
@@ -3334,6 +3360,17 @@ async fn run_single_message_command_ndjson(
     }
 }
 
+/// Legacy CLI adapters consume the payload even when an identity-aware peer
+/// sends an explicit envelope. Unwrap iteratively to tolerate nested envelopes.
+pub(super) fn unwrap_turn_event(
+    mut event: crate::protocol::ServerEvent,
+) -> crate::protocol::ServerEvent {
+    while let crate::protocol::ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = *inner;
+    }
+    event
+}
+
 fn emit_ndjson_event(
     stdout: &mut impl Write,
     state: &mut NdjsonRunState,
@@ -3341,7 +3378,7 @@ fn emit_ndjson_event(
 ) -> Result<()> {
     use crate::protocol::ServerEvent;
 
-    match event {
+    match unwrap_turn_event(event) {
         ServerEvent::TextDelta { text } => {
             state.text.push_str(&text);
             write_json_line(
@@ -3397,6 +3434,7 @@ fn emit_ndjson_event(
             output,
             cache_read_input,
             cache_creation_input,
+            ..
         } => {
             state.usage = crate::agent::TokenUsage {
                 input_tokens: input,
@@ -3554,73 +3592,12 @@ fn write_json_line(stdout: &mut impl Write, value: &impl Serialize) -> Result<()
     Ok(())
 }
 
-pub async fn run_model_command(
-    choice: &super::provider_init::ProviderChoice,
-    model: Option<&str>,
-    emit_json: bool,
-    verbose: bool,
-) -> Result<()> {
-    let provider = super::provider_init::init_provider_quiet(choice, model).await?;
+#[path = "commands/model_listing.rs"]
+mod model_listing;
 
-    if let Err(err) = provider.prefetch_models().await
-        && !super::output::quiet_enabled()
-    {
-        eprintln!("Warning: failed to refresh dynamic model list: {}", err);
-    }
-
-    let routes = provider.model_routes();
-    let filtered_routes = filter_cli_model_routes_for_choice(choice, &routes);
-    let models = if filtered_routes.len() == routes.len() {
-        collect_cli_model_names(&routes, provider.available_models_display())
-    } else {
-        collect_cli_model_names(&filtered_routes, Vec::new())
-    };
-
-    if models.is_empty() {
-        anyhow::bail!(
-            "No models found for provider '{}'. Check credentials or try a different --provider.",
-            provider.name()
-        );
-    }
-
-    if emit_json {
-        let provider_label = super::provider_init::login_provider_for_choice(choice)
-            .map(|provider| provider.display_name.to_string())
-            .unwrap_or_else(|| {
-                crate::provider_catalog::runtime_provider_display_name(provider.name())
-            });
-        let report = ModelListReport {
-            provider: provider_label,
-            selected_model: provider.model(),
-            models,
-            routes: filtered_routes
-                .iter()
-                .map(|route| ModelListRouteReport {
-                    provider: cli_route_provider_display(&route.provider, &route.api_method),
-                    model: route.model.clone(),
-                    method: cli_api_method_display(&route.api_method),
-                    available: route.available,
-                })
-                .collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        if verbose {
-            println!(
-                "Provider: {}",
-                crate::provider_catalog::runtime_provider_display_name(provider.name())
-            );
-            println!("Selected model: {}", provider.model());
-            println!("Available models: {}", models.len());
-            println!();
-        }
-        for model in models {
-            println!("{}", model);
-        }
-    }
-
-    Ok(())
-}
+#[cfg(test)]
+mod turn_envelope_tests;
+pub use model_listing::run_model_command;
 
 mod model_routes;
 use model_routes::*;

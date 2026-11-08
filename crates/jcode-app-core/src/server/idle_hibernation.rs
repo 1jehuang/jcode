@@ -264,10 +264,10 @@ mod tests {
                 );
                 let old = Instant::now() - Duration::from_secs(60);
                 member.last_status_change = old;
-                let sessions = Arc::new(RwLock::new(HashMap::from([(
-                    id.clone(),
-                    Arc::clone(&agent),
-                )])));
+                let sessions =
+                    Arc::new(crate::server::session_manager::SessionManager::from_agents(
+                        HashMap::from([(id.clone(), Arc::clone(&agent))]),
+                    ));
                 let members = Arc::new(RwLock::new(HashMap::from([(id.clone(), member)])));
                 let mut idle = HashMap::from([(id.clone(), IdleState::new(old, old))]);
                 let threshold = Duration::from_secs(1);

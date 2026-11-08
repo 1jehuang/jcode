@@ -171,6 +171,9 @@ pub struct CompactionManager {
     /// can restore the budget without switching models.
     model_token_budget: usize,
 
+    /// Per-session ceiling, replacing the global cap when set.
+    context_cap_override: Option<usize>,
+
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
@@ -224,6 +227,7 @@ impl CompactionManager {
             suppress_compaction_until_new_message: false,
             token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
             model_token_budget: DEFAULT_TOKEN_BUDGET,
+            context_cap_override: None,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
@@ -252,10 +256,28 @@ impl CompactionManager {
         self.refresh_context_cap();
     }
 
+    /// Set the per-session context ceiling. `None` or zero restores the global cap.
+    pub fn set_context_cap_override(&mut self, cap: Option<usize>) {
+        self.context_cap_override = cap.filter(|cap| *cap > 0);
+        self.refresh_context_cap();
+    }
+
+    /// Return the session override, not the effective model-limited budget.
+    pub fn context_cap_override(&self) -> Option<usize> {
+        self.context_cap_override
+    }
+
     fn refresh_context_cap(&mut self) {
         self.compaction_config.max_context_tokens =
             crate::config::config().compaction.max_context_tokens;
-        self.token_budget = Self::capped_budget(&self.compaction_config, self.model_token_budget);
+        let cap = self
+            .context_cap_override
+            .unwrap_or(self.compaction_config.max_context_tokens);
+        self.token_budget = if cap > 0 {
+            self.model_token_budget.min(cap)
+        } else {
+            self.model_token_budget
+        };
     }
 
     /// Apply `[compaction] max_context_tokens` so a large-window model cannot
@@ -1793,12 +1815,54 @@ async fn generate_compaction_artifact(
     );
 
     Ok(CompactionResult {
-        summary_text: summary,
+        summary_text: validate_compaction_summary(summary)?,
         openai_encrypted_content: None,
         covers_up_to_turn: messages.len(),
         duration_ms: start.elapsed().as_millis() as u64,
         summarized_messages: messages.len(),
     })
+}
+
+/// Reject summaries that cannot stand in for the messages they replace, such
+/// as empty output or a provider refusal (issue #2089). Returning an error makes
+/// compaction keep the original messages instead of dropping them.
+fn validate_compaction_summary(summary: String) -> Result<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("compaction summary rejected: provider returned empty text");
+    }
+    if looks_like_refusal(trimmed) {
+        let preview: String = trimmed.chars().take(120).collect();
+        anyhow::bail!(
+            "compaction summary rejected: provider refusal: {:?}",
+            preview
+        );
+    }
+    Ok(summary)
+}
+
+fn looks_like_refusal(text: &str) -> bool {
+    // Only inspect the opening so a real summary that mentions an earlier
+    // refusal later on is still accepted.
+    let head: String = text.chars().take(160).collect::<String>().to_lowercase();
+    let head = head.replace('\u{2019}', "'");
+    const PATTERNS: [&str; 8] = [
+        "i'm sorry, but i can",
+        "i am sorry, but i can",
+        "sorry, but i can't",
+        "sorry, i can't",
+        "i cannot assist with",
+        "i can't assist with",
+        "i can't help with",
+        "i'm unable to help with",
+    ];
+    // Short replies are refusals if they contain a pattern anywhere. Longer
+    // ones only if they open with it.
+    if text.chars().count() < 300 {
+        PATTERNS.iter().any(|pattern| head.contains(pattern))
+    } else {
+        PATTERNS.iter().any(|pattern| head.starts_with(pattern))
+    }
 }
 
 #[path = "compaction_transfer.rs"]

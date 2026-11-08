@@ -13,6 +13,107 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 const TODO_CARD_ROLE: &str = "todos";
 
 impl App {
+    fn current_todo_state(
+        &self,
+    ) -> (
+        Vec<TodoItem>,
+        crate::todo::TodoPlan,
+        Vec<crate::todo::TodoGoal>,
+    ) {
+        // A session-bound remote snapshot can arrive before History. SSH still
+        // never reads local todo files, including for the requested resume id.
+        let session_id = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
+        if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
+            let payload = self
+                .remote_todos_payload
+                .as_ref()
+                .filter(|(id, _)| Some(id.as_str()) == session_id)
+                .and_then(|(_, payload)| {
+                    serde_json::from_str::<serde_json::Value>(payload).map_or_else(
+                        |error| {
+                            crate::logging::debug(&format!(
+                                "Invalid remote todo snapshot: {error}"
+                            ));
+                            None
+                        },
+                        Some,
+                    )
+                })
+                .unwrap_or_default();
+            return (
+                serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
+                    crate::logging::debug(&format!("Invalid remote todos: {error}"));
+                    Vec::new()
+                }),
+                serde_json::from_value(payload["plan"].clone()).unwrap_or_else(|error| {
+                    crate::logging::debug(&format!("Invalid remote todo plan: {error}"));
+                    crate::todo::TodoPlan::default()
+                }),
+                serde_json::from_value(payload["goals"].clone()).unwrap_or_else(|error| {
+                    crate::logging::debug(&format!("Invalid remote todo goals: {error}"));
+                    Vec::new()
+                }),
+            );
+        }
+        (
+            load_current_session_todos(session_id),
+            load_current_session_plan(session_id),
+            load_current_session_goals(session_id),
+        )
+    }
+
+    pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
+        // Any client that renders from a server snapshot must keep polling it.
+        // A local resume seeds `remote_todos_payload` before History, and from
+        // then on `current_todo_state` ignores disk. Without polling, the card
+        // froze at the resume snapshot while the stored plan kept advancing.
+        if !(crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some())
+            || !(self.todos_view_enabled
+                || self.latest_todo_card_index().is_some()
+                || crate::config::config().display.pin_todos)
+            || self
+                .remote_todos_requested_at
+                .is_some_and(|at| at.elapsed() < self.remote_todos_poll_interval())
+        {
+            return false;
+        }
+        self.remote_todos_requested_at = Some(Instant::now());
+        true
+    }
+
+    /// Todos only change while a turn runs (the todo tool) or through an
+    /// explicit command, both of which clear `remote_todos_requested_at` for an
+    /// immediate refresh. An idle session therefore needs only a slow safety
+    /// poll: a 2s poll from every open window kept the shared server and each
+    /// client waking for nothing.
+    fn remote_todos_poll_interval(&self) -> std::time::Duration {
+        if self.is_processing() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(30)
+        }
+    }
+
+    /// Ask for a fresh remote todo snapshot on the next tick.
+    pub(super) fn request_remote_todos_refresh_soon(&mut self) {
+        self.remote_todos_requested_at = None;
+    }
+
+    pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
+        let expected = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
+        if expected != Some(session_id.as_str()) {
+            return;
+        }
+        self.remote_todos_payload = Some((session_id, payload));
+        self.refresh_todo_card_if_needed();
+        self.refresh_todos_view_now();
+        self.refresh_pinned_todos_now();
+    }
+
     pub(super) fn todos_view_enabled(&self) -> bool {
         self.todos_view_enabled
     }
@@ -40,16 +141,8 @@ impl App {
     /// Push (or move to the bottom) the inline todo card with fresh data. The
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
-        if crate::tui::is_ssh_remote() {
-            self.set_status_notice(
-                "Local todo view unavailable for SSH; ask the remote agent for todos",
-            );
-            return;
-        }
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
         self.todo_card_rendered_hash =
@@ -70,16 +163,11 @@ impl App {
     /// Live-refresh the inline todo card when the session todo list changed.
     /// Returns true when the transcript was updated.
     pub(super) fn refresh_todo_card_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let Some(idx) = self.latest_todo_card_index() else {
             return false;
         };
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
             ^ hash_background_tasks(&tasks);
@@ -95,9 +183,6 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -114,7 +199,7 @@ impl App {
         }
         self.pinned_todos_checked_at = Some(Instant::now());
         let session_id = self.active_client_session_id().map(str::to_string);
-        let todos = load_current_session_todos(session_id.as_deref());
+        let (todos, plan, goals) = self.current_todo_state();
         if todos.is_empty() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -123,8 +208,6 @@ impl App {
             }
             return false;
         }
-        let goals = load_current_session_goals(session_id.as_deref());
-        let plan = load_current_session_plan(session_id.as_deref());
         let agents = self.todo_card_agents(&todos);
         let tasks = self.todo_card_background_tasks(&todos);
         let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
@@ -325,13 +408,8 @@ impl App {
     }
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
         let session_id = self.active_client_session_id();
-        let todos = load_current_session_todos(session_id);
-        let goals = load_current_session_goals(session_id);
-        let plan = load_current_session_plan(session_id);
+        let (todos, plan, goals) = self.current_todo_state();
         let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
@@ -379,9 +457,9 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
 }
 
 pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
-    let arg = if trimmed == "/todo" {
+    let arg = if matches!(trimmed, "/todo" | "/todos") {
         ""
-    } else if let Some(rest) = trimmed.strip_prefix("/todos") {
+    } else if let Some(rest) = trimmed.strip_prefix("/todos ") {
         rest.trim()
     } else {
         return false;
@@ -484,7 +562,10 @@ fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
     let Some(session_id) = session_id else {
         return Vec::new();
     };
-    crate::todo::load_todos(session_id).unwrap_or_default()
+    crate::todo::load_todos(session_id).unwrap_or_else(|error| {
+        crate::logging::debug(&format!("Could not load current todos: {error}"));
+        Vec::new()
+    })
 }
 
 fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::TodoGoal> {
@@ -763,6 +844,7 @@ fn hash_todos_payload(
         todo.status.hash(&mut hasher);
         todo.priority.hash(&mut hasher);
         todo.group.hash(&mut hasher);
+        todo.lane_after.hash(&mut hasher);
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
@@ -888,6 +970,8 @@ mod tests {
             status: status.to_string(),
             priority: priority.to_string(),
             group: None,
+            lane_after: None,
+            lane_owner: None,
             confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),

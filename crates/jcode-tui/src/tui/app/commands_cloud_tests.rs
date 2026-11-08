@@ -1,5 +1,112 @@
 use super::*;
 
+#[path = "commands_cloud_tests/auto_recovery.rs"]
+mod auto_recovery;
+
+#[test]
+fn parses_mobile_as_a_move_to_managed_cloud() {
+    for input in ["/mobile", "/mobile ", " /mobile\t"] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Move {
+                host: Some("jcode-cloud".into()),
+            }),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn parses_mobile_cancel() {
+    for input in ["/mobile cancel", "/mobile\tcancel "] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::Cancel),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn mobile_rejects_unexpected_arguments() {
+    for input in [
+        "/mobile box",
+        "/mobile --host box",
+        "/mobile --session-only",
+        "/mobile --include-session other",
+        "/mobile --dry-run",
+        "/mobile status",
+        "/mobile cancel extra",
+        "/mobile cancel cancel",
+    ] {
+        assert_eq!(
+            parse_cloud_command(input),
+            Some(CloudCommand::MoveUsage),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn mobile_does_not_match_command_prefixes() {
+    for input in ["/mobilex", "/mobilex cancel", "/mobile-cancel"] {
+        assert_eq!(parse_cloud_command(input), None, "{input}");
+    }
+}
+
+#[test]
+fn mobile_is_registered_once_and_visible_in_command_help() {
+    let app = crate::tui::app::tests::create_test_app();
+    for topic in ["mobile", "/mobile", " MOBILE "] {
+        let detailed = app
+            .command_help(topic)
+            .expect("mobile detailed help should exist");
+        assert!(detailed.contains("/mobile cancel"));
+        assert!(detailed.contains("push notification"));
+    }
+    assert_eq!(
+        crate::tui::app::registered_command_names()
+            .filter(|name| *name == "/mobile")
+            .count(),
+        1
+    );
+    let (_, help) = crate::tui::app::registered_command_entries()
+        .find(|(name, _)| *name == "/mobile")
+        .expect("/mobile should be discoverable in command help");
+    assert!(!help.is_empty());
+    assert!(!crate::tui::app::registered_command_names().any(|name| name == "/mobilex"));
+}
+
+#[test]
+#[cfg(unix)]
+fn mobile_push_feedback_is_visible_without_failing_cloud_status() {
+    for result in [
+        Ok("Mobile notification sent".to_string()),
+        Err("No mobile devices registered".to_string()),
+    ] {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let tx = fake_job(&mut app, CloudCommand::Where);
+        app.cloud_job.as_mut().unwrap().trimmed = "/mobile".into();
+        let expected = result
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or_else(|error| error.as_str())
+            .to_string();
+        tx.send(CloudEvent::MobilePushResult(result)).unwrap();
+        tx.send(CloudEvent::Done(Ok(output(true, "session is on cloud"))))
+            .unwrap();
+        assert!(app.poll_cloud_job());
+        assert!(app.cloud_job.is_none());
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|message| message.content.contains(&expected))
+        );
+        assert!(!app.should_quit);
+        assert!(app.cloud_handoff_requested.is_none());
+    }
+}
+
 #[test]
 fn parses_explicit_group_selection_without_treating_flags_as_hosts() {
     assert_eq!(
@@ -349,7 +456,8 @@ fn cloud_recovery_is_bounded_and_keeps_command_and_cause() {
     assert!(context.ends_with("Error: permission denied"));
     assert!(context.chars().count() < 10000);
     assert!(context.contains("untrusted output"));
-    assert!(context.contains("ssh -F ~/.jcode/cloud/ssh_config"));
+    assert!(context.contains("ssh -F "));
+    assert!(context.contains("cloud/ssh_config"));
 }
 
 #[test]
@@ -368,7 +476,12 @@ fn cloud_recovery_guides_read_only_ssh_without_mutating_access() {
         "Do not alter session ownership or leases, restart daemons",
         "not the managed alias",
         "Validate and quote values",
-        "ask before state-changing recovery",
+        "apply safe reversible fixes",
+        "existing bash tool",
+        "LOCAL daemon's handoff RPC",
+        "Failure observed (UTC):",
+        "Do not stop unrelated sessions",
+        "never loop automatically",
         "bypass host-key verification",
     ] {
         assert!(
@@ -376,6 +489,19 @@ fn cloud_recovery_guides_read_only_ssh_without_mutating_access() {
             "missing safety guidance: {expected}"
         );
     }
+}
+
+#[test]
+fn cloud_recovery_uses_config_from_actual_jcode_state_directory() {
+    let context = cloud_recovery_context("/cloud", "session_test", "Error: Server disconnected");
+    let config = crate::storage::jcode_dir()
+        .unwrap()
+        .join("cloud/ssh_config");
+    let quoted = format!("'{}'", config.to_string_lossy().replace('\'', "'\\''"));
+    assert!(context.contains(&format!("ssh -F {quoted} -o BatchMode=yes")));
+    assert!(context.contains("Plain `ssh jcode-cloud` may not resolve"));
+    assert!(context.contains("Never read or print the key"));
+    assert!(context.contains("report that specific blocker"));
 }
 
 #[test]
@@ -501,9 +627,6 @@ fn unsent_cases() -> Vec<UnsentCase> {
             app.queued_messages.push("queued prompt".into())
         }),
         ("command", |app| app.queued_commands.push("/compact".into())),
-        ("hidden", |app| {
-            app.hidden_queued_system_messages.push("reminder".into())
-        }),
         ("attachment", |app| {
             app.pending_images.push(("image/png".into(), "data".into()))
         }),
@@ -531,14 +654,13 @@ fn unsent_cases() -> Vec<UnsentCase> {
 fn handoff_error_identifies_blocking_queue_without_its_contents() {
     let mut app = crate::tui::app::tests::create_test_app();
     let session = super::super::commands::active_session_id(&app);
-    app.hidden_queued_system_messages
-        .push("private reminder".into());
+    app.queued_messages.push("private prompt".into());
     handle_cloud_command(&mut app, "/cloud", &session);
     let error = &app.display_messages.last().unwrap().content;
-    assert!(error.contains("queued system reminders would be lost"));
-    assert!(!error.contains("private reminder"));
+    assert!(error.contains("queued messages would be lost"));
+    assert!(!error.contains("private prompt"));
 
-    app.hidden_queued_system_messages.clear();
+    app.queued_messages.clear();
     app.pending_cloud_handoff = Some(pending(CloudCommand::Return, &session));
     app.pending_soft_interrupt_requests
         .push((1, "private interrupt".into()));
@@ -1135,6 +1257,18 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Where)
     );
     assert_eq!(
+        parse_cloud_command("/cloud reload"),
+        Some(CloudCommand::Reload { force: false })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload --force"),
+        Some(CloudCommand::Reload { force: true })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload now"),
+        Some(CloudCommand::MoveUsage)
+    );
+    assert_eq!(
         parse_cloud_command("/cloud cancel"),
         Some(CloudCommand::Cancel)
     );
@@ -1143,4 +1277,51 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Cancel)
     );
     assert_eq!(parse_cloud_command("/cloudy"), None);
+}
+
+#[test]
+fn queued_system_reminders_reach_agent_before_handoff() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = super::super::commands::active_session_id(&app);
+    app.hidden_queued_system_messages
+        .push("bg task done".into());
+    handle_cloud_command(&mut app, "/local", &session);
+    assert!(app.pending_cloud_handoff.is_some());
+    // Reminders still dispatch while the handoff waits.
+    assert!(!app.cloud_handoff_blocks_work());
+    assert!(app.poll_cloud_job());
+    assert!(app.pending_queued_dispatch);
+    assert!(app.cloud_job.is_none());
+    assert_eq!(
+        app.hidden_queued_system_messages,
+        vec!["bg task done".to_string()]
+    );
+    assert!(app.pending_cloud_handoff.is_some());
+
+    // Once delivered, the handoff proceeds and blocks new work again.
+    app.pending_queued_dispatch = false;
+    app.hidden_queued_system_messages.clear();
+    assert!(app.cloud_handoff_blocks_work());
+    assert!(app.take_ready_cloud_handoff().is_some());
+}
+
+#[test]
+fn prepared_handoff_interrupts_running_turn_once() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    let session = super::super::commands::active_session_id(&app);
+    let mut request = pending(CloudCommand::Move { host: None }, &session);
+    app.is_processing = true;
+    app.pending_cloud_handoff = Some(request.clone());
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.cancel_requested, "unprepared host must not interrupt");
+
+    request.prepared = true;
+    app.pending_cloud_handoff = Some(request);
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(app.cancel_requested, "ready host interrupts the turn");
+    assert!(app.take_cloud_remote_interrupt());
+    assert!(!app.cancel_requested, "remote mode clears the local flag");
+
+    app.poll_cloud_job_interrupt_only_for_test();
+    assert!(!app.take_cloud_remote_interrupt(), "interrupts only once");
 }

@@ -28,6 +28,8 @@ pub struct RuntimeInfo {
     pub reasoning_effort: Option<String>,
     /// Credential the session bills against (`oauth` or `api_key`).
     pub auth_method: Option<String>,
+    /// OAuth account label the daemon's account router selected, if any.
+    pub account_label: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
 }
@@ -103,4 +105,5 @@ pub struct Usage {
     pub output: u64,
     pub cache_read_input: Option<u64>,
     pub cache_creation_input: Option<u64>,
+    pub effective_budget: Option<usize>,
 }

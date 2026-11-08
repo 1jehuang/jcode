@@ -22,6 +22,7 @@ impl App {
         self.copy_selection_goal_column = None;
         // A re-entered drag at the same pane and edge must not skip its nudge.
         self.copy_selection_edge_autoscroll = None;
+        self.input_selection_scroll = None;
     }
 
     pub(super) fn toggle_copy_selection_mode(&mut self) {
@@ -473,6 +474,9 @@ impl App {
             self.copy_selection_edge_autoscroll = None;
             return false;
         }
+        if pane == crate::tui::CopySelectionPane::Input {
+            return self.step_copy_selection_scroll(pane, upward);
+        }
         // Extend the selection to the current edge line, then scroll once more.
         if let Some(point) = crate::tui::ui::copy_pane_autoscroll_edge_point(pane, upward) {
             self.update_selection_with_point(point, true);
@@ -498,6 +502,37 @@ impl App {
         pane: crate::tui::CopySelectionPane,
         upward: bool,
     ) -> bool {
+        if pane == crate::tui::CopySelectionPane::Input {
+            let Some(mut point) = crate::tui::ui::copy_pane_autoscroll_edge_point(pane, upward)
+            else {
+                return false;
+            };
+            let last = Self::line_count(pane).unwrap_or(0).saturating_sub(1);
+            let next = if upward {
+                point.abs_line.saturating_sub(1)
+            } else {
+                point.abs_line.saturating_add(1).min(last)
+            };
+            if next == point.abs_line {
+                return false;
+            }
+            point.abs_line = next;
+            let scroll = Self::first_visible_copy_point(pane)
+                .map(|point| point.abs_line)
+                .unwrap_or(0);
+            self.input_selection_scroll = Some(if upward {
+                scroll.saturating_sub(1)
+            } else {
+                scroll.saturating_add(1)
+            });
+            point.column = if upward {
+                0
+            } else {
+                Self::line_width(pane, next).unwrap_or(0)
+            };
+            self.update_selection_with_point(point, true);
+            return true;
+        }
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
             return false;
         };
@@ -532,6 +567,9 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let point = point?;
+                self.input_selection_scroll = (point.pane == crate::tui::CopySelectionPane::Input)
+                    .then(|| Self::first_visible_copy_point(point.pane).map(|point| point.abs_line))
+                    .flatten();
                 if self.copy_selection_mode {
                     self.copy_selection_dragging = true;
                     self.copy_selection_pending_anchor = None;
@@ -548,7 +586,19 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if !self.copy_selection_dragging {
                     let pending = self.copy_selection_pending_anchor?;
-                    let point = point.filter(|point| point.pane == pending.pane)?;
+                    let point = point
+                        .filter(|point| point.pane == pending.pane)
+                        .or_else(|| {
+                            (pending.pane == crate::tui::CopySelectionPane::Input)
+                                .then(|| {
+                                    crate::tui::ui::copy_pane_drag_point(
+                                        pending.pane,
+                                        mouse.column,
+                                        mouse.row,
+                                    )
+                                })
+                                .flatten()
+                        })?;
                     // Kitty reports mouse motion at pixel granularity, so a
                     // plain click with sub-cell hand jitter still delivers
                     // Drag events for the *same* cell between press and
@@ -564,7 +614,11 @@ impl App {
                     self.copy_selection_dragging = true;
                     self.collapse_selection_to(pending);
                     self.update_selection_with_point(point, true);
-                    return Some(false);
+                    // Composer drags must arm the edge tick on this first
+                    // motion too, including a pointer held still afterward.
+                    if pending.pane != crate::tui::CopySelectionPane::Input {
+                        return Some(false);
+                    }
                 }
                 let active_pane = self.current_copy_selection_pane();
                 // Browser-style edge auto-scroll: if the drag is at the top/bottom
@@ -608,6 +662,7 @@ impl App {
                 // not start a selection.
                 self.copy_selection_pending_anchor = None;
                 self.copy_selection_edge_autoscroll = None;
+                self.input_selection_scroll = None;
                 if !self.copy_selection_dragging {
                     // A press+release with no drag is a plain click, not a
                     // selection. While actively in copy-selection mode we still

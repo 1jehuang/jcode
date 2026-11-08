@@ -64,19 +64,57 @@ fn load_inventory() -> Inventory {
     // Local auth files only. Retain metadata, never access/refresh tokens.
     let now = chrono::Utc::now().timestamp_millis();
     let mut expired = Vec::new();
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+    let claude_accounts = match crate::auth::claude::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Claude account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in claude_accounts {
         if account.expires <= now {
             expired.push(("claude", account.label));
         }
     }
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+    let codex_accounts = match crate::auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Header Codex account inventory unavailable: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in codex_accounts {
         if account.expires_at.is_some_and(|expires| expires <= now) {
             expired.push(("openai", account.label));
         }
     }
+    let logins = crate::auth::account_pool::oauth_logins();
+    let mut pool = AccountPool::load();
+    let keys: std::collections::BTreeSet<_> = logins
+        .iter()
+        .map(|login| account_key(login.provider, Some(&login.label)))
+        .chain(
+            crate::provider_catalog::login_providers()
+                .iter()
+                .map(|provider| provider.id.to_string()),
+        )
+        .chain(pool.members.iter().cloned())
+        .chain(pool.excluded.iter().cloned())
+        .chain(["openai-compatible".to_string()])
+        .collect();
+    // This is an in-memory render snapshot, not saved overrides. Resolve local
+    // subscription metadata on this background worker, never on each frame.
+    for key in keys {
+        let priority = pool.priority(&key);
+        pool.priorities.insert(key, priority);
+    }
     Inventory {
-        logins: crate::auth::account_pool::oauth_logins(),
-        pool: AccountPool::load(),
+        logins,
+        pool,
         expired,
     }
 }
@@ -161,6 +199,19 @@ fn remote_inventory_lines(
                     Style::default().fg(dim_color()),
                 ));
             }
+            let provider_kind = if provider == ActiveProvider::OpenAI {
+                crate::usage::MultiAccountProviderKind::OpenAI
+            } else {
+                crate::usage::MultiAccountProviderKind::Anthropic
+            };
+            if let Some(banked) =
+                crate::usage::remote_account_banked_resets(provider_kind, &account.label)
+                    .and_then(|banked| banked_resets_span(&banked))
+            {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
+                row.spans.push(banked);
+            }
             lines.push(row);
         }
     }
@@ -231,6 +282,13 @@ fn inventory_lines(
                 Style::default().fg(dim_color()),
             ));
         }
+        if let Some(banked) = header_account_banked_resets(usage_provider, &account.label)
+            .and_then(|banked| banked_resets_span(&banked))
+        {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
+            row.spans.push(banked);
+        }
         entries.push((
             account_key(account.provider, Some(&account.label)),
             true,
@@ -295,13 +353,21 @@ fn inventory_lines(
         .map(|(key, default, _)| (key.clone(), *default))
         .collect();
     let (ordered, _) = inventory.pool.partition(&keys);
+    let mut tiers: Vec<_> = ordered
+        .iter()
+        .map(|key| inventory.pool.priority(key))
+        .collect();
+    tiers.sort_unstable();
+    tiers.dedup();
     let mut lines: Vec<_> = ordered
         .into_iter()
         .filter_map(|key| {
             entries
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
-                .map(|(_, _, line)| line.clone())
+                .map(|(_, _, line)| {
+                    priority_row(line.clone(), inventory.pool.priority(key), &tiers)
+                })
         })
         .collect();
     if lines.is_empty() {
@@ -310,6 +376,90 @@ fn inventory_lines(
         ));
     }
     lines
+}
+
+fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
+    let rank = tiers.binary_search(&priority).unwrap_or(0);
+    let dimming = if tiers.len() < 2 {
+        0
+    } else {
+        rank * 40 / (tiers.len() - 1)
+    };
+    // Only decorate the identity span. Arrows, status dots and the info widget's
+    // usage-limit bars retain their established glyphs and colors.
+    if let Some(identity) = row.spans.get_mut(2)
+        && dimming > 0
+        && let Some(base) = identity.style.fg
+    {
+        let (r, g, b) = match base {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+            _ => return row,
+        };
+        let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+        identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
+    }
+    row
+}
+
+// Quotas already use the daemon mirror for connected local clients. Resets must
+// use the same source rather than an unrelated, process-local endpoint cache.
+fn header_account_banked_resets(
+    provider: crate::usage::MultiAccountProviderKind,
+    label: &str,
+) -> Option<crate::usage::AccountBankedResets> {
+    if crate::usage::remote_account_usage_received() {
+        crate::usage::remote_account_banked_resets(provider, label)
+    } else {
+        crate::usage::cached_account_banked_resets(provider, label)
+    }
+}
+
+/// Warmer colors mean less time to spend a reset. Unknown expiry stays blue.
+fn banked_expiry_color(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Color {
+    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    else {
+        return Color::Rgb(120, 190, 255);
+    };
+    let remaining = expiry.signed_duration_since(now);
+    if remaining <= chrono::Duration::hours(24) {
+        Color::Rgb(255, 100, 100)
+    } else if remaining <= chrono::Duration::days(3) {
+        Color::Rgb(255, 180, 80)
+    } else if remaining <= chrono::Duration::days(7) {
+        Color::Rgb(230, 210, 100)
+    } else {
+        Color::Rgb(100, 210, 130)
+    }
+}
+
+/// Compact banked-reset suffix: "2 resets" when claimable, otherwise when the
+/// next one unlocks. Nothing is shown when no reset is known or upcoming.
+fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span<'static>> {
+    if banked.available > 0 {
+        let noun = if banked.available == 1 {
+            "reset"
+        } else {
+            "resets"
+        };
+        let expiry = banked
+            .expires_at
+            .as_deref()
+            .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
+            .unwrap_or_default();
+        return Some(Span::styled(
+            format!("↻ {} {noun}{expiry}", banked.available),
+            Style::default().fg(banked_expiry_color(
+                banked.expires_at.as_deref(),
+                chrono::Utc::now(),
+            )),
+        ));
+    }
+    let at = banked.next_available_at.as_deref()?;
+    Some(Span::styled(
+        format!("↻ in {}", crate::usage::format_reset_time(at)),
+        Style::default().fg(dim_color()),
+    ))
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
@@ -519,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn router_inventory_follows_global_pool_order_without_promoting_active() {
+    fn router_inventory_follows_pool_order_within_priority_without_promoting_active() {
         let inventory = Inventory {
             logins: vec![
                 login("claude", "a", "alice@example.com"),
@@ -534,6 +684,8 @@ mod tests {
                     "openai:a".into(),
                 ],
                 excluded: vec![],
+                priorities: [("openai-api".into(), 1)].into_iter().collect(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -589,6 +741,7 @@ mod tests {
             pool: AccountPool {
                 members: vec!["openrouter".into()],
                 excluded: vec!["openai:excluded".into()],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -661,6 +814,49 @@ mod tests {
                 assert_eq!(row.spans[1].content, auth_dot_char(state));
                 assert_eq!(row.spans[1].style.fg, Some(auth_dot_color(state)));
                 assert_eq!(row.width(), 14);
+            }
+        }
+    }
+
+    #[test]
+    fn router_priorities_only_dim_original_identity_colors_and_fit_narrow_headers() {
+        let usage = crate::usage::AccountUsageSnapshot {
+            label: "one".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.48),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        for selected in [false, true] {
+            let mut row = detail(
+                AuthState::Available,
+                "openai 界界@example.com".into(),
+                selected,
+            );
+            row.spans
+                .extend(remaining_bar(&usage, false).unwrap().spans);
+            let high = priority_row(row.clone(), 20, &[20, 30, 90]);
+            let low = priority_row(row.clone(), 90, &[20, 30, 90]);
+            assert_eq!(low.spans[2].content, row.spans[2].content);
+            assert_eq!(high.spans[2].style.fg, row.spans[2].style.fg);
+            assert_eq!(low.spans[..2], row.spans[..2]);
+            assert_eq!(low.spans[3..], row.spans[3..]);
+            assert_ne!(high.spans[2].style.fg, low.spans[2].style.fg);
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 0, &[0, 1, 2]).spans[2].style.fg
+            );
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 90, &[90]).spans[2].style.fg
+            );
+            for width in [0, 1, 4, 12, 24, 40, 80] {
+                let fitted = fit_header_lines(vec![low.clone()], width);
+                assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
             }
         }
     }
@@ -832,6 +1028,66 @@ mod tests {
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Blocked
         );
+    }
+
+    #[test]
+    fn banked_expiry_colors_cover_boundaries_and_unknown() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-06T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (hours, expected) in [
+            (-1, Color::Rgb(255, 100, 100)),
+            (24, Color::Rgb(255, 100, 100)),
+            (25, Color::Rgb(255, 180, 80)),
+            (72, Color::Rgb(255, 180, 80)),
+            (73, Color::Rgb(230, 210, 100)),
+            (168, Color::Rgb(230, 210, 100)),
+            (169, Color::Rgb(100, 210, 130)),
+        ] {
+            let expiry = (now + chrono::Duration::hours(hours)).to_rfc3339();
+            assert_eq!(banked_expiry_color(Some(&expiry), now), expected);
+        }
+        for expiry in [None, Some("invalid")] {
+            assert_eq!(banked_expiry_color(expiry, now), Color::Rgb(120, 190, 255));
+        }
+    }
+
+    #[test]
+    fn banked_resets_suffix_shows_count_or_next_unlock() {
+        let ready = crate::usage::AccountBankedResets {
+            available: 2,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let expiring = crate::usage::AccountBankedResets {
+            available: 1,
+            next_available_at: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        assert!(
+            banked_resets_span(&expiring)
+                .unwrap()
+                .content
+                .starts_with("↻ 1 reset · exp ")
+        );
+        let spent = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: Some("2099-01-01T00:00:00Z".into()),
+            expires_at: None,
+        };
+        assert!(
+            banked_resets_span(&spent)
+                .unwrap()
+                .content
+                .starts_with("↻ in ")
+        );
+        let none = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert!(banked_resets_span(&none).is_none());
     }
 
     #[test]

@@ -328,6 +328,8 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
+                let mut retry_diagnostics =
+                    super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
                 // Attempt persistent WebSocket continuation first
                 if use_websocket_transport {
                     // Track output: a continuation that streams partial output
@@ -420,6 +422,9 @@ impl Provider for OpenAIProvider {
                                         max: MAX_RETRIES,
                                     }))
                                     .await;
+                            }
+                            if let Some(notice) = retry_diagnostics.record(&err) {
+                                emit_status_detail(&tx, notice).await;
                             }
                         }
                     }
@@ -657,6 +662,9 @@ impl Provider for OpenAIProvider {
                                     .await;
                             }
                             force_https_for_request = true;
+                            if let Some(notice) = retry_diagnostics.record(&format!("{error:#}")) {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             skip_backoff_once = true;
                             if matches!(transport_mode, OpenAITransportMode::Auto) {
                                 let (streak, cooldown) = record_websocket_fallback(
@@ -682,6 +690,7 @@ impl Provider for OpenAIProvider {
                             continue;
                         }
                         Err(OpenAIStreamFailure::Other(error)) => {
+                            let overload_notice = retry_diagnostics.record(&format!("{error:#}"));
                             let elapsed_ms = attempt_started.elapsed().as_millis();
                             // Full anyhow chain ({:#}) so a send-level transport
                             // cause wrapped behind `.context("Failed to send
@@ -713,6 +722,11 @@ impl Provider for OpenAIProvider {
                                         ("elapsed_ms", elapsed_ms.to_string()),
                                     ],
                                 );
+                                // A durable UI notice is a transcript fence. It
+                                // must follow rollback of this failed attempt.
+                                if let Some(notice) = overload_notice {
+                                    emit_status_detail(&tx, notice).await;
+                                }
                                 jcode_base::logging::info(&format!(
                                     "Transient error after {}ms, will retry: {}",
                                     elapsed_ms, error
@@ -736,6 +750,9 @@ impl Provider for OpenAIProvider {
                                     ("elapsed_ms", elapsed_ms.to_string()),
                                 ],
                             );
+                            if let Some(notice) = overload_notice {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             // A tool schema OpenAI rejects fails every turn, not
                             // just this one, and one bad construct invalidates
                             // the whole catalog (#446, #543, #687, #711, #713).
@@ -757,7 +774,7 @@ impl Provider for OpenAIProvider {
                                 }
                                 None => error,
                             };
-                            let _ = tx.send(Err(error)).await;
+                            let _ = tx.send(Err(retry_diagnostics.annotate(error))).await;
                             return;
                         }
                     }
@@ -775,11 +792,11 @@ impl Provider for OpenAIProvider {
                         ],
                     );
                     let _ = tx
-                        .send(Err(anyhow::anyhow!(
+                        .send(Err(retry_diagnostics.annotate(anyhow::anyhow!(
                             "Failed after {} retries: {}",
                             MAX_RETRIES,
                             e
-                        )))
+                        ))))
                         .await;
                 }
             };

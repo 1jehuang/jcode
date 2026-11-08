@@ -15,8 +15,8 @@ pub(super) use auth_muse as auth_muse_helpers;
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
     account_command_from_picker, execute_account_command_local, execute_account_command_remote,
-    handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
-    save_openai_fast_setting_local,
+    handle_account_command_remote, handle_auth_command, handle_ssh_usage_command_remote,
+    resolve_account_provider_descriptor, save_openai_fast_setting_local,
 };
 pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
 
@@ -2369,7 +2369,7 @@ impl App {
                         Some(value) => value,
                         None => {
                             self.push_display_message(DisplayMessage::error(
-                                "OpenAI-compatible API base must be https://... or http://localhost."
+                                "OpenAI-compatible API base must be https://..., or http:// with a localhost/.local name or a bare IP address."
                                     .to_string(),
                             ));
                             self.pending_login =
@@ -3404,7 +3404,7 @@ fn save_tui_openai_compatible_api_base(
     let trimmed = api_base.trim();
     if !trimmed.is_empty() {
         let normalized = crate::provider_catalog::normalize_api_base(trimmed).ok_or_else(|| {
-            anyhow::anyhow!("OpenAI-compatible API base must be https://... or http://localhost.")
+            anyhow::anyhow!("OpenAI-compatible API base must be https://..., or http:// with a localhost/.local name or a bare IP address.")
         })?;
         crate::provider_catalog::save_env_value_to_env_file(
             "JCODE_OPENAI_COMPAT_API_BASE",

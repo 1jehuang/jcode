@@ -234,10 +234,10 @@ fn validate_bundle(bundle: &GroupTransferBundle) -> Result<()> {
     Ok(())
 }
 
-/// All state-changing operations use an exclusive global admission reservation.
-/// This intentionally rejects even unrelated busy turns rather than guessing
-/// whether detached tool callbacks can still mutate the selected state.
-pub async fn handle(
+/// Operations fence the selected sessions and their complete swarm closure.
+/// Unknown-owner mutation remains globally exclusive with transfers. Snapshot
+/// expansion is verified again under admission and per-swarm operation locks.
+pub(super) async fn handle(
     cmd: &str,
     sessions: &SessionAgents,
     state: &SwarmState,
@@ -260,8 +260,32 @@ async fn handle_with_gate(
     let (action, json) = rest
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("group_transfer requires action:JSON"))?;
-    let _idle = gate.try_idle()
-        .ok_or_else(|| anyhow::anyhow!("daemon is busy; wait for all turns and background tasks to finish before group transfer"))?;
+    let selection: GroupTransferSelection = match action {
+        "inspect" => serde_json::from_str(json)?,
+        "prepare" => serde_json::from_str::<PrepareRequest>(json)?.selection,
+        "abort" | "reserve" | "import" | "check_import" => {
+            let bundle: GroupTransferBundle = serde_json::from_str(json)?;
+            validate_bundle(&bundle)?;
+            GroupTransferSelection {
+                session_ids: bundle
+                    .sessions
+                    .iter()
+                    .map(|s| s.session_id.clone())
+                    .collect(),
+                // Destination swarms may not exist yet. Their complete member
+                // sets have already been validated against the bundle sessions.
+                swarm_ids: Vec::new(),
+            }
+        }
+        _ => bail!("unknown group_transfer action: {action}"),
+    };
+    let before = snapshots(state).await;
+    let (admitted_ids, _) = expand_selection(&selection, &before)?;
+    let _idle = admit_transfer(gate, &admitted_ids, action, std::time::Duration::from_secs(2)).await.ok_or_else(|| {
+        anyhow::anyhow!(
+            "group_transfer action={action} phase=idle_admission: selected sessions or unscoped background tasks are busy; wait for selected turns and callbacks to finish"
+        )
+    })?;
     match action {
         "inspect" | "prepare" => {
             let (selection, host, expected) = if action == "prepare" {
@@ -285,6 +309,7 @@ async fn handle_with_gate(
             };
             let all = snapshots(state).await;
             let (ids, swarm_ids) = expand_selection(&selection, &all)?;
+            ensure!(ids == admitted_ids, "swarm changed during admission; retry");
             ensure!(
                 storage::session_presence()
                     .iter()
@@ -391,7 +416,7 @@ async fn handle_with_gate(
                 }
                 // Evict only transferred agents. Any outstanding Arc remains
                 // harmless because its durable away lease denies turns/saves.
-                sessions.write().await.retain(|id, _| !ids.contains(id));
+                sessions.retain(|id, _| !ids.contains(id)).await;
                 let mut members = state.members.write().await;
                 for id in &ids {
                     if let Some(member) = members.get_mut(id) {
@@ -478,6 +503,32 @@ async fn handle_with_gate(
     }
 }
 
+/// A client-side turn-complete event can precede release of the daemon's turn
+/// reservation or its detached callbacks. Host preparation does not establish
+/// daemon quiescence either. Briefly tolerate that drain race, but acquire the
+/// same atomic fence on every attempt and never ignore genuinely busy work.
+/// Recovery operations retain their immediate admission behavior.
+async fn admit_transfer(
+    gate: &crate::runtime_activity::ActivityGate,
+    sessions: &BTreeSet<String>,
+    action: &str,
+    drain_timeout: std::time::Duration,
+) -> Option<crate::runtime_activity::SessionIdleReservation> {
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+    loop {
+        if let Some(idle) = gate.try_idle_sessions(sessions) {
+            return Some(idle);
+        }
+        if !matches!(action, "inspect" | "prepare") || tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(25)),
+        )
+        .await;
+    }
+}
+
 fn verify_source_fence(session: &GroupTransferSession, host: &str) -> Result<()> {
     let lease = read_transfer_lease(&session.session_id)?
         .ok_or_else(|| anyhow::anyhow!("missing transfer fence"))?;
@@ -495,7 +546,8 @@ fn cancellation_path(bundle: &GroupTransferBundle) -> std::path::PathBuf {
         .join(format!("{}.cancelled.json", bundle.transfer_id))
 }
 
-fn read_transfer_lease(id: &str) -> Result<Option<SessionLease>> {
+pub(super) fn read_transfer_lease(id: &str) -> Result<Option<SessionLease>> {
+    ensure!(valid_id(id), "invalid session id");
     let path = storage::session_leases_dir()
         .ok_or_else(|| anyhow::anyhow!("session lease directory unavailable"))?
         .join(format!("{id}.json"));

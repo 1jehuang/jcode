@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -809,6 +809,7 @@ fn clone_split_session(
     child.append_fork_notice(parent_session_id, parent.display_name());
     child.save()?;
 
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     let name = child.display_name().to_string();
     Ok((child.id.clone(), name))
 }
@@ -830,7 +831,7 @@ fn create_transfer_child_session(
     parent: &Session,
     compaction: Option<crate::session::StoredCompactionState>,
 ) -> anyhow::Result<(String, String)> {
-    let mut todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut todos = crate::todo::load_todos(parent_session_id)?;
     // Background tasks belong to the source session. A fresh session must
     // reassess those results, not inherit foreign task IDs or their wakes.
     for todo in &mut todos {
@@ -854,6 +855,7 @@ fn create_transfer_child_session(
     child.status = crate::session::SessionStatus::Closed;
     child.save()?;
     crate::todo::save_todos(&child.id, &todos)?;
+    crate::session_env::inherit_session_env(parent_session_id, &child.id);
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 
@@ -1252,6 +1254,24 @@ pub(super) async fn handle_agent_task(
     agent: &Arc<Mutex<Agent>>,
     ctx: &AgentTaskContext<'_>,
 ) {
+    let mut agent = agent.lock().await;
+    let lease = match agent.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let events = super::state::TurnEventChannel::new(
+        client_session_id.into(),
+        Arc::clone(ctx.swarm_members),
+        ctx.client_event_tx.clone(),
+        &lease,
+    );
     update_member_status(
         client_session_id,
         "running",
@@ -1264,12 +1284,13 @@ pub(super) async fn handle_agent_task(
     )
     .await;
 
-    let result = process_message_streaming_mpsc(
-        Arc::clone(agent),
+    let result = process_reserved_message_streaming_mpsc(
+        &mut agent,
+        &lease,
         &task,
         vec![],
         None,
-        ctx.client_event_tx.clone(),
+        events.sender(),
     )
     .await;
     match result {
@@ -1285,7 +1306,7 @@ pub(super) async fn handle_agent_task(
                 Some(ctx.swarm_event_tx),
             )
             .await;
-            let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+            let _ = events.sender().send(ServerEvent::Done { id });
         }
         Err(e) => {
             update_member_status(
@@ -1302,11 +1323,13 @@ pub(super) async fn handle_agent_task(
             let retry_after_secs = e
                 .downcast_ref::<StreamError>()
                 .and_then(|stream_error| stream_error.retry_after_secs);
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+            let _ = events.sender().send(ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(&e),
                 retry_after_secs,
             });
         }
     }
+    drop(agent);
+    events.finish().await;
 }

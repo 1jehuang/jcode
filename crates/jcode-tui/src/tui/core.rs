@@ -63,21 +63,13 @@ impl DisplayMessageRoleExt for DisplayMessage {
     fn effective_role(&self) -> &str {
         if self.role != "background_task"
             && self.role != "tool"
-            && is_background_task_notification_content(&self.content)
+            && crate::message::is_background_task_notification_content(&self.content)
         {
             "background_task"
         } else {
             self.role.as_str()
         }
     }
-}
-
-fn is_background_task_notification_content(content: &str) -> bool {
-    content
-        .trim_start()
-        .starts_with("🐝 **Swarm await finished**")
-        || crate::message::parse_background_task_notification_markdown(content).is_some()
-        || crate::message::parse_background_task_progress_notification_markdown(content).is_some()
 }
 
 #[cfg(test)]
@@ -99,6 +91,26 @@ mod tests {
         assert_eq!(tool.effective_role(), "tool");
         assert_eq!(
             DisplayMessage::user("Discuss swarm reports").effective_role(),
+            "user"
+        );
+    }
+
+    #[test]
+    fn background_task_wakes_share_semantic_prompt_classification() {
+        for content in [
+            "**Background task** `build` · `bash` · ✓ completed · 7.1s · exit 0\n\n_Full output:_ `bg action=output task_id=build`",
+            "**Background task progress** `build` · `bash`\n\n[#####-------] 42% · Running tests (reported)",
+        ] {
+            assert!(crate::message::is_background_task_notification_content(
+                content
+            ));
+            assert_eq!(
+                DisplayMessage::user(content).effective_role(),
+                "background_task"
+            );
+        }
+        assert_eq!(
+            DisplayMessage::user("Please explain background task progress").effective_role(),
             "user"
         );
     }

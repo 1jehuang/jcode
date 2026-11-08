@@ -11,6 +11,10 @@
 
 use crate::TodoItem;
 
+#[cfg(test)]
+#[path = "lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
 /// One parallel lane inside a stage: indices into the original todo slice,
 /// in list order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,84 @@ pub fn stage_layout(todos: &[&TodoItem]) -> Vec<TodoStage> {
     stages
 }
 
+/// Validate lane-wide prerequisites against phase order of first appearance,
+/// not numeric phase labels. Restricting edges to earlier phases prevents cycles.
+pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
+    let refs: Vec<_> = todos.iter().collect();
+    let stages = stage_layout(&refs);
+    let mut positions = std::collections::HashMap::new();
+    for (phase, stage) in stages.iter().enumerate() {
+        for index in stage.item_indices() {
+            if positions.insert(todos[index].id.as_str(), phase).is_some() {
+                return Err(format!("duplicate todo id {:?}", todos[index].id));
+            }
+        }
+    }
+    for (phase, stage) in stages.iter().enumerate() {
+        for lane in &stage.lanes {
+            if let Some(owner) = todos[lane.items[0]].lane_owner.as_deref()
+                && !matches!(owner, "worker" | "self")
+            {
+                return Err(format!(
+                    "lane owner must be \"worker\" or \"self\", got {owner:?}"
+                ));
+            }
+            let expected = &todos[lane.items[0]].lane_after;
+            if lane.items.iter().any(|&i| &todos[i].lane_after != expected) {
+                return Err("lane_after must be consistent across every lane member".into());
+            }
+            let Some(dependencies) = expected else {
+                continue;
+            };
+            if dependencies.is_empty() {
+                return Err(
+                    "lane_after must be nonempty, or null for the default phase barrier".into(),
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for id in dependencies {
+                if id.trim().is_empty() || !seen.insert(id) {
+                    return Err("lane_after must contain unique nonempty todo IDs".into());
+                }
+                match positions.get(id.as_str()) {
+                    Some(&position) if position < phase => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "lane_after todo {id:?} must be in a strictly earlier phase"
+                        ));
+                    }
+                    None => return Err(format!("unknown lane_after todo {id:?}")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether this todo's lane asked for a dedicated auto-spawned swarm worker.
+pub fn lane_requests_worker(todo: &TodoItem) -> bool {
+    todo.lane_owner.as_deref() == Some(crate::LANE_OWNER_WORKER)
+}
+
+/// Make `lane_owner` lane-wide: every member takes the value of the lane's
+/// first member that sets one, so adding an item to a worker lane keeps it a
+/// worker lane and a single-item edit flips the whole lane.
+pub fn normalize_lane_owners(todos: &mut [TodoItem]) {
+    let mut owners: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for todo in todos.iter() {
+        let entry = owners.entry(lane_id(todo)).or_insert(None);
+        if entry.is_none() {
+            *entry = todo.lane_owner.clone();
+        }
+    }
+    for todo in todos.iter_mut() {
+        let owner = owners.get(&lane_id(todo)).cloned().flatten();
+        // `self` is the default; store only the meaningful value.
+        todo.lane_owner = owner.filter(|owner| owner != "self");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +288,10 @@ pub fn canonicalize_worker_lane(
         .map(|todo| TodoItem {
             stage: template.stage,
             group: template.group.clone(),
+            lane_after: template.lane_after.clone(),
+            // Inside a worker's own list the lane is the worker's: it must
+            // never re-dispatch it, so ownership stays coordinator-side.
+            lane_owner: None,
             ..todo.clone()
         })
         .collect()
@@ -237,6 +323,8 @@ pub fn merge_worker_lane(
             let mut item = todo.clone();
             item.stage = template.stage;
             item.group = template.group.clone();
+            item.lane_after = template.lane_after.clone();
+            item.lane_owner = template.lane_owner.clone();
             item.assigned_to = Some(link.worker.clone());
             if other_ids.contains(item.id.as_str()) {
                 item.id = format!("{}:{}", link.worker, item.id);

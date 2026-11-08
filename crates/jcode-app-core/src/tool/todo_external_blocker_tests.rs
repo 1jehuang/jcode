@@ -139,7 +139,28 @@ fn completely_blocked_schema_is_shared_and_strict() {
     assert_eq!(update["type"], json!(["object", "null"]));
     assert_eq!(update["required"], json!(["reason"]));
     assert_eq!(update["additionalProperties"], false);
-    assert_eq!(update["description"], "No way forward.");
+    for field in ["completely_blocked", "external_blocker"] {
+        let properties = &schema["properties"];
+        let canonical = &properties["update"]["items"]["properties"][field];
+        assert_eq!(canonical, &properties["add"]["items"]["properties"][field]);
+        assert_eq!(
+            canonical,
+            &properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]
+                ["properties"][field]
+        );
+        assert!(canonical.get("description").is_none());
+        assert!(
+            canonical["properties"]["reason"]
+                .get("description")
+                .is_none()
+        );
+    }
+    let tool = TodoTool::new();
+    let guidance = tool.description();
+    assert!(guidance.contains("indispensable action by someone else with no safe workaround"));
+    assert!(guidance.contains("name who must do what and why you cannot proceed"));
+    assert!(guidance.contains("agent coordination are not blockers"));
+    assert!(guidance.contains("Continue independent work."));
     assert!(update["properties"].get("action").is_none());
     assert!(
         schema["properties"]["update"]["items"]["properties"]
@@ -149,7 +170,7 @@ fn completely_blocked_schema_is_shared_and_strict() {
     assert!(
         TodoTool::new()
             .description()
-            .contains("completely_blocked: No way forward.")
+            .contains("completely_blocked means no way forward.")
     );
 }
 

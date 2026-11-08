@@ -5,9 +5,11 @@ use super::provider_init::ProviderChoice;
 mod cloud_env;
 pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
+mod cloud_runtime;
 mod google;
 mod mcp;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
+pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
@@ -281,6 +283,12 @@ pub(crate) enum Command {
         action: AccountCommand,
     },
 
+    /// Sync session transcripts to your Jcode account for the iOS app
+    Mobile {
+        #[command(subcommand)]
+        action: MobileCommand,
+    },
+
     /// Run in simple REPL mode (no TUI)
     Repl,
 
@@ -402,6 +410,30 @@ pub(crate) enum Command {
         /// Do not run the global push-to-talk listener
         #[arg(long)]
         no_voice: bool,
+
+        /// Do not show the live waveform in the focused Jcode CLI
+        #[arg(long)]
+        no_voice_waveform: bool,
+
+        /// Do not show desktop notifications for push-to-talk
+        #[arg(long)]
+        no_voice_notifications: bool,
+
+        /// Do not handle open/reveal requests (clients open locally)
+        #[arg(long)]
+        no_open: bool,
+
+        /// Do not open terminal windows (clients launch locally)
+        #[arg(long)]
+        no_spawn_terminal: bool,
+
+        /// Do not apply the lid-close override (macOS/Windows)
+        #[arg(long)]
+        no_lid: bool,
+
+        /// Do not auto-update the browser bridge
+        #[arg(long)]
+        no_browser_updates: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text
@@ -641,6 +673,25 @@ pub(crate) enum TelemetryCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum MobileCommand {
+    /// Turn on transcript sync to your Jcode account (requires a subscription)
+    Enable,
+    /// Turn off sync and delete transcripts stored for mobile
+    Disable,
+    /// Show whether mobile sync is on
+    Status,
+    /// Run one sync pass now
+    Sync,
+    /// Run sessions started or continued from the phone on this machine
+    /// (Jcode Cloud machines do this automatically)
+    Runner {
+        /// Handle queued commands, then exit instead of polling forever
+        #[arg(long)]
+        once: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum AccountCommand {
     /// Open browser-based device authorization and wait for plan activation
     Login {
@@ -727,6 +778,11 @@ pub(crate) enum ServerCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudCommand {
+    /// Inspect or update the managed cloud runtime without interrupting work.
+    Runtime {
+        #[command(subcommand)]
+        action: CloudRuntimeCommand,
+    },
     /// Transfer explicit project environment requirements without exposing values.
     Env {
         #[command(subcommand)]
@@ -818,6 +874,9 @@ pub(crate) enum CloudCommand {
         /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
         #[arg(long)]
         refs_only: bool,
+        /// Keep local OAuth credentials instead of importing the cloud copy. Useful when recovering an old session after signing in again locally.
+        #[arg(long)]
+        keep_local_auth: bool,
         /// After returning, resume the session in this terminal.
         #[arg(long)]
         attach: bool,
@@ -831,6 +890,101 @@ pub(crate) enum CloudCommand {
         session: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+
+    /// Fork a session into the cloud: copy its transcript into a new child
+    /// session, move only the child, and optionally start it on a task. The
+    /// original session keeps running here.
+    Fork {
+        /// Session to fork. Defaults to the session this command runs in.
+        #[arg(long)]
+        session: Option<String>,
+        /// First task for the forked agent. It runs detached on the host.
+        #[arg(long)]
+        prompt: Option<String>,
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Send a message to a cloud session. The turn runs detached on the
+    /// host; check it with `jcode cloud status` or `jcode cloud wait`.
+    Send {
+        #[arg(long)]
+        session: String,
+        message: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show whether a cloud session is running, idle or failed, with its
+    /// latest messages and run log. Read-only.
+    Status {
+        #[arg(long)]
+        session: String,
+        /// Number of recent transcript messages to include.
+        #[arg(long, default_value_t = 6)]
+        messages: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Block until a cloud session's detached turn finishes, then print status.
+    Wait {
+        #[arg(long)]
+        session: String,
+        /// Give up after this many seconds (exit code 2).
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        #[arg(long, default_value_t = 6)]
+        messages: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the tail of a cloud session's detached run log.
+    Logs {
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
+
+    /// Show recent failed /cloud and /local attempts recorded on this machine.
+    Problems {
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Read-only health check of the cloud path: account machine state, SSH
+    /// reachability, remote jcode version, moved sessions and recent failures.
+    Doctor {
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: remote side of `cloud status` (prints JSON).
+    #[command(hide = true)]
+    Inspect {
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value_t = 6)]
+        messages: usize,
+        #[arg(long, default_value_t = 40)]
+        log_lines: usize,
+    },
+
+    /// Internal: remote side of `cloud send` (starts a detached turn).
+    #[command(hide = true)]
+    RunDetached {
+        #[arg(long)]
+        session: String,
+        message: String,
     },
 
     /// Attach this terminal to a session that lives on a cloud host.
@@ -890,6 +1044,18 @@ pub(crate) enum CloudCommand {
         session: String,
         #[arg(long)]
         epoch: u64,
+        /// Opt in only when the returning client can acknowledge completion.
+        #[arg(long)]
+        require_completion: bool,
+    },
+
+    /// Internal: acknowledge a durable local return and permanently fence the cloud owner.
+    #[command(hide = true)]
+    CompleteReturn {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
     },
 
     /// Internal: restore cloud ownership after a rejected credential return.
@@ -907,6 +1073,9 @@ pub(crate) enum CloudMachineAction {
     Status,
     Wake,
     Stop,
+    /// Internal: prepare local managed SSH credentials without contacting cloud.
+    #[value(hide = true)]
+    PrepareSsh,
 }
 
 #[derive(Parser, Debug, Clone, Default)]
@@ -928,22 +1097,9 @@ pub(crate) struct CloudMoveTarget {
 mod cloud_sessions;
 pub(crate) use cloud_sessions::*;
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum RestartCommand {
-    /// Save a reboot snapshot of currently active jcode windows
-    Save {
-        /// Restore this reboot snapshot automatically the next time plain `jcode` starts
-        #[arg(long)]
-        auto_restore: bool,
-    },
-    /// Restore the most recently saved reboot snapshot
-    Restore,
-    /// Show the currently saved reboot snapshot
-    Status,
-    /// Remove the currently saved reboot snapshot
-    Clear,
-}
-
+#[path = "args/restart.rs"]
+mod restart;
+pub(crate) use restart::RestartCommand;
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelCommand {
     /// List model names you can pass to -m/--model

@@ -193,6 +193,7 @@ fn documented_shapes_validate() {
     let description = AppletTool::new().description().to_string();
     assert!(description.contains("select{bind,options:[{value,label}]}"));
     assert!(description.contains("host.send_prompt{prompt}"));
+    assert!(description.contains("table{columns:[string],rows:[[string]]}"));
     let view = json!({"type":"stack","children":[
         {"type":"select","bind":"env","options":[{"value":"a","label":"A"}]},
         {"type":"tabs","bind":"t","tabs":[{"id":"x","label":"X","children":[]}]},
@@ -202,7 +203,8 @@ fn documented_shapes_validate() {
         {"type":"input","bind":"q","placeholder":"p","multiline":true},
         {"type":"list","children":[{"type":"list_item","title":"a","subtitle":"b","meta":"c","badges":["d"],"on_press":{"action":"open"}}]},
         {"type":"progress","value":0.5,"label":"half"},
-        {"type":"text","text":"t","style":"caption","tone":"dim","max_lines":2}
+        {"type":"text","text":"t","style":"caption","tone":"dim","max_lines":2},
+        {"type":"table","columns":["Name","Email"],"rows":[["Ada","ada@example.com"]]}
     ]});
     let document: jcode_applet_types::Document =
         serde_json::from_value(json!({"revision":1,"title":"T","state":{"env":"a"},"view":view}))
@@ -213,4 +215,26 @@ fn documented_shapes_validate() {
         &Default::default(),
     )
     .expect("documented shapes validate");
+}
+
+/// A rejected view must say why. Tool errors are rendered with `{}`, so a
+/// cause attached via `.context` never reaches the agent, which then retries
+/// blind with variations of the same mistake.
+#[tokio::test]
+async fn invalid_view_error_names_the_cause() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = temp_home();
+    let error = AppletTool::new()
+        .execute(
+            json!({"title":"T","view":{"type":"table",
+                "columns":[{"key":"name","label":"Name"}],
+                "rows":[{"name":"Ada"}]}}),
+            context("applet-invalid-view", "call-1"),
+        )
+        .await
+        .expect_err("object-shaped table columns are rejected");
+    let shown = format!("{error}");
+    assert!(shown.starts_with("invalid view: "), "{shown}");
+    assert!(shown.contains("invalid `table` node"), "{shown}");
+    assert!(shown.contains("expected a string"), "{shown}");
 }

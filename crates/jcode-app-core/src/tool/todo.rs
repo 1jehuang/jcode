@@ -16,9 +16,41 @@ use std::collections::HashMap;
 
 pub struct TodoTool;
 
+#[path = "todo_names.rs"]
+mod names;
+
+#[cfg(test)]
+#[path = "todo_name_tests.rs"]
+mod name_tests;
+
 #[cfg(test)]
 #[path = "todo_external_blocker_tests.rs"]
 mod external_blocker_tests;
+
+#[cfg(test)]
+#[path = "todo_lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
+/// A lane-wide field edit naming one member applies atomically to its entire
+/// lane (`lane_after`, `lane_owner`).
+fn patch_lane_field(todos: &mut [Value], id: &str, field: &str, value: Value) -> Result<()> {
+    let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
+    let target = typed
+        .iter()
+        .find(|todo| todo.id == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown todo {id:?}"))?;
+    let lane = crate::todo::stages::lane_id(target);
+    for (raw, todo) in todos.iter_mut().zip(&typed) {
+        if crate::todo::stages::lane_id(todo) == lane {
+            raw[field] = value.clone();
+        }
+    }
+    Ok(())
+}
+
+fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+    patch_lane_field(todos, id, "lane_after", value)
+}
 
 fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
     let now = chrono::Utc::now();
@@ -183,6 +215,14 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
         if todo.assigned_to.is_none() {
             todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
         }
+        // Only a new start claims local ownership. Merely rewriting an old
+        // unassigned in-progress item does not establish who is working on it.
+        if todo.assigned_to.is_none()
+            && todo.status == "in_progress"
+            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
+        {
+            todo.assigned_to = Some("@self".to_string());
+        }
     }
 }
 
@@ -227,6 +267,22 @@ fn record_todo_write_mode(input: &Value) {
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
 /// drops ids. Full replacements and incremental edits are mutually exclusive.
 fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    names::normalize_containers(&mut input);
+    let patching = ["update", "add", "remove"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
+    let named_replacement = ["phases", "todos"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(names::uses_names));
+    let stored = if patching || named_replacement {
+        stored()
+    } else {
+        json!([])
+    };
+    names::normalize_public_input(
+        &mut input,
+        stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
+    )?;
     flatten_phases(&mut input)?;
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
@@ -264,7 +320,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         })
         .collect::<Result<_>>()?;
 
-    let Value::Array(mut todos) = stored() else {
+    let Value::Array(mut todos) = stored else {
         bail!("stored todos are not a list");
     };
     let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
@@ -297,6 +353,12 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
                 };
                 target.insert(key.to_string(), value.clone());
             }
+        }
+        if let Some(value) = fields.get("lane_after") {
+            patch_lane_after(&mut todos, id, value.clone())?;
+        }
+        if let Some(value) = fields.get("lane_owner") {
+            patch_lane_field(&mut todos, id, "lane_owner", value.clone())?;
         }
     }
 
@@ -342,6 +404,18 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
                 fields.insert(canonical.into(), value);
             }
         }
+        if !fields.contains_key("lane_after")
+            && let Some(value) = todos
+                .iter()
+                .find(|todo| {
+                    todo.get("stage") == fields.get("stage")
+                        && todo.get("group") == fields.get("group")
+                })
+                .and_then(|todo| todo.get("lane_after"))
+        {
+            fields.insert("lane_after".into(), value.clone());
+        }
+        let lane_after = fields.get("lane_after").cloned();
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
         if let Some(id) = &id
             && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
@@ -355,6 +429,9 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         }) {
             Some(index) => todos.insert(index + 1, add),
             None => todos.push(add),
+        }
+        if let (Some(id), Some(value)) = (id, lane_after) {
+            patch_lane_after(&mut todos, &id, value)?;
         }
     }
 
@@ -375,6 +452,7 @@ struct TodoInput {
 
 fn parse_todo_input(input: Value) -> Result<TodoInput> {
     let mut input = input;
+    names::normalize_public_input(&mut input, &[])?;
     flatten_phases(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
     if let Some(todos) = &params.todos {
@@ -435,7 +513,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(obj) = input.as_object_mut() else {
         return Ok(());
     };
-    let Some(phases) = obj.get("phases") else {
+    let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };
     if ["todos", "update", "add", "remove"]
@@ -480,7 +558,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
             if lane
                 .keys()
-                .any(|key| !["lane", "items"].contains(&key.as_str()))
+                .any(|key| !["lane", "items", "after", "owner"].contains(&key.as_str()))
             {
                 bail!("unexpected lane field");
             }
@@ -503,9 +581,17 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     .as_object()
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
-                if ["phase", "lane", "stage", "group", "wave"]
-                    .iter()
-                    .any(|key| item.contains_key(*key))
+                if [
+                    "phase",
+                    "lane",
+                    "stage",
+                    "group",
+                    "wave",
+                    "lane_after",
+                    "lane_owner",
+                ]
+                .iter()
+                .any(|key| item.contains_key(*key))
                 {
                     bail!("hierarchical items must not own phase/lane/stage/group membership");
                 }
@@ -521,6 +607,12 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 }
                 item.insert("stage".into(), json!(number));
                 item.insert("group".into(), json!(name));
+                if let Some(after) = lane.get("after") {
+                    item.insert("lane_after".into(), after.clone());
+                }
+                if let Some(owner) = lane.get("owner").filter(|owner| !owner.is_null()) {
+                    item.insert("lane_owner".into(), owner.clone());
+                }
                 todos.push(Value::Object(item));
             }
         }
@@ -840,6 +932,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
     let Some(mut plan) = incoming else {
         return stored.clone();
     };
+    if plan.title.is_none() {
+        plan.title = stored.title.clone();
+    }
     if plan.user_intention.is_none() {
         plan.user_intention = stored.user_intention.clone();
     }
@@ -856,6 +951,9 @@ fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
 
 fn plan_change(before: &TodoPlan, after: &TodoPlan) -> Option<TodoPlanChange> {
     let mut fields = Vec::new();
+    if before.title != after.title {
+        fields.push(TodoPlanField::Title);
+    }
     if before.user_intention != after.user_intention {
         fields.push(TodoPlanField::UserIntention);
     }
@@ -1018,7 +1116,7 @@ fn build_todo_output(
         .iter()
         .filter(|todo| todo.status != "completed")
         .count();
-    let mut text = serde_json::to_string_pretty(&todos)?;
+    let mut text = serde_json::to_string_pretty(&names::public_todos(&todos)?)?;
     if plan != TodoPlan::default() {
         text.push_str("\n\nPlan:\n");
         text.push_str(&serde_json::to_string_pretty(&plan)?);
@@ -1170,21 +1268,14 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update todos and goal assessments. For multi-step work, write the plan \
-         once with `phases` containing lanes containing items. Then use `update` by id for status/field changes and `add` \
-         for new work. Reserve full replacement for restructuring; remove rarely. \
-         Mark work in_progress before starting and completed as soon as it is done. \
-         Keep the live list current after meaningful steps. Use short titles, with \
-         longer context in details. Organize parallel lanes within sequential phases. \
-         Set waiting_on to existing background task IDs or swarm await_members dependency IDs from this session when work \
-         must wait. They block only while running, never after completion. Saving \
-         enables completion notify/wake. Use [] or null to clear waiting_on. \
-         For an external blocker without a dependency ID, set external_blocker to \
-         {reason, review_at}, with a concrete reason and future RFC3339 deadline. \
-         Keep the todo pending/in_progress. Pokes pause until review_at and a durable \
-         scheduler wakes this session to reassess, not assume resolution or completion. \
-         Clear external_blocker with null when unblocked. Use this instead of a separate \
-         schedule call for todo blocker reviews. completely_blocked: No way forward."
+        "Use the todo tool very frequently. Read/update todos and goal assessments. \
+         Initialize with phases, then patch by unique task name. \
+         Keep status current. Phases are sequential, lanes parallel, items ordered. \
+         Block only for an indispensable action by someone else with no safe workaround: \
+         name who must do what and why you cannot proceed. Uncertainty, task size, and \
+         agent coordination are not blockers. Continue independent work. \
+         external_blocker keeps work pending/in_progress and schedules reassessment at review_at \
+         instead of a separate schedule call; null clears it. completely_blocked means no way forward."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1194,176 +1285,161 @@ impl Tool for TodoTool {
                 "intent": super::intent_schema_property(),
                 "update": {
                     "type": "array",
-                    "description": "Patch todos by id and changed fields only. Unmentioned data stays untouched. Prefer for status updates.",
+                    "description": "Patch by name; omitted fields stay unchanged.",
                     "items": {
                         "type": "object",
-                        "required": ["id"],
-                        "properties": {"id": {"type": "string"}},
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string", "minLength": 1}},
                         "additionalProperties": true
                     }
                 },
                 "add": {
                     "type": "array",
-                    "description": "Append new todos (same fields as todos). Optional `after`: id to insert after.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "required": ["name", "status", "priority", "confidence"],
                         "additionalProperties": true
                     }
                 },
                 "remove": {
                     "type": "array",
-                    "description": "Ids of todos to delete. Prefer marking status cancelled.",
+                    "description": "Delete by name; prefer cancelling.",
                     "items": {"type": "string"}
                 },
                 "todos": {
                     "type": "array",
-                    "description": "Full todo list; replaces the whole list. Use for the initial plan or a real restructure, otherwise prefer update/add/remove.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id", "confidence"],
+                        "required": ["name", "status", "priority", "confidence"],
                         "properties": {
-                            "content": {
+                            "name": {
                                 "type": "string",
-                                "description": "Short title, ideally under 40 characters; todos render side by side. Put longer context in details."
+                                "minLength": 1,
+                                "description": "Unique task name, ideally under 40 characters."
                             },
-                            "details": {
-                                "type": "string",
-                                "description": "Longer brief for the assigned worker: files, acceptance criteria, context. Hidden from the card."
+                            "description": {
+                                "type": "string"
                             },
                             "waiting_on": {
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
-                                "description": "Session task/await_members IDs: pending blocks+notify/wake; done/timeout unblocks. []/null clears."
+                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
                             },
                             "completely_blocked": {
                                 "type": ["object", "null"],
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Reason."}
-                                },
-                                "description": "No way forward."
+                                    "reason": {"type": "string", "minLength": 1}
+                                }
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
                                 "required": ["reason", "review_at"],
                                 "additionalProperties": false,
                                 "properties": {
-                                    "reason": {"type": "string", "minLength": 1, "description": "Concrete external condition preventing useful work, not a completion claim."},
-                                    "review_at": {"type": "string", "format": "date-time", "description": "Future finite RFC3339 reassessment deadline. Does not mean the blocker resolves then."}
-                                },
-                                "description": "No dependency ID: pause until durable review_at to reassess the external condition. null cancels."
+                                    "reason": {"type": "string", "minLength": 1},
+                                    "review_at": {"type": "string", "format": "date-time", "description": "Future RFC3339 reassessment time, not assumed resolution."}
+                                }
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"],
-                                "description": "Status. Use completed when the task is done."
+                                "enum": ["pending", "in_progress", "completed", "cancelled"]
                             },
                             "priority": {
-                                "type": "string",
-                                "description": "Priority."
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "ID."
+                                "type": "string"
                             },
                             "lane": {
-                                "type": "string",
-                                "description": "Lane name: coherent goal owned by one worker, tasks ordered within it. Omit for flat list."
+                                "type": "string"
                             },
                             "phase": {
                                 "type": "integer",
-                                "minimum": 1,
-                                "description": "Sequential phase (1, 2...). Lanes inside each phase run in parallel. Omit for list order."
+                                "minimum": 1
                             },
                             "confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state that this todo can be completed correctly; reassess as evidence accumulates."
+                                "description": "Evidence that the task can be completed correctly."
                             },
                             "completion_confidence": {
                                 "type": "string",
                                 "enum": ["speculative", "plausible", "validated", "verified"],
-                                "description": "Evidence state behind this todo's completion. Use only for completed items."
+                                "description": "Evidence of completion; completed items only."
                             },
                         }
                     }
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Plan-level understanding of the request. Send on first write and whenever understanding changes.",
+                    "description": "Send initially and when understanding changes.",
                     "required": ["user_intention", "understands_user_intent"],
                     "properties": {
-                        "user_intention": {
+                        "title": {
                             "type": "string",
-                            "description": "What the user actually wants: underlying reason and desired end state. Omit later to retain."
+                            "description": "Session name, 2-5 specific words. Set when creating the plan."
+                        },
+                        "user_intention": {
+                            "type": "string"
                         },
                         "understands_user_intent": {
                             "type": "string",
-                            "enum": ["uncertain", "partial", "clear", "complete"],
-                            "description": "How well you understand what the user wants. Report uncertain or partial when guessing."
+                            "enum": ["uncertain", "partial", "clear", "complete"]
                         }
                     }
                 },
                 "goals": {
                     "type": "array",
-                    "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
+                    "description": "Assess honestly by group; omitted groups are retained.",
                     "items": {
                         "type": "object",
                         "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
                         "properties": {
                             "group": {
                                 "type": "string",
-                                "description": "Group label this goal describes. Omit or null for the ungrouped list."
+                                "description": "Omit/null for ungrouped."
                             },
                             "closed_feedback_loop": {
                                 "type": "string",
                                 "enum": ["absent", "weak", "usable", "strong", "closed"],
-                                "description": "How much of this goal's correctness the feedback_loop can verify on its own."
+                                "description": "How much correctness the feedback loop can verify itself."
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Requirement-to-check process: an explicit observation or check for each requirement of this goal."
+                                "description": "Concrete check for each requirement."
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
+                                "description": "indirect: inspection/proxy; synthetic: mocks/custom harness; representative: real interfaces, partial workflow; acceptance_blocked: real workflow attempted but externally blocked; acceptance_aligned: real build/test/user workflow passed, never substitutes only."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
-                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"]
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
+                                "description": "Requirements/outputs mapped to checks and observed results."
                             },
                             "delivery_state": {
                                 "type": "string",
-                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"],
-                                "description": "Completion-time: how far the result actually traveled toward the user's outcome."
+                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
                             },
                             "difficulty": {
                                 "type": "string",
-                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"],
-                                "description": "Honest intrinsic difficulty of this goal. Descriptive only."
+                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"]
                             },
                             "autonomy": {
                                 "type": "string",
-                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"],
-                                "description": "How far beyond the literal request the work went. Assess from what was completed."
+                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"]
                             },
                             "iteration_maturity": {
                                 "type": "string",
-                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"],
-                                "description": "How far the feedback loop was actually exercised, and any evidence-based reason to stop iterating."
+                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"]
                             },
                             "stopping_evidence": {
                                 "type": "string",
-                                "description": "Evidence for the reported iteration_maturity: attempts, observations, or a real budget limit."
+                                "description": "Observed evidence supporting iteration_maturity."
                             }
                         }
                     }
@@ -1373,13 +1449,26 @@ impl Tool for TodoTool {
         // Patch additions accept the same fields as full todos, plus an
         // insertion position. Keep their declarations in sync for providers
         // that require every `required` entry to appear in `properties`.
+        schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
+            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Earlier-phase prerequisite task names. Updates whole lane; null restores phase barrier."
+        });
+        schema["properties"]["todos"]["items"]["properties"]["lane_owner"] = json!({
+            "type": "string", "enum": ["self", "worker"],
+            "description": "Who runs the lane. worker: a swarm worker auto-spawns when the lane is ready. Updates whole lane."
+        });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
-            "description": "Existing todo id to insert after."
+            "description": "Insert after this task name."
         });
         schema["properties"]["update"]["items"]["properties"] =
             schema["properties"]["todos"]["items"]["properties"].clone();
+        schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
+            "type": "string", "minLength": 1,
+            "description": "New unique name; preserves identity and dependencies."
+        });
         schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
@@ -1398,21 +1487,29 @@ impl Tool for TodoTool {
         if let Some(properties) = item["properties"].as_object_mut() {
             properties.remove("phase");
             properties.remove("lane");
+            properties.remove("lane_dependencies");
+            properties.remove("lane_owner");
         }
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan: sequential phases, parallel lanes, ordered items. [] clears.",
+            "description": "Replace entire plan; [] clears. Prefer patches after initialization.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1}, "items": {"type": "array", "minItems": 1, "items": item}}
+                        "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
+                            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
+                        }, "owner": {
+                            "type": "string", "enum": ["self", "worker"],
+                            "description": "Who runs the lane. Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                        }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
-        schema["properties"]["add"]["description"] = json!(
-            "Add items with explicit phase and lane, or inherit missing membership from an existing after id."
-        );
+        schema["properties"]["add"]["description"] =
+            json!("Specify phase/lane or inherit from after.");
         schema
     }
 
@@ -1429,6 +1526,13 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            crate::todo::stages::normalize_lane_owners(&mut todos);
+            crate::todo::store::validate_session_lane_dependencies(
+                &crate::storage::jcode_dir()?,
+                &ctx.session_id,
+                &todos,
+            )
+            .map_err(anyhow::Error::msg)?;
             for todo in &mut todos {
                 if !crate::todo::is_incomplete_todo(todo) {
                     todo.external_blocker = None;

@@ -303,6 +303,14 @@ pub struct SwarmAwaitCompleted {
     pub wake: bool,
 }
 
+/// A worker report that must reach its owner's model, not just its UI.
+#[derive(Clone, Debug)]
+pub struct SwarmWorkerReported {
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -432,6 +440,8 @@ pub enum BusEvent {
     BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
+    /// A spawned worker finished and its owner needs to coordinate next steps.
+    SwarmWorkerReported(SwarmWorkerReported),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -497,8 +507,34 @@ pub enum BusEvent {
     /// from the cached one, so the branch/dirty/commit chrome needs a repaint
     /// now rather than at the next unrelated redraw.
     GitInfoRefreshed,
+    /// A client reload candidate binary was published (inotify). Clients
+    /// re-exec onto it once idle so every session follows hot reloads.
+    ClientBinaryChanged,
     /// Productivity report finished generating off the UI thread
     ProductivityReportReady(ProductivityReportReady),
+}
+
+impl BusEvent {
+    /// Owner of server-consumed continuation effects. Unknown ownership stays
+    /// global rather than being guessed from the publisher's current turn.
+    pub fn runtime_session_id(&self) -> Option<&str> {
+        match self {
+            Self::FileTouch(event) => Some(&event.session_id),
+            Self::LaneEdited(event) => Some(&event.worker),
+            Self::BackgroundTaskCompleted(event) => Some(&event.session_id),
+            Self::BackgroundTaskProgress(event) => Some(&event.session_id),
+            Self::BackgroundTaskStalled(event) => Some(&event.session_id),
+            Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
+            Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::UiActivity(event) => event.session_id.as_deref(),
+            Self::ToolUpdated(event) => Some(&event.session_id),
+            Self::SubagentStatus(event) => Some(&event.session_id),
+            Self::BatchProgress(event) => Some(&event.session_id),
+            Self::TodoUpdated(event) => Some(&event.session_id),
+            Self::SwarmOutputTail(event) => Some(&event.session_id),
+            _ => None,
+        }
+    }
 }
 
 /// A server delivery remains pending until dispatch, including any queue write,
@@ -507,6 +543,9 @@ pub enum BusEvent {
 pub struct RuntimeBusDelivery {
     pub event: BusEvent,
     _pending: Arc<PendingRuntimeDelivery>,
+    // Reserve at publication, not receipt. A detached callback queued after
+    // its parent exits must still exclude transfer of its owning session.
+    _activity: Option<Arc<crate::runtime_activity::ActivityReservation>>,
 }
 
 struct PendingRuntimeDelivery(Arc<AtomicUsize>);
@@ -619,10 +658,12 @@ impl Bus {
         if matches!(
             &event,
             BusEvent::FileTouch(_)
+                | BusEvent::LaneEdited(_)
                 | BusEvent::BackgroundTaskCompleted(_)
                 | BusEvent::BackgroundTaskProgress(_)
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
+                | BusEvent::SwarmWorkerReported(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)
@@ -631,12 +672,22 @@ impl Bus {
                 | BusEvent::SwarmOutputTail(_)
         ) {
             publication.retain(|sender| {
+                // A publication racing an existing transfer cannot block its
+                // synchronous producer. Queue it without admission instead:
+                // dispatch waits for the fence and rechecks durable ownership.
+                let activity = match event.runtime_session_id() {
+                    Some(session) => crate::runtime_activity::global().try_enter_session(session),
+                    None => crate::runtime_activity::global().try_enter_global(),
+                }
+                .ok()
+                .map(Arc::new);
                 self.runtime_epoch.fetch_add(1, Ordering::SeqCst);
                 self.runtime_pending.fetch_add(1, Ordering::SeqCst);
                 sender
                     .send(RuntimeBusDelivery {
                         event: event.clone(),
                         _pending: Arc::new(PendingRuntimeDelivery(self.runtime_pending.clone())),
+                        _activity: activity,
                     })
                     .is_ok()
             });
@@ -715,7 +766,9 @@ impl Bus {
                 state.publish_pending = false;
                 state.last_published_at = Some(Instant::now());
                 drop(state);
-                let _ = sender.send(BusEvent::ModelsUpdated);
+                if sender.send(BusEvent::ModelsUpdated).is_err() {
+                    crate::logging::debug("Model update notification has no subscribers");
+                }
             });
             return;
         }
@@ -738,6 +791,25 @@ mod tests {
             notify: true,
             wake: true,
         })
+    }
+
+    #[tokio::test]
+    async fn worker_report_uses_reliable_owner_scoped_runtime_delivery() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(BusEvent::SwarmWorkerReported(super::SwarmWorkerReported {
+            session_id: "root".into(),
+            worker_session_id: "worker".into(),
+            notification: "ready for next chunk".into(),
+        }));
+        assert!(bus.runtime_delivery_checkpoint().is_none());
+        let delivery = receiver.recv().await.unwrap();
+        assert_eq!(delivery.event.runtime_session_id(), Some("root"));
+        assert!(
+            matches!(&delivery.event, BusEvent::SwarmWorkerReported(report) if report.notification == "ready for next chunk")
+        );
+        drop(delivery);
+        assert!(bus.runtime_delivery_checkpoint().is_some());
     }
 
     #[tokio::test]

@@ -90,6 +90,27 @@ pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
         || message.starts_with("All todos are done. Todo confidence summary:")
 }
 
+fn is_incomplete_todo_poke(message: &str) -> bool {
+    let trimmed = message.trim();
+    trimmed.starts_with("You have ")
+        && trimmed
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains(" incomplete todo"))
+        && is_poke_message(trimmed)
+}
+
+/// An incomplete-todo poke can linger in the queue (for example re-queued
+/// after a server busy rejection) while the model finishes every todo.
+/// Sending it afterwards nags about finished work, so drop it at dispatch.
+pub(super) fn drop_stale_incomplete_todo_pokes(app: &App, messages: &mut Vec<String>) {
+    if messages.iter().any(|m| is_incomplete_todo_poke(m)) && incomplete_poke_todos(app).is_empty()
+    {
+        crate::logging::info("Dropping stale incomplete-todo poke: no open todos remain");
+        messages.retain(|m| !is_incomplete_todo_poke(m));
+    }
+}
+
 pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
     !messages.is_empty() && messages.iter().all(|message| is_poke_message(message))
 }
@@ -1371,7 +1392,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.
     let images = if prompt.is_some() {
-        std::mem::take(&mut app.pending_images)
+        app.take_pending_image_payloads()
     } else {
         Vec::new()
     };
@@ -2089,7 +2110,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         }
         history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
 
-        app.push_display_message(DisplayMessage::system(history));
+        app.push_display_message(DisplayMessage::system(history).with_title("Rewind"));
         return true;
     }
 
@@ -3442,24 +3463,16 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> bool {
+    handle_alignment_command(app, trimmed)
+        || handle_reasoning_display_command(app, trimmed)
+        || handle_compact_notifications_command(app, trimmed)
+        || handle_show_agentgrep_output_command(app, trimmed)
+        || handle_tool_call_details_command(app, trimmed)
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_alignment_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_reasoning_display_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_compact_notifications_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_show_agentgrep_output_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_tool_call_details_command(app, trimmed) {
+    if handle_display_settings_command(app, trimmed) {
         return true;
     }
 
@@ -3735,6 +3748,8 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let filter = rest.trim();
+    app.usage_provider_filter = (!filter.is_empty()).then(|| filter.to_string());
     app.open_usage_inline_loading();
     app.request_usage_report();
     true

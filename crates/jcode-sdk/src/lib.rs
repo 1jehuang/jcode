@@ -139,10 +139,15 @@
 
 mod auth;
 mod client;
+/// Jcode Cloud account sign-in and managed host connection (feature `cloud`).
+#[cfg(feature = "cloud")]
+pub mod cloud;
 pub mod collections;
 mod diagnostics;
 mod errors;
 mod launch;
+#[cfg(feature = "ssh-native")]
+mod native_ssh;
 mod process;
 mod ssh;
 mod structured;
@@ -178,6 +183,8 @@ pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
 };
+#[cfg(feature = "ssh-native")]
+pub use native_ssh::{NativeSshKey, NativeSshOptions, NativeSshTransport};
 pub use ssh::SshConnectOptions;
 #[cfg(unix)]
 pub use ssh::{SharedSshTransport, WeakSharedSshTransport};
@@ -191,10 +198,10 @@ pub use turn_retry::{FailureKind, RetryDecision, RetryPolicy, TurnRetry, classif
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
-    ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SessionToolDefinition,
-    SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
-    ToolConfiguration, TurnStopReason, api_socket_path,
+    ApiEvent, ApiRequest, HistoryMessage, HistoryTool, ModelRouteInfo, PermissionDecision,
+    RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
+    SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
+    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, api_socket_path,
 };
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,

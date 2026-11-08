@@ -20,6 +20,13 @@ pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000)
 /// Tick cadence while a drag-held edge autoscroll runs (one line per tick).
 pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
+/// Tick cadence while a turn is live but its streamed text is fully revealed.
+/// Matches the status spinner glyph cadence so the spinner stays smooth.
+pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);
+/// Fastest tick for a client whose terminal is not focused. Nobody is looking
+/// closely at a background pane, but agent swarms keep a dozen of them
+/// streaming at once, so full-rate repaints there are pure battery cost.
+pub(crate) const REDRAW_UNFOCUSED_MIN: Duration = Duration::from_millis(100);
 
 /// Whether this session has been left alone long enough to be treated as
 /// dormant (deep idle): no stream activity *and* no user interaction for
@@ -171,6 +178,7 @@ const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
     "status_animation",
     "swarm_spinner",
     "session_picker_spinner",
+    "session_picker_preview",
 ];
 
 fn record_full_frame_redraw_reason(reason: &'static str) {
@@ -194,6 +202,9 @@ pub(crate) fn last_full_frame_redraw_reason() -> Option<&'static str> {
 /// against current state instead.
 pub(crate) fn current_full_frame_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
     let policy = crate::perf::tui_policy();
+    if session_picker_preview_redraw_active(state) {
+        return Some("session_picker_preview");
+    }
     if full_frame_status_animation_active_with_policy(state, &policy) {
         return Some("status_animation");
     }
@@ -312,8 +323,18 @@ fn session_picker_spinner_redraw_active(state: &dyn TuiState) -> bool {
         && state.session_picker_overlay().is_some_and(|picker| {
             picker
                 .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_visible_running_sessions())
+                .is_ok_and(|picker| picker.has_visible_running_sessions())
+        })
+}
+
+/// Preview completions are functional updates, not decorative animation. Poll
+/// only while focused, including Minimal policy and deep idle.
+fn session_picker_preview_redraw_active(state: &dyn TuiState) -> bool {
+    state.client_focused()
+        && state.session_picker_overlay().is_some_and(|picker| {
+            picker
+                .try_borrow()
+                .is_ok_and(|picker| picker.has_pending_preview_work())
         })
 }
 
@@ -396,8 +417,27 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     policy: &crate::perf::TuiPerfPolicy,
     animation_on_screen: bool,
 ) -> Duration {
+    let interval = redraw_interval_focused_policy(state, policy, animation_on_screen);
+    if state.client_focused() || state.copy_selection_edge_autoscroll_active() {
+        interval
+    } else {
+        interval.max(REDRAW_UNFOCUSED_MIN)
+    }
+}
+
+fn redraw_interval_focused_policy(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+    animation_on_screen: bool,
+) -> Duration {
     let animation_interval = fps_to_duration(policy.animation_fps);
     let fast_interval = fps_to_duration(policy.redraw_fps);
+
+    // Preview receivers have no independent event-loop notification. Poll
+    // promptly until drained, regardless of decorative-animation policy.
+    if session_picker_preview_redraw_active(state) {
+        return Duration::from_millis(16);
+    }
 
     // A retained/collapsing reasoning trace used to need animation cadence here;
     // anchored traces are static transcript messages now. The tail-follow
@@ -507,6 +547,24 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         return REDRAW_PASSIVE_LIVENESS;
     }
 
+    // Streamed text is on screen but fully revealed while the turn continues
+    // (thinking or running a tool after emitting text). New deltas wake the
+    // loop themselves, so ticks only need to keep the status spinner and timer
+    // alive. Measured on a live client: this state held 66 full frames/s with
+    // zero changed cells, about 0.2 cores per waiting session.
+    if state.is_processing()
+        && !state.streaming_text().is_empty()
+        && !state.stream_reveal_pending()
+        && !state.has_pending_mouse_scroll_animation()
+        && !state.copy_selection_edge_autoscroll_active()
+        && !rate_limit_countdown_redraw_active(state)
+    {
+        return match policy.tier {
+            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
+            _ => REDRAW_STATIC_STREAM,
+        };
+    }
+
     if state.is_processing()
         || !state.streaming_text().is_empty()
         || state.has_pending_mouse_scroll_animation()
@@ -574,6 +632,11 @@ pub(crate) fn periodic_redraw_required_excluding_idle_animation(state: &dyn TuiS
 
 fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: bool) -> bool {
     let policy = crate::perf::tui_policy();
+
+    if session_picker_preview_redraw_active(state) {
+        record_full_frame_redraw_reason("session_picker_preview");
+        return true;
+    }
 
     let deep_idle = deep_idle_dormant(state);
 
@@ -694,6 +757,7 @@ mod tests {
             "status_animation",
             "swarm_spinner",
             "session_picker_spinner",
+            "session_picker_preview",
         ] {
             assert!(
                 FULL_FRAME_REDRAW_REASONS.contains(&reason),

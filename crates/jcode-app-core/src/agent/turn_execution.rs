@@ -34,7 +34,9 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let _turn = self.claim_server_turn()?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message(
@@ -74,7 +76,9 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let _turn = self.claim_server_turn()?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message_with_display_role(
@@ -124,7 +128,31 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        let lease = self.claim_server_turn()?;
+        self.run_reserved_streaming_mpsc(
+            &lease,
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_reserved_streaming_mpsc(
+        &mut self,
+        lease: &TurnLease,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<()> {
+        self.validate_server_turn(lease)?;
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
         if !alerts.is_empty() {
@@ -191,9 +219,11 @@ impl Agent {
     /// retried on the new route exactly as if it had never been sent.
     pub(crate) async fn continue_turn_after_failover(
         &mut self,
+        lease: &TurnLease,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        self.validate_server_turn(lease)?;
         if self.is_graceful_shutdown() {
             return Ok(());
         }
