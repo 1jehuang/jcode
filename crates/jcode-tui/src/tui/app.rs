@@ -117,6 +117,7 @@ mod update_sim;
 mod usage_reset;
 mod voice_input;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
+mod binary_watch;
 mod justrust_status;
 mod state_ui_history_marker;
 mod state_ui_maintenance;

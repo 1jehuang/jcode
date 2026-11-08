@@ -160,6 +160,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.check_stable_version();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
     needs_redraw |= app.maybe_finish_background_client_reload();
+    needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     if app.pending_migration.is_some() && !app.is_processing && !app.cloud_handoff_blocks_work() {
         app.execute_migration();
         needs_redraw = true;
@@ -240,6 +241,7 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::GitInfoRefreshed) => true,
+        Ok(BusEvent::ClientBinaryChanged) => app.maybe_hot_reload_onto_new_binary(),
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true

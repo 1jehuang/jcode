@@ -506,6 +506,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= recover_stuck_remote_history(app, remote).await;
     needs_redraw |= detect_starved_queued_followup(app);
     needs_redraw |= app.maybe_finish_background_client_reload();
+    needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     needs_redraw
 }
 
@@ -762,6 +763,7 @@ pub(super) async fn handle_bus_event(
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::GitInfoRefreshed) => true,
+        Ok(BusEvent::ClientBinaryChanged) => app.maybe_hot_reload_onto_new_binary(),
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
             true
