@@ -1,6 +1,41 @@
 use super::*;
 use std::time::Duration;
 
+#[test]
+fn recent_history_negotiation_preserves_local_verified_prefix() {
+    let base = HistoryBase {
+        count: 7,
+        fingerprint: 123,
+        images_fingerprint: Some(456),
+        recent_messages: None,
+    };
+    let local = subscribe_history_base(Some(base), false).unwrap();
+    assert_eq!(local.count, 7);
+    assert_eq!(local.fingerprint, 123);
+    let remote = subscribe_history_base(Some(base), true).unwrap();
+    assert_eq!(remote.count, 0);
+    assert_eq!(remote.recent_messages, Some(128));
+    assert!(subscribe_history_base(None, false).is_none());
+    assert_eq!(
+        subscribe_history_base(None, true).unwrap().recent_messages,
+        Some(128)
+    );
+}
+
+#[tokio::test]
+async fn recent_history_page_request_explicitly_selects_normal_transcript() {
+    let mut remote = RemoteConnection::dummy();
+    let id = remote.get_compacted_history(192, true).await.unwrap();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    peer.readable().await.unwrap();
+    let mut bytes = [0; 256];
+    let count = peer.try_read(&mut bytes).unwrap();
+    assert!(
+        matches!(serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+        Request::GetCompactedHistory { id: actual, visible_messages: 192, recent_history: true } if actual == id)
+    );
+}
+
 #[tokio::test]
 async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();

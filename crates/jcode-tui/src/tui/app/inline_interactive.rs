@@ -2773,11 +2773,9 @@ impl App {
 
         match recv_result {
             Ok(session_picker::SessionListUpdate::CloudUnavailable(warning)) => {
-                if picker_active {
-                    if let Some(picker) = self.session_picker_overlay.as_ref() {
-                        picker.borrow_mut().set_cloud_warning(warning);
-                        return true;
-                    }
+                if picker_active && let Some(picker) = self.session_picker_overlay.as_ref() {
+                    picker.borrow_mut().set_cloud_warning(warning);
+                    return true;
                 }
                 false
             }

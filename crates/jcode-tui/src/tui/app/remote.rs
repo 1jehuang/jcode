@@ -690,8 +690,18 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
     let Some(visible_messages) = app.take_pending_compacted_history_load() else {
         return false;
     };
-    match remote.get_compacted_history(visible_messages).await {
-        Ok(_) => true,
+    let recent_history = app.recent_history_window_active();
+    match remote
+        .get_compacted_history(visible_messages, recent_history)
+        .await
+    {
+        Ok(id) => {
+            if recent_history {
+                app.recent_history_request =
+                    Some((id, app.display_messages_version, visible_messages));
+            }
+            true
+        }
         Err(error) => {
             app.restore_pending_compacted_history_load(visible_messages);
             app.set_status_notice(format!("Failed to request older history: {}", error));

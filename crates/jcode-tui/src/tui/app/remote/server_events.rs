@@ -2406,6 +2406,7 @@ fn handle_server_event_inner(
             true
         }
         ServerEvent::CompactedHistory {
+            id,
             session_id,
             messages,
             images,
@@ -2422,7 +2423,10 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            let restored_messages = messages
+            if !app.accept_recent_history_response(id) {
+                return false;
+            }
+            let mut restored_messages: Vec<_> = messages
                 .into_iter()
                 .map(|msg| DisplayMessage {
                     role: msg.role,
@@ -2433,6 +2437,12 @@ fn handle_server_event_inner(
                     tool_data: msg.tool_data,
                 })
                 .collect();
+            if !app.recent_history_page_contains_visible_tail(
+                &mut restored_messages,
+                compacted_visible,
+            ) {
+                return false;
+            }
             app.apply_compacted_history_window(
                 restored_messages,
                 images,

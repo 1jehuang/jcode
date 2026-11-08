@@ -727,6 +727,7 @@ impl App {
         remaining_messages: usize,
         hidden_user_prompts: usize,
     ) {
+        let recent_history = self.recent_history_window_active();
         compact_display_messages_for_storage(&mut messages);
         carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
@@ -739,6 +740,11 @@ impl App {
             hidden_user_prompts,
             pending_request_visible: None,
         };
+        if recent_history {
+            // Once the current transcript is fully visible, its original
+            // compaction marker (if any) becomes the next lazy history source.
+            self.sync_compacted_history_lazy_from_display_messages();
+        }
         self.auto_scroll_paused = true;
         // Older messages are prepended above the current view. If the reader had
         // an anchor captured (they scrolled up to trigger this load), leave the
@@ -935,7 +941,7 @@ impl App {
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);
             self.set_status_notice(format!(
-                "Loading older compacted history… {} of {}",
+                "Loading older history… {} of {}",
                 next_visible, self.compacted_history_lazy.total_messages
             ));
         } else {
@@ -944,7 +950,74 @@ impl App {
     }
 
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
+        if self.recent_history_retry_at.is_some_and(|deadline| Instant::now() < deadline) {
+            return None;
+        }
+        self.recent_history_retry_at = None;
         self.compacted_history_lazy.pending_request_visible.take()
+    }
+
+    pub(super) fn recent_history_window_active(&self) -> bool {
+        self.display_messages.first().is_some_and(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with(crate::protocol::RECENT_HISTORY_MARKER_PREFIX)
+        })
+    }
+
+    /// A response computed before a live append or rewind must not discard it.
+    /// Retry against the new generation while retaining the viewport anchor.
+    pub(super) fn accept_recent_history_response(&mut self, id: u64) -> bool {
+        let Some((expected, version, visible)) = self.recent_history_request else {
+            return !self.recent_history_window_active();
+        };
+        if id != expected {
+            return false;
+        }
+        self.recent_history_request = None;
+        if version != self.display_messages_version {
+            if self.recent_history_window_active() {
+                self.restore_pending_compacted_history_load(visible);
+                self.recent_history_retry_at = Some(Instant::now() + Duration::from_millis(250));
+            }
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn recent_history_page_contains_visible_tail(
+        &mut self,
+        messages: &mut [DisplayMessage],
+        visible: usize,
+    ) -> bool {
+        if !self.recent_history_window_active() {
+            return true;
+        }
+        compact_display_messages_for_storage(messages);
+        // A busy agent may supply a persisted snapshot. Generation fencing
+        // alone cannot detect a snapshot already stale when we sent the request.
+        // Require its real transcript tail to include the rows on screen, while
+        // ignoring local status notices which are never part of server history.
+        let meaningful = |role: &str| matches!(role, "user" | "assistant" | "tool");
+        let current: Vec<_> = self
+            .display_messages
+            .iter()
+            .filter(|m| meaningful(&m.role))
+            .collect();
+        let incoming: Vec<_> = messages.iter().filter(|m| meaningful(&m.role)).collect();
+        let matches = current.is_empty()
+            || incoming.windows(current.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(&current)
+                    .all(|(new, old)| new.role == old.role && new.content == old.content)
+            });
+        if !matches {
+            self.restore_pending_compacted_history_load(visible);
+            self.recent_history_retry_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        matches
     }
 
     /// Whether there are older compacted-history messages not yet loaded into the
@@ -1072,7 +1145,12 @@ fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedH
     }
     let rest = message
         .content
-        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)?;
+        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)
+        .or_else(|| {
+            message
+                .content
+                .strip_prefix(crate::protocol::RECENT_HISTORY_MARKER_PREFIX)
+        })?;
 
     if let Some(rest) = rest.strip_prefix("showing all ") {
         let (total, _) = parse_leading_usize(rest)?;

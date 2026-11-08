@@ -941,6 +941,9 @@ pub struct App {
     display_edit_line_counts: (usize, usize),
     terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
+    /// Request id, display generation and target size for a normal transcript page.
+    recent_history_request: Option<(u64, u64, usize)>,
+    recent_history_retry_at: Option<Instant>,
     /// When older compacted history has just been loaded, this anchors the
     /// viewport to the content the reader was looking at so the prepend does not
     /// visibly jump. Resolved into `scroll_offset` by the next render frame.

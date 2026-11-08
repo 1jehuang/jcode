@@ -8,7 +8,7 @@
 mod ssh_sessions;
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -18,6 +18,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+
+fn subscribe_history_base(base: Option<HistoryBase>, ssh_remote: bool) -> Option<HistoryBase> {
+    if ssh_remote {
+        Some(HistoryBase::recent(128))
+    } else {
+        base
+    }
+}
 
 /// Debug events broadcast by local harnesses via debug socket.
 /// These expose the full internal state for debugging/comparison.
@@ -456,7 +464,7 @@ impl RemoteConnection {
             target_session_id: resume_target.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history: client_has_local_history && !super::is_ssh_remote(),
-            history_base: history_base.filter(|_| !super::is_ssh_remote()),
+            history_base: subscribe_history_base(history_base, super::is_ssh_remote()),
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: super::is_ssh_remote(),
@@ -891,11 +899,16 @@ impl RemoteConnection {
     }
 
     /// Request a wider compacted-history window for the active session.
-    pub async fn get_compacted_history(&mut self, visible_messages: usize) -> Result<u64> {
+    pub async fn get_compacted_history(
+        &mut self,
+        visible_messages: usize,
+        recent_history: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::GetCompactedHistory {
             id,
             visible_messages,
+            recent_history,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
