@@ -13,12 +13,13 @@ const CACHE_BUDGET: u64 = 24 * 1024 * 1024;
 const TTL: Duration = Duration::from_secs(15);
 
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
-    let root = super::super::preview_result(crate::storage::jcode_dir(), "cache directory")?;
+    let mut timer = super::StageTimer::new("cache_scope");
+    let root = super::stage_result(crate::storage::jcode_dir(), "cache_directory")?;
     let owner = crate::subscription_catalog::configured_api_key().unwrap_or_default();
     let endpoint = crate::subscription_api::configured_api_base();
-    Some(scoped_key_path(
-        &root, session_id, host, epoch, &owner, &endpoint,
-    ))
+    let path = scoped_key_path(&root, session_id, host, epoch, &owner, &endpoint);
+    timer.outcome("success");
+    Some(path)
 }
 
 #[cfg(test)]
@@ -57,33 +58,51 @@ fn scoped_key_path(
 }
 
 pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
+    let mut timer = super::StageTimer::new("cache_read");
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-        Err(error) => return super::super::preview_result(Err::<Vec<u8>, _>(error), "cache open"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            timer.outcome("miss");
+            return None;
+        }
+        Err(_) => return None,
     };
-    if super::super::preview_result(file.metadata(), "cache metadata")?.len() > MAX_BYTES as u64 {
+    if super::stage_result(file.metadata(), "cache_metadata")?.len() > MAX_BYTES as u64 {
+        timer.outcome("oversized");
         return None;
     }
     // Do not trust metadata for allocation or bounds: the file can grow concurrently.
     let mut bytes = Vec::new();
-    super::super::preview_result(
+    super::stage_result(
         file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
-        "cache read",
+        "cache_read_io",
     )?;
+    timer.outcome(if bytes.len() <= MAX_BYTES {
+        "hit"
+    } else {
+        "oversized"
+    });
     (bytes.len() <= MAX_BYTES).then_some(bytes)
 }
 
 pub(super) fn fresh(path: &Path) -> bool {
-    super::super::preview_result(
+    let mut timer = super::StageTimer::new("cache_freshness");
+    let fresh = super::stage_result(
         fs::metadata(path).and_then(|metadata| metadata.modified()),
-        "cache freshness",
+        "cache_timestamp",
     )
-    .and_then(|modified| super::super::preview_result(modified.elapsed(), "cache timestamp"))
-    .is_some_and(|age| age < TTL)
+    .and_then(|modified| super::stage_result(modified.elapsed(), "cache_age"))
+    .is_some_and(|age| age < TTL);
+    timer.outcome(if fresh {
+        "fresh"
+    } else {
+        "stale_or_unavailable"
+    });
+    fresh
 }
 
 pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut timer = super::StageTimer::new("cache_write");
     if bytes.len() > MAX_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -108,6 +127,7 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     prune(parent, path, CACHE_BUDGET);
+    timer.outcome("success");
     Ok(())
 }
 

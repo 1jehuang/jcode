@@ -32,6 +32,59 @@ use super::*;
 use std::io::Write;
 
 #[test]
+fn remote_timing_errors_and_skips_are_safe_and_do_not_change_wire_format() {
+    let home = tempfile::tempdir().unwrap();
+    let private_id = "private_session_identifier";
+    let preview = projection_output(home.path(), "preview", private_id);
+    assert!(!preview.status.success());
+    assert!(preview.stdout.is_empty());
+    let inventory = run_projection(
+        home.path(),
+        "inventory",
+        &format!("{private_id}\n../private"),
+    );
+    assert!(inventory.status.success());
+    let payload: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(payload["sessions"], serde_json::json!([]));
+    for output in [&preview, &inventory] {
+        let logs = String::from_utf8_lossy(&output.stderr);
+        assert!(logs.contains("stage=projection outcome=error duration_ms="));
+        assert!(!logs.contains(private_id));
+        assert!(!logs.contains(home.path().to_str().unwrap()));
+        assert!(!logs.contains("Traceback"));
+        for line in logs.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 4, "{line}");
+            assert_eq!(fields[0], "[CLOUD_TIMING]");
+            assert!(fields[1].starts_with("stage="));
+            assert!(fields[2].starts_with("outcome="));
+            fields[3]
+                .strip_prefix("duration_ms=")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+        }
+    }
+    assert!(String::from_utf8_lossy(&inventory.stderr).contains("outcome=skipped_invalid_target"));
+    std::fs::create_dir(home.path().join("sessions")).unwrap();
+    let session = Session::create_with_id(private_id.into(), None, Some("private title".into()));
+    std::fs::write(
+        home.path()
+            .join("sessions")
+            .join(format!("{private_id}.json")),
+        serde_json::to_vec(&session).unwrap(),
+    )
+    .unwrap();
+    let success = run_projection(home.path(), "preview", private_id);
+    assert!(success.status.success());
+    assert!(parse_for_session(&success.stdout, private_id).is_some());
+    let logs = String::from_utf8_lossy(&success.stderr);
+    assert!(logs.contains("stage=projection outcome=success duration_ms="));
+    assert!(!logs.contains(private_id));
+    assert!(!logs.contains("private title"));
+}
+
+#[test]
 fn remote_scanner_handles_escaped_nested_strings_and_rejects_truncation() {
     let checks = r#"
 import random
@@ -83,6 +136,16 @@ for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'
 }
 
 fn run_projection(home: &std::path::Path, mode: &str, id: &str) -> std::process::Output {
+    let output = projection_output(home, mode, id);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn projection_output(home: &std::path::Path, mode: &str, id: &str) -> std::process::Output {
     let mut child = std::process::Command::new("python3")
         .args(["-", mode, id])
         .env("JCODE_HOME", home)
@@ -98,13 +161,7 @@ fn run_projection(home: &std::path::Path, mode: &str, id: &str) -> std::process:
         .unwrap()
         .write_all(REMOTE_PROJECTOR.as_bytes())
         .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
+    child.wait_with_output().unwrap()
 }
 
 #[test]

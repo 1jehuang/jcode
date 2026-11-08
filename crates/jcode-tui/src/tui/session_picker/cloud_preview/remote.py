@@ -7,6 +7,28 @@ from pathlib import Path
 import re
 import socket
 import sys
+import time
+
+
+def timing(stage, outcome, started):
+    # Fixed labels only. Never print exceptions, identifiers or projected data.
+    print('[CLOUD_TIMING] stage={} outcome={} duration_ms={}'.format(
+        stage, outcome, int((time.monotonic() - started) * 1000)), file=sys.stderr)
+
+
+def timed(stage):
+    def decorate(function):
+        def run(*args, **kwargs):
+            started = time.monotonic()
+            outcome = 'error'
+            try:
+                result = function(*args, **kwargs)
+                outcome = 'success'
+                return result
+            finally:
+                timing(stage, outcome, started)
+        return run
+    return decorate
 
 # Consume complete strings in C, including escaped quotes and backslashes.
 STRING = re.compile(br'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
@@ -133,6 +155,7 @@ def recent_messages(data, start, end, messages, ranges=None):
         messages.append(message)
 
 
+@timed('projection')
 def project(path, preview):
     session = {}
     messages = collections.deque(maxlen=MAX_MESSAGES)
@@ -175,12 +198,15 @@ def project(path, preview):
     return session
 
 
+@timed('remote_request')
 def main():
     mode, ids = sys.argv[1:3]
     base = Path(os.environ.get('JCODE_HOME', str(Path.home() / '.jcode')))
     result = []
     for sid in ids.splitlines():
+        started = time.monotonic()
         if not sid or not all(c.isascii() and (c.isalnum() or c in '_-') for c in sid):
+            timing('inventory_entry', 'skipped_invalid_target', started)
             if mode == 'preview':
                 raise ValueError('invalid session id')
             continue
@@ -204,13 +230,21 @@ def main():
             lease_path = base / 'session_leases' / (sid + '.json')
             lease = json.loads(lease_path.read_bytes()) if lease_path.exists() else {}
             if lease.get('away_host'):
+                timing('inventory_entry', 'skipped_away', started)
                 continue
             result.append({'session_id': sid, 'epoch': max(session.get('migration_epoch', 0), lease.get('epoch', 0)), 'cwd': session.get('working_dir'), 'title': session.get('custom_title') if session.get('custom_title') is not None else session.get('title'), 'updated_at': session.get('updated_at')})
+            timing('inventory_entry', 'success', started)
         except (OSError, ValueError, TypeError, IndexError):
+            timing('inventory_entry' if mode != 'preview' else 'remote_preview', 'error', started)
             if mode == 'preview':
                 raise
     print(json.dumps({'host': socket.gethostname(), 'sessions': result}))
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception:
+        # Tracebacks include paths and may quote private input. The stage timer
+        # already records failure, and the exit status preserves the contract.
+        sys.exit(1)
