@@ -1098,7 +1098,7 @@ impl Agent {
                             crate::telemetry::record_tool_failure();
                         }
                         let native_result = match tool_result {
-                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Ok(output) => NativeToolResult::from_tool_output(request_id, output),
                             Err(e) => NativeToolResult::error(request_id, e.to_string()),
                         };
                         if let Some(sender) = self.provider.native_result_sender() {

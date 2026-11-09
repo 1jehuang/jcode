@@ -532,8 +532,10 @@ pub(crate) async fn answer_idle(handle: &Arc<ChildHandle>, value: &Value) {
                     request_id,
                     control::mcp_response_body(control::mcp_tool_result(
                         &jsonrpc_id,
-                        "The jcode turn that requested this tool has ended.",
-                        true,
+                        &jcode_provider_core::NativeToolResult::error(
+                            request_id.into(),
+                            "The jcode turn that requested this tool has ended.".into(),
+                        ),
                     )),
                 ),
             }

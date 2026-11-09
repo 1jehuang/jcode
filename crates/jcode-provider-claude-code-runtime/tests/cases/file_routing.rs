@@ -1,5 +1,47 @@
 use super::*;
 
+#[tokio::test]
+async fn tool_images_cross_sdk_mcp_with_text_labels_and_error_status() {
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
+    const GIF: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    for is_error in [false, true] {
+        let fake = Fake::new();
+        let provider = fake.provider();
+        let answer = |_: &str, _: &Value| {
+            let output = jcode_tool_types::ToolOutput::new("Screenshot captured; file removed")
+                .with_labeled_image("image/png", PNG, "Original screenshot")
+                .with_image("image/gif", GIF);
+            let mut result = NativeToolResult::from_tool_output(String::new(), output);
+            if is_error {
+                result.result.error = result.result.output.take();
+                result.is_error = true;
+            }
+            result
+        };
+        let events = run_turn(&provider, &[Message::user("mcp echo")], Some(&answer)).await;
+        assert!(errors(&events).is_empty(), "{events:?}");
+        let inputs = fake.inputs();
+        let reply = inputs
+            .iter()
+            .map(|row| &row["message"]["response"]["response"]["mcp_response"])
+            .find(|reply| reply["id"] == 2)
+            .expect("tool callback must reach Claude Code");
+        assert_eq!(
+            reply,
+            &json!({"jsonrpc":"2.0", "id":2, "result": {
+                "content": [
+                    {"type":"text", "text":"Screenshot captured; file removed"},
+                    {"type":"text", "text":"Original screenshot"},
+                    {"type":"image", "data":PNG, "mimeType":"image/png"},
+                    {"type":"image", "data":GIF, "mimeType":"image/gif"}
+                ],
+                "isError":is_error
+            }})
+        );
+        provider.shutdown().await;
+    }
+}
+
 async fn listing(provider: &ClaudeCodeProvider, definitions: &[ToolDefinition]) -> Vec<String> {
     let mut stream = provider
         .complete(&[Message::user("file-tools")], definitions, SYSTEM, None)
