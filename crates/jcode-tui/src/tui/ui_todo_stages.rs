@@ -773,8 +773,11 @@ const MIN_TITLE_CELLS: usize = 8;
 fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec<Span<'static>> {
     let comma = || Span::styled(", ", Style::default().fg(rgb(105, 100, 135)));
     let title = |todo: &crate::todo::TodoItem| -> Span<'static> {
+        // Index 2 is the title. Trailing spans (blocker suffix) are shown in
+        // the blocked footer; budgets below are sized from the title width.
         todo_card_item_spans(todo, false)
-            .pop()
+            .into_iter()
+            .nth(2)
             .unwrap_or_else(|| Span::raw(todo.content.clone()))
     };
     // Every shown title gets a fair share of the row, so a long first title
@@ -952,7 +955,7 @@ pub(crate) fn push_stage_lines(
                     inner_width,
                 ));
             }
-            push_lane_status_lines(lines, &items, agents, base_indent, inner_width);
+            push_lane_status_lines_below_rows(lines, &items, agents, base_indent, inner_width);
             continue;
         }
         let statuses = lane_item_statuses(&items, agents);
@@ -1064,6 +1067,30 @@ pub(super) fn push_lane_status_lines(
     indent: &str,
     width: usize,
 ) {
+    push_lane_status_lines_inner(lines, todos, agents, indent, width, false);
+}
+
+/// Like [`push_lane_status_lines`], for callers that already render each todo
+/// row: a waiting worker's reason is folded onto its row by
+/// [`todo_wait_note`], so it does not get a second line here.
+pub(super) fn push_lane_status_lines_below_rows(
+    lines: &mut Vec<Line<'static>>,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    indent: &str,
+    width: usize,
+) {
+    push_lane_status_lines_inner(lines, todos, agents, indent, width, true);
+}
+
+fn push_lane_status_lines_inner(
+    lines: &mut Vec<Line<'static>>,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    indent: &str,
+    width: usize,
+    fold_waiting: bool,
+) {
     let mut seen = std::collections::HashSet::new();
     for todo in todos {
         if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
@@ -1077,6 +1104,9 @@ pub(super) fn push_lane_status_lines(
             continue;
         };
         if agent.live_status.is_none() && todo.status != "in_progress" {
+            continue;
+        }
+        if fold_waiting && todo_wait_note(todo, agents).is_some() {
             continue;
         }
         if !seen.insert(agent.session_id.as_str()) {
@@ -1151,8 +1181,10 @@ fn dim_span(span: Span<'static>) -> Span<'static> {
 
 #[path = "ui_todo_stages/item_rows.rs"]
 mod item_rows;
-pub(crate) use item_rows::render_todo_item_line;
-use item_rows::truncate_to_width;
+#[cfg(test)]
+use item_rows::render_todo_item_line;
+pub(crate) use item_rows::render_todo_item_line_with_background;
+use item_rows::{todo_wait_note, truncate_to_width};
 
 #[cfg(test)]
 #[path = "ui_todo_stages_tests.rs"]
