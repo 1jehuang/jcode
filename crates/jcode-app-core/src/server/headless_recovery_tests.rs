@@ -1,5 +1,5 @@
 //! Startup regressions: durable session/member input, real Server recovery,
-//! recording provider. No credentials, exec, builds, or shared daemon required.
+//! recording provider. No credentials, builds, or shared daemon required.
 //! Wire from server.rs with `#[cfg(test)] mod headless_recovery_tests;`.
 #![allow(clippy::await_holding_lock)]
 
@@ -579,6 +579,173 @@ async fn rejected_startup_launch_keeps_recovery_reminder_for_retry() -> Result<(
                 |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(reminder)),
             )
         }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_unloaded_worker_wakes_from_dm_after_restart() -> Result<()> {
+    // Revival has one process-global context, just as a restarted daemon does.
+    if std::env::var_os("JCODE_IDLE_WORKER_WAKE_PROBE").is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "server::headless_recovery_tests::idle_unloaded_worker_wakes_from_dm_after_restart",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("JCODE_IDLE_WORKER_WAKE_PROBE", "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::TempDir::new()?;
+    let _env = IsolatedEnv::new(root.path());
+    let id = seed_worker("ready", false, false)?;
+    let mut saved = Session::load(&id)?;
+    saved.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "previous completed response".into(),
+            cache_control: None,
+        }],
+    );
+    saved.save()?;
+    let provider = Arc::new(RecordingProvider::default());
+    let server = Server::new(provider.clone());
+    super::worker_revive::register_context(super::worker_revive::WorkerReviveContext {
+        provider: provider.clone(),
+        sessions: server.sessions.clone(),
+        mcp_pool: server.mcp_pool.clone(),
+        shutdown_signals: server.shutdown_signals.clone(),
+        soft_interrupt_queues: server.soft_interrupt_queues.clone(),
+    });
+    server.recover_headless_sessions_on_startup().await;
+    assert!(
+        server.sessions.read().await.is_empty(),
+        "ready workers stay unloaded at startup"
+    );
+    assert_eq!(
+        server.swarm_state.members.read().await[&id].status,
+        "stopped"
+    );
+    assert_eq!(provider.calls(), 0);
+
+    for status in ["stopped", "completed", "done", "suspended", "paused"] {
+        server
+            .swarm_state
+            .members
+            .write()
+            .await
+            .get_mut(&id)
+            .unwrap()
+            .status = status.into();
+        assert!(
+            super::live_turn::idle_live_agent(&id, &server.sessions, &server.swarm_state.members)
+                .await
+                .is_none()
+        );
+        assert!(
+            server.sessions.read().await.is_empty(),
+            "must not revive {status}"
+        );
+    }
+    // A reactivated member can be ready before its runtime is lazily loaded.
+    server
+        .swarm_state
+        .members
+        .write()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .status = "ready".into();
+    let pending = usage_limit_resume::register_pending_resume(&id);
+    assert!(
+        super::live_turn::idle_live_agent(&id, &server.sessions, &server.swarm_state.members)
+            .await
+            .is_none()
+    );
+    assert!(
+        server.sessions.read().await.is_empty(),
+        "a provider wait owns its continuation"
+    );
+    drop(pending);
+
+    let sender = "recovery-owner";
+    server
+        .swarm_state
+        .members
+        .write()
+        .await
+        .insert(sender.into(), member(sender, "ready", None));
+    server
+        .swarm_state
+        .swarms_by_id
+        .write()
+        .await
+        .entry("startup-regression-swarm".into())
+        .or_default()
+        .insert(sender.into());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    super::client_comm_message::handle_comm_message(
+        73,
+        sender.into(),
+        "idle-worker-wake-marker".into(),
+        Some(id.clone()),
+        None,
+        Some(crate::protocol::CommDeliveryMode::Wake),
+        None,
+        None,
+        None,
+        false,
+        &tx,
+        &server.sessions,
+        &server.soft_interrupt_queues,
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.channel_subscriptions,
+        &server.event_history,
+        &server.event_counter,
+        &server.swarm_event_tx,
+        &server.client_connections,
+    )
+    .await;
+    assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: 73 })));
+    let revived = server
+        .sessions
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .expect("wake delivery must restore the idle worker");
+    assert!(
+        super::client_state::agent_provider(&revived).is_some(),
+        "revived workers retain their provider handle for account refresh"
+    );
+    assert_eq!(wait_terminal(&server, &id).await, "ready");
+    assert_eq!(
+        provider.calls(),
+        1,
+        "the acknowledged wake must execute exactly once"
+    );
+    let requests = provider.requests.lock().unwrap();
+    for marker in [
+        "original-work-marker",
+        "previous completed response",
+        "idle-worker-wake-marker",
+    ] {
+        assert!(
+            requests[0].iter().any(|message| message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(marker))
+            )),
+            "restored turn must preserve {marker}"
+        );
     }
     Ok(())
 }

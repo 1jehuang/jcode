@@ -131,10 +131,16 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    }?;
+    if !swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(member_accepts_automatic_turn)
+    {
+        return None;
+    }
+    let agent =
+        super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
 
     let agent = agent.try_lock_owned().ok()?;
     let eligible = {
