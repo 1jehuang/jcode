@@ -773,8 +773,11 @@ const MIN_TITLE_CELLS: usize = 8;
 fn lane_titles_spans(lane_todos: &[&crate::todo::TodoItem], width: usize) -> Vec<Span<'static>> {
     let comma = || Span::styled(", ", Style::default().fg(rgb(105, 100, 135)));
     let title = |todo: &crate::todo::TodoItem| -> Span<'static> {
+        // Index 2 is the title. Trailing spans (blocker suffix) are shown in
+        // the blocked footer; budgets below are sized from the title width.
         todo_card_item_spans(todo, false)
-            .pop()
+            .into_iter()
+            .nth(2)
             .unwrap_or_else(|| Span::raw(todo.content.clone()))
     };
     // Every shown title gets a fair share of the row, so a long first title
