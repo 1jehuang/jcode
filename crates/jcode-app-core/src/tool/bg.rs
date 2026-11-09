@@ -417,6 +417,18 @@ async fn resolve_task_ids(
     }
 }
 
+fn task_label(task: &background::TaskStatusFile) -> String {
+    crate::message::background_task_display_label(&task.tool_name, task.display_name.as_deref())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Name what is being waited on so status rows say more than "a background task".
+fn task_wait_reason(task: &background::TaskStatusFile) -> String {
+    format!("Waiting for {}", task_label(task))
+}
+
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
     session_id: &str,
@@ -471,7 +483,23 @@ async fn wait_many_polling(
             last_progress.insert(task.task_id.clone(), task.progress.clone());
         }
         wait_guard.get_or_insert_with(|| {
-            crate::wait_registry::register(session_id, "Waiting for background tasks")
+            let running: Vec<_> = tasks
+                .iter()
+                .filter(|task| !is_terminal(&task.status))
+                .collect();
+            let reason = match running.as_slice() {
+                [task] => task_wait_reason(task),
+                _ => format!(
+                    "Waiting for {} background tasks: {}",
+                    running.len(),
+                    running
+                        .iter()
+                        .map(|task| task_label(task))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            crate::wait_registry::register(session_id, &reason)
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -731,10 +759,6 @@ impl Tool for BgTool {
                 let wait_duration = Duration::from_secs(capped_wait);
                 // watch/delivery only updates notification settings and does not
                 // block. Only the actual wait action owns foreground metadata.
-                let wait_reason = format!(
-                    "Waiting for background task{}",
-                    if task_ids.len() > 1 { "s" } else { "" }
-                );
 
                 if task_ids.len() > 1 {
                     let mode = params.wait_mode.as_deref().unwrap_or("any");
@@ -781,14 +805,15 @@ impl Tool for BgTool {
                         "Missing task_id; provide a task_id or use latest=true"
                     ));
                 };
-                let blocking = if capped_wait > 0 {
-                    manager
-                        .status(&task_id)
-                        .await
-                        .is_some_and(|task| !is_terminal(&task.status))
-                } else {
-                    false
-                };
+                let current = manager.status(&task_id).await;
+                let blocking = capped_wait > 0
+                    && current
+                        .as_ref()
+                        .is_some_and(|task| !is_terminal(&task.status));
+                let wait_reason = current
+                    .as_ref()
+                    .map(task_wait_reason)
+                    .unwrap_or_else(|| "Waiting for background task".to_string());
                 let wait_guard =
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
                 let wait_result = manager
@@ -939,7 +964,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             crate::wait_registry::current(sid).map(|(reason, _)| reason),
-            Some("Waiting for background tasks".into())
+            Some("Waiting for test".into())
         );
         drop(future);
         assert_eq!(crate::wait_registry::current(sid), None);
