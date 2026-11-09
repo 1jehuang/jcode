@@ -284,10 +284,28 @@ impl SessionPicker {
 
     /// Render the always-visible search row, with a placeholder when empty.
     pub(super) fn render_search_bar(&self, frame: &mut Frame, area: Rect) {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        let width = usize::from(area.width);
         let accent = Style::default().fg(rgb(186, 139, 255));
         let hint = Style::default().fg(rgb(60, 60, 60));
         let cursor_char = if self.search_active { "▎" } else { "" };
-        let mut spans = vec![Span::styled(" 🔍 ", accent)];
+        let cursor_width = cursor_char.width();
+        let query_width = self.search_query.width();
+        let tail_width = self
+            .search_query
+            .graphemes(true)
+            .next_back()
+            .map_or(0, |g| g.width());
+        // Hide the decoration before sacrificing the cursor or newest grapheme.
+        let prefix = if " 🔍 ".width() + cursor_width + query_width.min(tail_width + 1) <= width {
+            " 🔍 "
+        } else {
+            ""
+        };
+        let query_budget = width.saturating_sub(prefix.width() + cursor_width);
+        let mut spans = vec![Span::styled(prefix, accent)];
         if self.search_query.is_empty() {
             let placeholder = if self.search_active {
                 "Type to search sessions…  Tab for shortcuts"
@@ -295,23 +313,54 @@ impl SessionPicker {
                 "Type or / to search"
             };
             spans.push(Span::styled(cursor_char, accent));
-            spans.push(Span::styled(
-                placeholder,
-                Style::default().fg(rgb(90, 90, 100)),
-            ));
+            spans.extend(
+                jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                    &Line::styled(placeholder, Style::default().fg(rgb(90, 90, 100))),
+                    query_budget,
+                )
+                .spans,
+            );
         } else {
+            let clipped = query_width > query_budget;
+            let query = if clipped {
+                let mut remaining = query_budget.saturating_sub(1);
+                let mut start = self.search_query.len();
+                for (index, grapheme) in self.search_query.grapheme_indices(true).rev() {
+                    if grapheme.width() > remaining {
+                        break;
+                    }
+                    remaining -= grapheme.width();
+                    start = index;
+                }
+                std::borrow::Cow::Owned(if query_budget == 0 {
+                    String::new()
+                } else {
+                    format!("…{}", &self.search_query[start..])
+                })
+            } else {
+                std::borrow::Cow::Borrowed(self.search_query.as_str())
+            };
             spans.push(Span::styled(
-                self.search_query.as_str(),
+                query,
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(cursor_char, accent));
-            spans.push(if self.search_active {
-                Span::styled("  Esc to clear · Tab for shortcuts", hint)
-            } else {
-                Span::styled("  / to edit", hint)
-            });
+            if !clipped {
+                let help = if self.search_active {
+                    "  Esc to clear · Tab for shortcuts"
+                } else {
+                    "  / to edit"
+                };
+                spans.extend(
+                    jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                        &Line::styled(help, hint),
+                        query_budget.saturating_sub(query_width),
+                    )
+                    .spans,
+                );
+            }
         }
         let widget = Paragraph::new(Line::from(spans)).style(Style::default().bg(rgb(25, 25, 30)));
         frame.render_widget(widget, area);

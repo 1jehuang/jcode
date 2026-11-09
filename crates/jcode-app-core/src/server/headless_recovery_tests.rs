@@ -512,3 +512,48 @@ async fn owner_socket_resume_during_startup_does_not_duplicate_worker_turn() -> 
     debug_handle.await?;
     result
 }
+
+#[tokio::test]
+async fn rejected_startup_launch_keeps_recovery_reminder_for_retry() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::TempDir::new()?;
+    let _env = IsolatedEnv::new(root.path());
+    let id = seed_worker("running", false, true)?;
+    let reminder = "durable-rejected-recovery-marker";
+    reload_recovery::persist_intent(
+        "rejected-startup-launch",
+        &id,
+        reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: reminder.to_string(),
+        },
+        "rejected startup regression",
+    )?;
+    let provider = Arc::new(RecordingProvider::default());
+    let server = Server::new(provider.clone());
+    let transfer = crate::runtime_activity::global()
+        .try_idle_sessions(&std::collections::BTreeSet::from([id.clone()]))
+        .expect("idle worker can be fenced for transfer");
+    server.recover_headless_sessions_on_startup().await;
+    assert_eq!(provider.calls(), 0, "transfer must reject the launch");
+    assert!(
+        reload_recovery::has_pending_for_session(&id),
+        "a rejected turn must not acknowledge the durable reminder"
+    );
+    drop(transfer);
+    drop(server);
+
+    let retry = Server::new(provider.clone());
+    retry.recover_headless_sessions_on_startup().await;
+    assert_eq!(wait_terminal(&retry, &id).await, "ready");
+    assert_eq!(provider.calls(), 1);
+    assert!(!reload_recovery::has_pending_for_session(&id));
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[0].iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(reminder)),
+        )
+    }));
+    Ok(())
+}
