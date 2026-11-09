@@ -1739,7 +1739,58 @@ fn restore_repo(
             }
         }
         let head_tree = git(&root, &["rev-parse", "HEAD^{tree}"]).ok();
-        if !known.contains(&current) && head_tree.as_deref() != Some(current.as_str()) {
+        // An empty checkout holds nothing that could be lost.
+        let empty_tree = git(&root, &["hash-object", "-t", "tree", "/dev/null"]).ok();
+        if !known.contains(&current)
+            && head_tree.as_deref() != Some(current.as_str())
+            && empty_tree.as_deref() != Some(current.as_str())
+        {
+            // Preserve the unreturned state as a durable commit instead of
+            // refusing. Orphaned work from older sessions otherwise blocks
+            // every later move into this checkout. The rescue ref keeps the
+            // full tree (tracked and untracked) recoverable on this host.
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let rescue_ref = format!("{SNAPSHOT_REF_PREFIX}/rescued/{stamp}-{session_id}");
+            let message = format!("jcode cloud: unreturned work rescued before {session_id}");
+            let mut args = vec!["commit-tree", current.as_str(), "-m", message.as_str()];
+            let parent = git(&root, &["rev-parse", "--verify", "HEAD^{commit}"]).ok();
+            if let Some(parent) = &parent {
+                args.extend(["-p", parent.as_str()]);
+            }
+            let rescued = git_env(&root, &args, &identity_env(&root))
+                .and_then(|commit| {
+                    git(&root, &["update-ref", &rescue_ref, &commit])?;
+                    Ok(commit)
+                });
+            match rescued {
+                Ok(commit) => eprintln!(
+                    "[cloud receive] preserved unreturned work in {} as {rescue_ref} ({commit})",
+                    repo.root
+                ),
+                Err(error) => {
+                    eprintln!("[cloud receive] could not preserve unreturned work: {error:#}");
+                    refuse_unreturned(&root, repo)?;
+                }
+            }
+        }
+    } else {
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("create {} on the cloud host", repo.root))?;
+        git(&root, &["init", "--quiet"])?;
+        if let Some(url) = &repo.origin_url {
+            let _ = git(&root, &["remote", "add", "origin", url]);
+        }
+    }
+    restore_repo_contents(repo, &root, &bundle_str, &snap_ref, ignored_tar, session_id)
+}
+
+fn refuse_unreturned(root: &Path, repo: &RepoManifest) -> Result<()> {
+    {
+        {
+            let root = root.to_path_buf();
             let owners = git(
                 &root,
                 &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
@@ -1765,14 +1816,20 @@ fn restore_repo(
                 repo.root,
             );
         }
-    } else {
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("create {} on the cloud host", repo.root))?;
-        git(&root, &["init", "--quiet"])?;
-        if let Some(url) = &repo.origin_url {
-            let _ = git(&root, &["remote", "add", "origin", url]);
-        }
     }
+}
+
+fn restore_repo_contents(
+    repo: &RepoManifest,
+    root: &Path,
+    bundle_str: &str,
+    snap_ref: &str,
+    ignored_tar: &Path,
+    session_id: &str,
+) -> Result<String> {
+    let root = root.to_path_buf();
+    let bundle_str = bundle_str.to_owned();
+    let snap_ref = snap_ref.to_owned();
     // An incremental bundle may omit the branch advertisement when that
     // branch's tip is already a prerequisite on this host. The snapshot has
     // the complete parent chain we need, so fetch it rather than requiring an
