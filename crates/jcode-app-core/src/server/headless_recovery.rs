@@ -377,6 +377,6 @@ async fn spawn_wait_restore(
         drop(reservation);
         events.finish().await;
         drop(turn_lease);
-    });
-    true
+    })
+    .is_some()
 }
