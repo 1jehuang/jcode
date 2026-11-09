@@ -838,7 +838,24 @@ pub(super) async fn handle_client(
         let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
             None
         } else {
-            match crate::runtime_activity::global().try_enter() {
+            // Requests that keep this connection's session identity are owned
+            // by that session, so they never block transfers of unrelated
+            // sessions. Identity-changing requests stay globally owned.
+            let identity_change = !client_subscribed
+                || matches!(
+                    &request,
+                    Request::Subscribe { .. }
+                        | Request::ResumeSession { .. }
+                        | Request::ResumeAllSessions { .. }
+                        | Request::Clear { .. }
+                );
+            let gate = crate::runtime_activity::global();
+            let activity = if identity_change || client_session_id.trim().is_empty() {
+                gate.try_enter()
+            } else {
+                gate.try_enter_session(&client_session_id)
+            };
+            match activity {
                 Ok(activity) => Some(activity),
                 Err(error) => {
                     let _ = client_event_tx.send(ServerEvent::Error {
