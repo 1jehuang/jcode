@@ -1406,6 +1406,7 @@ impl Server {
         crate::mobile_sync::spawn_background_sync();
         // On Jcode Cloud machines, run sessions the phone starts or continues.
         crate::mobile_runner::spawn_cloud_runner();
+        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.swarm_state.members));
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -1924,6 +1925,25 @@ impl Server {
                     .await
                     .is_ok();
                     lid_reported = reported.then_some(want_lid);
+                }
+            }
+        });
+    }
+
+    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
+    /// client unless the busy marker is fresh. Turns keep running after the
+    /// client disconnects, so mark the host busy while any session runs.
+    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
+        if !crate::mobile_runner::is_cloud_machine() {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if Self::any_session_streaming(&swarm_members).await {
+                    crate::mobile_runner::touch_cloud_activity_marker();
                 }
             }
         });
