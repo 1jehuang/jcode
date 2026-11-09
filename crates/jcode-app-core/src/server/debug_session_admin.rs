@@ -136,6 +136,8 @@ pub(super) async fn maybe_handle_session_admin_command(
             }
         }
 
+        crate::hooks::forget_swarm_identity(target_id);
+
         if removed_agent.is_none() {
             return Err(anyhow::anyhow!("Unknown session_id '{}'", target_id));
         }
