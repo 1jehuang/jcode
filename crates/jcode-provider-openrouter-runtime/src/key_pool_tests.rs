@@ -29,6 +29,25 @@ fn session_for(len: usize, want: usize) -> String {
         .unwrap()
 }
 
+/// Clears every env name that a named profile apply sets. The guards restore them on drop.
+fn clear_named_profile_env() -> Vec<EnvVarGuard> {
+    [
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_API_KEY_NAMES",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect()
+}
+
 #[test]
 fn one_session_keeps_one_entry_and_sessions_spread_over_the_pool() {
     let _lock = ENV_LOCK.lock();
@@ -108,18 +127,7 @@ fn single_key_profile_keeps_api_key_env_and_rejects_unsafe_pool_names() {
 #[test]
 fn pool_profile_credential_checks_name_the_first_entry() {
     let _lock = ENV_LOCK.lock();
-    let _env = [
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-    ]
-    .map(EnvVarGuard::remove);
+    let _env = clear_named_profile_env();
     let mut config = jcode_base::config::Config::default();
     config.providers.insert(
         "gateway".to_string(),
@@ -131,5 +139,58 @@ fn pool_profile_credential_checks_name_the_first_entry() {
     assert_eq!(
         source.map(|(key_env, _)| key_env).as_deref(),
         Some("POOL_KEY_A")
+    );
+}
+
+#[test]
+fn unset_first_pool_entry_still_counts_as_configured() {
+    let _lock = ENV_LOCK.lock();
+    let _env = clear_named_profile_env();
+    let _a = EnvVarGuard::remove("POOL_KEY_A");
+    let _b = EnvVarGuard::set("POOL_KEY_B", "secret-b");
+    let mut config = jcode_base::config::Config::default();
+    config.providers.insert(
+        "gateway".to_string(),
+        profile(&["POOL_KEY_A", "POOL_KEY_B"]),
+    );
+    jcode_base::provider_catalog::apply_named_provider_profile_env_from_config("gateway", &config)
+        .unwrap();
+    assert!(jcode_base::provider::openrouter::has_credentials());
+    assert!(
+        jcode_base::provider_catalog::openai_compatible_profile_is_configured(
+            jcode_base::provider_catalog::OPENAI_COMPAT_PROFILE
+        )
+    );
+}
+
+#[test]
+fn unbound_pick_takes_the_first_entry_that_resolves() {
+    let _lock = ENV_LOCK.lock();
+    let _a = EnvVarGuard::remove("POOL_KEY_A");
+    let _b = EnvVarGuard::set("POOL_KEY_B", "secret-b");
+    let pool = KeyPool::new("gateway", &profile(&["POOL_KEY_A", "POOL_KEY_B"])).unwrap();
+    assert_eq!(
+        picked(&pool.auth()),
+        ("secret-b".to_string(), "POOL_KEY_B".to_string())
+    );
+}
+
+#[test]
+fn pool_credential_source_names_the_entry_that_resolves() {
+    let _lock = ENV_LOCK.lock();
+    let _env = clear_named_profile_env();
+    let _a = EnvVarGuard::remove("POOL_KEY_A");
+    let _b = EnvVarGuard::set("POOL_KEY_B", "secret-b");
+    let mut config = jcode_base::config::Config::default();
+    config.providers.insert(
+        "gateway".to_string(),
+        profile(&["POOL_KEY_A", "POOL_KEY_B"]),
+    );
+    jcode_base::provider_catalog::apply_named_provider_profile_env_from_config("gateway", &config)
+        .unwrap();
+    let source = jcode_base::provider_catalog::active_named_provider_profile_credential_source();
+    assert_eq!(
+        source.map(|(key_env, _)| key_env).as_deref(),
+        Some("POOL_KEY_B")
     );
 }

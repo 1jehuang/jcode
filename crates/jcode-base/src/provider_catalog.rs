@@ -855,6 +855,7 @@ fn apply_openai_compatible_profile_env_impl(
     let vars = [
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_API_KEY_NAMES",
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
@@ -1119,6 +1120,15 @@ pub fn apply_named_provider_profile_env_from_config(
                 });
             let key_env = profile.api_key_envs.first().cloned().or(key_env);
 
+            for key_env in &profile.api_key_envs {
+                if !is_safe_env_key_name(key_env) {
+                    anyhow::bail!(
+                        "Provider profile '{}' has invalid api_key_env '{}'.",
+                        profile_name,
+                        key_env
+                    );
+                }
+            }
             if let Some(key_env) = key_env {
                 if !is_safe_env_key_name(&key_env) {
                     anyhow::bail!(
@@ -1128,6 +1138,12 @@ pub fn apply_named_provider_profile_env_from_config(
                     );
                 }
                 crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", &key_env);
+            }
+            if !profile.api_key_envs.is_empty() {
+                crate::env::set_var(
+                    "JCODE_OPENROUTER_API_KEY_NAMES",
+                    profile.api_key_envs.join(","),
+                );
             }
 
             if let Some(env_file) = profile
@@ -1228,7 +1244,8 @@ fn parse_bool_like(value: &str) -> bool {
 /// Resolve the active named provider profile's credential env var + env file,
 /// as set by [`apply_named_provider_profile_env`], if one is active.
 ///
-/// Returns `(api_key_env, env_file)` describing where to look for the key.
+/// Returns `(api_key_env, env_file)` describing where to look for the key. A key
+/// pool gives the first entry that resolves, else its first entry.
 pub fn active_named_provider_profile_credential_source() -> Option<(String, String)> {
     // Presence of this var marks an active named profile (set by
     // `apply_named_provider_profile_env`).
@@ -1247,6 +1264,12 @@ pub fn active_named_provider_profile_credential_source() -> Option<(String, Stri
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "openrouter.env".to_string());
+    let names = openrouter_api_key_pool_names().unwrap_or_else(|| vec![key_env.clone()]);
+    let key_env = names
+        .iter()
+        .find(|name| load_api_key_from_env_or_config(name, &env_file).is_some())
+        .cloned()
+        .unwrap_or(key_env);
     Some((key_env, env_file))
 }
 
@@ -1267,6 +1290,34 @@ fn active_named_provider_profile_is_configured() -> Option<bool> {
     }
 
     Some(load_api_key_from_env_or_config(&key_env, &env_file).is_some())
+}
+
+/// Comma-separated env names from `var`, or `None` when it is unset or lists none.
+pub fn env_name_list(var: &str) -> Option<Vec<String>> {
+    let Ok(raw) = std::env::var(var) else {
+        return None;
+    };
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+fn openrouter_api_key_pool_names() -> Option<Vec<String>> {
+    env_name_list("JCODE_OPENROUTER_API_KEY_NAMES")
+}
+
+/// Key for the OpenAI-compatible slot. A pool gives its first entry that resolves.
+pub fn load_openai_compatible_slot_key(key_name: &str, env_file: &str) -> Option<String> {
+    match openrouter_api_key_pool_names() {
+        Some(names) => names
+            .iter()
+            .find_map(|name| load_runtime_api_key(name, env_file)),
+        None => load_runtime_api_key(key_name, env_file),
+    }
 }
 
 pub fn configured_api_key_source(
