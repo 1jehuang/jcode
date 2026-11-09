@@ -1638,10 +1638,6 @@ impl MultiProvider {
         }
         let prefix = match active {
             ActiveProvider::Claude => {
-                // The fork must reopen this profile to keep its base URL and key.
-                if let Some(profile_id) = Self::active_named_anthropic_profile() {
-                    return format!("{profile_id}:{current_model}");
-                }
                 if let Some(anthropic) = self.anthropic_provider() {
                     // OAuth/ApiKey emit their canonical model prefix; Auto keeps
                     // the bare provider key (route without pinning a credential).
@@ -2789,11 +2785,9 @@ impl Provider for MultiProvider {
             lap = std::time::Instant::now();
         };
         mark("model_active", &mut laps);
-        let anthropic = if self.anthropic_provider().is_some() {
-            external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
-        } else {
-            None
-        };
+        // Copy the runtime. Rebuilding it reads the process env that other sessions share.
+        let anthropic = self.anthropic_provider().map(|runtime| runtime.fork());
+        let keeps_claude = active == ActiveProvider::Claude && anthropic.is_some();
         mark("anthropic", &mut laps);
         let openai = if self.openai_provider().is_some() {
             external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
@@ -2872,8 +2866,11 @@ impl Provider for MultiProvider {
         provider.spawn_openai_catalog_refresh_if_needed();
         let catalog_ms = catalog_start.elapsed().as_millis();
         let set_model_start = std::time::Instant::now();
-        let switch_request = self.fork_model_switch_request(active, &current_model);
-        let _ = provider.set_model(&switch_request);
+        // Re-selecting Claude would rebind the profile env that other sessions share.
+        if !keeps_claude {
+            let switch_request = self.fork_model_switch_request(active, &current_model);
+            let _ = provider.set_model(&switch_request);
+        }
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,
@@ -2905,11 +2902,17 @@ impl Provider for MultiProvider {
         if self.initial_provider.is_some() {
             let active = self.active_provider();
             let current_model = self.model();
-            let switch_request = self.fork_model_switch_request(active, &current_model);
-            if let Err(error) = provider.set_model(&switch_request) {
+            let selected = match Self::active_named_anthropic_profile() {
+                // Bind by name. The prefix `claude` would reach the built-in provider.
+                Some(profile) if active == ActiveProvider::Claude => {
+                    provider.set_model_on_named_provider_profile(&profile, &current_model)
+                }
+                _ => provider.set_model(&self.fork_model_switch_request(active, &current_model)),
+            };
+            if let Err(error) = selected {
                 crate::logging::warn(&format!(
                     "Failed to preserve initial provider model '{}' for new session: {}",
-                    switch_request, error
+                    current_model, error
                 ));
             }
         }

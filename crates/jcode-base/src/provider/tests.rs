@@ -921,12 +921,12 @@ impl Provider for StubExternalRuntime {
         Ok(())
     }
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(StubExternalRuntime::new(
-            self.name,
-            self.provider_label,
-            self.api_method,
-            self.models,
-        ))
+        let fork =
+            StubExternalRuntime::new(self.name, self.provider_label, self.api_method, self.models);
+        *fork.model.write().unwrap() = self.model.read().unwrap().clone();
+        *fork.credential_mode.write().unwrap() = *self.credential_mode.read().unwrap();
+        *fork.oauth_account.write().unwrap() = self.oauth_account.read().unwrap().clone();
+        Arc::new(fork)
     }
 
     fn set_oauth_account(&self, label: Option<&str>) -> anyhow::Result<()> {

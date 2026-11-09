@@ -423,51 +423,32 @@ id = "claude-opus-4-6"
 }
 
 #[test]
-fn fork_keeps_named_anthropic_profile_transport_and_key() {
+fn fork_reuses_named_anthropic_runtime_without_rebuilding_it() {
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
-        let path =
-            std::path::PathBuf::from(std::env::var_os("JCODE_HOME").unwrap()).join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-[providers.gateway]
-type = "anthropic-compatible"
-base_url = "https://gateway.example.com/v1"
-auth = "bearer"
-api_key_env = "FORK_GATEWAY_TEST_KEY"
-[[providers.gateway.models]]
-id = "claude-opus-4-6"
-"#,
-        )
-        .unwrap();
+        write_anthropic_profile("gateway", "FORK_GATEWAY_TEST_KEY");
         crate::env::set_var("FORK_GATEWAY_TEST_KEY", "gateway-secret");
-        crate::config::invalidate_config_cache();
         crate::config::Config::set_default_model(Some("gateway:claude-opus-4-6"), None).unwrap();
-        // Record the base URL and key name in effect at each Anthropic runtime build.
-        let built = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let record = Arc::clone(&built);
-        external::register_external_provider(external::ANTHROPIC_RUNTIME, move || {
-            record.lock().unwrap().push((
-                std::env::var("JCODE_ANTHROPIC_API_BASE").ok(),
-                std::env::var("JCODE_ANTHROPIC_API_KEY_NAME").ok(),
-            ));
-            test_anthropic_runtime() as Arc<dyn Provider>
-        });
+        let built = record_anthropic_builds();
         let router = MultiProvider::new_fast();
         assert_eq!(router.active_provider(), ActiveProvider::Claude);
-        built.lock().unwrap().clear();
-
-        let fork = router.fork();
-
-        assert_eq!(fork.model(), "claude-opus-4-6");
         assert_eq!(
             built.lock().unwrap().last().cloned(),
             Some((
                 Some("https://gateway.example.com/v1".to_string()),
                 Some("FORK_GATEWAY_TEST_KEY".to_string())
             ))
+        );
+        built.lock().unwrap().clear();
+
+        let fork = router.fork();
+
+        assert_eq!(fork.model(), "claude-opus-4-6");
+        assert!(
+            built.lock().unwrap().is_empty(),
+            "fork rebuilt the Anthropic runtime: {:?}",
+            built.lock().unwrap()
         );
         assert_eq!(
             std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
@@ -476,6 +457,134 @@ id = "claude-opus-4-6"
             Some("gateway")
         );
         crate::env::remove_var("FORK_GATEWAY_TEST_KEY");
+    });
+}
+
+fn write_anthropic_profile(name: &str, key_env: &str) {
+    let path =
+        std::path::PathBuf::from(std::env::var_os("JCODE_HOME").unwrap()).join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+[providers.{name}]
+type = "anthropic-compatible"
+base_url = "https://gateway.example.com/v1"
+auth = "bearer"
+api_key_env = "{key_env}"
+[[providers.{name}.models]]
+id = "claude-opus-4-6"
+"#
+        ),
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+}
+
+type AnthropicBuilds = Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>>;
+
+fn record_anthropic_builds() -> AnthropicBuilds {
+    let built = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = Arc::clone(&built);
+    external::register_external_provider(external::ANTHROPIC_RUNTIME, move || {
+        record.lock().unwrap().push((
+            std::env::var("JCODE_ANTHROPIC_API_BASE").ok(),
+            std::env::var("JCODE_ANTHROPIC_API_KEY_NAME").ok(),
+        ));
+        test_anthropic_runtime() as Arc<dyn Provider>
+    });
+    built
+}
+
+#[test]
+fn fork_keeps_anthropic_profile_named_like_a_builtin_provider() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        write_anthropic_profile("claude", "FORK_CLAUDE_TEST_KEY");
+        crate::env::set_var("FORK_CLAUDE_TEST_KEY", "claude-secret");
+        crate::config::Config::set_default_model(Some("claude-opus-4-6"), Some("claude")).unwrap();
+        let router = MultiProvider::new_fast();
+        assert_eq!(router.active_provider(), ActiveProvider::Claude);
+        assert_eq!(
+            std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("claude")
+        );
+
+        let fork = router.fork();
+
+        assert_eq!(fork.model(), "claude-opus-4-6");
+        assert_eq!(
+            std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("claude")
+        );
+        crate::env::remove_var("FORK_CLAUDE_TEST_KEY");
+    });
+}
+
+#[test]
+fn fork_of_native_claude_ignores_profile_bound_by_another_router() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        write_anthropic_profile("gateway", "FORK_GATEWAY_TEST_KEY");
+        crate::env::set_var("FORK_GATEWAY_TEST_KEY", "gateway-secret");
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-anthropic-test");
+        let built = record_anthropic_builds();
+        crate::config::Config::set_default_model(Some("claude-opus-4-6"), None).unwrap();
+        let native = MultiProvider::new_fast();
+        assert_eq!(native.active_provider(), ActiveProvider::Claude);
+        crate::config::Config::set_default_model(Some("gateway:claude-opus-4-6"), None).unwrap();
+        let _gateway = MultiProvider::new_fast();
+        assert_eq!(
+            std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("gateway")
+        );
+        built.lock().unwrap().clear();
+
+        let fork = native.fork();
+
+        assert_eq!(fork.model(), "claude-opus-4-6");
+        assert!(
+            built.lock().unwrap().iter().all(|(base, _)| base.is_none()),
+            "fork bound another session's profile: {:?}",
+            built.lock().unwrap()
+        );
+        crate::env::remove_var("FORK_GATEWAY_TEST_KEY");
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+    });
+}
+
+#[test]
+fn fork_for_new_session_keeps_anthropic_profile_named_like_a_builtin_provider() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        write_anthropic_profile("claude", "FORK_CLAUDE_TEST_KEY");
+        crate::env::set_var("FORK_CLAUDE_TEST_KEY", "claude-secret");
+        crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
+        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+        let router = MultiProvider::new_fast();
+        router
+            .set_model_on_named_provider_profile("claude", "claude-opus-4-6")
+            .unwrap();
+
+        let fresh = router.fork_for_new_session();
+
+        assert_eq!(fresh.model(), "claude-opus-4-6");
+        assert_eq!(
+            std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("claude")
+        );
+        crate::env::remove_var("FORK_CLAUDE_TEST_KEY");
     });
 }
 
