@@ -144,6 +144,71 @@ async fn removing_server_session_clears_active_pid_marker() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn session_end_hook_keeps_worker_swarm_identity_after_session_removal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let record = home.path().join("session_end.txt");
+    let script = home.path().join("session_end.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s' \"$JCODE_HOOK_SWARM_ID\" \"$JCODE_HOOK_AGENT_TYPE\" > {}\n",
+            crate::terminal_launch::sh_escape(&record.to_string_lossy())
+        ),
+    )
+    .expect("write hook");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod hook");
+    let _hook = ScopedEnvVar::set("JCODE_HOOK_SESSION_END", script.as_os_str());
+    for _ in 0..200 {
+        if crate::hooks::hook_configured("session_end") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(crate::hooks::hook_configured("session_end"));
+
+    let agent = test_agent(Arc::new(StreamingMockProvider::default())).await;
+    let sid = agent.lock().await.session_id().to_string();
+    crate::hooks::register_swarm_identity(
+        &sid,
+        crate::hooks::SwarmIdentity {
+            swarm_id: "swarm-end-identity".into(),
+            coordinator_session_id: "coord".into(),
+            parent_session_id: "coord".into(),
+            label: Some("task".into()),
+            agent_type: Some("reviewer".into()),
+        },
+    );
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(sid.clone(), agent.clone())]),
+    ));
+
+    // Same order as the stop/disconnect/reap paths: remove the entry, then
+    // close the agent, which fires `session_end`.
+    let removed = remove_session_entry(&sessions, &sid).await.unwrap();
+    removed.lock().await.mark_closed();
+    crate::hooks::forget_swarm_identity(&sid);
+
+    let mut recorded = String::new();
+    for _ in 0..200 {
+        if let Ok(data) = std::fs::read_to_string(&record)
+            && !data.is_empty()
+        {
+            recorded = data;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(recorded, "swarm-end-identity|reviewer");
+    assert!(crate::hooks::swarm_identity(&sid).is_none());
+}
+
 #[test]
 fn configured_server_name_normalizes_operator_labels() {
     assert_eq!(

@@ -69,6 +69,14 @@ pub fn inherit_session_env(parent: &str, child: &str) {
 /// jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
     crate::hooks::forget_swarm_identity(session_id);
+    remove_session_env_keeping_hook_identity(session_id);
+}
+
+/// Like [`remove_session_env`], but leaves the swarm hook identity registered
+/// so the closing hooks (`session_end`, `swarm_member_end`) still carry the
+/// worker's swarm fields. The caller must call
+/// `hooks::forget_swarm_identity` once those hooks have been dispatched.
+pub fn remove_session_env_keeping_hook_identity(session_id: &str) {
     crate::hooks::forget_prompt_origin(session_id);
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
