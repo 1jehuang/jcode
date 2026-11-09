@@ -162,8 +162,7 @@ async fn session_end_hook_keeps_worker_swarm_identity_after_session_removal() {
         ),
     )
     .expect("write hook");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod hook");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
     let _hook = ScopedEnvVar::set("JCODE_HOOK_SESSION_END", script.as_os_str());
     for _ in 0..200 {
         if crate::hooks::hook_configured("session_end") {
