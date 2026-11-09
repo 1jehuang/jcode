@@ -211,6 +211,74 @@ fn event_mapper_maps_tool_lifecycle() {
     assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
 }
 
+/// A tool's text remains available and its image is sent as ACP image content.
+#[test]
+fn event_mapper_surfaces_live_tool_images() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQMgkDAAD4AJ3MaiF4AAAAAElFTkSuQmCC";
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+    });
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+        output: "Read example.png".to_string(),
+        error: None,
+    });
+    assert_eq!(done[0]["content"][0]["content"]["text"], "Read example.png");
+    let event: ServerEvent = serde_json::from_value(json!({
+        "type": "side_pane_images",
+        "session_id": "session1",
+        "images": [{
+            "media_type": "image/png",
+            "data": png,
+            "label": "example.png",
+            "source": {"kind": "tool_result", "tool_name": "read"},
+            "anchor": {"kind": "tool_call", "id": "tool1"}
+        }]
+    }))
+    .unwrap();
+    let updates = mapper.map_event(event);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(updates[0]["content"]["type"], "image");
+    assert_eq!(updates[0]["content"]["mimeType"], "image/png");
+    assert_eq!(updates[0]["content"]["data"], png);
+}
+
+/// Images from another session or the user's prompt must not be repeated as output.
+#[test]
+fn event_mapper_does_not_forward_other_sessions_or_user_images() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let event = |session: &str, source: Value| -> ServerEvent {
+        serde_json::from_value(json!({
+            "type": "side_pane_images",
+            "session_id": session,
+            "images": [{
+                "media_type": "image/png",
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQMgkDAAD4AJ3MaiF4AAAAAElFTkSuQmCC",
+                "label": null,
+                "source": source
+            }]
+        }))
+        .unwrap()
+    };
+    assert!(
+        mapper
+            .map_event(event(
+                "session2",
+                json!({"kind": "tool_result", "tool_name": "read"})
+            ))
+            .is_empty()
+    );
+    assert!(
+        mapper
+            .map_event(event("session1", json!({"kind": "user_input"})))
+            .is_empty()
+    );
+}
+
 #[test]
 fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
     let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
