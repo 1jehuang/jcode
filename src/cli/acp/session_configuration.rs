@@ -90,10 +90,21 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 
     let efforts = available_efforts(state);
     if !efforts.is_empty() {
+        // An unset effort still needs a concrete `currentValue`. Prefer the
+        // provider's documented default so the snapshot tells the truth (e.g.
+        // DeepSeek runs at `high` when no effort is sent), then fall back to a
+        // middle rung for providers whose default is not modelled here.
         let current = state
             .reasoning_effort
             .as_deref()
             .filter(|effort| efforts.contains(effort))
+            .or_else(|| {
+                crate::provider::default_reasoning_effort(
+                    state.provider_name.as_deref(),
+                    state.model.as_deref(),
+                )
+                .filter(|effort| efforts.contains(effort))
+            })
             .unwrap_or_else(|| {
                 if efforts.contains(&"medium") {
                     "medium"

@@ -1279,6 +1279,7 @@ impl AcpRuntime {
                 ServerEvent::ModelChanged {
                     model,
                     provider_name,
+                    reasoning_effort,
                     error,
                     ..
                 } => {
@@ -1287,10 +1288,7 @@ impl AcpRuntime {
                     if error.is_none() {
                         let config_options = {
                             let mut state = session.ui_state.lock().await;
-                            state.model = Some(model);
-                            if provider_name.is_some() {
-                                state.provider_name = provider_name;
-                            }
+                            apply_model_changed(&mut state, model, provider_name, reasoning_effort);
                             session_config_options(&state)
                         };
                         if !config_options.is_empty() {
@@ -1383,11 +1381,23 @@ impl AcpRuntime {
             }
             AcpSlashCommand::Effort(None) => {
                 let state = session.ui_state.lock().await;
+                let available = available_efforts(&state);
+                // Report the effort the provider actually runs with, matching
+                // the `config_options` snapshot (e.g. DeepSeek defaults to
+                // `high` when no explicit effort was sent). Keep the inferred
+                // default inside the model's ladder so a model that cannot run
+                // a value never has it reported.
                 let current = state
                     .reasoning_effort
                     .as_deref()
+                    .or_else(|| {
+                        crate::provider::default_reasoning_effort(
+                            state.provider_name.as_deref(),
+                            state.model.as_deref(),
+                        )
+                        .filter(|effort| available.contains(effort))
+                    })
                     .unwrap_or("provider default");
-                let available = available_efforts(&state);
                 if available.is_empty() {
                     Ok(format!("Current reasoning effort: `{current}`."))
                 } else {
@@ -1533,6 +1543,24 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
     }
 }
 
+/// Apply a daemon `ModelChanged` event to the ACP presentation state.
+///
+/// The server always serializes `reasoning_effort`, with `null` meaning "no
+/// effort", so a switch must overwrite the previous value instead of leaving a
+/// stale selection in `configOptions`.
+fn apply_model_changed(
+    state: &mut SessionUiState,
+    model: String,
+    provider_name: Option<String>,
+    reasoning_effort: Option<String>,
+) {
+    state.model = Some(model);
+    if provider_name.is_some() {
+        state.provider_name = provider_name;
+    }
+    state.reasoning_effort = reasoning_effort;
+}
+
 async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
     let id = session.next_id();
     session
@@ -1568,6 +1596,7 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
                 id,
                 model,
                 provider_name,
+                reasoning_effort,
                 error,
                 ..
             } if id == request_id => {
@@ -1575,10 +1604,7 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
-                state.model = Some(model);
-                if provider_name.is_some() {
-                    state.provider_name = provider_name;
-                }
+                apply_model_changed(&mut state, model, provider_name, reasoning_effort);
                 return Ok(());
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {

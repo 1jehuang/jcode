@@ -610,3 +610,102 @@ fn acp_turn_outcome_ignores_stale_interrupt_before_ack() {
     o.observe(&ServerEvent::Interrupted, 9);
     assert_eq!(o.stop_reason(false), "cancelled");
 }
+
+#[test]
+fn config_options_report_openai_pro_default_within_its_ladder() {
+    // gpt-5-pro accepts only `high`; the generic OpenAI default (medium)
+    // must not leak into the snapshot.
+    let state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5-pro".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("gpt-5-pro exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "high");
+}
+
+#[test]
+fn model_change_replaces_stale_reasoning_effort() {
+    let mut state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5.4".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: Some("high".to_string()),
+    };
+
+    // A switch to a model with no effort must clear the old selection.
+    apply_model_changed(
+        &mut state,
+        "glm-5.3".to_string(),
+        Some("Z.AI".to_string()),
+        None,
+    );
+    assert_eq!(state.model.as_deref(), Some("glm-5.3"));
+    assert_eq!(state.provider_name.as_deref(), Some("Z.AI"));
+    assert_eq!(state.reasoning_effort, None);
+
+    // A switch that reports an effort installs the server's value.
+    apply_model_changed(
+        &mut state,
+        "gpt-5.4".to_string(),
+        Some("OpenAI".to_string()),
+        Some("low".to_string()),
+    );
+    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn config_options_report_deepseek_default_effort_when_unset() {
+    // DeepSeek thinking mode defaults to `high` when no effort is sent.
+    // Reporting `medium` here made ACP hosts show a value the runtime was
+    // not using (Paseo `effectiveThinkingOptionId: medium`).
+    let state = SessionUiState {
+        provider_name: Some("OpenCode Go".to_string()),
+        model: Some("opencode-go:deepseek-v4.1-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "high");
+}
+
+#[test]
+fn config_options_keep_an_explicit_effort_over_the_provider_default() {
+    let state = SessionUiState {
+        provider_name: Some("OpenCode Go".to_string()),
+        model: Some("opencode-go:deepseek-v4.1-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: Some("max".to_string()),
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "max");
+}
+
+#[test]
+fn config_options_use_openai_default_effort_when_unset() {
+    let state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5.2".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("openai exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "medium");
+}

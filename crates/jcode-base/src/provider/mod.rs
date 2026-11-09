@@ -64,7 +64,7 @@ pub use jcode_provider_core::{
     JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
     ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
+    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes, default_reasoning_effort,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
     oauth_account_label, provider_from_model_key, shared_http_client,
