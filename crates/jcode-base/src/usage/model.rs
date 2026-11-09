@@ -497,3 +497,55 @@ impl AccountUsageProbe {
         ))
     }
 }
+
+const RETRY_AT_MARKER: &str = "retry at ";
+
+/// Annotate a usage fetch error with when the next probe is allowed, so
+/// throttled accounts can show a countdown instead of a bare failure.
+pub fn usage_error_with_retry(error: Option<String>, retry: Option<Instant>) -> Option<String> {
+    let error = error?;
+    let Some(retry) = retry else {
+        return Some(error);
+    };
+    if error.contains(RETRY_AT_MARKER) {
+        return Some(error);
+    }
+    let wait = retry.saturating_duration_since(Instant::now());
+    let at = chrono::Utc::now() + chrono::Duration::from_std(wait).ok()?;
+    Some(format!(
+        "{error} ({RETRY_AT_MARKER}{})",
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    ))
+}
+
+/// RFC3339 retry time embedded by [`usage_error_with_retry`].
+pub fn usage_error_retry_at(error: &str) -> Option<&str> {
+    let start = error.find(RETRY_AT_MARKER)? + RETRY_AT_MARKER.len();
+    let rest = &error[start..];
+    let end = rest.find(')').unwrap_or(rest.len());
+    let at = &rest[..end];
+    chrono::DateTime::parse_from_rfc3339(at).ok().map(|_| at)
+}
+
+#[cfg(test)]
+mod retry_hint_tests {
+    use super::*;
+
+    #[test]
+    fn retry_hint_roundtrips() {
+        let error = usage_error_with_retry(
+            Some("HTTP 429".into()),
+            Instant::now().checked_add(std::time::Duration::from_secs(3000)),
+        )
+        .unwrap();
+        let at = usage_error_retry_at(&error).unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339(at).unwrap();
+        let secs = at.signed_duration_since(chrono::Utc::now()).num_seconds();
+        assert!((2990..=3001).contains(&secs), "{secs}");
+        assert!(usage_error_retry_at("HTTP 429").is_none());
+        assert_eq!(
+            usage_error_with_retry(Some("x".into()), None).as_deref(),
+            Some("x")
+        );
+    }
+}

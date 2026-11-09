@@ -797,7 +797,7 @@ pub(super) fn anthropic_snapshot_from_usage(
         resets_at: five_hour_ratio
             .and(usage.five_hour_resets_at.clone())
             .or_else(|| seven_day_ratio.and(usage.seven_day_resets_at.clone())),
-        error: usage.last_error.clone(),
+        error: super::usage_error_with_retry(usage.last_error.clone(), usage.refresh_after),
     }
 }
 
