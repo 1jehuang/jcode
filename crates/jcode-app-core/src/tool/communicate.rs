@@ -1261,9 +1261,10 @@ impl Tool for CommunicateTool {
             "spawn" => {
                 let label = params.required_spawn_label()?;
                 // Every spawned worker owns one lane in the coordinator's todo
-                // list: the lane named `label` in `phase` (default: the active
-                // phase), created from the prompt when it does not exist. The
-                // worker's own todo list is that lane and syncs only it.
+                // list: the lane named `label` in `phase` (default: the open
+                // lane already carrying that label, else the active phase),
+                // created from the prompt when it does not exist. The worker's
+                // own todo list is that lane and syncs only it.
                 let prompt = params.spawn_initial_message();
                 let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
