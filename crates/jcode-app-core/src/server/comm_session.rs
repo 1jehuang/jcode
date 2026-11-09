@@ -971,6 +971,9 @@ pub(super) async fn handle_comm_stop(
         }
     }
 
+    // `session_end` and `swarm_member_end` have been dispatched.
+    crate::hooks::forget_swarm_identity(&target_session);
+
     let (removed_swarm_id, removed_name) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.remove(&target_session) {
