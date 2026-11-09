@@ -307,6 +307,36 @@ async fn import_preserves_unrelated_state_and_plan_without_starting_agents() {
 }
 
 #[tokio::test]
+async fn import_restores_worker_hook_identity() {
+    let _home = TestHome::new();
+    let agents = agents();
+    let state = state();
+    let identity = crate::hooks::SwarmIdentity {
+        swarm_id: "hook-swarm".into(),
+        coordinator_session_id: "hook-leader".into(),
+        parent_session_id: "hook-leader".into(),
+        label: Some("task".into()),
+        agent_type: Some("reviewer".into()),
+    };
+    let mut group = swarm("hook-swarm", &["hook-leader", "hook-worker"]);
+    group.members[1].hook_identity = Some(identity.clone());
+    let transfer = bundle(vec![group], &["hook-leader", "hook-worker"]);
+    for session in &transfer.sessions {
+        save_session(&session.session_id, 1);
+        inbound_lease(&session.session_id, 1);
+    }
+    crate::hooks::forget_swarm_identity("hook-worker");
+    import_bundle(&transfer, &agents, &state).await.unwrap();
+    assert_eq!(
+        crate::hooks::swarm_identity("hook-worker"),
+        Some(identity),
+        "an imported worker must keep its swarm hook identity"
+    );
+    assert_eq!(crate::hooks::swarm_identity("hook-leader"), None);
+    crate::hooks::forget_swarm_identity("hook-worker");
+}
+
+#[tokio::test]
 async fn import_rejects_stale_destination_before_mutating_swarm_state() {
     let _home = TestHome::new();
     save_session("worker", 0);
