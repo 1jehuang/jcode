@@ -6,11 +6,15 @@ use super::*;
 /// Maximum bytes of `additionalContext` accepted from one pre_tool hook.
 const GATE_CONTEXT_LIMIT: usize = 8 * 1024;
 
-/// Maximum bytes of stdout accepted from one `pre_tool` gate. A gate may
-/// legitimately return a large `updatedInput`, so this is far above the small
-/// default capture limit. Output beyond it blocks the call instead of being
+/// Maximum bytes of replacement JSON accepted from one tool transformer.
+/// Output beyond this is detected and the transformer is ignored, never
 /// parsed as a silently cut-off document.
-const GATE_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+const TRANSFORM_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Maximum bytes of stdout accepted from one `pre_tool` gate. A gate may
+/// legitimately return a large `updatedInput`, so this matches the transformer
+/// limit rather than the small default capture limit.
+const GATE_OUTPUT_LIMIT: usize = TRANSFORM_OUTPUT_LIMIT;
 
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,17 +192,24 @@ pub async fn transform_tool_input(
                 continue;
             }
         };
-        let output = match sync_runner::run_command(
+        let output = match sync_runner::run_command_with_limit(
             std_cmd,
             serialized.as_bytes(),
             timeout,
             StderrMode::Discard,
+            TRANSFORM_OUTPUT_LIMIT,
         )
         .await
         {
             Ok(output) if output.status.success() => output,
             Ok(_) | Err(_) => continue,
         };
+        if output.stdout_truncated {
+            crate::logging::warn(&format!(
+                "Tool transformer '{command_line}' output exceeded {TRANSFORM_OUTPUT_LIMIT} bytes (leaving input unchanged)"
+            ));
+            continue;
+        }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let candidate = stdout.trim();
         if candidate.is_empty() {
