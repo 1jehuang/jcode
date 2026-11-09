@@ -2718,10 +2718,11 @@ pub(super) fn handle_test_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn slash_command_rest<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
-    if trimmed == command {
-        Some("")
+    let rest = trimmed.strip_prefix(command)?;
+    if rest.is_empty() {
+        Some(rest)
     } else {
-        trimmed.strip_prefix(&format!("{} ", command))
+        rest.strip_prefix(char::is_whitespace)
     }
 }
 
