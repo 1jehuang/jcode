@@ -952,4 +952,112 @@ mod transcript_slash_tests {
             }
         });
     }
+
+    #[test]
+    fn sent_transcript_subagent_commands_keep_their_arguments() {
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+            for (text, expected) in [
+                ("/subagent write notes", "run_subagent"),
+                ("/subagent-model fixed-model", "set_subagent_model"),
+            ] {
+                apply_remote_transcript_event(
+                    &mut app,
+                    &mut remote,
+                    text.to_string(),
+                    TranscriptMode::Send,
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], expected, "{text}: {line}");
+                if expected == "run_subagent" {
+                    assert_eq!(request["prompt"], "write notes", "{line}");
+                }
+                if expected == "set_subagent_model" {
+                    assert_eq!(request["model"], "fixed-model", "{line}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn sent_transcript_slash_lookalikes_stay_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+            // Paths keep their slashes and are sent as plain text.
+            for text in [
+                "/subagent/notes",
+                "/subagent-model/notes",
+                "/refactor/notes",
+            ] {
+                app.is_processing = false;
+                apply_remote_transcript_event(
+                    &mut app,
+                    &mut remote,
+                    text.to_string(),
+                    TranscriptMode::Send,
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.read_line(&mut line))
+                    .await
+                    .unwrap_or_else(|_| panic!("{text}: no remote request"))
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "message", "{text}: {line}");
+                assert_eq!(request["content"], text, "{text}");
+                assert!(!app.pending_turn, "{text}");
+            }
+            // An unknown bare word stays local with an Unknown skill error.
+            for text in [
+                "/subagent-helper",
+                "/subagent-models",
+                "/improvement",
+                "/agentsx",
+                "/goalsx",
+                "/workspacefoo",
+            ] {
+                app.is_processing = false;
+                apply_remote_transcript_event(
+                    &mut app,
+                    &mut remote,
+                    text.to_string(),
+                    TranscriptMode::Send,
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                let read = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    peer.read_line(&mut line),
+                )
+                .await;
+                assert!(read.is_err(), "{text}: unexpected request {line}");
+                let last = app.display_messages().last().expect("error message");
+                assert_eq!(last.content, format!("Unknown skill: {text}"), "{text}");
+                assert!(!app.pending_turn, "{text}");
+            }
+        });
+    }
 }
