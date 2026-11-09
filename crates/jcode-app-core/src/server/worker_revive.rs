@@ -86,7 +86,7 @@ pub(super) async fn live_or_revived_agent(
                     session.working_dir.as_ref().map(std::path::PathBuf::from),
                 )
                 .await;
-            let mut agent = Agent::new_with_session(provider, registry, session, None);
+            let mut agent = Agent::new_with_session(provider.clone(), registry, session, None);
             agent.set_debug(true);
             if matches!(
                 crate::config::config().agents.swarm_spawn_mode,
@@ -95,6 +95,7 @@ pub(super) async fn live_or_revived_agent(
                 agent.set_inline_output_tap(true);
             }
             let agent = Arc::new(Mutex::new(agent));
+            super::client_state::register_agent_provider(&agent, provider);
 
             {
                 let guard = agent.lock().await;
