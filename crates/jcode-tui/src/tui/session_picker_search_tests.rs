@@ -892,3 +892,50 @@ fn test_search_query_and_filter_survive_cached_and_fresh_session_updates() {
         assert_eq!(visible_ids(&picker), vec!["session_quota".to_string()]);
     }
 }
+
+#[test]
+fn long_search_row_keeps_cursor_and_query_tail_visible_by_display_cells() {
+    for query in [
+        format!("{}tailZ", "long search ".repeat(12)),
+        format!("{}e\u{301}👩‍💻", "界".repeat(60)),
+    ] {
+        let mut picker = type_to_search_picker();
+        picker.search_query = query.clone();
+        picker.focus_search_input();
+        for width in 1..=32 {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width + 2, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    picker.render_search_bar(frame, ratatui::layout::Rect::new(1, 1, width, 1));
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (1..=width).map(|x| buffer[(x, 1)].symbol()).collect();
+            assert!(row.contains('▎'), "cursor hidden at width {width}: {row:?}");
+            if width >= 2 {
+                assert!(
+                    row.contains('…'),
+                    "missing truncation at width {width}: {row:?}"
+                );
+            }
+            if width >= 4 {
+                let tail = if query.ends_with('Z') {
+                    "Z"
+                } else {
+                    "👩‍💻"
+                };
+                assert!(
+                    row.contains(tail),
+                    "newest text hidden at width {width}: {row:?}"
+                );
+            }
+            for x in 0..width + 2 {
+                assert_eq!(buffer[(x, 0)].symbol(), " ");
+                assert_eq!(buffer[(x, 2)].symbol(), " ");
+            }
+            assert_eq!(buffer[(0, 1)].symbol(), " ");
+            assert_eq!(buffer[(width + 1, 1)].symbol(), " ");
+        }
+    }
+}

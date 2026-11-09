@@ -274,6 +274,7 @@ struct NiriFocusedWindow {
 
 /// Ask niri over its IPC socket directly. Spawning `niri msg` costs a fork,
 /// exec and dynamic link per call, which dominated the companion's idle CPU.
+#[cfg(unix)]
 fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
     use std::io::{BufRead, BufReader, Write};
     let path = std::env::var_os("NIRI_SOCKET")?;
@@ -298,6 +299,7 @@ fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
 }
 
 fn focused_window_niri() -> Result<Option<NiriFocusedWindow>> {
+    #[cfg(unix)]
     if let Some(window) = focused_window_niri_socket() {
         return Ok(window);
     }

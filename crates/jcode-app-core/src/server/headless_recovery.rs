@@ -199,7 +199,8 @@ pub(super) async fn recover(server: &Server) {
             .ok()
             .flatten()
             .map(|record| record.reload_id);
-        if let Some(reload_id) = &swarm.recovery_reload_id {
+        let recovery_reload_id = swarm.recovery_reload_id.clone();
+        if let Some(reload_id) = &recovery_reload_id {
             reload_trace::record_value(
                 reload_id,
                 "startup_recovery_decision",
@@ -208,18 +209,11 @@ pub(super) async fn recover(server: &Server) {
                     "restored_provider_wait": pending_wait.is_some(),
                 }),
             );
-            reload_trace::record_value(
-                reload_id,
-                "continuation_started",
-                serde_json::json!({
-                    "session_id": session_id, "source": "server_startup_headless",
-                }),
-            );
         }
-        if let Some(state) = pending_wait {
+        let launched = if let Some(state) = pending_wait {
             // The wait owns its original transcript and absolute deadline. A
             // reload reminder here would create a different user turn.
-            spawn_wait_restore(&session_id, held, state, swarm, publication).await;
+            spawn_wait_restore(&session_id, held, state, swarm, publication).await
         } else {
             let reminder = stored_directive
                 .as_ref()
@@ -243,7 +237,20 @@ pub(super) async fn recover(server: &Server) {
                 swarm,
                 publication,
             )
-            .await;
+            .await
+        };
+        if !launched {
+            stats.skipped += 1;
+            continue;
+        }
+        if let Some(reload_id) = &recovery_reload_id {
+            reload_trace::record_value(
+                reload_id,
+                "continuation_started",
+                serde_json::json!({
+                    "session_id": session_id, "source": "server_startup_headless",
+                }),
+            );
         }
         if let Some(directive) = stored_directive
             && let Err(error) = reload_recovery::mark_delivered_if_matching_continuation(
@@ -306,7 +313,7 @@ async fn spawn_wait_restore(
     state: ResumeState,
     swarm: LiveTurnSwarmContext,
     publication: Arc<swarm::TurnPublication>,
-) {
+) -> bool {
     let agent = tokio::sync::OwnedMutexGuard::mutex(&held).clone();
     let session_id = session_id.to_string();
     let turn_lease = match held.claim_server_turn() {
@@ -315,7 +322,7 @@ async fn spawn_wait_restore(
             crate::logging::warn(&format!(
                 "Cannot restore provider wait for {session_id}: {error}"
             ));
-            return;
+            return false;
         }
     };
     let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
@@ -371,4 +378,5 @@ async fn spawn_wait_restore(
         events.finish().await;
         drop(turn_lease);
     });
+    true
 }
