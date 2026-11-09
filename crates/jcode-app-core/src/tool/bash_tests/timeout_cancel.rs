@@ -11,7 +11,7 @@ async fn promoted_command_cancellation_terminates_process_group() {
     let result = BashTool::new()
         .execute(
             json!({
-                "command": "sleep 20 & printf '%s %s\\n' \"$$\" \"$!\" > pids; wait",
+                "command": "sleep 2; sleep 20 & printf '%s %s\\n' \"$$\" \"$!\" > pids; wait",
                 "timeout": 1000,
                 "notify": false,
                 "wake": false,
@@ -24,8 +24,20 @@ async fn promoted_command_cancellation_terminates_process_group() {
     let task_id = metadata["task_id"].as_str().expect("task ID");
     assert_eq!(metadata["timeout_promoted"], true);
 
-    let pids = std::fs::read_to_string(directory.path().join("pids"))
-        .expect("command should record its process IDs before promotion");
+    // The foreground timeout can elapse before the shell writes its PID record.
+    let pids = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match std::fs::read_to_string(directory.path().join("pids")) {
+                Ok(pids) if pids.ends_with('\n') => break pids,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("could not read process IDs: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("command should record its process IDs");
     let mut pids = pids.split_whitespace();
     let parent_pid: u32 = pids
         .next()
