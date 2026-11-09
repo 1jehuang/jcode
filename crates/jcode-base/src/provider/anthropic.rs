@@ -91,21 +91,23 @@ pub fn anthropic_api_key_pool_names() -> Option<Vec<String>> {
     if anthropic_auth_is_none() {
         return None;
     }
-    let Ok(raw) = std::env::var("JCODE_ANTHROPIC_API_KEY_NAMES") else {
-        return None;
-    };
-    let names: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect();
-    (!names.is_empty()).then_some(names)
+    crate::provider_catalog::env_name_list("JCODE_ANTHROPIC_API_KEY_NAMES")
 }
 
 pub fn load_anthropic_api_key() -> Result<String> {
     if anthropic_auth_is_none() {
         return Ok(String::new());
+    }
+    if let Some(names) = anthropic_api_key_pool_names() {
+        // Without a session, take the first entry that resolves. An unset first entry is skipped.
+        let mut first_err = None;
+        for name in &names {
+            match load_anthropic_profile_key(name) {
+                Ok(key) => return Ok(key),
+                Err(err) => first_err = first_err.or(Some(err)),
+            }
+        }
+        return Err(first_err.unwrap_or_else(|| anyhow::anyhow!("Anthropic key pool is empty")));
     }
     if let Ok(env_name) = std::env::var("JCODE_ANTHROPIC_API_KEY_NAME") {
         let env_name = env_name.trim();

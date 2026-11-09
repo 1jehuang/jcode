@@ -99,3 +99,30 @@ fn unbound_session_uses_the_first_pool_entry() {
     let pool = KeyPool::from_env();
     assert_eq!(pool.key().unwrap(), "secret-b");
 }
+
+#[test]
+fn unset_first_pool_entry_still_starts_the_pool() {
+    let _lock = jcode_base::storage::lock_test_env();
+    // POOL_KEY_MISSING is never set. The first entry resolves to nothing.
+    let _env = EnvGuard::set(&[
+        ("JCODE_ANTHROPIC_API_BASE", "https://gateway.example/v1"),
+        ("JCODE_NAMED_PROVIDER_PROFILE", "gateway"),
+        (
+            "JCODE_ANTHROPIC_API_KEY_NAMES",
+            "POOL_KEY_MISSING,POOL_KEY_B,POOL_KEY_C",
+        ),
+        ("JCODE_ANTHROPIC_API_KEY_NAME", "POOL_KEY_MISSING"),
+        ("POOL_KEY_B", "secret-b"),
+        ("POOL_KEY_C", "secret-c"),
+    ]);
+    assert!(jcode_base::provider::anthropic::has_anthropic_api_key());
+    let pool = KeyPool::from_env();
+    assert_eq!(pool.key().unwrap(), "secret-b");
+    pool.bind(&session_for(3, 1));
+    assert_eq!(pool.key().unwrap(), "secret-b");
+    pool.bind(&session_for(3, 2));
+    assert_eq!(pool.key().unwrap(), "secret-c");
+    pool.bind(&session_for(3, 0));
+    let err = pool.key().unwrap_err();
+    assert!(err.to_string().contains("POOL_KEY_MISSING"), "{err}");
+}

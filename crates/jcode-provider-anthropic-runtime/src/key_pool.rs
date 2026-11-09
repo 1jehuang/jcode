@@ -41,7 +41,7 @@ impl KeyPool {
         }
     }
 
-    /// Key for the bound session, or the single profile key without a pool.
+    /// Key for the bound session. Unbound calls take the first entry that resolves.
     pub(crate) fn key(&self) -> Result<String> {
         let Some(keys) = &self.keys else {
             return load_anthropic_api_key();
@@ -51,7 +51,12 @@ impl KeyPool {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        match keys.get(pool_index(session.as_deref(), keys.len())) {
+        let index = match session.as_deref() {
+            // Unbound calls take the first entry that resolves, else the error of entry 0.
+            None | Some("") => keys.iter().position(Result::is_ok).unwrap_or(0),
+            id => pool_index(id, keys.len()),
+        };
+        match keys.get(index) {
             Some(Ok(key)) => Ok(key.clone()),
             Some(Err(err)) => anyhow::bail!(err.clone()),
             None => anyhow::bail!("Anthropic key pool is empty"),

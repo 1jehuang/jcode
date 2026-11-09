@@ -92,7 +92,15 @@ fn named_profile_auth(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
             let pool = &profile.api_key_envs;
-            let picked = pool.get(pool_index(pinned.as_deref(), pool.len())).cloned();
+            let index = match pinned.as_deref() {
+                // Unbound calls take the first entry that resolves, else the error of entry 0.
+                None | Some("") => pool
+                    .iter()
+                    .position(|name| load_named_profile_api_key(name, &profile).is_some())
+                    .unwrap_or(0),
+                id => pool_index(id, pool.len()),
+            };
+            let picked = pool.get(index).cloned();
             let key = picked
                 .as_deref()
                 .and_then(|name| load_named_profile_api_key(name, &profile));
