@@ -29,37 +29,39 @@ pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifes
 }
 
 #[test]
-fn cloud_conflict_identifies_earlier_session_and_preserves_changes() {
-    let (root, stage, repo) = repository();
+fn cloud_unreturned_work_is_rescued_and_move_proceeds() {
+    let (root, _earlier_stage, _) = repository();
+    let stage = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "new-session", stage.path())
+        .unwrap()
+        .unwrap();
     std::fs::write(root.path().join("file.txt"), "valuable cloud work\n").unwrap();
     std::fs::write(root.path().join("untracked.txt"), "also valuable\n").unwrap();
-    let head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
-    let status = git(root.path(), &["status", "--porcelain"]).unwrap();
-    let error = restore_repo(
+    restore_repo(
         &repo,
         &stage.path().join("repo.bundle"),
         &stage.path().join("ignored.tar"),
         "new-session",
     )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("cloud return --session earlier-session"),
-        "{error}"
-    );
-    assert!(error.contains("refusing to overwrite"), "{error}");
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
-        "valuable cloud work\n"
+        "original\n"
+    );
+    let rescued = git(
+        root.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/jcode-cloud/rescued"],
+    )
+    .unwrap();
+    let rescued = rescued.lines().next().expect("rescue ref");
+    assert!(rescued.ends_with("-new-session"), "{rescued}");
+    assert_eq!(
+        git(root.path(), &["show", &format!("{rescued}:file.txt")]).unwrap(),
+        "valuable cloud work"
     );
     assert_eq!(
-        std::fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "also valuable\n"
-    );
-    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), head);
-    assert_eq!(
-        git(root.path(), &["status", "--porcelain"]).unwrap(),
-        status
+        git(root.path(), &["show", &format!("{rescued}:untracked.txt")]).unwrap(),
+        "also valuable"
     );
 }
 

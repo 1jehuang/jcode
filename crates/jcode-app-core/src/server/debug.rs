@@ -346,7 +346,16 @@ pub(super) async fn handle_debug_client(
         let _request_activity = match if transfer_control || read_only_probe {
             Ok(None)
         } else {
-            crate::runtime_activity::global().try_enter().map(Some)
+            // Debug commands that name a session only affect that session.
+            match &request {
+                Request::DebugCommand {
+                    session_id: Some(session),
+                    ..
+                } if !session.trim().is_empty() => crate::runtime_activity::global()
+                    .try_enter_session(session)
+                    .map(Some),
+                _ => crate::runtime_activity::global().try_enter().map(Some),
+            }
         } {
             Ok(activity) => activity,
             Err(error) => {

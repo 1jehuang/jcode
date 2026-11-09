@@ -1531,7 +1531,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
-    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
+    todo_stages::push_lane_status_lines_below_rows(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -2084,11 +2084,29 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
+    let wait_note = todo_stages::todo_wait_note(todo, agents);
     if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
-        return render_todo_item_line(todo, agents, base_indent, inner_width);
+        let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
+        if let Some(note) = wait_note {
+            line.spans.push(Span::styled(
+                format!("  ◷ {note}"),
+                Style::default().fg(todo_warning_color()),
+            ));
+            line = super::truncate_line_with_ellipsis_to_width(
+                &line,
+                inner_width.saturating_add(base_indent.width()),
+            );
+        }
+        return line;
     }
     let mut spans = todo_card_item_spans(todo, false);
     spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    if let Some(note) = wait_note {
+        spans.push(Span::styled(
+            format!("  {note}"),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
     let progress = todo_dependency_progress(
         &dependencies,
