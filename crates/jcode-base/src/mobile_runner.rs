@@ -264,6 +264,21 @@ pub fn is_cloud_machine() -> bool {
     mobile_sync::session_source() == "cloud"
 }
 
+/// Keep the cloud host's idle-poweroff guard from stopping the VM while a
+/// daemon session is mid-turn without an SSH client attached. The host's
+/// `idle.sh` treats a marker touched within 5 minutes as busy. Only touches,
+/// never removes: staleness releases it, and the mobile runner owns removal.
+pub fn touch_cloud_activity_marker() {
+    if !is_cloud_machine() {
+        return;
+    }
+    if let Some(path) = busy_marker()
+        && let Err(error) = std::fs::write(&path, b"")
+    {
+        crate::logging::warn(&format!("cloud activity marker update failed: {error}"));
+    }
+}
+
 fn busy_marker() -> Option<PathBuf> {
     match crate::storage::jcode_dir() {
         Ok(directory) => Some(directory.join("mobile-runner-busy")),
