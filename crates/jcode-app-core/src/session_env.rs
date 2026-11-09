@@ -69,10 +69,6 @@ pub fn inherit_session_env(parent: &str, child: &str) {
 /// jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
     crate::hooks::forget_swarm_identity(session_id);
-<<<<<<< HEAD
-    crate::hooks::forget_prompt_origin(session_id);
-    crate::hooks::reset_stop_continuations(session_id);
-=======
     remove_session_env_keeping_hook_identity(session_id);
 }
 
@@ -82,6 +78,7 @@ pub fn remove_session_env(session_id: &str) {
 /// `hooks::forget_swarm_identity` once those hooks have been dispatched.
 pub fn remove_session_env_keeping_hook_identity(session_id: &str) {
     crate::hooks::forget_prompt_origin(session_id);
+    crate::hooks::reset_stop_continuations(session_id);
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
     crate::tool::session_http::prune(&entries);
