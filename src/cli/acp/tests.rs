@@ -610,3 +610,198 @@ fn acp_turn_outcome_ignores_stale_interrupt_before_ack() {
     o.observe(&ServerEvent::Interrupted, 9);
     assert_eq!(o.stop_reason(false), "cancelled");
 }
+
+/// A stand-in for the shared daemon on a private socket, so tests can drop
+/// connections the way a daemon reload does.
+#[cfg(unix)]
+mod reconnect {
+    use super::*;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::net::UnixListener;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    const SESSION: &str = "session_reconnect";
+
+    struct FakeConn {
+        reader: BufReader<OwnedReadHalf>,
+        writer: OwnedWriteHalf,
+    }
+
+    impl FakeConn {
+        async fn accept(listener: &UnixListener) -> Self {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            Self {
+                reader: BufReader::new(reader),
+                writer,
+            }
+        }
+
+        async fn read(&mut self) -> Request {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        async fn write(&mut self, event: Value) {
+            self.writer
+                .write_all(format!("{event}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        /// Answer the reattach subscription a reconnecting ACP session sends.
+        async fn accept_reattach(listener: &UnixListener) -> Self {
+            let mut conn = Self::accept(listener).await;
+            let Request::Subscribe {
+                id,
+                target_session_id,
+                ..
+            } = conn.read().await
+            else {
+                panic!("expected a reattach subscription");
+            };
+            assert_eq!(target_session_id.as_deref(), Some(SESSION));
+            conn.write(json!({
+                "type": "history", "id": id, "session_id": SESSION,
+                "messages": [], "provider_model": "reattached-model",
+            }))
+            .await;
+            conn.write(json!({"type": "done", "id": id})).await;
+            conn
+        }
+
+        /// Read one prompt and complete it immediately.
+        async fn complete_prompt(&mut self) {
+            let Request::Message { id, content, .. } = self.read().await else {
+                panic!("expected the prompt message");
+            };
+            assert_eq!(content, "hello");
+            self.write(json!({"type": "ack", "id": id})).await;
+            self.write(json!({"type": "done", "id": id})).await;
+        }
+    }
+
+    struct Harness {
+        runtime: AcpRuntime,
+        listener: UnixListener,
+        output: BufReader<tokio::io::DuplexStream>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (sink, output) = tokio::io::duplex(1 << 16);
+            let mut runtime =
+                AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None);
+            runtime.socket_override = Some(socket);
+            runtime.stdout = Arc::new(Mutex::new(Box::new(sink)));
+            Self {
+                runtime,
+                listener,
+                output: BufReader::new(output),
+                _dir: dir,
+            }
+        }
+
+        /// An attached ACP session plus the daemon end of its connection.
+        async fn session(&self) -> (Arc<DaemonSession>, FakeConn) {
+            let (connected, conn) = tokio::join!(
+                self.runtime.connect_daemon(),
+                FakeConn::accept(&self.listener)
+            );
+            let (reader, writer) = connected.unwrap();
+            let session = DaemonSession::new(SESSION.to_string(), reader, writer, 2)
+                .with_working_dir(PathBuf::from("/acp-test"));
+            (Arc::new(session), conn)
+        }
+
+        async fn prompt(&self, session: &Arc<DaemonSession>) -> Result<()> {
+            session.prompt_running.store(true, Ordering::SeqCst);
+            self.runtime
+                .run_prompt(json!(7), Arc::clone(session), "hello".into(), vec![], None)
+                .await
+        }
+
+        async fn next_output(&mut self) -> Value {
+            let mut line = String::new();
+            self.output.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+    }
+
+    async fn timed<T>(future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), future)
+            .await
+            .expect("reconnect test timed out")
+    }
+
+    #[tokio::test]
+    async fn idle_session_reattaches_after_daemon_restart() {
+        let mut harness = Harness::new();
+        let (session, first) = harness.session().await;
+        // The daemon reloads while the agent is idle: its end of the socket closes.
+        drop(first);
+
+        let daemon = async {
+            let mut conn = FakeConn::accept_reattach(&harness.listener).await;
+            conn.complete_prompt().await;
+            conn
+        };
+        let (result, _conn) = timed(async { tokio::join!(harness.prompt(&session), daemon) }).await;
+        result.expect("prompt after a daemon restart should reattach and succeed");
+
+        let response = timed(harness.next_output()).await;
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(
+            session.ui_state.lock().await.model.as_deref(),
+            Some("reattached-model")
+        );
+        assert!(!session.prompt_running.load(Ordering::SeqCst));
+    }
+
+    /// Once the daemon has read a prompt, whether it ran is unknown, so the
+    /// bridge must not resend it, with or without an Ack.
+    #[tokio::test]
+    async fn prompt_taken_before_restart_is_not_resent_but_session_recovers() {
+        for acked in [false, true] {
+            prompt_taken_before_restart(acked).await;
+        }
+    }
+
+    async fn prompt_taken_before_restart(acked: bool) {
+        let mut harness = Harness::new();
+        let (session, mut first) = harness.session().await;
+
+        let daemon = async {
+            let Request::Message { id, .. } = first.read().await else {
+                panic!("expected the prompt message");
+            };
+            if acked {
+                first.write(json!({"type": "ack", "id": id})).await;
+            }
+            // The daemon reloads after taking the prompt.
+            drop(first);
+            FakeConn::accept_reattach(&harness.listener).await
+        };
+        let (result, mut conn) =
+            timed(async { tokio::join!(harness.prompt(&session), daemon) }).await;
+        let err = result.expect_err("a prompt the daemon took must not be resent");
+        assert!(
+            format!("{err:#}").contains("resend the prompt"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!session.prompt_running.load(Ordering::SeqCst));
+
+        // The session was reattached, so the next prompt works without a new agent.
+        let (result, ()) =
+            timed(async { tokio::join!(harness.prompt(&session), conn.complete_prompt()) }).await;
+        result.expect("the reattached session should accept new prompts");
+        let response = timed(harness.next_output()).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+    }
+}
