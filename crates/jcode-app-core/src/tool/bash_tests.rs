@@ -25,6 +25,9 @@ pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
 
 #[path = "bash_tests/session_environment.rs"]
 mod session_environment;
+#[cfg(unix)]
+#[path = "bash_tests/timeout_cancel.rs"]
+mod timeout_cancel;
 
 #[cfg(not(windows))]
 #[test]
