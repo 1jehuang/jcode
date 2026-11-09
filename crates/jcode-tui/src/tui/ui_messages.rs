@@ -7,7 +7,9 @@ mod todo_completion;
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
+use todo_stages::{
+    agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line_with_background,
+};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -1542,7 +1544,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
-    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
+    todo_stages::push_lane_status_lines_below_rows(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -2085,38 +2087,6 @@ fn todo_running_dependencies<'a>(
         .iter()
         .filter(|task| todo.waiting_on.contains(&task.task_id))
         .collect()
-}
-
-fn render_todo_item_line_with_background(
-    todo: &crate::todo::TodoItem,
-    agents: &[TodoCardAgent],
-    tasks: &[TodoCardBackgroundTask],
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let dependencies = todo_running_dependencies(todo, tasks);
-    if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
-        return render_todo_item_line(todo, agents, base_indent, inner_width);
-    }
-    let mut spans = todo_card_item_spans(todo, false);
-    spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
-    let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
-    let progress = todo_dependency_progress(
-        &dependencies,
-        inner_width
-            .saturating_sub(title_width + 2)
-            .max(inner_width.saturating_sub(12).min(inner_width / 2)),
-    );
-    let progress_width = progress.width();
-    if progress_width > 0 {
-        let left_width = inner_width.saturating_sub(progress_width + 2);
-        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
-        let pad = inner_width.saturating_sub(left.width() + progress_width);
-        left.spans.push(Span::raw(" ".repeat(pad)));
-        left.spans.extend(progress.spans);
-        spans = left.spans;
-    }
-    todo_card_line(spans, base_indent, inner_width)
 }
 
 /// Reuse the info widget's bar cells, colors and used/remaining convention.
