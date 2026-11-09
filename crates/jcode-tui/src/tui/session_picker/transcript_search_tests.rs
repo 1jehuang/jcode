@@ -69,7 +69,7 @@ fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
     let path = dir.path().join("oversized.jsonl");
     // Too large for warmup or decoded-text caching, so this must use cold IO.
     let mut text = format!("{}\n", r#"{"text":"needle"}"#);
-    text.push_str(&" ".repeat(2 * 1024 * 1024));
+    text.push_str(&" ".repeat(17 * 1024 * 1024));
     std::fs::write(&path, text).unwrap();
     let session = external_session("cold", &path);
     let mut search = TranscriptSearch::default();
@@ -130,14 +130,8 @@ fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
         ("absent", false),
     ] {
         let tokens = search_query_tokens(query);
-        let mut reference = Scan {
-            tokens: &tokens,
-            found: vec![false; tokens.len()],
-            cancel: &cancel,
-            fuzzy,
-            score: 0,
-            scores: &mut WordScores::default(),
-        };
+        let mut scores = WordScores::default();
+        let mut reference = Scan::new(&tokens, &[], &cancel, mode(fuzzy), &mut scores);
         for path in &paths {
             scan_file_streaming(path, &mut reference);
             if reference.complete() {
@@ -146,7 +140,7 @@ fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
         }
         assert_eq!(
             cached_paths_scan(&paths, &tokens, &cancel, fuzzy),
-            Some(reference.complete().then_some(reference.score))
+            Some(reference.all_found().then_some(reference.score))
         );
     }
 }
@@ -184,16 +178,9 @@ fn incremental_token_sequences_match_fresh_streaming_results_and_scores() {
             for second in words {
                 let tokens = vec![first.to_string(), second.to_string()];
                 let mut scores = WordScores::default();
-                let mut reference = Scan {
-                    tokens: &tokens,
-                    found: vec![false; tokens.len()],
-                    cancel: &cancel,
-                    fuzzy,
-                    score: 0,
-                    scores: &mut scores,
-                };
+                let mut reference = Scan::new(&tokens, &[], &cancel, mode(fuzzy), &mut scores);
                 scan_file_streaming(&path, &mut reference);
-                let expected = reference.complete().then_some(reference.score);
+                let expected = reference.all_found().then_some(reference.score);
                 assert_eq!(
                     cached_paths_scan(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
                     Some(expected),
@@ -411,6 +398,7 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
         exact_field: false,
         opening_prompt: opening.into(),
         intent_text: intent.into(),
+        prior: Vec::new(),
     };
     let candidates = vec![
         candidate("weak-first", "unrelated", ""),
@@ -420,8 +408,9 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
     ];
     let ranked = prioritize_candidates(
         candidates,
-        query,
+        &PhraseQuery::new(query),
         &search_query_tokens(query),
+        &[],
         &AtomicBool::new(false),
     );
     assert_eq!(

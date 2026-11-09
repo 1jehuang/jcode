@@ -1160,7 +1160,7 @@ async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint(
 }
 
 #[tokio::test]
-async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key() {
+async fn auth_test_choice_plan_discovers_model_for_custom_compat_endpoint_with_api_key() {
     let _env_guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
         "JCODE_OPENAI_COMPAT_API_BASE",
@@ -1176,14 +1176,9 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         "NO_PROXY",
         "no_proxy",
     ]);
-    // 0.0.0.0 is accepted as an insecure HTTP test host but is not treated as
-    // localhost by resolve_openai_compatible_profile, so this exercises the
-    // hosted/API-key code path while still serving the response locally.
-    let api_base = spawn_single_response_http_server_on_host(
-        "0.0.0.0",
-        200,
-        r#"{"data":[{"id":"hosted-compatible-model"}]}"#,
-    );
+    // IP-address endpoints remain self-hosted when an API key is configured.
+    let api_base =
+        spawn_single_response_http_server(200, r#"{"data":[{"id":"keyed-compatible-model"}]}"#);
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::set_var("OPENAI_COMPAT_API_KEY", "test-key");
     crate::env::set_var("NO_PROXY", "0.0.0.0,127.0.0.1,localhost");
@@ -1195,7 +1190,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::OPENAI_COMPAT_PROFILE,
     );
-    assert!(resolved.requires_api_key);
+    assert!(!resolved.requires_api_key);
 
     let plan = auth_test_choice_plan(
         &super::super::provider_init::ProviderChoice::OpenaiCompatible,
@@ -1206,7 +1201,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
 
     match plan {
         AuthTestChoicePlan::Run { model } => {
-            assert_eq!(model.as_deref(), Some("hosted-compatible-model"))
+            assert_eq!(model.as_deref(), Some("keyed-compatible-model"))
         }
         AuthTestChoicePlan::Skip(detail) => panic!("unexpected skip: {detail}"),
     }

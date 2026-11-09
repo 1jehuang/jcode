@@ -741,13 +741,13 @@ fn test_loading_picker_ctrl_s_filter_survives_reseed() {
     let mut picker = SessionPicker::loading();
     picker.focus_search_input();
     let start = picker.filter_mode;
-    // All -> current dir -> catch up -> saved.
-    for _ in 0..3 {
+    // All -> cloud -> current dir -> catch up -> saved.
+    for _ in 0..4 {
         picker
             .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
             .unwrap();
     }
-    assert_eq!(picker.filter_mode, start.next().next().next());
+    assert_eq!(picker.filter_mode, start.next().next().next().next());
     assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
     assert!(picker.search_query.is_empty(), "Ctrl+S is not query text");
 
@@ -863,7 +863,7 @@ fn test_loading_tab_preserves_list_focus_through_cached_and_fresh_updates() {
 fn test_search_query_and_filter_survive_cached_and_fresh_session_updates() {
     let mut picker = SessionPicker::loading();
     picker.focus_search_input();
-    for _ in 0..3 {
+    for _ in 0..4 {
         picker
             .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
             .unwrap();

@@ -3250,6 +3250,12 @@ fn history_image_boundaries_survive_loss_of_tool_data() {
     };
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1].role, "tool");
+    let tool = messages[1]
+        .tool
+        .as_ref()
+        .expect("tool rows carry their call");
+    assert_eq!((tool.id.as_str(), tool.name.as_str()), ("read-1", "read"));
+    assert!(messages[0].tool.is_none());
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].history_message_index, Some(2));
     assert_eq!(

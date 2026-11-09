@@ -90,6 +90,27 @@ pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
         || message.starts_with("All todos are done. Todo confidence summary:")
 }
 
+fn is_incomplete_todo_poke(message: &str) -> bool {
+    let trimmed = message.trim();
+    trimmed.starts_with("You have ")
+        && trimmed
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains(" incomplete todo"))
+        && is_poke_message(trimmed)
+}
+
+/// An incomplete-todo poke can linger in the queue (for example re-queued
+/// after a server busy rejection) while the model finishes every todo.
+/// Sending it afterwards nags about finished work, so drop it at dispatch.
+pub(super) fn drop_stale_incomplete_todo_pokes(app: &App, messages: &mut Vec<String>) {
+    if messages.iter().any(|m| is_incomplete_todo_poke(m)) && incomplete_poke_todos(app).is_empty()
+    {
+        crate::logging::info("Dropping stale incomplete-todo poke: no open todos remain");
+        messages.retain(|m| !is_incomplete_todo_poke(m));
+    }
+}
+
 pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
     !messages.is_empty() && messages.iter().all(|message| is_poke_message(message))
 }

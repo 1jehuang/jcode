@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 mod input_dispatch;
 mod key_handling;
+mod latency;
 mod login_completion;
 mod queue_recovery;
 mod reconnect;
@@ -53,8 +54,7 @@ use session_persistence::{
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
-// Re-export the remote input dispatch helpers for sibling modules/tests that go
-// through the `remote` facade instead of private submodule paths.
+// Re-export remote input dispatch helpers for sibling modules/tests.
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
@@ -66,7 +66,7 @@ pub(super) use input_dispatch::{
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
 };
-pub(super) use server_events::handle_server_event;
+pub(super) use latency::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
@@ -121,7 +121,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .as_ref()
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
-    let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = crate::tui::periodic_redraw_required(app)
+        | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
         && let Err(error) = remote.poll_account_usage().await
@@ -451,13 +452,24 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
+    // After a reload `is_processing` stays false until the History bootstrap
+    // reports whether the server is still mid-turn. Dispatching queued work
+    // before then would inject follow-ups into the still-running turn.
+    if !remote.has_loaded_history() {
+        return needs_redraw;
+    }
+
     if !app.is_processing && !app.queued_commands.is_empty() {
         // Commands queued with Ctrl+Enter run before queued prompts. Hand them
         // to the follow-up dispatcher, which runs them one at a time.
         app.pending_queued_dispatch = true;
         needs_redraw = true;
-    } else if !app.is_processing && !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
+    } else if !app.is_processing
+        && !app.queued_messages.is_empty()
+        && !app.reload_recovery_blocks_queue()
+    {
+        let mut queued_messages = std::mem::take(&mut app.queued_messages);
+        super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let queued_images = std::mem::take(&mut app.queued_message_images);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
@@ -472,7 +484,15 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             app.push_display_message(DisplayMessage::system(msg));
         }
         for msg in &messages {
-            app.push_display_message(DisplayMessage::user(msg.clone()));
+            // Synthetic continuations are for the model, not user prompts.
+            let display = match crate::todo::auto_poke_display_summary(msg) {
+                Some(summary) => DisplayMessage::system(summary.to_string()),
+                None => DisplayMessage::user(msg.clone()),
+            };
+            app.push_display_message(display);
+        }
+        if messages.is_empty() && reminder.is_none() {
+            return true;
         }
         if begin_remote_send(
             app,
@@ -510,6 +530,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             || (remote.has_loaded_history() && app.has_pending_cloud_recovery()))
     {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        app.reload_recovery_dispatch_pending = false;
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
             "Sending hidden continuation reminder ({} chars)",
@@ -542,6 +563,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= recover_stuck_remote_history(app, remote).await;
     needs_redraw |= detect_starved_queued_followup(app);
     needs_redraw |= app.maybe_finish_background_client_reload();
+    needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     needs_redraw
 }
 
@@ -586,11 +608,10 @@ pub(super) async fn handle_terminal_event(
     // lag. Mirrors the identical drain in `local::handle_terminal_event`.
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            break;
-        }
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(Some(event)) = crate::tui::terminal_events::try_read() {
             needs_redraw |= apply_terminal_event(app, terminal, remote, Some(Ok(event))).await?;
+        } else {
+            break;
         }
     }
     Ok(needs_redraw)
@@ -744,8 +765,18 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
     let Some(visible_messages) = app.take_pending_compacted_history_load() else {
         return false;
     };
-    match remote.get_compacted_history(visible_messages).await {
-        Ok(_) => true,
+    let recent_history = app.recent_history_window_active();
+    match remote
+        .get_compacted_history(visible_messages, recent_history)
+        .await
+    {
+        Ok(id) => {
+            if recent_history {
+                app.recent_history_paging.request =
+                    Some((id, app.display_messages_version, visible_messages));
+            }
+            true
+        }
         Err(error) => {
             app.restore_pending_compacted_history_load(visible_messages);
             app.set_status_notice(format!("Failed to request older history: {}", error));
@@ -786,6 +817,7 @@ pub(super) async fn handle_bus_event(
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::GitInfoRefreshed) => true,
+        Ok(BusEvent::ClientBinaryChanged) => app.maybe_hot_reload_onto_new_binary(),
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
             true
@@ -1710,12 +1742,16 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 )));
             }
         }
-    } else if !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
+    } else if !app.queued_messages.is_empty() && !app.reload_recovery_blocks_queue() {
+        let mut queued_messages = std::mem::take(&mut app.queued_messages);
+        super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
         let queued_images = std::mem::take(&mut app.queued_message_images);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        if messages.is_empty() && reminder.is_none() {
+            return;
+        }
         let combined = messages.join("\n\n");
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
         let auto_retry = reminder.is_some() && messages.is_empty();
@@ -1762,6 +1798,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        app.reload_recovery_dispatch_pending = false;
         let combined = reminders.join("\n\n");
         if begin_remote_send(
             app,

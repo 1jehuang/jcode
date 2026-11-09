@@ -14,6 +14,7 @@ use crate::message::ConnectionPhase;
 use crate::tui::app;
 use crate::tui::color_support::rgb;
 use crate::tui::detect_kv_cache_problem;
+use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
 use crate::tui::session_facts;
 use ratatui::{prelude::*, style::Modifier, widgets::Paragraph};
@@ -298,7 +299,7 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
-    if app.login_input_hint().is_some() {
+    if app.login_input_hint().is_some() || app.voice_composer_preview().is_some() {
         return 1;
     }
     // Command suggestions render as an overlay (see
@@ -362,7 +363,8 @@ pub(super) fn wrapped_input_line_count(
 
     let num_str = next_prompt.to_string();
     let (prompt_char, caret_color) = input_prompt(app);
-    let (lines, _, _) = wrap_input_text_with_images(
+    let preview = app.voice_composer_preview();
+    let (lines, _, _) = wrap_input_text_with_ghost(
         app.input(),
         app.cursor_pos(),
         line_width,
@@ -371,6 +373,7 @@ pub(super) fn wrapped_input_line_count(
         caret_color,
         prompt_len,
         &|number| app.input_image_attached(number),
+        voice_ghost(preview.as_ref()),
     );
     lines.len().max(1)
 }
@@ -682,10 +685,7 @@ fn append_batch_progress_spans(
     }
 }
 
-#[path = "stable_status.rs"]
-mod stable_status;
-
-/// Compact live activity for todo-lane observers. The composer uses stable_status.
+/// Shared by the open session status line and its lightweight todo-lane observer.
 /// No provider or worker state is inferred here: absent telemetry stays absent.
 pub(super) fn live_processing_status_line(
     status: &crate::protocol::SwarmLiveStatus,
@@ -833,7 +833,351 @@ fn live_status_snapshot(app: &dyn TuiState, elapsed: f32) -> crate::protocol::Sw
 }
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
-    stable_status::draw_status(frame, app, area, pending_count);
+    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
+        if !super::secondary_render_active() {
+            crate::tui::app::oauth_telemetry::note_status_render(area);
+        }
+        frame.render_widget(
+            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
+                .style(Style::default().fg(accent_color())),
+            area,
+        );
+        return;
+    }
+    let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+    let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
+    let (cache_read, cache_creation) = app.streaming_cache_tokens();
+    let user_turn_count = app.display_user_message_count();
+    let (streaming_input_tokens, _) = app.streaming_tokens();
+    let provider_name = app.provider_name();
+    let upstream_provider = app.upstream_provider();
+    let cache_ttl = app.cache_ttl_status();
+    let kv_cache_problem = detect_kv_cache_problem(
+        &provider_name,
+        upstream_provider.as_deref(),
+        user_turn_count,
+        streaming_input_tokens,
+        cache_read,
+        cache_creation,
+        cache_ttl.as_ref(),
+    );
+
+    let queued_suffix = if pending_count > 0 {
+        format!(" · +{} queued", pending_count)
+    } else {
+        String::new()
+    };
+
+    let line = if let Some(build_progress) = crate::build::read_build_progress() {
+        let spinner = super::activity_indicator(elapsed, 12.5);
+        Line::from(vec![
+            Span::styled(spinner, Style::default().fg(rgb(255, 193, 7))),
+            Span::styled(
+                format!(" {}", build_progress),
+                Style::default().fg(rgb(255, 193, 7)),
+            ),
+        ])
+    } else if let Some(remaining) = app.rate_limit_remaining() {
+        let secs = remaining.as_secs();
+        let spinner = super::activity_indicator(elapsed, 4.0);
+        let time_str = if secs >= 3600 {
+            let hours = secs / 3600;
+            let mins = (secs % 3600) / 60;
+            format!("{}h {}m", hours, mins)
+        } else if secs >= 60 {
+            let mins = secs / 60;
+            let s = secs % 60;
+            format!("{}m {}s", mins, s)
+        } else {
+            format!("{}s", secs)
+        };
+        Line::from(vec![
+            Span::styled(spinner, Style::default().fg(rgb(255, 193, 7))),
+            Span::styled(
+                format!(
+                    " Rate limited. Auto-retry in {}...{}",
+                    time_str, queued_suffix
+                ),
+                Style::default().fg(rgb(255, 193, 7)),
+            ),
+        ])
+    } else if app.is_processing() {
+        let spinner = super::activity_indicator(elapsed, 12.5);
+
+        match app.status() {
+            ProcessingStatus::Idle => Line::from(""),
+            ProcessingStatus::Sending => {
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "sending".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+            ProcessingStatus::Connecting(ref phase) => {
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "connecting".into();
+                snapshot.connection_phase = Some(connection_phase_label(phase));
+                // "Suspiciously long" is measured per connection attempt, not
+                // across the whole turn, so later round-trips don't immediately
+                // render yellow just because the turn has been running a while.
+                let phase_elapsed = app
+                    .connection_phase_elapsed()
+                    .map_or(elapsed, |d| d.as_secs_f32());
+                let label_color = match phase {
+                    crate::message::ConnectionPhase::Retrying { .. } => rgb(255, 193, 7),
+                    crate::message::ConnectionPhase::Authenticating if phase_elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    crate::message::ConnectionPhase::Connecting if phase_elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    crate::message::ConnectionPhase::SendingRequest if phase_elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    _ => dim_color(),
+                };
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if let Some(label) = spans.get_mut(1) {
+                    label.style = label.style.fg(label_color);
+                }
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+            ProcessingStatus::Thinking(_start) => {
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "thinking".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+            ProcessingStatus::Streaming => {
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "streaming".into();
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if let Some(upstream) = app.upstream_provider() {
+                    spans.push(Span::styled(
+                        format!(" · via {upstream}"),
+                        Style::default().fg(dim_color()),
+                    ));
+                }
+                if let Some(problem) = kv_cache_problem {
+                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
+                    let miss_str = if miss_tokens >= 1000 {
+                        format!("{}k", miss_tokens / 1000)
+                    } else if miss_tokens > 0 {
+                        format!("{}", miss_tokens)
+                    } else {
+                        "kv".to_string()
+                    };
+                    spans.insert(
+                        1,
+                        Span::styled(
+                            format!(" ⚠ {miss_str} cache miss ·"),
+                            Style::default().fg(rgb(255, 193, 7)),
+                        ),
+                    );
+                }
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+            ProcessingStatus::WaitingForNetwork { listener } => {
+                let mut spans = vec![
+                    Span::styled("↻ ", Style::default().fg(rgb(255, 193, 7))),
+                    Span::styled(
+                        format!(
+                            "network disconnected, waiting to retry · {} · {}",
+                            listener,
+                            format_elapsed(elapsed)
+                        ),
+                        Style::default().fg(rgb(255, 193, 7)),
+                    ),
+                ];
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+            ProcessingStatus::RunningTool(ref name) => {
+                let anim_color = ai_color();
+                let batch_prog = app.batch_progress();
+                let is_batch = name == "batch";
+                // For batch: compute initial total from the streaming tool call input
+                let batch_total_initial = if is_batch {
+                    app.streaming_tool_calls()
+                        .last()
+                        .and_then(|tc| tc.input.get("tool_calls"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                } else {
+                    None
+                };
+                let tool_detail = if is_batch {
+                    None // batch always uses progress display
+                } else {
+                    app.streaming_tool_calls()
+                        .last()
+                        .map(get_tool_activity_detail)
+                        .filter(|s| !s.is_empty())
+                };
+                let experimental_notice = app.active_experimental_feature_notice();
+                let subagent = app.subagent_status();
+
+                let mut snapshot = live_status_snapshot(app, elapsed);
+                snapshot.phase = "running_tool".into();
+                snapshot.tool_name = Some(name.clone());
+                snapshot.tool_intent = tool_detail;
+                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+
+                // For batch tool: show "completed/total · last_tool" progress
+                if is_batch {
+                    append_batch_progress_spans(
+                        &mut spans,
+                        anim_color,
+                        batch_prog,
+                        batch_total_initial,
+                    );
+                }
+
+                if let Some(notice) = experimental_notice {
+                    spans.push(Span::styled(
+                        format!(" · ⚠ {}", notice),
+                        Style::default().fg(rgb(255, 193, 7)).bold(),
+                    ));
+                }
+
+                if let Some(status) = subagent {
+                    spans.push(Span::styled(
+                        format!(" ({})", status),
+                        Style::default().fg(dim_color()),
+                    ));
+                }
+                if let Some(label) = app
+                    .upstream_provider()
+                    .map(|provider| format!("via {provider}"))
+                {
+                    spans.push(Span::styled(
+                        format!(" · {}", label),
+                        Style::default().fg(dim_color()),
+                    ));
+                }
+
+                if let Some(problem) = kv_cache_problem {
+                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
+                    let miss_str = if miss_tokens >= 1000 {
+                        format!("{}k", miss_tokens / 1000)
+                    } else if miss_tokens > 0 {
+                        format!("{}", miss_tokens)
+                    } else {
+                        "kv".to_string()
+                    };
+                    spans.push(Span::styled(
+                        format!(" · ⚠ {} cache miss", miss_str),
+                        Style::default().fg(rgb(255, 193, 7)),
+                    ));
+                }
+
+                spans.push(Span::styled(
+                    format!(" · {} bg", jcode_tui_core::keybind::alt_chord("B")),
+                    Style::default().fg(rgb(100, 100, 100)),
+                ));
+
+                push_queued_suffix(&mut spans, &queued_suffix);
+                Line::from(spans)
+            }
+        }
+    } else if let Some((total_in, total_out)) = app.total_session_tokens() {
+        let total = total_in + total_out;
+        if let Some(warning) = occasional_session_history_warning(
+            total,
+            app.session_compaction_count(),
+            app.context_limit(),
+            area.width as usize,
+            app.animation_elapsed() as u64,
+        ) {
+            let severe_token_threshold = app
+                .context_limit()
+                .and_then(|limit| u64::try_from(limit).ok())
+                .map(|limit| limit.saturating_mul(3))
+                .unwrap_or(1_000_000);
+            let warning_color =
+                if total >= severe_token_threshold || app.session_compaction_count() >= 3 {
+                    rgb(255, 100, 100)
+                } else {
+                    rgb(255, 193, 7)
+                };
+            Line::from(vec![
+                Span::styled("⚠ ", Style::default().fg(warning_color)),
+                Span::styled(warning, Style::default().fg(warning_color)),
+            ])
+        } else if let Some(tip) =
+            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
+        {
+            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
+        } else {
+            Line::from("")
+        }
+    } else {
+        if let Some(tip) =
+            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
+        {
+            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
+        } else {
+            Line::from("")
+        }
+    };
+
+    let line = status_with_background_tasks(
+        line,
+        app.background_task_rows(),
+        area.width as usize,
+        app.is_processing(),
+    );
+
+    crate::memory::check_staleness();
+
+    if app.centered_mode() {
+        frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
+        return;
+    }
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Background launches finish their tool call immediately, but the work and
+/// its intent must remain visible while the agent moves on to another tool.
+fn status_with_background_tasks(
+    foreground: Line<'static>,
+    tasks: &[crate::tui::BackgroundTaskRow],
+    width: usize,
+    processing: bool,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus;
+    use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
+
+    let running: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
+        .collect();
+    if running.is_empty() {
+        return fit(&foreground, width);
+    }
+    let labels = running
+        .iter()
+        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let background = Line::from(Span::styled(
+        format!("bg {}: {}", running.len(), labels),
+        Style::default().fg(ai_color()),
+    ));
+    // Idle tips must not displace actual work. While processing, reserve space
+    // for both activities rather than letting a long foreground intent hide bg.
+    if !processing || foreground.width() == 0 || width < 24 {
+        return fit(&background, width);
+    }
+    let background_width = background.width().min(width / 2);
+    let mut line = fit(&foreground, width.saturating_sub(background_width + 3));
+    line.spans
+        .push(Span::styled(" · ", Style::default().fg(dim_color())));
+    line.spans.extend(fit(&background, background_width).spans);
+    line
 }
 
 fn running_tool_header_spans(
@@ -1195,13 +1539,13 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
-        machine: crate::tui::ssh_remote_host(),
+        machine: app.remote_machine(),
         dir: overscroll_directory_transition(
             data.original_working_dir.as_deref(),
             app.working_dir().as_deref(),
         ),
         branch: overscroll_git_branch(&data),
-        git: data.git_info.clone(),
+        git: overscroll_git_info(&data).cloned(),
         context: overscroll_context_usage(&data),
         account_remaining: overscroll_account_remaining(&data),
         auth: overscroll_auth_label(data.auth_method),
@@ -1244,6 +1588,7 @@ pub(crate) fn preview_overscroll_line(
 }
 
 /// The host belongs to the selected preview, never the attached live session.
+#[cfg(test)]
 pub(crate) fn preview_overscroll_line_for_host(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
@@ -1259,7 +1604,7 @@ pub(crate) fn preview_overscroll_line_for_host(
             data.working_dir.as_deref(),
         ),
         branch: overscroll_git_branch(data),
-        git: data.git_info.clone(),
+        git: overscroll_git_info(data).cloned(),
         context: overscroll_context_usage(data),
         account_remaining: overscroll_account_remaining(data),
         auth: overscroll_auth_label(data.auth_method),
@@ -1573,10 +1918,23 @@ fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec
 }
 
 /// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.
+/// Git facts for the status line. Cloud sessions keep their repository in
+/// `dual_git_info.cloud`, so prefer that over the (absent) local `git_info`.
+fn overscroll_git_info(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<&crate::tui::info_widget::GitInfo> {
+    if let Some(dual) = &data.dual_git_info
+        && let crate::tui::cloud_git::RepoState::Ready(info) = &dual.cloud
+    {
+        return Some(info);
+    }
+    data.git_info.as_ref()
+}
+
 /// Compact git branch label for the status line and fact stack. Truncated so
 /// long branch names cannot crowd out the other facts.
 fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
-    let branch = data.git_info.as_ref()?.branch.trim();
+    let branch = overscroll_git_info(data)?.branch.trim();
     if branch.is_empty() {
         return None;
     }
@@ -1807,6 +2165,7 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
 
 /// The idle resume composer uses the live input wrapper, but never reads the
 /// currently open session's draft, queue, selection, or cursor state.
+#[cfg(test)]
 pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
     let number = next_prompt.to_string();
     let prompt = "> ";
@@ -1854,7 +2213,8 @@ pub(super) fn draw_input(
         return None;
     }
 
-    let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_images(
+    let voice_preview = app.voice_composer_preview();
+    let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_ghost(
         input_text,
         cursor_pos,
         line_width,
@@ -1863,12 +2223,18 @@ pub(super) fn draw_input(
         caret_color,
         prompt_len,
         &|number| app.input_image_attached(number),
+        voice_ghost(voice_preview.as_ref()),
     );
 
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    if let Some(hint) = app.login_input_hint() {
+    if let Some(preview) = voice_preview.as_ref() {
+        hint_shown = true;
+        let line = voice_waveform_line(preview, area.width as usize);
+        hint_line = Some(line.spans.iter().map(|s| s.content.as_ref()).collect());
+        lines.push(line);
+    } else if let Some(hint) = app.login_input_hint() {
         hint_shown = true;
         hint_line = Some(hint.to_string());
         lines.push(Line::from(Span::styled(
@@ -2083,7 +2449,9 @@ pub(super) fn draw_input(
     if app.input_drag_scroll_offset().is_some() {
         return None;
     }
-    frame.set_cursor_position(cursor);
+    if !super::secondary_render_active() {
+        frame.set_cursor_position(cursor);
+    }
     Some(cursor)
 }
 
@@ -2346,6 +2714,7 @@ pub(crate) fn wrap_input_text<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn wrap_input_text_with_images<'a>(
     input: &str,
     cursor_pos: usize,
@@ -2356,6 +2725,48 @@ fn wrap_input_text_with_images<'a>(
     prompt_len: usize,
     attached: &dyn Fn(usize) -> bool,
 ) -> (Vec<Line<'a>>, usize, usize) {
+    wrap_input_text_with_ghost(
+        input,
+        cursor_pos,
+        line_width,
+        num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+        attached,
+        None,
+    )
+}
+
+/// Like [`wrap_input_text_with_images`], with an optional live voice
+/// transcript appended as ghost text. The ghost wraps with the input but is
+/// never editable, so the cursor stays at its real position.
+#[allow(clippy::too_many_arguments)]
+fn wrap_input_text_with_ghost<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+    attached: &dyn Fn(usize) -> bool,
+    ghost: Option<(&str, Style)>,
+) -> (Vec<Line<'a>>, usize, usize) {
+    let ghost_start = input.chars().count();
+    let combined;
+    let (input, ghost_style) = match ghost.filter(|(text, _)| !text.is_empty()) {
+        Some((text, style)) => {
+            let sep = if input.is_empty() || input.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
+            combined = format!("{input}{sep}{text}");
+            (combined.as_str(), Some(style))
+        }
+        None => (input, None),
+    };
     let image_ranges: Vec<(std::ops::Range<usize>, bool)> = input
         .match_indices("[image ")
         .filter_map(|(start, _)| {
@@ -2401,7 +2812,9 @@ fn wrap_input_text_with_images<'a>(
         let mut previous_style = Style::default();
         for (offset, ch) in segment.text.chars().enumerate() {
             let position = segment.start_char + offset;
-            let style = if let Some((_, present)) = image_ranges
+            let style = if let Some(ghost_style) = ghost_style.filter(|_| position >= ghost_start) {
+                ghost_style
+            } else if let Some((_, present)) = image_ranges
                 .iter()
                 .find(|(range, _)| range.contains(&position))
             {
@@ -2435,6 +2848,136 @@ fn wrap_input_text_with_images<'a>(
     }
 
     (lines, cursor_line, cursor_col)
+}
+
+/// Ghost text for the live voice transcript: italic and dim while
+/// recording, accent colored while the final pass runs.
+fn voice_ghost(preview: Option<&crate::tui::VoiceComposerPreview>) -> Option<(&str, Style)> {
+    let preview = preview?;
+    let color = if preview.recording {
+        rgb(200, 200, 210)
+    } else {
+        rgb(140, 200, 255)
+    };
+    Some((
+        preview.live.as_str(),
+        Style::default().fg(dim_color_of(color)).italic(),
+    ))
+}
+
+fn dim_color_of(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => rgb(
+            (r as u16 * 3 / 4) as u8,
+            (g as u16 * 3 / 4) as u8,
+            (b as u16 * 3 / 4) as u8,
+        ),
+        other => other,
+    }
+}
+
+/// Truncate to `width` terminal cells, ending in `…` when cut.
+fn truncate_cells(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    if width > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Smooth level to a 0..=1 bar height. Speech RMS sits around 0.02 to 0.2,
+/// so the curve is compressed to keep normal speech visibly moving.
+fn voice_level_height(level: f32) -> f32 {
+    (level.max(0.0) * 4.0).sqrt().min(1.0)
+}
+
+/// Header row above the composer while voice input is active:
+/// `● 0:07 ▁▂▅▇▆▃▂▁▂▄… · Ctrl+Space send · Esc cancel`. The waveform fills the
+/// width left after the label and hint, newest sample on the right, colored
+/// by loudness. Never wraps: the hint is dropped first, then the waveform
+/// shrinks.
+fn voice_waveform_line(preview: &crate::tui::VoiceComposerPreview, width: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !preview.recording {
+        let dots = ["◌", "◍", "●", "◍"];
+        let phase = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() / 250)
+            .unwrap_or(0)
+            % dots.len() as u128) as usize;
+        let mut text = format!("  {} Transcribing…", dots[phase]);
+        if !preview.hint.is_empty() {
+            text.push_str(" · ");
+            text.push_str(&preview.hint);
+        }
+        let text = truncate_cells(&text, width);
+        spans.push(Span::styled(
+            text,
+            Style::default().fg(rgb(140, 200, 255)).bold(),
+        ));
+        return Line::from(spans);
+    }
+    let label = format!(
+        "  ● {}:{:02} ",
+        preview.elapsed_secs / 60,
+        preview.elapsed_secs % 60
+    );
+    let hint = if preview.hint.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", preview.hint)
+    };
+    let label_w = label.width();
+    let mut hint_w = hint.width();
+    if label_w + hint_w + 8 > width {
+        hint_w = 0;
+    }
+    let wave_w = width.saturating_sub(label_w + hint_w).min(48);
+    spans.push(Span::styled(
+        truncate_cells(&label, width),
+        Style::default().fg(rgb(255, 110, 110)).bold(),
+    ));
+    if wave_w > 0 {
+        let levels = &preview.levels;
+        let start = levels.len().saturating_sub(wave_w);
+        let pad = wave_w.saturating_sub(levels.len() - start);
+        if pad > 0 {
+            spans.push(Span::styled(
+                "·".repeat(pad),
+                Style::default().fg(rgb(70, 70, 80)),
+            ));
+        }
+        for level in &levels[start..] {
+            let h = voice_level_height(*level);
+            let glyph = BARS[(h * 7.0).round() as usize];
+            // Quiet bars recede, loud bars glow warm.
+            let color = rgb(
+                (110.0 + 145.0 * h) as u8,
+                (150.0 - 40.0 * h) as u8,
+                (190.0 - 80.0 * h) as u8,
+            );
+            spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
+        }
+    }
+    if hint_w > 0 {
+        spans.push(Span::styled(hint, Style::default().fg(dim_color())));
+    }
+    Line::from(spans)
 }
 
 fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {

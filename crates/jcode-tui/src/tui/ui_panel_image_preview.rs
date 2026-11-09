@@ -21,6 +21,9 @@ pub(super) fn restore_regions(saved: Vec<(Rect, u64)>) {
 }
 
 pub(super) fn record_image(area: Rect, hash: u64) {
+    if super::secondary_render_active() {
+        return;
+    }
     if area.width > 0 && area.height > 0 {
         IMAGE_REGIONS.with(|regions| regions.borrow_mut().push((area, hash)));
     }

@@ -506,7 +506,8 @@ async fn wait_monitor_publishes_entry_age_and_cleanup_without_tool_events() {
     })
     .await
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Age refreshes are coalesced to a 5s tick.
+    tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if let Some(ServerEvent::SwarmStatus { members }) = rx.recv().await
                 && members

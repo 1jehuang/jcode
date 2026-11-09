@@ -1307,7 +1307,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         start_processing_message(
             ProcessingMessage {
                 id: 78,
-                content: "continue after reload".to_string(),
+                content: String::new(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: Some("nonexistent-replay-skill".to_string()),

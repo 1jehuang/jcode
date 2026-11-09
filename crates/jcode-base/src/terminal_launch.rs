@@ -1,8 +1,9 @@
 use anyhow::{Result, bail};
 pub use jcode_terminal_launch::{
-    SpawnAttempt, TerminalCommand, apply_client_terminal_env, build_hook_spawn_command,
-    detected_resume_terminal, expand_home, parse_hook_command, resume_terminal_candidates,
-    sh_escape, shell_command, snapshot_client_terminal_env, spawn_command_in_new_terminal_with,
+    RUNTIME_ENV_VARS, SpawnAttempt, TerminalCommand, apply_client_terminal_env, apply_runtime_env,
+    build_hook_spawn_command, detected_resume_terminal, expand_home, parse_hook_command,
+    resume_terminal_candidates, sh_escape, shell_command, snapshot_client_terminal_env,
+    spawn_command_in_new_terminal_with,
 };
 use std::path::Path;
 
@@ -18,6 +19,34 @@ pub fn configured_spawn_hook() -> Option<String> {
         .map(str::trim)
         .filter(|hook| !hook.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod runtime_env_facade_tests {
+    #[test]
+    fn app_core_portable_runtime_filter_reference_is_exported() {
+        let _: &'static [&'static str] = super::RUNTIME_ENV_VARS;
+        assert!(super::RUNTIME_ENV_VARS.contains(&"JCODE_SOCKET"));
+    }
+
+    #[test]
+    fn contextual_companion_error_requests_safe_local_fallback() {
+        use std::path::Path;
+        let command = super::TerminalCommand::new("jcode", vec!["--resume".into()])
+            .runtime_env(vec![("JCODE_SOCKET".into(), "/tmp/connected.sock".into())]);
+        // An older companion rejects the distinct contextual operation; the
+        // wire-level rejection itself is covered by the companion client tests.
+        let handled =
+            super::try_spawn_via_companion_with(&command, Path::new("/work"), |_request| {
+                Err(crate::companion_client::CompanionError::Failed(
+                    "unknown variant `spawn_terminal_with_runtime`".into(),
+                ))
+            });
+        assert!(
+            !handled,
+            "a rejected contextual request must fall back to a local launch"
+        );
+    }
 }
 
 /// Spawn `command` in a new terminal window/pane.
@@ -49,17 +78,25 @@ fn try_spawn_via_companion(command: &TerminalCommand, cwd: &Path) -> bool {
     if std::env::var_os("JCODE_COMPANION").is_some() || crate::auth::running_in_test_harness() {
         return false;
     }
-    let request = crate::companion_client::CompanionRequest::SpawnTerminal {
-        program: command.program.clone(),
-        args: command.args.clone(),
-        cwd: cwd.to_path_buf(),
-        title: command.title.clone(),
-        kind: command.kind.clone(),
-        session_id: command.session_id.clone(),
-        env: command.extra_env.clone(),
-        client_terminal_env: command.client_terminal_env.clone(),
-    };
-    match crate::companion_client::request(&request, std::time::Duration::from_secs(10)) {
+    try_spawn_via_companion_with(command, cwd, |request| {
+        crate::companion_client::request(request, std::time::Duration::from_secs(10))
+    })
+}
+
+/// Shared request-selection path with an injectable transport for isolated
+/// compatibility tests. Any protocol error safely falls back to the local path.
+fn try_spawn_via_companion_with(
+    command: &TerminalCommand,
+    cwd: &Path,
+    mut send: impl FnMut(
+        &crate::companion_client::CompanionRequest,
+    ) -> std::result::Result<
+        crate::companion_client::CompanionResponse,
+        crate::companion_client::CompanionError,
+    >,
+) -> bool {
+    let request = crate::companion_client::CompanionRequest::spawn_terminal(command, cwd);
+    match send(&request) {
         Ok(_) => true,
         Err(crate::companion_client::CompanionError::Unavailable) => false,
         Err(error) => {

@@ -198,10 +198,10 @@ pub use turn_retry::{FailureKind, RetryDecision, RetryPolicy, TurnRetry, classif
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
-    ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SessionToolDefinition,
-    SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
-    ToolConfiguration, TurnStopReason, api_socket_path,
+    ApiEvent, ApiRequest, HistoryMessage, HistoryTool, ModelRouteInfo, PermissionDecision,
+    RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
+    SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
+    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, api_socket_path,
 };
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,

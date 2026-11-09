@@ -9,6 +9,7 @@ pub mod cloud_managed;
 pub mod cloud_move;
 pub mod cloud_runtime;
 pub mod commands;
+pub mod companion_autostart;
 pub mod compatible_runtime;
 pub mod debug;
 pub mod dispatch;

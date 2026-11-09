@@ -1,5 +1,8 @@
 //! Recoverable placeholder for an unexpectedly incomplete unbounded preview.
+#[cfg(test)]
 use super::*;
+
+#[cfg(test)]
 
 pub(super) fn unavailable(width: u16) -> PreparedMessages {
     crate::logging::warn("Unbounded history preview unexpectedly failed to complete");
@@ -19,6 +22,7 @@ pub(super) fn unavailable(width: u16) -> PreparedMessages {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
     use super::*;
 
     #[test]

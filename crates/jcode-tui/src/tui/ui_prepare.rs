@@ -867,6 +867,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1177,6 +1184,7 @@ struct BodyRenderCtx<'a> {
 /// Render saved history through the live dispatcher and wrapping pipeline.
 /// No active App is borrowed: expansion state, images and in-flight swarm work
 /// from the session behind the picker must never leak into this transcript.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1193,6 +1201,7 @@ mod preview_fallback;
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
 /// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview_for_viewport(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1221,6 +1230,8 @@ pub(crate) fn prepare_history_preview_for_viewport(
         true,
     )
 }
+
+#[cfg(test)]
 
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
@@ -2531,6 +2542,7 @@ fn wrap_lines(
     }
 
     let image_regions = compute_image_regions(&wrapped_lines);
+    shrink_wrapped_lines(&mut wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -2550,6 +2562,16 @@ fn wrap_lines(
         message_boundaries: Vec::new(),
         mermaid_pending_epoch: None,
     }
+}
+
+/// Drop spare span and line capacity before a body is cached. Wrapping builds
+/// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
+/// and these bodies live in the body cache for the session's lifetime.
+fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
+    for line in wrapped_lines.iter_mut() {
+        line.spans.shrink_to_fit();
+    }
+    wrapped_lines.shrink_to_fit();
 }
 
 #[expect(
@@ -2692,6 +2714,7 @@ fn wrap_lines_with_map(
         });
     }
 
+    shrink_wrapped_lines(&mut wrapped_lines);
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
     // Translate the per-message unwrapped-line boundaries into wrapped-line

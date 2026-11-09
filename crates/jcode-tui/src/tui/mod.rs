@@ -23,13 +23,13 @@ pub struct BackgroundTaskRow {
     pub label: String,
     pub percent: Option<f32>,
     pub status: BackgroundTaskRowStatus,
-    /// When a successful task stopped being actionable. Running and failed
-    /// tasks remain visible until their state changes or the session closes.
+    /// When a successful task stopped being actionable, retained until session closure.
     pub completed_at: Option<std::time::Instant>,
 }
 
 pub mod backend;
 mod cloud_git;
+mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
 mod core;
@@ -61,9 +61,9 @@ mod redraw_schedule;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
-    REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, current_full_frame_redraw_reason,
-    idle_donut_active, last_full_frame_redraw_reason, periodic_redraw_required,
-    periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
+    current_full_frame_redraw_reason, idle_donut_active, last_full_frame_redraw_reason,
+    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
@@ -71,6 +71,7 @@ pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
 mod stream_buffer;
+mod terminal_events;
 pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
@@ -951,6 +952,10 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    /// Voice input rendered in the composer instead of the status line.
+    fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
+        None
+    }
     /// How long since the user last pressed a key, scrolled, or pasted, or
     /// `None` when they have not interacted yet.
     ///
@@ -980,6 +985,15 @@ pub trait TuiState {
     /// Whether mouse-wheel smoothing has queued lines to animate.
     fn has_pending_mouse_scroll_animation(&self) -> bool {
         false
+    }
+    /// Whether the paced stream buffer still holds text that later ticks will
+    /// reveal. While streamed text sits on screen with no backlog (e.g. the
+    /// model is thinking or running a tool after emitting text), nothing in the
+    /// transcript changes per tick, so the animation cadence is pure waste.
+    /// Defaults to true so state impls that do not track a backlog keep the
+    /// conservative fast cadence.
+    fn stream_reveal_pending(&self) -> bool {
+        true
     }
     /// Optional configured keybinding label for external dictation.
     fn dictation_key_label(&self) -> Option<String>;
@@ -1189,6 +1203,11 @@ pub trait TuiState {
     /// Current git branch of the working directory, if in a repo.
     fn git_branch(&self) -> Option<String> {
         None
+    }
+    /// Remote machine this session runs on (SSH host or cloud VM), shown on
+    /// the status line. Embedded views override it with their own host.
+    fn remote_machine(&self) -> Option<String> {
+        ssh_remote_host()
     }
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
@@ -1436,6 +1455,19 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+}
+
+/// Live voice input shown inside the composer: a waveform row above the
+/// prompt and the in-progress transcript as ghost text after the cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceComposerPreview {
+    pub recording: bool,
+    pub elapsed_secs: u64,
+    /// Recent RMS levels, oldest first.
+    pub levels: Vec<f32>,
+    pub live: String,
+    /// Trailing key hint, e.g. `Ctrl+Space send · Esc cancel`.
+    pub hint: String,
 }
 
 /// Render snapshot of the Ctrl+R reverse prompt-history search overlay.

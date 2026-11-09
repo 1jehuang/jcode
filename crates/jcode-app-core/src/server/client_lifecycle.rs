@@ -409,6 +409,8 @@ pub(super) async fn handle_client(
     // Old clients count unknown events against a stray-line budget, so
     // `session_account_changed` goes only to clients that opted in.
     let supports_session_accounts = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Keep only the window preference, never a session-specific prefix fingerprint.
+    let mut recent_history_messages = None;
     let mut supports_user_response = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
@@ -876,7 +878,24 @@ pub(super) async fn handle_client(
         let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
             None
         } else {
-            match crate::runtime_activity::global().try_enter() {
+            // Requests that keep this connection's session identity are owned
+            // by that session, so they never block transfers of unrelated
+            // sessions. Identity-changing requests stay globally owned.
+            let identity_change = !client_subscribed
+                || matches!(
+                    &request,
+                    Request::Subscribe { .. }
+                        | Request::ResumeSession { .. }
+                        | Request::ResumeAllSessions { .. }
+                        | Request::Clear { .. }
+                );
+            let gate = crate::runtime_activity::global();
+            let activity = if identity_change || client_session_id.trim().is_empty() {
+                gate.try_enter()
+            } else {
+                gate.try_enter_session(&client_session_id)
+            };
+            match activity {
                 Ok(activity) => Some(activity),
                 Err(error) => {
                     let _ = client_event_tx.send(ServerEvent::Error {
@@ -1604,6 +1623,7 @@ server_resumes: false,
                     requested_session_accounts,
                     std::sync::atomic::Ordering::Relaxed,
                 );
+                recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
@@ -1817,7 +1837,7 @@ server_resumes: false,
                     None,
                     supports_pdf_panels,
                     supports_turn_identity,
-                    None,
+                    recent_history_messages.map(crate::protocol::HistoryBase::recent),
             )
                 .await
                 .is_err()
@@ -1851,6 +1871,7 @@ server_resumes: false,
             Request::GetCompactedHistory {
                 id,
                 visible_messages,
+                recent_history,
             } => {
                 if handle_get_compacted_history(
                     id,
@@ -1858,6 +1879,7 @@ server_resumes: false,
                     &agent,
                     &writer,
                     visible_messages,
+                    recent_history,
                 )
                 .await
                 .is_err()
@@ -1919,7 +1941,7 @@ server_resumes: false,
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
-                        None,
+                        recent_history_messages.map(crate::protocol::HistoryBase::recent),
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,
@@ -2667,6 +2689,21 @@ server_resumes: false,
                         });
                     }
                 }
+            }
+
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = super::debug::forward_voice_activity(
+                    id,
+                    &session_id,
+                    activity,
+                    &swarm_members,
+                )
+                .await;
+                let _ = client_event_tx.send(event);
             }
 
             Request::InputShell { id, command } => {

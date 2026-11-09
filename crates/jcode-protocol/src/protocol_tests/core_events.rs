@@ -243,6 +243,7 @@ fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
 fn test_compacted_history_request_roundtrip() -> Result<()> {
     let req = Request::GetCompactedHistory {
         id: 7,
+        recent_history: false,
         visible_messages: 64,
     };
     let json = serde_json::to_string(&req)?;
@@ -256,6 +257,40 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
         return Err(anyhow!("wrong request type"));
     };
     assert_eq!(visible_messages, 64);
+    Ok(())
+}
+
+#[test]
+fn recent_history_schema_is_opt_in_and_legacy_compatible() -> Result<()> {
+    let legacy: crate::HistoryBase = serde_json::from_str(r#"{"count":0,"fingerprint":0}"#)?;
+    assert_eq!(legacy.recent_messages, None);
+    assert!(!serde_json::to_string(&legacy)?.contains("recent_messages"));
+    let recent = crate::HistoryBase::recent(128);
+    assert_eq!(recent.count, 0);
+    assert_eq!(recent.fingerprint, 0);
+    assert_eq!(recent.images_fingerprint, None);
+    let decoded: crate::HistoryBase = serde_json::from_str(&serde_json::to_string(&recent)?)?;
+    assert_eq!(decoded.recent_messages, Some(128));
+    let legacy =
+        parse_request_json(r#"{"type":"get_compacted_history","id":1,"visible_messages":64}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::GetCompactedHistory {
+            recent_history: false,
+            ..
+        }
+    ));
+    let recent = parse_request_json(
+        r#"{"type":"get_compacted_history","id":1,"visible_messages":192,"recent_history":true}"#,
+    )?;
+    assert!(matches!(
+        recent,
+        Request::GetCompactedHistory {
+            recent_history: true,
+            visible_messages: 192,
+            ..
+        }
+    ));
     Ok(())
 }
 

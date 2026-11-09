@@ -189,16 +189,12 @@ impl SessionPicker {
             })
             .collect::<Vec<_>>();
 
-        filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        filtered.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
         // Cache once per candidate, never run matching from the comparator.
         // Stable sorting keeps recency as the deterministic final tie-break.
@@ -230,6 +226,17 @@ impl SessionPicker {
                         .iter()
                         .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
                         .count();
+                    let rank = if self.transcript_search.contains(&session.id) {
+                        rank
+                    } else {
+                        let [title, label, prompt] = &fields;
+                        rank.with_source_weight(transcript_search::metadata_source_weight(
+                            &[title, label, prompt],
+                            &session.search_index,
+                            &tokens,
+                            self.transcript_search.idf(),
+                        ))
+                    };
                     (
                         identity_search::rank(session, &tokens),
                         rank.with_intent_terms(intent_terms),
@@ -407,16 +414,12 @@ impl SessionPicker {
             }
         }
 
-        saved_sessions.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        saved_sessions.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
 
         if !saved_sessions.is_empty() {

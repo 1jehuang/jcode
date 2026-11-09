@@ -72,6 +72,30 @@ pub enum TranscriptMode {
     Send,
 }
 
+/// Push-to-talk state captured outside the TUI (for example `jcode companion`),
+/// shown in the target session's status line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum VoiceActivity {
+    /// Microphone open. `levels` holds recent RMS levels (`0.0..=1.0`),
+    /// oldest first. `live` is the partial transcript so far.
+    Recording {
+        #[serde(default)]
+        elapsed_ms: u64,
+        #[serde(default)]
+        levels: Vec<f32>,
+        #[serde(default)]
+        live: String,
+    },
+    /// Key released, waiting for the final transcript.
+    Transcribing {
+        #[serde(default)]
+        live: String,
+    },
+    /// Capture ended (sent, cancelled or failed). Clears the indicator.
+    Idle,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommDeliveryMode {
@@ -92,6 +116,26 @@ pub struct HistoryBase {
     /// When it matches, History omits `images` and sets `images_unchanged`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images_fingerprint: Option<u64>,
+    /// Opt into a recent rendered-history window on a full bootstrap. Only
+    /// honored when `count` is zero, never combined with prefix validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_messages: Option<usize>,
+}
+
+/// Synthetic lazy-window marker used by remote transcript bootstraps.
+pub const RECENT_HISTORY_MARKER_PREFIX: &str = "Earlier remote history - ";
+
+impl HistoryBase {
+    /// Request a bounded initial view. Older servers ignore this hint and
+    /// return their ordinary full History payload.
+    pub fn recent(visible: usize) -> Self {
+        Self {
+            count: 0,
+            fingerprint: 0,
+            images_fingerprint: None,
+            recent_messages: Some(visible),
+        }
+    }
 }
 
 /// Stable fingerprint of a History image set (order, metadata and data).
@@ -197,6 +241,7 @@ impl HistoryFingerprinter {
             count: self.count,
             fingerprint: self.finish(),
             images_fingerprint: None,
+            recent_messages: None,
         }
     }
 }
@@ -828,6 +873,7 @@ impl Request {
             Request::AppletAction { id, .. } => *id,
             Request::CloseApplet { id, .. } => *id,
             Request::Transcript { id, .. } => *id,
+            Request::VoiceActivity { id, .. } => *id,
             Request::InputShell { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
             Request::RefreshModels { id } => *id,
@@ -905,10 +951,9 @@ impl Request {
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
-                // `jcode login` and the SDK login flow send a lone auth-change
-                // notice on a fresh socket. The process-wide refresh needs no
-                // session; on a subscribed connection it keeps its full
-                // session-aware handling.
+                // One-shot login clients report new credentials without a
+                // session. Subscribed connections still take the
+                // session-local path that also switches their model.
                 | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }

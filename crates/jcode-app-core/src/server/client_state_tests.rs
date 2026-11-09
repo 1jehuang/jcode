@@ -11,11 +11,61 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider(Option<&'static str>);
+
+#[tokio::test]
+async fn resume_todos_arrive_before_backpressured_large_history() {
+    let _env = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let session_id = "session_early_todo_backpressure";
+    let item: crate::todo::TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "resume", "content": "Authoritative remote plan", "status": "in_progress", "priority": "high"
+    })).unwrap();
+    crate::todo::save_todos(session_id, &[item]).unwrap();
+    let (stream, peer) = crate::transport::stream_pair().unwrap();
+    let (_, write) = stream.into_split();
+    let writer = Arc::new(Mutex::new(write));
+    let started = Instant::now();
+    let transfer = tokio::spawn(async move {
+        super::send_resume_todos(session_id, &writer).await.unwrap();
+        // An unread transcript cannot fit in the socket, reproducing the
+        // original head-of-line blocking without any model or cloud traffic.
+        tokio::io::AsyncWriteExt::write_all(&mut *writer.lock().await, &vec![b'x'; 14_000_000])
+            .await
+    });
+    let mut reader = tokio::io::BufReader::new(peer);
+    let mut line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line),
+    )
+    .await
+    .expect("todos must not wait for history transfer")
+    .unwrap();
+    let elapsed = started.elapsed();
+    let event: crate::protocol::ServerEvent = serde_json::from_str(&line).unwrap();
+    assert!(
+        matches!(event, crate::protocol::ServerEvent::Todos { session_id: id, payload }
+        if id == session_id && payload.contains("Authoritative remote plan"))
+    );
+    assert!(
+        !transfer.is_finished(),
+        "large transcript should still be blocked while todos are usable"
+    );
+    eprintln!("authoritative todo arrival with 14 MB History blocked: {elapsed:?}");
+    transfer.abort();
+    let _ = transfer.await;
+    match previous_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
 
 #[derive(Clone)]
 struct StaticDiscoveryProvider(Arc<std::sync::atomic::AtomicBool>);

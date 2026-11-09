@@ -1576,6 +1576,7 @@ impl App {
                 || clicked_compact_expandable_todo_card)
         {
             self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            crate::tui::ui::viewport::reset_pinned_todo_scroll();
             finish_mouse_event!(false, "pinned_todos_toggle");
         }
 
@@ -1590,6 +1591,24 @@ impl App {
             self.jump_to_chat_bottom();
             crate::tui::ui::viewport::set_jump_to_bottom_area(None);
             finish_mouse_event!(false, "jump_to_bottom_pill");
+        }
+
+        if self.pinned_todos_expanded
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && crate::tui::ui::viewport::pinned_todo_scroll_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                -(Self::MOUSE_SCROLL_INTENT_LINES as isize)
+            } else {
+                Self::MOUSE_SCROLL_INTENT_LINES as isize
+            };
+            crate::tui::ui::viewport::scroll_pinned_todos(delta);
+            finish_mouse_event!(false, "pinned_todos_scroll");
         }
 
         // A left press in the composer moves the caret first (native text-field

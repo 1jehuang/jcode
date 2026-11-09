@@ -48,6 +48,23 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 );
             }
             Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::MessageEnd { stop_reason })
+                if crate::is_guardrail_stop_reason(stop_reason.as_deref()) =>
+            {
+                // A refusal or content-filter stop is not a usable answer. Callers
+                // such as compaction would otherwise persist the refusal text as
+                // if it were real output (issue #2089).
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(
+                        "simple completion stopped by provider guardrail (stop_reason={})",
+                        stop_reason.as_deref().unwrap_or_default()
+                    ),
+                }
+                .into());
+            }
             Ok(StreamEvent::Error { message, .. }) => {
                 return Err(SimpleCompletionError {
                     usage,

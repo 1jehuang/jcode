@@ -940,6 +940,10 @@ pub enum ServerEvent {
     #[serde(rename = "transcript")]
     Transcript { text: String, mode: TranscriptMode },
 
+    /// Push-to-talk captured outside this client (e.g. `jcode companion`).
+    #[serde(rename = "voice_activity")]
+    VoiceActivity { activity: VoiceActivity },
+
     /// Completed `!cmd` shell execution for a connected remote client.
     #[serde(rename = "input_shell_result")]
     InputShellResult { result: InputShellResult },
