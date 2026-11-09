@@ -4102,6 +4102,7 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-side-panel-types",
+ "jsonschema",
  "rand 0.9.3",
  "serde",
  "serde_json",

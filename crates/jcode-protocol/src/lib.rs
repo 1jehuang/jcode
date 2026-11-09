@@ -36,6 +36,7 @@ impl std::fmt::Debug for ProviderOAuthEmail {
 }
 
 mod comm_format;
+pub mod elicitation;
 mod notifications;
 
 pub use comm_format::*;
