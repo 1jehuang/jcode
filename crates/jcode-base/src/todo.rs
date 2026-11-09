@@ -306,6 +306,7 @@ mod tests {
             id: content.to_ascii_lowercase().replace(' ', "-"),
             group: group.map(str::to_string),
             lane_after: None,
+            lane_owner: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),

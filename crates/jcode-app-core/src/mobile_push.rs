@@ -17,6 +17,38 @@ pub const MIN_TURN_DURATION_FOR_PUSH: Duration = Duration::from_secs(20);
 /// Back-off after the API reports no registered devices.
 pub const NO_DEVICES_SUPPRESS: Duration = Duration::from_secs(10 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timing labels are deliberately static, never payloads, URLs or errors.
+struct PushTiming {
+    stage: &'static str,
+    outcome: &'static str,
+    start: Instant,
+}
+
+impl PushTiming {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            outcome: "cancelled",
+            start: Instant::now(),
+        }
+    }
+
+    fn finish(mut self, outcome: &'static str) {
+        self.outcome = outcome;
+    }
+}
+
+impl Drop for PushTiming {
+    fn drop(&mut self) {
+        crate::logging::info(&format!(
+            "[CLOUD_TIMING] operation=mobile_push stage={} outcome={} duration_ms={}",
+            self.stage,
+            self.outcome,
+            self.start.elapsed().as_millis()
+        ));
+    }
+}
 const BODY_MAX_CHARS: usize = 180;
 pub const OPT_OUT_ENV: &str = "JCODE_MOBILE_PUSH";
 
@@ -50,8 +82,22 @@ pub fn build_payload(
     let title = session_title
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(|t| truncate_chars(t, 120));
-    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        .map(|t| truncate_chars(&plain_inline(t), 120))
+        .or_else(|| lookup_session_title(session_id));
+    // An answer that ends by asking the user something is waiting on them.
+    let (kind, summary) = match kind {
+        PushKind::TurnDone => match trailing_question(body) {
+            Some(question) => (PushKind::NeedsInput, question),
+            None => (kind, summarize_answer(body)),
+        },
+        PushKind::NeedsInput => (
+            kind,
+            trailing_question(body).unwrap_or_else(|| summarize_answer(body)),
+        ),
+        PushKind::TurnError => (kind, summarize_error(body)),
+        PushKind::Wake => (kind, summarize_wake(body)),
+    };
+    let collapsed = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     let body = if collapsed.is_empty() {
         match kind {
             PushKind::TurnDone => "Turn finished".to_string(),
@@ -60,15 +106,303 @@ pub fn build_payload(
             PushKind::Wake => "Session update".to_string(),
         }
     } else {
-        truncate_chars(&collapsed, BODY_MAX_CHARS)
+        truncate_words(&collapsed, BODY_MAX_CHARS)
     };
+    // Lead the title with a per-kind marker so the kinds are told apart at a
+    // glance on the lock screen, not only by the small subtitle.
+    let title = Some(format!(
+        "{} {}",
+        kind_marker(kind),
+        title.as_deref().unwrap_or("jcode")
+    ));
     PushPayload {
         kind,
         session_id: session_id.to_string(),
         session_title: title,
         body,
-        turn_id,
+        // Message ids are random u64s. JSON numbers above 2^53 lose precision
+        // in JavaScript and the API rejects them, so fold into the safe range.
+        turn_id: turn_id.map(|id| id & JS_SAFE_INT_MASK),
     }
+}
+
+const JS_SAFE_INT_MASK: u64 = (1 << 53) - 1;
+
+pub fn kind_marker(kind: PushKind) -> &'static str {
+    match kind {
+        PushKind::TurnDone => "\u{2705}",   // white check mark
+        PushKind::TurnError => "\u{274C}",  // cross mark
+        PushKind::NeedsInput => "\u{2753}", // question mark
+        PushKind::Wake => "\u{23F0}",       // alarm clock
+    }
+}
+
+fn lookup_session_title(session_id: &str) -> Option<String> {
+    if cfg!(test) || session_id.is_empty() {
+        return None;
+    }
+    crate::process_title::terminal_display_title_for_id(session_id)
+        .map(|t| plain_inline(t.trim()))
+        .filter(|t| !t.is_empty())
+        .map(|t| truncate_chars(&t, 120))
+}
+
+/// Strip inline Markdown so a notification reads as plain prose.
+fn plain_inline(text: &str) -> String {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static EMPH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let link = LINK.get_or_init(|| regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap());
+    let emph = EMPH.get_or_init(|| {
+        regex::Regex::new(r"\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~").unwrap()
+    });
+    let text = link.replace_all(text, "$1");
+    let text = emph.replace_all(&text, "$1$2$3$4");
+    text.replace('`', "")
+}
+
+/// Turn Markdown into plain lines: drop code blocks, tables, rules and
+/// headings markers, list bullets and inline emphasis.
+fn plain_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || line.is_empty() {
+            if !in_fence && out.last().is_some_and(|l: &String| !l.is_empty()) {
+                out.push(String::new());
+            }
+            continue;
+        }
+        if line.starts_with('|')
+            || line
+                .chars()
+                .all(|c| matches!(c, '-' | '*' | '_' | '=' | ' '))
+        {
+            continue;
+        }
+        // Headings are labels ("Summary"), not content.
+        if line.starts_with('#') {
+            continue;
+        }
+        let line = line.trim_start_matches('>').trim();
+        let line = strip_list_marker(line);
+        let line = plain_inline(line);
+        let line = line.trim();
+        if !line.is_empty() {
+            out.push(line.to_string());
+        }
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out
+}
+
+fn strip_list_marker(line: &str) -> &str {
+    for marker in ["- [ ] ", "- [x] ", "- ", "* ", "+ ", "• "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return rest;
+        }
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let rest = &line[digits..];
+        if let Some(rest) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return rest;
+        }
+    }
+    line
+}
+
+/// Lead of a final answer: the first paragraph, which by convention carries
+/// the conclusion. Bullet items are joined into one sentence-like line.
+fn summarize_answer(text: &str) -> String {
+    let lines = plain_lines(text);
+    let mut para = Vec::new();
+    for line in &lines {
+        if line.is_empty() {
+            if !para.is_empty() && para.iter().map(|l: &&String| l.len()).sum::<usize>() >= 40 {
+                break;
+            }
+            continue;
+        }
+        para.push(line);
+    }
+    join_sentences(para.iter().map(|l| l.as_str()))
+}
+
+fn join_sentences<'a>(parts: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if !out.is_empty() {
+            if !out.ends_with(['.', '!', '?', ':', ';']) {
+                out.push('.');
+            }
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// If the answer ends by asking the user a question, return that question.
+fn trailing_question(text: &str) -> Option<String> {
+    let lines = plain_lines(text);
+    let last = lines.iter().rev().find(|l| !l.is_empty())?;
+    if !last.trim_end_matches(['*', '_', ')']).ends_with('?') {
+        return None;
+    }
+    // Keep the last sentence, plus the one before if it sets up the question.
+    let mut start = 0;
+    for (i, c) in last.char_indices() {
+        if matches!(c, '.' | '!' | '?') && i + 1 < last.len() - 1 {
+            let next = last[i + c.len_utf8()..].chars().next();
+            if next.is_some_and(char::is_whitespace) {
+                start = i + c.len_utf8();
+            }
+        }
+    }
+    let question = last[start..].trim();
+    (question.chars().count() >= 8).then(|| question.to_string())
+}
+
+/// Errors arrive as `context: cause: cause`. Drop JSON blobs and noise, keep
+/// the most specific readable cause.
+fn summarize_error(text: &str) -> String {
+    static JSON: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let json = JSON.get_or_init(|| regex::Regex::new(r"\{.*\}").unwrap());
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Pull a human message out of an embedded provider JSON error if present.
+    let message = json.find(&flat).and_then(|m| {
+        serde_json::from_str::<serde_json::Value>(m.as_str())
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .or_else(|| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+    });
+    let stripped = json.replace_all(&flat, "");
+    let mut parts: Vec<&str> = stripped
+        .split(": ")
+        .map(|p| p.trim().trim_end_matches([':', ',']))
+        .filter(|p| !p.is_empty())
+        .collect();
+    parts.dedup();
+    let head = parts.join(": ");
+    match message {
+        Some(m) if !head.contains(m.as_str()) => {
+            if head.is_empty() {
+                m
+            } else {
+                format!("{m} ({head})")
+            }
+        }
+        _ => head,
+    }
+}
+
+/// Wake notifications are agent-facing Markdown. Rewrite the known shapes
+/// into one readable line and strip instructions meant for the model.
+fn summarize_wake(text: &str) -> String {
+    if let Some(task) = crate::message::parse_background_task_notification_markdown(text) {
+        let label = task
+            .display_name
+            .clone()
+            .unwrap_or_else(|| task.tool_name.clone());
+        let status = task.status.trim_start_matches(['✓', '✗', '↻', ' ']).trim();
+        let duration = humanize_secs(&task.duration);
+        let mut line = format!("{label} {status} in {duration}");
+        if status == "failed"
+            && task.exit_label.starts_with("exit ")
+            && task.exit_label != "exit n/a"
+        {
+            line.push_str(&format!(" ({})", task.exit_label));
+        }
+        let detail = task
+            .failure_summary
+            .as_deref()
+            .map(plain_inline)
+            .or_else(|| task.preview.as_deref().and_then(last_meaningful_line));
+        if let Some(detail) = detail.filter(|d| !d.trim().is_empty()) {
+            line.push_str(": ");
+            line.push_str(detail.trim());
+        }
+        return line;
+    }
+    if let Some(rest) = text.trim().strip_prefix("**Background task stalled** ") {
+        let header = rest.lines().next().unwrap_or_default();
+        let label = header
+            .split(" · ")
+            .nth(1)
+            .map(plain_inline)
+            .unwrap_or_default();
+        let label = label
+            .split(" (")
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let idle = header
+            .split("no output or progress for ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .map(humanize_secs)
+            .unwrap_or_default();
+        return format!("{label} has been silent for {idle} and may be stuck")
+            .trim()
+            .to_string();
+    }
+    let lines: Vec<String> = plain_lines(text)
+        .into_iter()
+        .filter(|l| !l.is_empty() && !l.contains("action=\"") && !l.starts_with("Full output:"))
+        .collect();
+    join_sentences(lines.iter().map(String::as_str))
+}
+
+fn last_meaningful_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| l.chars().filter(|c| c.is_alphanumeric()).count() >= 4)
+        .map(|l| truncate_chars(l, 120))
+}
+
+fn humanize_secs(value: &str) -> String {
+    let Ok(secs) = value.trim_end_matches('s').parse::<f64>() else {
+        return value.to_string();
+    };
+    let secs = secs.round() as u64;
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => match secs % 60 {
+            0 => format!("{}m", secs / 60),
+            s => format!("{}m {s}s", secs / 60),
+        },
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// Truncate at a word boundary so previews never end mid-word.
+fn truncate_words(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max.saturating_sub(1)).collect();
+    let cut = head
+        .rfind(char::is_whitespace)
+        .filter(|&i| i >= head.len() * 2 / 3)
+        .unwrap_or(head.len());
+    let mut out = head[..cut]
+        .trim_end_matches([',', ';', ':', ' ', '-'])
+        .to_string();
+    out.push('…');
+    out
 }
 
 /// Last `max` chars are most useful for an assistant reply preview? No: the
@@ -103,6 +437,14 @@ impl Suppression {
 
 static SUPPRESSION: Mutex<Suppression> = Mutex::new(Suppression { until: None });
 
+/// True while the API recently reported no registered devices.
+pub(crate) fn devices_suppressed() -> bool {
+    SUPPRESSION
+        .lock()
+        .map(|s| s.is_suppressed(Instant::now()))
+        .unwrap_or(false)
+}
+
 fn env_opted_out(value: Option<&str>) -> bool {
     matches!(
         value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
@@ -110,7 +452,7 @@ fn env_opted_out(value: Option<&str>) -> bool {
     )
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     let opt_out = match std::env::var(OPT_OUT_ENV) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
@@ -125,7 +467,7 @@ fn enabled() -> bool {
     crate::config::config().server.mobile_push != Some(false)
 }
 
-fn credentials() -> Option<(String, String)> {
+pub(crate) fn credentials() -> Option<(String, String)> {
     let key = crate::provider_catalog::load_api_key_from_env_or_config(
         JCODE_API_KEY_ENV,
         JCODE_ENV_FILE,
@@ -212,7 +554,19 @@ pub fn notify(
     body: &str,
     turn_id: Option<u64>,
 ) {
-    if cfg!(test) || !enabled() {
+    if cfg!(test) {
+        return;
+    }
+    let requested = kind;
+    if !enabled() {
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("disabled by config or JCODE_MOBILE_PUSH"),
+            None,
+        );
         return;
     }
     if SUPPRESSION
@@ -221,18 +575,113 @@ pub fn notify(
         .unwrap_or(false)
     {
         crate::logging::debug("mobile push suppressed: no registered devices");
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("no registered devices (10 min back-off)"),
+            None,
+        );
         return;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        record(
+            requested,
+            None,
+            body,
+            "skipped",
+            Some("no tokio runtime"),
+            None,
+        );
         return;
     };
     let payload = build_payload(kind, session_id, session_title, body, turn_id);
+    let source = body.to_string();
     handle.spawn(async move {
         let Some((key, base)) = credentials() else {
+            record(
+                requested,
+                Some(&payload),
+                &source,
+                "skipped",
+                Some("not signed in (no JCODE_API_KEY)"),
+                None,
+            );
             return;
         };
-        send(&key, &base, &payload).await;
+        let mut attempt = send(&key, &base, &payload).await;
+        // Transient network failures (DNS, reset, timeout) get one retry.
+        if attempt.0 == "error" && attempt.2.is_none() {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            attempt = send(&key, &base, &payload).await;
+            if let Some(detail) = attempt.1.as_mut() {
+                detail.push_str(" (after retry)");
+            }
+        }
+        let (outcome, detail, status) = attempt;
+        record(
+            requested,
+            Some(&payload),
+            &source,
+            outcome,
+            detail.as_deref(),
+            status,
+        );
     });
+}
+
+/// Record a turn that deliberately did not push, so the history explains
+/// missing notifications too.
+pub fn note_skipped(kind: PushKind, reason: &str) {
+    if !cfg!(test) {
+        record(kind, None, "", "skipped", Some(reason), None);
+    }
+}
+
+/// Append one line per push attempt to `~/.jcode/logs/mobile-push.jsonl`:
+/// what was requested, the exact payload sent, a source excerpt, and the
+/// outcome. This is the push history used to debug notification quality.
+fn record(
+    requested: PushKind,
+    payload: Option<&PushPayload>,
+    source: &str,
+    outcome: &str,
+    detail: Option<&str>,
+    http_status: Option<u16>,
+) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "requested_kind": requested,
+        "outcome": outcome,
+        "detail": detail,
+        "http_status": http_status,
+        "payload": payload,
+        "source_chars": source.chars().count(),
+        "source_excerpt": truncate_chars(source, 1500),
+    });
+    crate::logging::info(&format!(
+        "mobile push {:?} {outcome}{}",
+        payload.map(|p| p.kind).unwrap_or(requested),
+        detail.map(|d| format!(": {d}")).unwrap_or_default()
+    ));
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".jcode").join("logs")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("mobile-push.jsonl");
+    // Keep the history bounded: rotate once past 5 MB.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("mobile-push.1.jsonl"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -267,15 +716,31 @@ async fn send_mobile_resume(
     base: &str,
     payload: &PushPayload,
 ) -> anyhow::Result<String> {
-    let response = reqwest::Client::new()
+    let total = PushTiming::new("total");
+    let result = send_mobile_resume_inner(key, base, payload).await;
+    total.finish(if result.is_ok() { "delivered" } else { "error" });
+    result
+}
+
+async fn send_mobile_resume_inner(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> anyhow::Result<String> {
+    let http = PushTiming::new("http_send");
+    let result = crate::provider::shared_http_client()
         .post(format!("{base}/push/send"))
         .bearer_auth(key)
         .json(&payload)
         .timeout(SEND_TIMEOUT)
         .send()
-        .await?
-        .error_for_status()?;
-    let reply = response.json::<SendReply>().await?;
+        .await;
+    http.finish(if result.is_ok() { "response" } else { "error" });
+    let response = result?.error_for_status()?;
+    let body = PushTiming::new("body");
+    let result = response.json::<SendReply>().await;
+    body.finish(if result.is_ok() { "decoded" } else { "error" });
+    let reply = result?;
     match (reply.devices, reply.sent) {
         (Some(0), _) => anyhow::bail!(
             "No mobile devices registered. Open the Jcode app, sign in to the same account, and enable notifications, then retry /mobile."
@@ -289,46 +754,84 @@ async fn send_mobile_resume(
     }
 }
 
-async fn send(key: &str, base: &str, payload: &PushPayload) {
-    let client = match reqwest::Client::builder().timeout(SEND_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(error) => {
-            crate::logging::warn(&format!("mobile push client build failed: {error}"));
-            return;
-        }
-    };
-    let result = client
+async fn send(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> (&'static str, Option<String>, Option<u16>) {
+    let total = PushTiming::new("total");
+    let result = send_inner(key, base, payload).await;
+    total.finish(result.0);
+    result
+}
+
+async fn send_inner(
+    key: &str,
+    base: &str,
+    payload: &PushPayload,
+) -> (&'static str, Option<String>, Option<u16>) {
+    let http = PushTiming::new("http_send");
+    let result = crate::provider::shared_http_client()
         .post(format!("{base}/push/send"))
         .bearer_auth(key)
         .json(payload)
+        .timeout(SEND_TIMEOUT)
         .send()
         .await;
+    http.finish(if result.is_ok() { "response" } else { "error" });
     match result {
         Ok(resp) if resp.status().is_success() => {
-            let reply = match resp.json::<SendReply>().await {
+            let status = resp.status().as_u16();
+            let body = PushTiming::new("body");
+            let result = resp.json::<SendReply>().await;
+            body.finish(if result.is_ok() { "decoded" } else { "error" });
+            let reply = match result {
                 Ok(reply) => reply,
                 Err(error) => {
-                    crate::logging::warn(&format!("invalid mobile push reply: {error}"));
-                    return;
+                    return (
+                        "error",
+                        Some(format!("invalid reply: {error}")),
+                        Some(status),
+                    );
                 }
             };
             let devices = reply.devices;
             if let Ok(mut s) = SUPPRESSION.lock() {
                 s.record_reply(devices, Instant::now());
             }
-            crate::logging::debug(&format!(
-                "mobile push {:?} session={} sent={:?} devices={:?}",
-                payload.kind, payload.session_id, reply.sent, devices
-            ));
+            let detail = format!("sent={:?} devices={:?}", reply.sent, devices);
+            let outcome = match (reply.sent, devices) {
+                (_, Some(0)) => "no_devices",
+                (Some(n), _) if n > 0 => "delivered",
+                _ => "undelivered",
+            };
+            (outcome, Some(detail), Some(status))
         }
-        Ok(resp) => crate::logging::warn(&format!(
-            "mobile push {:?} rejected: HTTP {}",
-            payload.kind,
-            resp.status()
-        )),
-        Err(error) => crate::logging::warn(&format!("mobile push failed: {error}")),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            // Keep the API's error body: it says exactly which field was rejected.
+            let timing = PushTiming::new("body");
+            let result = resp.text().await;
+            timing.finish(if result.is_ok() { "read" } else { "error" });
+            let body = result.unwrap_or_default();
+            crate::logging::warn(&format!(
+                "mobile push {:?} rejected: HTTP {status}: {}",
+                payload.kind,
+                truncate_chars(&body, 300)
+            ));
+            ("rejected", Some(truncate_chars(&body, 500)), Some(status))
+        }
+        Err(error) => {
+            let detail = crate::util::format_error_chain(&anyhow::Error::from(error));
+            crate::logging::warn(&format!("mobile push failed: {detail}"));
+            ("error", Some(detail), None)
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "mobile_push_http_tests.rs"]
+mod http_tests;
 
 #[cfg(test)]
 mod tests {
@@ -439,7 +942,7 @@ mod tests {
             serde_json::json!({
                 "kind": "turn_done",
                 "session_id": "session_x",
-                "session_title": "Fix login",
+                "session_title": "\u{2705} Fix login",
                 "body": "Done. All tests pass",
                 "turn_id": 42
             })
@@ -451,7 +954,7 @@ mod tests {
         let p = build_payload(PushKind::NeedsInput, "s", Some("  "), "", None);
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["kind"], "needs_input");
-        assert!(v.get("session_title").is_none());
+        assert_eq!(v["session_title"], "\u{2753} jcode");
         assert!(v.get("turn_id").is_none());
         assert_eq!(v["body"], "Waiting for your input");
         let long = "a".repeat(500);
@@ -461,6 +964,87 @@ mod tests {
             serde_json::to_value(PushKind::Wake).unwrap(),
             serde_json::json!("wake")
         );
+    }
+
+    #[test]
+    fn mobile_push_turn_id_is_js_safe() {
+        let p = build_payload(
+            PushKind::TurnDone,
+            "s",
+            None,
+            "ok",
+            Some(8338987288606337570),
+        );
+        assert!(p.turn_id.unwrap() <= (1 << 53) - 1);
+        assert_eq!(
+            build_payload(PushKind::TurnDone, "s", None, "ok", Some(42)).turn_id,
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn mobile_push_answer_uses_lead_paragraph_as_plain_text() {
+        let answer = "## Summary\n\nFixed the **login** bug in `auth.rs`; all 12 tests pass.\n\n- detail one\n- detail two\n\n```rust\nfn x() {}\n```";
+        let p = build_payload(PushKind::TurnDone, "s", Some("Fix `login`"), answer, None);
+        assert_eq!(p.body, "Fixed the login bug in auth.rs; all 12 tests pass.");
+        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Fix login"));
+        for (kind, body, marker) in [
+            (PushKind::TurnDone, "done", "\u{2705}"),
+            (PushKind::TurnDone, "Should I push?", "\u{2753}"),
+            (PushKind::TurnError, "boom", "\u{274C}"),
+            (PushKind::Wake, "bash completed", "\u{23F0}"),
+        ] {
+            let t = build_payload(kind, "s", Some("T"), body, None)
+                .session_title
+                .unwrap();
+            assert_eq!(t, format!("{marker} T"));
+        }
+        let bullets = "- Updated parser\n- Added tests\n- Shipped v2 to production servers today";
+        assert_eq!(
+            build_payload(PushKind::TurnDone, "s", None, bullets, None).body,
+            "Updated parser. Added tests. Shipped v2 to production servers today"
+        );
+    }
+
+    #[test]
+    fn mobile_push_trailing_question_becomes_needs_input() {
+        let p = build_payload(
+            PushKind::TurnDone,
+            "s",
+            None,
+            "I found two options.\n\nShould I use OAuth or a password?",
+            None,
+        );
+        assert_eq!(p.kind, PushKind::NeedsInput);
+        assert_eq!(p.body, "Should I use OAuth or a password?");
+        let p = build_payload(
+            PushKind::TurnDone,
+            "s",
+            None,
+            "Done. Want me to deploy it?",
+            None,
+        );
+        assert_eq!(
+            (p.kind, p.body.as_str()),
+            (PushKind::NeedsInput, "Want me to deploy it?")
+        );
+    }
+
+    #[test]
+    fn mobile_push_errors_and_wakes_are_readable() {
+        let e = r#"Provider request failed: HTTP 529: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert_eq!(
+            build_payload(PushKind::TurnError, "s", None, e, None).body,
+            "Overloaded (Provider request failed: HTTP 529)"
+        );
+        let bg = "**Background task** `abc123` · `bash` · ✓ completed · 754.2s · exit 0\n\n```text\nCompiling...\ntest result: ok. 42 passed\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"abc123\"`";
+        assert_eq!(
+            build_payload(PushKind::Wake, "s", None, bg, None).body,
+            "bash completed in 12m 34s: test result: ok. 42 passed"
+        );
+        let long = "word ".repeat(60);
+        let p = build_payload(PushKind::Wake, "s", None, &long, None);
+        assert!(p.body.ends_with("word…"));
     }
 
     #[test]

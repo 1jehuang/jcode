@@ -472,6 +472,30 @@ pub(crate) enum Command {
         /// Do not run the global push-to-talk listener
         #[arg(long)]
         no_voice: bool,
+
+        /// Do not show the live waveform in the focused Jcode CLI
+        #[arg(long)]
+        no_voice_waveform: bool,
+
+        /// Do not show desktop notifications for push-to-talk
+        #[arg(long)]
+        no_voice_notifications: bool,
+
+        /// Do not handle open/reveal requests (clients open locally)
+        #[arg(long)]
+        no_open: bool,
+
+        /// Do not open terminal windows (clients launch locally)
+        #[arg(long)]
+        no_spawn_terminal: bool,
+
+        /// Do not apply the lid-close override (macOS/Windows)
+        #[arg(long)]
+        no_lid: bool,
+
+        /// Do not auto-update the browser bridge
+        #[arg(long)]
+        no_browser_updates: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text
@@ -1111,6 +1135,9 @@ pub(crate) enum CloudMachineAction {
     Status,
     Wake,
     Stop,
+    /// Internal: prepare local managed SSH credentials without contacting cloud.
+    #[value(hide = true)]
+    PrepareSsh,
 }
 
 #[derive(Parser, Debug, Clone, Default)]

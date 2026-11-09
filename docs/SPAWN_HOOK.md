@@ -61,6 +61,30 @@ The hook (and any terminal spawned by the built-in fallback) receives:
 | `JCODE_SPAWN_COORDINATOR_SESSION_ID` | (swarm spawns) The coordinator session that requested the spawn |
 | `JCODE_FRESH_SPAWN` | `1` when the spawn is a fresh window handoff |
 
+When a spawn carries explicit local runtime context (`JCODE_HOME`,
+`JCODE_RUNTIME_DIR`, `JCODE_SOCKET`, or the other allowlisted runtime
+variables), the appended argv is a runtime-aware invocation, not just the bare
+jcode program: on Unix it begins with `env`, clears inherited API-socket and
+auto-update overrides when they were not explicitly supplied, applies the
+allowlisted values, then executes jcode and its original arguments. This is
+necessary for remote-control hooks such as kitty, where the hook process's
+environment is not inherited by a child launched by the already-running kitty
+server. Hooks must forward and execute all appended argv entries unchanged.
+For example:
+
+```bash
+kitty @ --to unix:/tmp/kitty.sock launch --type=tab -- "$@"
+```
+
+On Windows the appended argv stays the plain `<jcode-binary> <args...>`
+sequence; the runtime context reaches the hook through its process
+environment (`JCODE_*` variables) instead.
+
+With no explicit runtime context, argv remains the historical
+`<jcode-binary> <args...>` sequence. `JCODE_SPAWN_COMMAND` describes the full
+runtime-aware command as a shell-escaped string for hooks that accept one
+command string.
+
 ### Client terminal environment (multi-terminal routing)
 
 The jcode server process is long-lived: it captures terminal-identifying env

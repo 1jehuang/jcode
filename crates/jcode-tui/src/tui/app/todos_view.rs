@@ -20,7 +20,11 @@ impl App {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
     ) {
-        let session_id = self.active_client_session_id();
+        // A session-bound remote snapshot can arrive before History. SSH still
+        // never reads local todo files, including for the requested resume id.
+        let session_id = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
         if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
             let payload = self
                 .remote_todos_payload
@@ -61,13 +65,17 @@ impl App {
     }
 
     pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
-        if !crate::tui::is_ssh_remote()
+        // Any client that renders from a server snapshot must keep polling it.
+        // A local resume seeds `remote_todos_payload` before History, and from
+        // then on `current_todo_state` ignores disk. Without polling, the card
+        // froze at the resume snapshot while the stored plan kept advancing.
+        if !(crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some())
             || !(self.todos_view_enabled
                 || self.latest_todo_card_index().is_some()
                 || crate::config::config().display.pin_todos)
             || self
                 .remote_todos_requested_at
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+                .is_some_and(|at| at.elapsed() < self.remote_todos_poll_interval())
         {
             return false;
         }
@@ -75,8 +83,29 @@ impl App {
         true
     }
 
+    /// Todos only change while a turn runs (the todo tool) or through an
+    /// explicit command, both of which clear `remote_todos_requested_at` for an
+    /// immediate refresh. An idle session therefore needs only a slow safety
+    /// poll: a 2s poll from every open window kept the shared server and each
+    /// client waking for nothing.
+    fn remote_todos_poll_interval(&self) -> std::time::Duration {
+        if self.is_processing() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(30)
+        }
+    }
+
+    /// Ask for a fresh remote todo snapshot on the next tick.
+    pub(super) fn request_remote_todos_refresh_soon(&mut self) {
+        self.remote_todos_requested_at = None;
+    }
+
     pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
-        if self.active_client_session_id() != Some(session_id.as_str()) {
+        let expected = self
+            .active_client_session_id()
+            .or(self.resume_session_id.as_deref());
+        if expected != Some(session_id.as_str()) {
             return;
         }
         self.remote_todos_payload = Some((session_id, payload));
@@ -942,6 +971,7 @@ mod tests {
             priority: priority.to_string(),
             group: None,
             lane_after: None,
+            lane_owner: None,
             confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),

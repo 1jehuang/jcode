@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn cloud_warning_retains_local_sessions_and_survives_fresh_update() {
+    let local = make_session("local", "local session", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![local.clone()]);
+    let warning = "Cloud sessions could not be refreshed. Reopen /resume to retry.";
+    assert!(
+        !picker
+            .apply_session_list_update(SessionListUpdate::CloudUnavailable(warning.into()))
+            .unwrap()
+    );
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("local")
+    );
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((vec![], vec![local]))))
+            .unwrap()
+    );
+    assert_eq!(picker.cloud_warning.as_deref(), Some(warning));
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("local")
+    );
+    assert!(SessionPicker::loading().cloud_warning.is_none());
+    assert!(SessionPicker::new(vec![]).cloud_warning.is_none());
+    assert!(
+        SessionPicker::new_grouped(vec![], vec![])
+            .cloud_warning
+            .is_none()
+    );
+
+    for width in [12, 80] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|frame| picker.render_session_list_impl(frame, frame.area(), false))
+            .unwrap();
+        assert_eq!(picker.last_list_area.unwrap().y, 1);
+        let buffer = terminal.backend().buffer();
+        let first_row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(first_row.starts_with("Cloud"));
+        if width == 80 {
+            assert!(first_row.contains("Reopen /resume to retry."));
+            let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            assert!(text.contains("Test session"));
+        } else {
+            assert!(first_row.ends_with('…'));
+        }
+    }
+}
+
+#[test]
 fn standalone_resume_renders_before_list_load_finishes() {
     let mut picker = SessionPicker::loading();
     let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
@@ -211,7 +264,7 @@ fn loading_picker_filter_choice_survives_refresh() {
         .unwrap();
     let chosen = picker.filter_mode;
     assert!(picker.filter_mode_user_chosen);
-    assert_eq!(chosen, SessionFilterMode::CurrentDir);
+    assert_eq!(chosen, SessionFilterMode::Cloud);
     picker
         .apply_session_list_update(SessionListUpdate::Cached((
             Vec::new(),

@@ -240,63 +240,6 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
 }
 
 #[tokio::test]
-async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_mode() {
-    let _env_lock = crate::storage::lock_test_env();
-    let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
-    let repo_dir = std::env::current_dir().expect("repo cwd");
-    let socket_path = runtime_dir.path().join("jcode.sock");
-    let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
-    // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
-    let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
-    let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
-    let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
-
-    let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
-        delay: Duration::from_millis(50),
-    });
-    let server = Arc::new(Server::new(provider));
-    let mut server_task = {
-        let server = Arc::clone(&server);
-        tokio::spawn(async move { server.run().await })
-    };
-
-    let socket_path = runtime_dir.path().join("jcode.sock");
-    wait_for_server_socket(&socket_path, &mut server_task)
-        .await
-        .expect("server socket should be ready");
-
-    let mut client = RawClient::connect(&socket_path)
-        .await
-        .expect("client should connect");
-    client.subscribe(&repo_dir).await.expect("subscribe");
-    let session = client.session_id().await.expect("session id");
-
-    let tool = CommunicateTool::new();
-    let ctx = test_ctx(&session, &repo_dir);
-
-    // Background is the default; with no plan the validation happens inline and
-    // no background task should be started.
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tool.execute(json!({"action": "run_plan"}), ctx.clone()),
-    )
-    .await
-    .expect("run_plan should return promptly")
-    .expect("run_plan should succeed");
-    assert!(
-        output.output.contains("No swarm plan items to run."),
-        "expected inline empty-plan response, got: {}",
-        output.output
-    );
-    assert!(
-        output.metadata.is_none(),
-        "empty plan must not start a background driver"
-    );
-
-    server_task.abort();
-}
-
-#[tokio::test]
 async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");

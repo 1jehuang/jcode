@@ -1267,3 +1267,85 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
 
 #[path = "compaction_native_usage_tests.rs"]
 mod native_usage;
+
+#[test]
+fn compaction_summary_rejects_refusals_and_empty_text_issue_2089() {
+    for bad in [
+        "",
+        "   ",
+        "I'm sorry, but I cannot assist with that request.",
+        "I\u{2019}m sorry, but I can\u{2019}t help with that.",
+        "I can't assist with that.",
+    ] {
+        assert!(
+            validate_compaction_summary(bad.to_string()).is_err(),
+            "{bad:?}"
+        );
+    }
+    let real = "## Task\nThe user is fixing compaction. Earlier the assistant said \"I can't help with that\" about a deploy, then continued. ".repeat(4);
+    assert!(validate_compaction_summary(real).is_ok());
+}
+
+struct RefusingSummaryProvider;
+
+#[async_trait::async_trait]
+impl Provider for RefusingSummaryProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(crate::message::StreamEvent::TextDelta(
+                "I'm sorry, but I cannot assist with that request.".into(),
+            )),
+            Ok(crate::message::StreamEvent::MessageEnd {
+                stop_reason: Some("content_filter".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "refusing"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(RefusingSummaryProvider)
+    }
+}
+
+#[tokio::test]
+async fn refused_compaction_keeps_original_messages_issue_2089() {
+    let messages: Vec<Message> = (0..28)
+        .map(|i| {
+            make_text_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("turn {i}"),
+            )
+        })
+        .collect();
+    let err =
+        generate_compaction_artifact(Arc::new(RefusingSummaryProvider), messages.clone(), None)
+            .await
+            .err()
+            .expect("refused summary must fail");
+    assert!(format!("{err:#}").contains("guardrail"), "{err:#}");
+
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    manager.seed_restored_messages(messages.len());
+    manager.update_observed_input_tokens(10_000);
+    let _ = manager.force_compact_with(&messages, Arc::new(RefusingSummaryProvider));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.is_compacting() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    assert_eq!(manager.compacted_count(), 0);
+    assert_eq!(manager.summary_chars(), 0);
+}

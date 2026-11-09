@@ -85,6 +85,7 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -145,6 +146,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -216,6 +218,7 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -281,6 +284,7 @@ fn test_remote_poke_status_and_off_update_state() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,

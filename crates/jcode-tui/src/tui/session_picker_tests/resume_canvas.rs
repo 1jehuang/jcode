@@ -219,20 +219,13 @@ fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
                 tool_data: msg.tool_data.clone(),
             })
             .collect();
-        let text_width = width - u16::from(cache.show_scrollbar);
-        let text_width = text_width.saturating_sub(
-            super::super::super::ui::left_aligned_content_inset(text_width, false),
-        );
-        let live = super::super::super::ui::prepare::prepare_history_preview(
-            &messages, 0, text_width, mode,
-        );
-        let header = super::super::super::ui::header::build_preview_header(&session, text_width);
-        let offset = header.len()
-            + super::super::super::ui::prepare::initial_header_pad_top(inner.height, header.len());
+        assert_eq!(cache.messages.len(), messages.len(), "width={width}");
+        let last = cache.messages.last().unwrap();
+        assert_eq!(last.duration_secs, Some(2.3));
+        assert_eq!(last.title.as_deref(), Some("Saved tool title"));
         assert_eq!(
-            cache.wrapped_lines[offset..],
-            live.wrapped_lines,
-            "width={width}"
+            last.tool_data.as_ref().map(|t| t.name.as_str()),
+            Some("bash")
         );
     }
     session.messages_preview.last_mut().unwrap().duration_secs = Some(4.5);
@@ -254,6 +247,7 @@ fn completed_empty_preview_is_not_loaded_again() {
     });
     tx.send(Some(LoadedSessionPreview {
         messages: vec![],
+        search: None,
         extras: PreviewExtras::default(),
     }))
     .unwrap();

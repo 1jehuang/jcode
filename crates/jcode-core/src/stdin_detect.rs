@@ -58,6 +58,7 @@ pub mod linux {
                 || wchan == "pipe_wait_readable"
                 || wchan == "unix_stream_read_generic")
                 && stdin_is_pipe_or_pty(pid)
+                && stdin_is_only_blocking_input(pid)
             {
                 return StdinState::Reading;
             }
@@ -77,6 +78,52 @@ pub mod linux {
             return path.contains("pipe") || path.contains("pts") || path.contains("ptmx");
         }
         false
+    }
+
+    /// `wchan` only says the process is blocked reading *some* pipe, socket or
+    /// tty, not which fd. Commands commonly block on other inputs (cargo's
+    /// jobserver pipe, the read end of `a | b`, network sockets), which caused
+    /// false "waiting for input" pushes. Only trust wchan when fd 0 is the sole
+    /// readable pipe/socket/tty the process holds.
+    fn stdin_is_only_blocking_input(pid: u32) -> bool {
+        let Ok(entries) = std::fs::read_dir(format!("/proc/{}/fd", pid)) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(fd) = name.to_str() else { continue };
+            if fd == "0" {
+                continue;
+            }
+            let Ok(link) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let link = link.to_string_lossy();
+            let blocking_kind = link.starts_with("pipe:")
+                || link.starts_with("socket:")
+                || link.contains("/pts/")
+                || link.contains("ptmx")
+                || link.starts_with("anon_inode:");
+            if !blocking_kind {
+                continue;
+            }
+            if fd_is_readable(pid, fd) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn fd_is_readable(pid: u32, fd: &str) -> bool {
+        let Ok(info) = std::fs::read_to_string(format!("/proc/{}/fdinfo/{}", pid, fd)) else {
+            return true;
+        };
+        info.lines()
+            .find_map(|l| l.strip_prefix("flags:"))
+            .and_then(|f| u32::from_str_radix(f.trim(), 8).ok())
+            // O_ACCMODE: 0 = O_RDONLY, 1 = O_WRONLY, 2 = O_RDWR
+            .map(|flags| flags & 0o3 != 1)
+            .unwrap_or(true)
     }
 
     /// Check all threads in a process group (for cases where a child is the one reading)

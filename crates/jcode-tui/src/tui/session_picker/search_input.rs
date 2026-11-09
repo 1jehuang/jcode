@@ -249,7 +249,8 @@ impl SessionPicker {
     fn is_normal_mode_shortcut_char(c: char) -> bool {
         matches!(
             c,
-            'q' | ' '
+            'q' | 'y'
+                | ' '
                 | 'a'
                 | 'd'
                 | 'T'

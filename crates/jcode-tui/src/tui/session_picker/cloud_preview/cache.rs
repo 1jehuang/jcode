@@ -7,53 +7,102 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-pub(super) const MAX_BYTES: usize = 64 * 1024 * 1024;
-const CACHE_BUDGET: u64 = 256 * 1024 * 1024;
+// Remote projection is at most 2 MiB plus bounded optional telemetry.
+pub(super) const MAX_BYTES: usize = 3 * 1024 * 1024;
+const CACHE_BUDGET: u64 = 24 * 1024 * 1024;
 const TTL: Duration = Duration::from_secs(15);
 
 pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> {
-    let root = super::super::preview_result(crate::storage::jcode_dir(), "cache directory")?;
-    Some(key_path(&root, session_id, host, epoch))
+    let mut timer = super::StageTimer::new("cache_scope");
+    let root = super::stage_result(crate::storage::jcode_dir, "cache_directory")?;
+    let owner = crate::subscription_catalog::configured_api_key().unwrap_or_default();
+    let endpoint = crate::subscription_api::configured_api_base();
+    let path = scoped_key_path(&root, session_id, host, epoch, &owner, &endpoint);
+    timer.outcome("success");
+    Some(path)
 }
 
+#[cfg(test)]
 fn key_path(root: &Path, session_id: &str, host: &str, epoch: u64) -> PathBuf {
+    scoped_key_path(
+        root,
+        session_id,
+        host,
+        epoch,
+        "test-owner",
+        "https://test.invalid",
+    )
+}
+
+fn scoped_key_path(
+    root: &Path,
+    session_id: &str,
+    host: &str,
+    epoch: u64,
+    owner: &str,
+    endpoint: &str,
+) -> PathBuf {
     let mut digest = Sha256::new();
-    for field in [host.as_bytes(), session_id.as_bytes(), &epoch.to_be_bytes()] {
+    for field in [
+        owner.as_bytes(),
+        endpoint.as_bytes(),
+        host.as_bytes(),
+        session_id.as_bytes(),
+        &epoch.to_be_bytes(),
+    ] {
         digest.update((field.len() as u64).to_be_bytes());
         digest.update(field);
     }
-    root.join("cache/cloud-previews/v1")
+    root.join("cache/cloud-previews/v2")
         .join(format!("{:x}.blob", digest.finalize()))
 }
 
 pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
+    let mut timer = super::StageTimer::new("cache_read");
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-        Err(error) => return super::super::preview_result(Err::<Vec<u8>, _>(error), "cache open"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            timer.outcome("miss");
+            return None;
+        }
+        Err(_) => return None,
     };
-    if super::super::preview_result(file.metadata(), "cache metadata")?.len() > MAX_BYTES as u64 {
+    if super::stage_result(|| file.metadata(), "cache_metadata")?.len() > MAX_BYTES as u64 {
+        timer.outcome("oversized");
         return None;
     }
     // Do not trust metadata for allocation or bounds: the file can grow concurrently.
     let mut bytes = Vec::new();
-    super::super::preview_result(
-        file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
-        "cache read",
+    super::stage_result(
+        || file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
+        "cache_read_io",
     )?;
+    timer.outcome(if bytes.len() <= MAX_BYTES {
+        "hit"
+    } else {
+        "oversized"
+    });
     (bytes.len() <= MAX_BYTES).then_some(bytes)
 }
 
 pub(super) fn fresh(path: &Path) -> bool {
-    super::super::preview_result(
-        fs::metadata(path).and_then(|metadata| metadata.modified()),
-        "cache freshness",
+    let mut timer = super::StageTimer::new("cache_freshness");
+    let fresh = super::stage_result(
+        || fs::metadata(path).and_then(|metadata| metadata.modified()),
+        "cache_timestamp",
     )
-    .and_then(|modified| super::super::preview_result(modified.elapsed(), "cache timestamp"))
-    .is_some_and(|age| age < TTL)
+    .and_then(|modified| super::stage_result(|| modified.elapsed(), "cache_age"))
+    .is_some_and(|age| age < TTL);
+    timer.outcome(if fresh {
+        "fresh"
+    } else {
+        "stale_or_unavailable"
+    });
+    fresh
 }
 
 pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut timer = super::StageTimer::new("cache_write");
     if bytes.len() > MAX_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -78,6 +127,7 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     prune(parent, path, CACHE_BUDGET);
+    timer.outcome("success");
     Ok(())
 }
 
@@ -216,7 +266,7 @@ mod tests {
     fn keys_scope_host_session_epoch_and_field_boundaries() {
         let root = Path::new("private-root");
         let baseline = key_path(root, "session", "host", 1);
-        assert!(baseline.starts_with(root.join("cache/cloud-previews/v1")));
+        assert!(baseline.starts_with(root.join("cache/cloud-previews/v2")));
         for other in [
             key_path(root, "session2", "host", 1),
             key_path(root, "session", "host2", 1),
@@ -224,11 +274,51 @@ mod tests {
         ] {
             assert_ne!(baseline, other);
         }
+        assert_ne!(
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner-one",
+                "https://api-one.invalid"
+            ),
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner-two",
+                "https://api-one.invalid"
+            )
+        );
+        assert_ne!(
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner",
+                "https://api-one.invalid"
+            ),
+            scoped_key_path(
+                root,
+                "session",
+                "host",
+                1,
+                "owner",
+                "https://api-two.invalid"
+            )
+        );
+        assert_ne!(
+            scoped_key_path(root, "session", "host", 1, "ab", "c"),
+            scoped_key_path(root, "session", "host", 1, "a", "bc")
+        );
         assert_ne!(key_path(root, "bc", "a", 0), key_path(root, "c", "ab", 0));
         let hostile = key_path(root, "../../session", "secret-host/..", 1);
         assert_eq!(
             hostile.parent(),
-            Some(root.join("cache/cloud-previews/v1").as_path())
+            Some(root.join("cache/cloud-previews/v2").as_path())
         );
         assert_eq!(hostile.file_name().unwrap().to_str().unwrap().len(), 69);
     }

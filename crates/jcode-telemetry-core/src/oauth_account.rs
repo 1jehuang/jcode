@@ -57,10 +57,33 @@ pub fn enqueue_oauth_account(provider: &str, email: &str) -> bool {
         "antigravity" => "antigravity",
         _ => return false,
     };
+    // Clients call this on every frame and tick. The worker already drops
+    // repeats inside 60s, but each enqueue still woke its thread. Drop exact
+    // repeats here, before the channel, so an idle client stays asleep.
+    if recently_enqueued(provider, &email, std::time::Instant::now()) {
+        return true;
+    }
     send(Command::Candidate(Candidate {
         provider: provider.to_ascii_lowercase(),
         email,
     }))
+}
+
+fn recently_enqueued(provider: &str, email: &str, now: std::time::Instant) -> bool {
+    static LAST: std::sync::Mutex<Option<(String, String, std::time::Instant)>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else {
+        return false;
+    };
+    if let Some((p, e, at)) = last.as_ref()
+        && p == provider
+        && e == email
+        && now.duration_since(*at) < Duration::from_secs(60)
+    {
+        return true;
+    }
+    *last = Some((provider.to_string(), email.to_string(), now));
+    false
 }
 
 /// Does not consume the pending notice or authorize identity upload.
@@ -375,6 +398,28 @@ fn handle_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_enqueue_is_dropped_before_waking_worker() {
+        let t0 = std::time::Instant::now();
+        assert!(!recently_enqueued("anthropic", "dedupe@example.com", t0));
+        assert!(recently_enqueued(
+            "anthropic",
+            "dedupe@example.com",
+            t0 + Duration::from_secs(1)
+        ));
+        assert!(!recently_enqueued(
+            "openai",
+            "dedupe@example.com",
+            t0 + Duration::from_secs(2)
+        ));
+        assert!(!recently_enqueued(
+            "openai",
+            "dedupe@example.com",
+            t0 + Duration::from_secs(70)
+        ));
+    }
+
     fn check(known: bool, tracked: bool) -> Option<Check> {
         Some(Check {
             installation_known: known,

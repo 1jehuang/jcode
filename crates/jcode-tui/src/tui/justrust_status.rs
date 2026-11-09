@@ -4,13 +4,12 @@
 
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
-use tokio::sync::oneshot;
+use tokio::io::AsyncReadExt as _;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
-const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE: usize = 512 * 1024;
 const COMPLETION_RETENTION: Duration = Duration::from_secs(10 * 60);
 
@@ -236,64 +235,80 @@ impl Snapshot {
     }
 }
 
-async fn query(program: &std::ffi::OsStr) -> Option<Snapshot> {
-    query_with_timeout(program, QUERY_TIMEOUT).await
+/// One long-lived `justrust status --json --watch` per client. justrust
+/// prints a line only when the status changes and sleeps on inotify while no
+/// build runs, so an idle client costs nothing (a one-shot query per second
+/// used to spawn a process every second in every window).
+fn spawn_stream(
+    program: std::ffi::OsString,
+) -> tokio::sync::watch::Receiver<Option<Option<Arc<Snapshot>>>> {
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            if let Err(error) = stream(&program, &sender).await {
+                crate::logging::debug(&format!("Build status stream ended: {error:#}"));
+            }
+            // Some(None) tells the poller the stream is gone.
+            let _ = sender.send(Some(None));
+        });
+    }
+    receiver
 }
 
-async fn query_with_timeout(program: &std::ffi::OsStr, timeout: Duration) -> Option<Snapshot> {
+async fn stream(
+    program: &std::ffi::OsStr,
+    sender: &tokio::sync::watch::Sender<Option<Option<Arc<Snapshot>>>>,
+) -> anyhow::Result<()> {
     use anyhow::Context;
-    let result = tokio::time::timeout(timeout, async {
-        let mut child = tokio::process::Command::new(program)
-            .args(["status", "--json"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("start justrust status query")?;
-        let mut bytes = Vec::new();
-        child
-            .stdout
-            .take()
-            .context("justrust status stdout was not piped")?
-            .take((MAX_RESPONSE + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .context("read justrust status response")?;
-        if bytes.len() > MAX_RESPONSE {
-            child
-                .kill()
-                .await
-                .context("terminate oversized justrust status response")?;
-            anyhow::bail!("justrust status response exceeds {MAX_RESPONSE} bytes");
-        }
-        let status = child
-            .wait()
-            .await
-            .context("wait for justrust status query")?;
-        anyhow::ensure!(status.success(), "justrust status exited with {status}");
-        serde_json::from_slice(&bytes).context("decode justrust status response")
-    })
-    .await;
-    match result {
-        Ok(Ok(snapshot)) => Some(snapshot),
-        Ok(Err(error)) => {
-            crate::logging::debug(&format!("Build status unavailable: {error:#}"));
-            None
-        }
-        Err(error) => {
-            crate::logging::debug(&format!("Build status query timed out: {error}"));
-            None
+    use tokio::io::AsyncBufReadExt;
+    let mut child = tokio::process::Command::new(program)
+        .args(["status", "--json", "--watch", "1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("start justrust status stream")?;
+    let stdout = child.stdout.take().context("stdout was not piped")?;
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = Vec::new();
+    let mut first = true;
+    loop {
+        line.clear();
+        let limit = if first {
+            FIRST_LINE_TIMEOUT
+        } else {
+            Duration::from_secs(365 * 24 * 3600)
+        };
+        let mut limited = (&mut reader).take((MAX_RESPONSE + 1) as u64);
+        let next = limited.read_until(b'\n', &mut line);
+        let read = tokio::select! {
+            read = tokio::time::timeout(limit, next) => {
+                read.context("first status line timed out")?
+            }
+            () = sender.closed() => return Ok(()),
+        };
+        first = false;
+        let n = read.context("read justrust status stream")?;
+        anyhow::ensure!(n > 0, "justrust status stream closed");
+        anyhow::ensure!(
+            line.ends_with(b"\n") || n <= MAX_RESPONSE,
+            "justrust status line exceeds {MAX_RESPONSE} bytes"
+        );
+        let snapshot: Snapshot =
+            serde_json::from_slice(&line).context("decode justrust status line")?;
+        if sender.send(Some(Some(Arc::new(snapshot)))).is_err() {
+            return Ok(());
         }
     }
 }
 
 #[derive(Default)]
 pub(crate) struct Poller {
-    pending: Option<oneshot::Receiver<Option<Snapshot>>>,
-    snapshot: Option<Snapshot>,
+    stream: Option<tokio::sync::watch::Receiver<Option<Option<Arc<Snapshot>>>>>,
+    snapshot: Option<Arc<Snapshot>>,
     received: Option<Instant>,
-    next_poll: Option<Instant>,
+    next_start: Option<Instant>,
     row: Option<StatusRow>,
     last_finished: Option<(Finished, Instant)>,
 }
@@ -315,45 +330,42 @@ impl Poller {
             self.row = None;
             self.snapshot = None;
             self.last_finished = None;
-            self.pending = None;
+            self.stream = None;
             return self.row != previous;
         }
         let now = Instant::now();
-        if let Some(receiver) = &mut self.pending {
-            match receiver.try_recv() {
-                Ok(snapshot) => {
-                    let retry = if snapshot.is_some() {
-                        POLL_INTERVAL
-                    } else {
-                        RETRY_INTERVAL
-                    };
-                    if let Some(run) = snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.recent.as_ref())
+        let mut ended = false;
+        if let Some(receiver) = &mut self.stream
+            && receiver.has_changed().unwrap_or(true)
+        {
+            match receiver.borrow_and_update().clone() {
+                Some(Some(snapshot)) => {
+                    if let Some(run) = snapshot.recent.as_ref()
                         && relevance(run.agent_session.as_deref(), &run.cwd, session, repo) > 0
                     {
                         self.last_finished = Some((run.clone(), now));
                     }
-                    self.snapshot = snapshot;
+                    self.snapshot = Some(snapshot);
                     self.received = Some(now);
-                    self.pending = None;
-                    self.next_poll = Some(now + retry);
                 }
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    self.pending = None;
-                    self.snapshot = None;
-                    self.next_poll = Some(now + RETRY_INTERVAL);
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {}
+                Some(None) => ended = true,
+                None => {}
             }
         }
+        if ended {
+            self.stream = None;
+            self.snapshot = None;
+            self.next_start = Some(now + RETRY_INTERVAL);
+        }
+        // A live stream's snapshot stays current until the next line: an
+        // active build prints every second, an idle one never needs to.
         self.row = self.snapshot.as_ref().and_then(|snapshot| {
             let age = self
                 .received
                 .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
-            (age < Duration::from_secs(5))
-                .then(|| snapshot.row(session, repo, age))
-                .flatten()
+            let fresh = !snapshot.active.is_empty() && age < Duration::from_secs(5)
+                || snapshot.active.is_empty();
+            fresh.then(|| snapshot.row(session, repo, age)).flatten()
         });
         if self.row.is_none()
             && let Some((run, received)) = &self.last_finished
@@ -364,20 +376,12 @@ impl Poller {
             }
             .row(session, repo, now.saturating_duration_since(*received));
         }
-        if self.pending.is_none()
-            && self.next_poll.is_none_or(|next| now >= next)
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        if self.stream.is_none()
+            && self.next_start.is_none_or(|next| now >= next)
+            && tokio::runtime::Handle::try_current().is_ok()
         {
-            let (sender, receiver) = oneshot::channel();
-            self.pending = Some(receiver);
-            runtime.spawn(async move {
-                if sender
-                    .send(query(std::ffi::OsStr::new("justrust")).await)
-                    .is_err()
-                {
-                    crate::logging::debug("Discarded build status after poller was closed");
-                }
-            });
+            self.stream = Some(spawn_stream("justrust".into()));
+            self.next_start = Some(now + RETRY_INTERVAL);
         }
         self.row != previous
     }
@@ -529,19 +533,29 @@ mod tests {
         assert_eq!(clean("evil\n\u{1b}[31m"), "evil[31m");
     }
 
+    fn feed(json: &str) -> tokio::sync::watch::Receiver<Option<Option<Arc<Snapshot>>>> {
+        let snapshot = serde_json::from_str::<Snapshot>(json).unwrap();
+        let (sender, receiver) = tokio::sync::watch::channel(Some(Some(Arc::new(snapshot))));
+        std::mem::forget(sender);
+        receiver
+    }
+
     #[test]
     fn matching_completion_survives_unrelated_updates_and_expires() {
-        let (sender, receiver) = oneshot::channel();
-        sender.send(Some(serde_json::from_str::<Snapshot>(r#"{"recent":{"cwd":"/repo/app","args":["test"],"wall":51,"ok":true,"ago":1,"agent_session":"ours"}}"#).unwrap())).unwrap();
         let mut poller = Poller {
-            pending: Some(receiver),
+            stream: Some(feed(
+                r#"{"recent":{"cwd":"/repo/app","args":["test"],"wall":51,"ok":true,"ago":1,"agent_session":"ours"}}"#,
+            )),
             ..Default::default()
         };
+        poller.stream.as_mut().unwrap().mark_changed();
         poller.refresh(Some("ours"), Some("/repo/app"), true);
         assert!(poller.row().unwrap().text.contains("finished in 51s"));
-        let (sender, receiver) = oneshot::channel();
-        sender.send(Some(serde_json::from_str::<Snapshot>(r#"{"active":[{"cwd":"/other"}],"recent":{"cwd":"/other","wall":1,"ok":false,"ago":0}}"#).unwrap())).unwrap();
-        poller.pending = Some(receiver);
+        let mut next = feed(
+            r#"{"active":[{"cwd":"/other"}],"recent":{"cwd":"/other","wall":1,"ok":false,"ago":0}}"#,
+        );
+        next.mark_changed();
+        poller.stream = Some(next);
         poller.refresh(Some("ours"), Some("/repo/app"), true);
         assert!(poller.row().unwrap().text.contains("finished in 51s"));
         poller.snapshot = None;
@@ -556,6 +570,22 @@ mod tests {
     }
 
     #[test]
+    fn idle_snapshot_stays_current_without_new_lines() {
+        let mut poller = Poller {
+            stream: Some(feed(
+                r#"{"active":[],"recent":{"cwd":"/repo/app","args":["test"],"wall":3,"ok":true,"ago":1,"agent_session":"ours"}}"#,
+            )),
+            ..Default::default()
+        };
+        poller.stream.as_mut().unwrap().mark_changed();
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        poller.received = Some(Instant::now() - Duration::from_secs(30));
+        poller.last_finished = None;
+        poller.refresh(Some("ours"), Some("/repo/app"), true);
+        assert!(poller.row().unwrap().text.contains("finished in 3s"));
+    }
+
+    #[test]
     fn disabled_poller_clears_cached_builds_without_starting_queries() {
         let mut poller = Poller {
             row: Some(StatusRow {
@@ -567,21 +597,26 @@ mod tests {
         };
         assert!(poller.refresh(None, None, false));
         assert!(poller.row().is_none());
-        assert!(poller.pending.is_none());
+        assert!(poller.stream.is_none());
+    }
+
+    async fn first(program: &std::path::Path) -> Option<Option<Arc<Snapshot>>> {
+        let mut receiver = spawn_stream(program.as_os_str().to_owned());
+        receiver.changed().await.ok()?;
+        receiver.borrow().clone()
     }
 
     #[tokio::test]
     async fn missing_executable_is_optional() {
-        assert!(
-            query(std::ffi::OsStr::new("/nonexistent/justrust-status-test"))
-                .await
-                .is_none()
-        );
+        assert!(matches!(
+            first(std::path::Path::new("/nonexistent/justrust-status-test")).await,
+            Some(None) | None
+        ));
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn status_subprocess_is_bounded_and_checks_exit_status() {
+    async fn status_stream_is_bounded_and_streams_lines() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("status");
@@ -590,27 +625,36 @@ mod tests {
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write(
-            "test \"$1\" = status && test \"$2\" = --json || exit 9\nprintf '%s' '{\"active\":[],\"recent\":null}'",
+            "test \"$1 $2 $3\" = 'status --json --watch' || exit 9\necho '{\"active\":[],\"recent\":null}'\nsleep 0.2\necho '{\"active\":[{\"cwd\":\"/x\"}]}'\nsleep 10",
         );
-        assert!(query(program.as_os_str()).await.is_some());
-        write("printf '%s' '{\"active\":[]}'\nexit 1");
-        assert!(query(program.as_os_str()).await.is_none());
-        write("printf '%s' 'not json'");
-        assert!(query(program.as_os_str()).await.is_none());
-        write("exec head -c 524289 /dev/zero");
-        assert!(query(program.as_os_str()).await.is_none());
-        write("exec sleep 10");
-        // Exercise the real subprocess cancellation path without making every
-        // filtered test run wait for the production two-second deadline.
-        assert_eq!(QUERY_TIMEOUT, Duration::from_secs(2));
-        let timeout = Duration::from_millis(50);
-        let start = Instant::now();
+        let mut receiver = spawn_stream(program.as_os_str().to_owned());
+        receiver.changed().await.unwrap();
         assert!(
-            query_with_timeout(program.as_os_str(), timeout)
-                .await
-                .is_none()
+            receiver
+                .borrow_and_update()
+                .clone()
+                .unwrap()
+                .unwrap()
+                .active
+                .is_empty()
         );
-        assert!(start.elapsed() >= timeout);
-        assert!(start.elapsed() < Duration::from_secs(5));
+        receiver.changed().await.unwrap();
+        assert_eq!(
+            receiver
+                .borrow_and_update()
+                .clone()
+                .unwrap()
+                .unwrap()
+                .active
+                .len(),
+            1
+        );
+        drop(receiver);
+        write("echo 'not json'");
+        assert!(matches!(first(&program).await, Some(None)));
+        write("exec head -c 524289 /dev/zero");
+        assert!(matches!(first(&program).await, Some(None)));
+        write("exit 1");
+        assert!(matches!(first(&program).await, Some(None)));
     }
 }

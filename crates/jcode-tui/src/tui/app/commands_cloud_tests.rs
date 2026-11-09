@@ -1257,6 +1257,18 @@ fn parses_cloud_commands() {
         Some(CloudCommand::Where)
     );
     assert_eq!(
+        parse_cloud_command("/cloud reload"),
+        Some(CloudCommand::Reload { force: false })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload --force"),
+        Some(CloudCommand::Reload { force: true })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload now"),
+        Some(CloudCommand::MoveUsage)
+    );
+    assert_eq!(
         parse_cloud_command("/cloud cancel"),
         Some(CloudCommand::Cancel)
     );

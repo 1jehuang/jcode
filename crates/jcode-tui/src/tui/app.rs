@@ -23,11 +23,11 @@ use crate::session::{Session, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::selfdev::ReloadContext;
 use crate::tool::{Registry, ToolContext};
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
 use auth::PendingLogin;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use debug::DebugTrace;
 use futures::StreamExt;
@@ -125,7 +125,9 @@ mod usage_reset;
 mod voice_input;
 pub(crate) mod window_account;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
+mod binary_watch;
 mod justrust_status;
+mod state_ui_history_marker;
 mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
@@ -138,6 +140,7 @@ mod terminal_setup_command;
 mod terminal_title;
 mod todo_completion;
 mod todos_view;
+mod wake_stats;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
@@ -958,6 +961,7 @@ pub struct App {
     display_edit_line_counts: (usize, usize),
     terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
+    recent_history_paging: state_ui_history_marker::RecentHistoryPagingState,
     /// When older compacted history has just been loaded, this anchors the
     /// viewport to the content the reader was looking at so the prepend does not
     /// visibly jump. Resolved into `scroll_offset` by the next render frame.
@@ -1050,6 +1054,9 @@ pub struct App {
     // Keep recovery identities after dispatch so delayed History cannot requeue
     // the same continuation. Reset only when a new server reload begins.
     scheduled_reload_recoveries: HashSet<(String, String)>,
+    // A reload recovery continuation was queued. It must run as its own turn
+    // so user follow-ups queued before the reload still wait for that turn to end.
+    reload_recovery_dispatch_pending: bool,
     // Current status
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
@@ -1450,6 +1457,9 @@ pub struct App {
     /// When `remote_swarm_members` last arrived, so worker stopwatches can
     /// tick locally between server snapshots.
     remote_swarm_members_received_at: Option<std::time::Instant>,
+    /// When each swarm agent last sent us a notification, keyed by sender, so
+    /// notifications can show time since that agent's previous message.
+    swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
@@ -1686,6 +1696,9 @@ pub struct App {
     voice_input: Option<voice_input::VoiceInput>,
     // Last voice key press, to tell a held key's auto-repeat from a new press
     voice_input_last_press: Option<Instant>,
+    // Push-to-talk captured outside this client (`jcode companion`), with the
+    // time it was last updated so a vanished sender cannot leave it stuck.
+    external_voice: Option<(crate::protocol::VoiceActivity, Instant)>,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
     // Config reload generation the keybinding snapshot above was parsed at.

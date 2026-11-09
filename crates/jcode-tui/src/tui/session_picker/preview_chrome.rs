@@ -99,7 +99,10 @@ fn snapshot_account_info(
     (auth, usage)
 }
 
-fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoWidgetData {
+pub(super) fn selected_info(
+    session: &SessionInfo,
+    extras: Option<&PreviewExtras>,
+) -> InfoWidgetData {
     let mut data = extras
         .and_then(|extras| extras.info_data.clone())
         .unwrap_or_else(|| InfoWidgetData {
@@ -124,6 +127,8 @@ fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoW
     data
 }
 
+#[cfg(test)]
+
 fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> usize {
     let visible_users = session
         .messages_preview
@@ -144,88 +149,11 @@ fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> 
 
 /// Draw only the image rows intersecting the scrolling transcript. Raster
 /// images retain their original fit box when partially scrolled off screen.
-pub(super) fn draw_images(
-    frame: &mut Frame,
-    area: Rect,
-    regions: &[jcode_tui_messages::ImageRegion],
-    source_rows: &[usize],
-    reserved: Option<Rect>,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    for region in regions {
-        let start = source_rows.partition_point(|row| *row < region.abs_line_idx);
-        let end = source_rows.partition_point(|row| *row < region.end_line);
-        if region.height == 0 || start >= end {
-            continue;
-        }
-        let source_start = source_rows[start];
-        let mut image_area = Rect {
-            x: area.x,
-            y: area.y + start as u16,
-            width: area.width,
-            height: (end - start).min(u16::MAX as usize) as u16,
-        };
-        if let Some(panel) = reserved
-            && image_area.y < panel.bottom()
-            && panel.y < image_area.bottom()
-        {
-            image_area.width = panel
-                .x
-                .saturating_sub(area.x)
-                .saturating_sub(1)
-                .min(area.width);
-        }
-        if image_area.width == 0 {
-            continue;
-        }
-        let fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
-        if fit {
-            let cols = if region.width == 0 {
-                image_area.width
-            } else {
-                region.width.min(image_area.width)
-            };
-            if !super::super::ui::inline_image_ui::ensure_drawable(region.hash, cols, region.height)
-            {
-                continue;
-            }
-            if !crate::tui::mermaid::render_image_widget_fit_stable(
-                region.hash,
-                image_area,
-                frame.buffer_mut(),
-                cols,
-                region.height,
-                (source_start - region.abs_line_idx).min(u16::MAX as usize) as u16,
-                false,
-                true,
-            ) {
-                crate::tui::mermaid::render_image_widget_fit(
-                    region.hash,
-                    image_area,
-                    frame.buffer_mut(),
-                    false,
-                    true,
-                );
-            }
-        } else {
-            let rows = crate::tui::mermaid::render_image_widget(
-                region.hash,
-                image_area,
-                frame.buffer_mut(),
-                false,
-                source_start > region.abs_line_idx,
-            );
-            if rows == 0 && source_start == region.abs_line_idx {
-                frame.render_widget(Paragraph::new("↗ mermaid diagram unavailable"), image_area);
-            }
-        }
-    }
-}
+#[cfg(test)]
 
 /// Reserve stationary chrome around the scrolling transcript, like the live
 /// layout. At tiny heights prefer preserving one transcript row over widgets.
+#[cfg(test)]
 pub(super) fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -276,6 +204,7 @@ pub(super) fn draw(
 
 /// The same margin measurement and placement engine as the live chat, with
 /// fresh private anchors so preview selection cannot move the live HUD.
+#[cfg(test)]
 pub(super) fn draw_widgets(
     frame: &mut Frame,
     area: Rect,

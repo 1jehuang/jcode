@@ -220,6 +220,27 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     .expect("history should be written promptly")?;
     let event: ServerEvent = serde_json::from_str(line.trim())?;
     match event {
+        ServerEvent::Todos {
+            session_id,
+            payload,
+        } => {
+            assert_eq!(session_id, target_session_id);
+            let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            assert!(payload["todos"].is_array());
+        }
+        other => {
+            panic!("authoritative todos must precede the potentially huge History, got {other:?}")
+        }
+    }
+    line.clear();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::io::AsyncBufReadExt::read_line(&mut peer_reader, &mut line),
+    )
+    .await
+    .expect("history follows the early todo snapshot")?;
+    let event: ServerEvent = serde_json::from_str(line.trim())?;
+    match event {
         ServerEvent::History {
             session_id,
             messages,

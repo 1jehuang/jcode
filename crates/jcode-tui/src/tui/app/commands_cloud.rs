@@ -41,6 +41,10 @@ pub(super) enum CloudCommand {
     Prepare {
         host: Option<String>,
     },
+    /// Restart the managed cloud daemon onto its selected runtime once idle.
+    Reload {
+        force: bool,
+    },
 }
 
 pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
@@ -58,6 +62,11 @@ pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
             Some("cancel") => Some(CloudCommand::Cancel),
             Some("status") | Some("where") => Some(CloudCommand::Where),
             Some("back") | Some("return") => Some(CloudCommand::Return),
+            Some("reload") => match (words.next(), words.next()) {
+                (None, _) => Some(CloudCommand::Reload { force: false }),
+                (Some("--force"), None) => Some(CloudCommand::Reload { force: true }),
+                _ => Some(CloudCommand::MoveUsage),
+            },
             Some("replace") => {
                 let (mut host, mut yes, mut dry_run) = (None, false, false);
                 while let Some(word) = words.next() {
@@ -227,7 +236,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         )));
         return true;
     }
-    if !matches!(command, CloudCommand::Where) {
+    if !matches!(command, CloudCommand::Where | CloudCommand::Reload { .. }) {
         if !check_cloud_handoff_input(app, trimmed) {
             return true;
         }
@@ -362,6 +371,12 @@ fn start_cloud_command(
         CloudCommand::Cancel => unreachable!("cancel does not spawn"),
         CloudCommand::Where => {
             cmd.args(["where", "--session", session_id]);
+        }
+        CloudCommand::Reload { force } => {
+            cmd.args(["runtime", "reload"]);
+            if *force {
+                cmd.arg("--force");
+            }
         }
     }
     if app.cloud_job.is_some() {
@@ -1184,6 +1199,11 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         | CloudCommand::ReplaceUsage
         | CloudCommand::MoveUsage => {
             unreachable!("handled before transfer completion")
+        }
+        CloudCommand::Reload { .. } => {
+            app.push_display_message(DisplayMessage::system(
+                "Cloud daemon reloaded onto its selected runtime. Cloud sessions resume when their clients reconnect.",
+            ));
         }
         CloudCommand::Where => {
             let text = if stdout.trim().is_empty() {

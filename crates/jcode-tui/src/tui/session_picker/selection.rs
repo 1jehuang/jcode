@@ -18,6 +18,10 @@ impl SessionPicker {
         let (sessions, finished) = match update {
             SessionListUpdate::Cached(sessions) => (sessions, false),
             SessionListUpdate::Fresh(sessions) => (sessions?, true),
+            SessionListUpdate::CloudUnavailable(warning) => {
+                self.set_cloud_warning(warning);
+                return Ok(false);
+            }
         };
         // An untouched cached highlight must not suppress the project default.
         // Typed searches and explicit navigation keep their target and filter.

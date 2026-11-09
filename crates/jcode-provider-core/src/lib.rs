@@ -648,6 +648,18 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// True when a provider stop reason is a model-side refusal, safety, or
+/// content-filter stop rather than a normal end of turn or truncation.
+pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
+    let Some(reason) = stop_reason else {
+        return false;
+    };
+    let reason = reason.trim().to_ascii_lowercase();
+    matches!(reason.as_str(), "refusal" | "content_filter" | "safety")
+        || reason.contains("guardrail")
+        || reason.contains("policy_violation")
+}
+
 /// Failed simple completion with the usage already observed before failure.
 /// Dropping the completion future (for example on timeout) cannot return this
 /// snapshot. Cancellation accounting requires a separate observer lifecycle.

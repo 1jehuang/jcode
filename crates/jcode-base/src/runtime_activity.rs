@@ -47,6 +47,7 @@ pub struct ActivityReservation {
     _runtime: OwnedRwLockReadGuard<()>,
     gate: ActivityGate,
     session: Option<String>,
+    changed: Arc<Notify>,
 }
 
 impl ActivityReservation {
@@ -87,6 +88,9 @@ impl Drop for ActivityReservation {
                 );
             }
         }
+        drop(state);
+        // Wake transfer admission waiting for this work to drain.
+        self.changed.notify_waiters();
     }
 }
 
@@ -195,6 +199,7 @@ impl ActivityGate {
             _runtime: runtime,
             gate: self.clone(),
             session,
+            changed: self.changed.clone(),
         })
     }
 
@@ -242,6 +247,48 @@ impl ActivityGate {
             }
             Err(_) => None,
         }
+    }
+
+    /// Human-readable description of what currently blocks `sessions` from
+    /// a scoped transfer. Used for diagnostics only.
+    pub fn busy_summary(&self, sessions: &BTreeSet<String>) -> String {
+        let state = lock_state(&self.scoped);
+        let mut parts = Vec::new();
+        if state.unhealthy {
+            parts.push("activity accounting unhealthy (restart the daemon)".to_owned());
+        }
+        if state.unknown != 0 {
+            parts.push(format!("{} unscoped task(s)", state.unknown));
+        }
+        let busy: Vec<_> = sessions
+            .iter()
+            .filter(|id| state.active.contains_key(*id))
+            .map(|id| format!("{id} x{}", state.active[id]))
+            .collect();
+        if !busy.is_empty() {
+            parts.push(format!("busy sessions: {}", busy.join(", ")));
+        }
+        let fenced: Vec<_> = sessions
+            .iter()
+            .filter(|id| state.fenced.contains(*id))
+            .cloned()
+            .collect();
+        if !fenced.is_empty() {
+            parts.push(format!("already fenced: {}", fenced.join(", ")));
+        }
+        if self.runtime.try_read().is_err() {
+            parts.push("runtime upgrade in progress".to_owned());
+        }
+        if parts.is_empty() {
+            "nothing (transient)".to_owned()
+        } else {
+            parts.join("; ")
+        }
+    }
+
+    /// Resolves after any reservation or fence is released.
+    pub async fn changed(&self) {
+        self.changed.notified().await
     }
 
     pub fn try_idle_sessions(&self, sessions: &BTreeSet<String>) -> Option<SessionIdleReservation> {

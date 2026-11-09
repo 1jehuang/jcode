@@ -56,7 +56,10 @@ pub use remote_accounts::{
     clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
     remote_account_usage_received, set_remote_account_usage,
 };
-pub use startup_snapshot::{AccountUsageStartupPublisher, hydrate_remote_account_usage};
+pub use startup_snapshot::{
+    AccountUsageStartupPublisher, hydrate_remote_account_usage,
+    hydrate_remote_account_usage_for_generation,
+};
 
 /// Fetch a saved login's subscription limits without selecting it as active.
 /// Identity is explicit rather than inferred from a provider display name.

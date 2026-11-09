@@ -8,6 +8,7 @@ use std::sync::{
 fn preview() -> LoadedSessionPreview {
     LoadedSessionPreview {
         messages: Vec::new(),
+        search: None,
         extras: PreviewExtras {
             hidden_prompts: 7,
             todos_payload: Some("selected todos".into()),

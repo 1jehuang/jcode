@@ -24,22 +24,6 @@ const DEFAULT_API_BASE: &str = "https://api.jcode.sh/v1";
 const PROVISION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 
-/// A live multiplexed SSH master means the machine is awake and this client is
-/// already authorized, so the Jcode Cloud wake/authorize call can be skipped.
-pub(crate) fn master_is_live() -> bool {
-    let Ok(args) = ssh_args() else {
-        return false;
-    };
-    Command::new("ssh")
-        .args(args)
-        .args(["-O", "check", HOST])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 pub(crate) fn is_managed(host: &str) -> bool {
     host == HOST
 }
@@ -64,6 +48,11 @@ fn known_hosts_path() -> Result<PathBuf> {
 
 pub(crate) fn ssh_config_path() -> Result<PathBuf> {
     Ok(dir()?.join("ssh_config"))
+}
+
+/// Prepare only local SSH files. Do not provision, wake, authorize, or connect.
+pub(crate) fn prepare_ssh() -> Result<()> {
+    ssh_args().map(|_| ())
 }
 
 /// Ensure the client key and private SSH config exist. Returns `-F <config>`
@@ -126,6 +115,11 @@ pub(super) fn proxy_executable(exe: PathBuf) -> PathBuf {
         Some(launcher) if launcher.is_file() => launcher,
         _ => trimmed,
     }
+}
+
+pub(crate) fn preparation_namespace() -> Result<String> {
+    let account = account()?;
+    control_namespace(&account.key, &account.base).context("missing cloud account namespace")
 }
 
 fn control_namespace(key: &str, base: &str) -> Option<String> {
@@ -333,18 +327,31 @@ pub(crate) fn stop() -> Result<Reply> {
     request("POST", "cloud/host/stop", Some(serde_json::json!({})))
 }
 
+fn timed_managed_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let start = Instant::now();
+    let result = operation();
+    crate::logging::info(&format!(
+        "cloud prepare: {stage} took {}ms (ok={})",
+        start.elapsed().as_millis(),
+        result.is_ok()
+    ));
+    result
+}
+
 /// Create or wake the machine and wait until it accepts this client's key.
 /// `progress` receives each distinct status message.
 pub(crate) fn connect(progress: &mut dyn FnMut(&str)) -> Result<Reply> {
-    let key = public_key()?;
+    let key = timed_managed_stage("cloud client key preparation", public_key)?;
     let deadline = Instant::now() + PROVISION_DEADLINE;
     let mut last = String::new();
     loop {
-        let reply = request(
-            "POST",
-            "cloud/host/connect",
-            Some(serde_json::json!({ "public_key": key })),
-        )?;
+        let reply = timed_managed_stage("cloud connect API request", || {
+            request(
+                "POST",
+                "cloud/host/connect",
+                Some(serde_json::json!({ "public_key": key })),
+            )
+        })?;
         if reply.ready {
             return Ok(reply);
         }
@@ -359,7 +366,10 @@ pub(crate) fn connect(progress: &mut dyn FnMut(&str)) -> Result<Reply> {
         if Instant::now() >= deadline {
             bail!("Jcode Cloud machine did not become ready in time. Retry to keep waiting.");
         }
-        std::thread::sleep(POLL_INTERVAL);
+        timed_managed_stage("cloud wake poll wait", || {
+            std::thread::sleep(POLL_INTERVAL);
+            Ok(())
+        })?;
     }
 }
 
@@ -529,6 +539,11 @@ fn prepare_script_for_paths_with_candidate(
     let privilege = if elevate { "sudo -n " } else { "" };
     let home = shell_quote(home);
     let want = shell_quote(target.unwrap_or(""));
+    let capability_schema = shell_quote(&format!(
+        "handoff-capabilities-v1:{}:{}",
+        jcode_build_meta::VERSION,
+        jcode_build_meta::GIT_HASH,
+    ));
     format!(
         r#"set -eu
 want={want}
@@ -541,6 +556,12 @@ cli="$HOME/.local/bin/jcode"
 backend={backend}
 root="$HOME/.local/share/jcode/cloud-releases"
 mkdir -p "$HOME/.local/bin" "$root"
+stage_started=$(date +%s%N)
+stage_timing() {{
+  stage_now=$(date +%s%N)
+  echo "[cloud prepare timing] $1 $(( (stage_now - stage_started) / 1000000 ))ms" >&2
+  stage_started=$stage_now
+}}
 # Serialize cooperating preflights without terminating any running process.
 # Wait briefly for a concurrent prepare instead of failing the move, and
 # reclaim a lock left behind by a prepare that was killed mid-run.
@@ -560,6 +581,7 @@ until mkdir "$lock" 2>/dev/null; do
   sleep 2
   waited=$((waited + 2))
 done
+stage_timing lock_wait
 stage=
 backup=
 next=
@@ -569,6 +591,7 @@ committed=0
 cleanup() {{
   rc=$?
   trap - EXIT HUP INT TERM
+  if [ "$rc" != 0 ]; then rm -f "$root/.capabilities-ok"; fi
   if [ "$switched" = 1 ] && [ "$committed" = 0 ]; then
     rollback_ok=1
     if [ "$had_previous" = 1 ]; then
@@ -598,6 +621,34 @@ cleanup() {{
 }}
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+# Cache only successful protocol probes, not release or managed runtime policy.
+# Include wrapper, backend, symlink targets and adjacent loader/library files.
+# A changed install (including an atomic replacement) must be probed again.
+capability_snapshot() {{
+  [ -f "$cli" ] && [ -f "$backend" ] || return 1
+  resolved=$(readlink -f "$backend") || return 1
+  printf '%s\n' {capability_schema}
+  stat -c '%n %d %i %s %y %z %a' "$cli" "$backend" || return 1
+  stat -Lc '%n %d %i %s %y %z %a' "$cli" "$backend" || return 1
+  files=$(find -L "$(dirname "$resolved")" -maxdepth 1 -type f \
+    -exec stat -Lc '%n %d %i %s %y %z %a' {{}} +) || return 1
+  printf '%s\n' "$files" | LC_ALL=C sort
+}}
+capability_cache="$root/.capabilities-ok"
+snapshot=$(capability_snapshot) || snapshot=
+warm=0
+now=$(date +%s)
+if [ -n "$snapshot" ] && [ -z "$development_candidate" ] && [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" != 1 ] && [ -f "$capability_cache" ]; then
+  stamp=$(head -n 1 "$capability_cache")
+  case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+  # Longer than the local 120s handoff marker: every reuse verifies this
+  # installation snapshot and still evaluates version/runtime policy below.
+  if [ "$stamp" -le "$now" ] && [ "$((now - stamp))" -le 600 ] && [ "$(tail -n +2 "$capability_cache")" = "$snapshot" ]; then
+    warm=1
+  fi
+fi
+echo "[cloud prepare] capability cache warm=$warm" >&2
+stage_timing cache_verification
 probe() {{
   # Do not let a fast-release parent identity mask the candidate's real version.
   env -u JCODE_RUNTIME_RELEASE_SEMVER -u JCODE_RUNTIME_RELEASE_GIT_HASH \
@@ -605,6 +656,7 @@ probe() {{
     "$1" --no-update --no-selfdev "$2" "${{3:-}}" "${{4:-}}"
 }}
 capable() {{
+  if [ "$warm" = 1 ] && {{ [ "$1" = "$cli" ] || [ "$1" = "$backend" ]; }}; then return 0; fi
   probe "$1" cloud receive --help >/dev/null 2>&1 &&
     probe "$1" cloud credentials --help >/dev/null 2>&1 &&
     probe "$1" cloud router-credentials --help >/dev/null 2>&1 &&
@@ -665,6 +717,8 @@ if [ -x "$managed_updater" ]; then
     exit 1
   }}
 elif ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version_at_least "$cli" || ! version_at_least "$backend"; }}; }} || [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" = 1 ]; then
+  # Cached evidence describes the old install, never the candidate.
+  warm=0
   if [ -z "$want" ] && [ -z "$development_candidate" ]; then
     # Development builds have no corresponding published tag. Resolve the
     # canonical latest redirect, then pin and validate that exact release.
@@ -750,6 +804,7 @@ elif ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! versi
   {privilege}mv -Tf "$next" "$backend"
   capable "$backend" && version_matches "$backend" && capable "$cli" && version_matches "$cli" || exit 1
 fi
+stage_timing runtime_policy_and_preparation
 # All handoff protocols are mandatory even when credentials are not needed yet.
 capable "$cli" || {{ echo '[cloud prepare] cloud handoff, replacement and group protocols are required' >&2; exit 1; }}
 committed=1
@@ -757,6 +812,19 @@ if [ -n {home} ] && [ ! -d {home} ]; then
   sudo -n install -d -o "$(id -un)" -g "$(id -gn)" -m 755 {home}
 fi
 command -v git >/dev/null || sudo -n dnf install -y git >/dev/null
+# Never renew the lifetime of cached evidence without actually probing again.
+final_snapshot=$(capability_snapshot) || final_snapshot=
+if [ "$warm" = 1 ] && [ "$final_snapshot" != "$snapshot" ]; then
+  echo '[cloud prepare] runtime changed during verification; retry preparation' >&2
+  exit 1
+fi
+if [ "$warm" = 0 ] && [ -z "$development_candidate" ]; then
+  rm -f "$capability_cache"
+  if [ -n "$snapshot" ] && [ "$final_snapshot" = "$snapshot" ]; then
+    (umask 077; printf '%s\n%s\n' "$now" "$snapshot" > "$capability_cache")
+  fi
+fi
+stage_timing final_verification
 "#
     )
 }
@@ -810,6 +878,100 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_ssh_cli_is_hidden_and_only_prepares_local_files() {
+        use super::super::args::{Args, CloudCommand, CloudMachineAction};
+        use clap::{Parser, ValueEnum};
+
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("https://{}/v1", listener.local_addr().unwrap());
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => crate::env::set_var(name, value),
+                        None => crate::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            ["JCODE_HOME", "JCODE_API_KEY", "JCODE_API_BASE"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_API_KEY", "offline-test-account");
+        crate::env::set_var("JCODE_API_BASE", &base);
+
+        let args = Args::try_parse_from([
+            "jcode",
+            "--no-update",
+            "--no-selfdev",
+            "cloud",
+            "machine",
+            "prepare-ssh",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(super::super::args::Command::Cloud(CloudCommand::Machine {
+                action: CloudMachineAction::PrepareSsh
+            }))
+        ));
+        assert!(
+            CloudMachineAction::PrepareSsh
+                .to_possible_value()
+                .unwrap()
+                .is_hide_set()
+        );
+
+        super::super::cloud_move::run_cli(CloudCommand::Machine {
+            action: CloudMachineAction::PrepareSsh,
+        })
+        .unwrap();
+        let config = ssh_config_path().unwrap();
+        let original_key = std::fs::read(key_path().unwrap()).unwrap();
+        assert!(key_path().unwrap().with_extension("pub").is_file());
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("cloud proxy")
+        );
+        assert!(!known_hosts_path().unwrap().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [
+                (dir().unwrap(), 0o700),
+                (config.clone(), 0o600),
+                (key_path().unwrap(), 0o600),
+            ] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
+        std::fs::write(&config, "stale config").unwrap();
+        prepare_ssh().unwrap();
+        assert!(
+            std::fs::read_to_string(config)
+                .unwrap()
+                .contains("Host jcode-cloud")
+        );
+        assert_eq!(std::fs::read(key_path().unwrap()).unwrap(), original_key);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn proxy_executable_survives_replaced_binary() {

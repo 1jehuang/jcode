@@ -177,6 +177,30 @@ impl Agent {
         assistant_output_tail_after(&self.session.messages, start_index)
     }
 
+    /// The final visible assistant prose of this turn (its answer), used for
+    /// notification previews. Tool calls and reasoning are excluded.
+    pub fn final_assistant_text_after(&self, start_index: usize) -> Option<String> {
+        self.session
+            .messages
+            .iter()
+            .skip(start_index)
+            .rev()
+            .filter(|message| message.role == Role::Assistant)
+            .find_map(|message| {
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text, .. } => Some(text.trim()),
+                        _ => None,
+                    })
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                (!text.is_empty()).then_some(text)
+            })
+    }
+
     pub fn last_upstream_provider(&self) -> Option<String> {
         self.last_upstream_provider
             .clone()

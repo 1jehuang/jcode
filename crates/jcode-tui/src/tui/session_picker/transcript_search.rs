@@ -3,7 +3,7 @@
 //! never fuzzy DP or transcript file reads.
 use super::loading::search_query_tokens;
 use super::{ResumeTarget, SessionInfo};
-use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::DeserializeSeed;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -19,8 +19,10 @@ use std::time::Instant;
 mod text_cache;
 mod word_scores;
 use word_scores::WordScores;
+pub(super) mod source;
 mod token_cache;
 mod warmup;
+use source::Source;
 
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
@@ -30,6 +32,11 @@ const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct SearchRank {
     opening_prompt: usize,
+    /// Sum of per-token origin weights scaled by word rarity: user prompts
+    /// beat replies, which beat tool calls, tool output, and reasoning, and a
+    /// rare word outweighs ones found in most sessions. Ranked above literal
+    /// so a single typo cannot sink a session with strong, distinctive hits.
+    source_weight: u32,
     literal: bool,
     intent_terms: usize,
     exact_field: bool,
@@ -67,6 +74,7 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
     }
     SearchRank {
         opening_prompt: 0,
+        source_weight: 0,
         literal: metadata_terms == tokens.len(),
         intent_terms: 0,
         exact_field: false,
@@ -109,6 +117,11 @@ impl SearchRank {
         self
     }
 
+    pub(super) fn with_source_weight(mut self, weight: u32) -> Self {
+        self.source_weight = weight;
+        self
+    }
+
     pub(super) fn with_exact_field(mut self, exact: bool) -> Self {
         self.exact_field = exact;
         self
@@ -143,6 +156,26 @@ struct Candidate {
     exact_field: bool,
     opening_prompt: String,
     intent_text: String,
+    /// Per-token origin evidence from metadata, before transcript reads.
+    prior: Vec<Option<Source>>,
+}
+
+/// Per-token metadata origins for the UI-thread ranking of sessions the worker
+/// has not ranked yet. Uses the already lowercased intent fields.
+pub(super) fn metadata_source_weight(
+    intent_fields: &[&str],
+    index: &str,
+    tokens: &[String],
+    idf: &[u32],
+) -> u32 {
+    source::weighted_source_weight(&source::metadata_sources(intent_fields, index, tokens), idf)
+}
+
+/// Transcript evidence: the first-match fuzzy score plus per-token origins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Evidence {
+    score: i64,
+    sources: Vec<Option<Source>>,
 }
 
 /// Rank in memory before publishing results or opening transcripts. Keep this
@@ -150,10 +183,12 @@ struct Candidate {
 /// the incoming order for equally promising candidates.
 fn prioritize_candidates(
     candidates: Vec<Candidate>,
-    query: &str,
+    phrase: &Option<PhraseQuery>,
     tokens: &[String],
+    idf: &[u32],
     cancel: &AtomicBool,
 ) -> Vec<(Candidate, SearchRank)> {
+    let phrase = phrase.as_ref();
     let mut ranked = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if cancel.load(Ordering::Relaxed) {
@@ -161,12 +196,17 @@ fn prioritize_candidates(
         }
         let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
             .with_exact_field(candidate.exact_field);
-        rank.opening_prompt = opening_prompt_rank(&candidate.opening_prompt, query);
+        rank.opening_prompt = phrase.map_or(0, |phrase| phrase.rank(&candidate.opening_prompt));
         let intent = lowercase_field(&candidate.intent_text);
         rank.intent_terms = tokens
             .iter()
             .filter(|token| intent.contains(token.as_str()))
             .count();
+        let prior = source::metadata_sources(&[&intent], &candidate.search_index, tokens);
+        drop(intent);
+        let mut candidate = candidate;
+        candidate.prior = prior;
+        rank.source_weight = source::weighted_source_weight(&candidate.prior, idf);
         ranked.push((candidate, rank));
     }
     ranked.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
@@ -176,49 +216,154 @@ fn prioritize_candidates(
 // A retyped request is stronger evidence than words scattered throughout a
 // huge transcript. Compare contiguous word windows, allowing a few misspelled
 // words without requiring every short function word to match literally.
+#[cfg(test)]
 fn opening_prompt_rank(prompt: &str, query: &str) -> usize {
-    let words = |text: &str| -> Vec<String> {
-        text.split_whitespace()
-            .take(256)
-            .map(|word| {
-                word.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase()
-            })
-            .filter(|word| !word.is_empty())
-            .collect()
-    };
-    let query = words(query);
-    if query.len() < 4 || query.len() > 64 {
-        return 0;
-    }
-    let prompt = words(prompt);
-    // Missing spaces ("ofhow") should not hide an otherwise exact request.
-    let compact_query = query.concat();
-    if compact_query.chars().count() >= 16 && prompt.concat().contains(&compact_query) {
-        return query.len();
-    }
-    let prepared: Vec<_> = query
-        .iter()
-        .map(|word| jcode_fuzzy::PreparedTokenQuery::new(word))
-        .collect();
-    prompt
-        .windows(query.len())
-        .filter_map(|window| {
-            let matched = query
-                .iter()
-                .zip(&prepared)
-                .zip(window)
-                .filter(|((word, prepared), candidate)| {
-                    word == candidate
-                        || (word.len() >= 4
-                            && candidate.len() <= 128
-                            && prepared.matches_search_text(candidate))
-                })
-                .count();
-            (matched * 5 >= query.len() * 4).then_some(matched)
+    PhraseQuery::new(query).map_or(0, |phrase| phrase.rank(prompt))
+}
+
+fn phrase_words(text: &str, limit: usize) -> Vec<String> {
+    text.split_whitespace()
+        .take(limit)
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
         })
-        .max()
-        .unwrap_or(0)
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// A multiword query prepared once and compared against many user prompts.
+struct PhraseQuery {
+    words: Vec<String>,
+    compact: String,
+    prepared: Vec<jcode_fuzzy::PreparedTokenQuery>,
+}
+
+impl PhraseQuery {
+    fn new(query: &str) -> Option<Self> {
+        let words = phrase_words(query, 256);
+        if words.len() < 4 || words.len() > 64 {
+            return None;
+        }
+        Some(Self {
+            compact: words.concat(),
+            prepared: words
+                .iter()
+                .map(|word| jcode_fuzzy::PreparedTokenQuery::new(word))
+                .collect(),
+            words,
+        })
+    }
+
+    fn rank(&self, prompt: &str) -> usize {
+        let prompt = phrase_words(prompt, 2048);
+        if prompt.len() + 1 < self.words.len() * 4 / 5 {
+            return 0;
+        }
+        // Missing spaces ("ofhow") should not hide an otherwise exact request.
+        if self.compact.chars().count() >= 16 && prompt.concat().contains(&self.compact) {
+            return self.words.len();
+        }
+        prompt
+            .windows(self.words.len())
+            .filter_map(|window| {
+                let matched = self
+                    .words
+                    .iter()
+                    .zip(&self.prepared)
+                    .zip(window)
+                    .filter(|((word, prepared), candidate)| {
+                        word == candidate
+                            || (word.len() >= 4
+                                && candidate.len() <= 128
+                                && prepared.matches_search_text(candidate))
+                    })
+                    .count();
+                (matched * 5 >= self.words.len() * 4).then_some(matched)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Best retyped-request match across every user prompt in a transcript, not
+/// only the opening one. Later follow-ups ("okay lets do that") are what
+/// people remember and retype just as often.
+fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &AtomicBool) -> usize {
+    let mut sink = PhraseSink {
+        phrase,
+        best: 0,
+        cancel,
+    };
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) || sink.best == phrase.words.len() {
+            break;
+        }
+        if let Some(segments) = text_cache::segments(path, cancel) {
+            for (text, source) in segments.iter() {
+                if source == Source::User {
+                    sink.best = sink.best.max(phrase.rank(text));
+                }
+            }
+            continue;
+        }
+        stream_file(path, &mut sink, cancel);
+    }
+    sink.best
+}
+
+struct PhraseSink<'a> {
+    phrase: &'a PhraseQuery,
+    best: usize,
+    cancel: &'a AtomicBool,
+}
+
+impl source::Sink for PhraseSink<'_> {
+    fn text(&mut self, text: &str, source: Source) -> Result<(), &'static str> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err("search cancelled");
+        }
+        if source == Source::User {
+            self.best = self.best.max(self.phrase.rank(text));
+            if self.best == self.phrase.words.len() {
+                return Err("search complete");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stream a transcript too large for the text cache through a sink.
+fn stream_file<S: source::Sink>(path: &Path, sink: &mut S, cancel: &AtomicBool) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut reader = BufReader::with_capacity(
+        64 * 1024,
+        CancellableReader {
+            reader: file,
+            cancel,
+        },
+    );
+    if path.extension().is_some_and(|ext| ext == "jsonl") {
+        let mut line = Vec::new();
+        while !cancel.load(Ordering::Relaxed) {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let _ = source::Walk::new(&mut *sink)
+                        .deserialize(&mut serde_json::Deserializer::from_slice(&line));
+                }
+            }
+        }
+        return;
+    }
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    while source::Walk::new(&mut *sink)
+        .deserialize(&mut deserializer)
+        .is_ok()
+    {}
 }
 
 #[derive(Default)]
@@ -230,6 +375,8 @@ pub(super) struct TranscriptSearch {
     cancel: Arc<AtomicBool>,
     ranks: HashMap<String, SearchRank>,
     defer_metadata: bool,
+    /// Per-token rarity weights, computed by the worker before any rank.
+    idf: Arc<std::sync::OnceLock<Vec<u32>>>,
 }
 
 impl Drop for TranscriptSearch {
@@ -267,10 +414,27 @@ impl TranscriptSearch {
                 })
                 .cloned()
                 .collect();
+            // Literal metadata matches still go to the worker, which upgrades
+            // their rank once it knows where in the transcript each word came from,
+            // unless every word already comes from a user-intent field.
             if missing_tokens.is_empty()
                 && (tokens.len() < 4 || session.first_user_prompt.is_none())
             {
-                continue;
+                let intent = [
+                    session.title.to_lowercase(),
+                    session.save_label.as_deref().unwrap_or("").to_lowercase(),
+                    session
+                        .first_user_prompt
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase(),
+                ];
+                if tokens
+                    .iter()
+                    .all(|token| intent.iter().any(|field| field.contains(token.as_str())))
+                {
+                    continue;
+                }
             }
             let paths = transcript_paths(session);
             self.candidates.push(Candidate {
@@ -290,6 +454,7 @@ impl TranscriptSearch {
                     session.save_label.as_deref().unwrap_or(""),
                     session.first_user_prompt.as_deref().unwrap_or(""),
                 ),
+                prior: Vec::new(),
             });
         }
         if !self.candidates.is_empty() {
@@ -317,6 +482,11 @@ impl TranscriptSearch {
             .map_or_else(SearchRank::default, |rank| *rank)
     }
 
+    /// Rarity weights for the current query, once the worker computed them.
+    pub(super) fn idf(&self) -> &[u32] {
+        self.idf.get().map_or(&[], Vec::as_slice)
+    }
+
     pub(super) fn defers_metadata(&self) -> bool {
         self.defer_metadata
     }
@@ -333,21 +503,30 @@ impl TranscriptSearch {
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
             let query = self.query.clone();
+            let shared_idf = self.idf.clone();
             let (sender, receiver) = mpsc::channel();
             match std::thread::Builder::new()
                 .name("jcode-transcript-search".into())
                 .spawn(move || {
-                    // Finish the in-memory fuzzy pass before opening any large
-                    // transcripts. Neither DP matching nor disk scans belong
-                    // on the keystroke/render thread.
+                    // Document frequency over every candidate's metadata index.
+                    // Off the render thread: this touches every session.
+                    let idf = source::idf_weights(
+                        &tokens,
+                        candidates
+                            .iter()
+                            .map(|candidate| candidate.search_index.as_str()),
+                    );
+                    let _ = shared_idf.set(idf.clone());
+                    // Transcript reads and fuzzy scans dominate. Shard sessions
+                    // across workers round-robin so every shard sees the same
+                    // mix of recent and old sessions and ranks arrive evenly.
+                    let workers = search_workers(candidates.len());
+                    // Rank in memory first so the strongest retyped openings
+                    // are published before any shard starts reading disk.
+                    let phrase = PhraseQuery::new(&query);
+                    let ranked = prioritize_candidates(candidates, &phrase, &tokens, &idf, &cancel);
                     let mut scores = WordScores::default();
-                    let mut fuzzy_candidates = Vec::new();
-                    for (mut candidate, priority) in
-                        prioritize_candidates(candidates, &query, &tokens, &cancel)
-                    {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
+                    for (candidate, priority) in &ranked {
                         if priority.opening_prompt > 0 {
                             let mut rank = fuzzy_metadata_rank_with_scores(
                                 &candidate.search_index,
@@ -356,161 +535,34 @@ impl TranscriptSearch {
                             );
                             rank.opening_prompt = priority.opening_prompt;
                             rank.intent_terms = priority.intent_terms;
+                            rank.source_weight = priority.source_weight;
                             if sender.send((candidate.id.clone(), rank)).is_err() {
                                 return;
                             }
                         }
-                        candidate
-                            .missing_tokens
-                            .retain(|token| !candidate.search_index.contains(token.as_str()));
-                        if candidate.missing_tokens.is_empty() {
-                            let rank = literal_metadata_rank(&candidate.search_index, &tokens)
-                                .with_exact_field(candidate.exact_field);
-                            if sender.send((candidate.id, rank)).is_err() {
-                                return;
-                            }
-                            continue;
-                        }
-                        fuzzy_candidates.push((candidate, priority));
                     }
-                    let mut transcripts = Vec::new();
-                    for (mut candidate, priority) in fuzzy_candidates {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let mut fuzzy_missing = candidate.missing_tokens.clone();
-                        let mut rank = fuzzy_metadata_rank_with_scores(
-                            &candidate.search_index,
-                            &tokens,
-                            &mut scores,
-                        )
-                        .with_exact_field(candidate.exact_field);
-                        rank.opening_prompt = priority.opening_prompt;
-                        rank.intent_terms = priority.intent_terms;
-                        fuzzy_missing
-                            .retain(|token| !scores.matches_text(token, &candidate.search_index));
-                        candidate.search_index = String::new();
-                        if fuzzy_missing.is_empty()
-                            && sender.send((candidate.id.clone(), rank)).is_err()
-                        {
-                            return;
-                        }
-                        if !candidate.paths.is_empty() {
-                            transcripts.push((candidate, fuzzy_missing, rank));
-                        }
+                    let candidates = ranked.into_iter().map(|(candidate, _)| candidate);
+                    let mut shards: Vec<Vec<Candidate>> =
+                        (0..workers).map(|_| Vec::new()).collect();
+                    for (index, candidate) in candidates.enumerate() {
+                        shards[index % workers].push(candidate);
                     }
-                    // Fuzzy scoring adds evidence unavailable to the cheap
-                    // pass. Use it to schedule disk reads, too.
-                    transcripts.sort_by_key(|(_, _, rank)| std::cmp::Reverse(*rank));
-                    let mut cold_transcripts = Vec::new();
-                    let mut warm_fuzzy = Vec::new();
-                    // Reuse resident token evidence before waiting for a typing
-                    // pause. Never narrow fuzzy candidates using literal results.
-                    for (candidate, fuzzy_missing, rank) in transcripts {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        match cached_paths_scan_with_scores(
-                            &candidate.paths,
-                            &candidate.missing_tokens,
-                            &cancel,
-                            false,
-                            &mut scores,
-                        ) {
-                            Some(Some(_)) => {
-                                if sender
-                                    .send((
-                                        candidate.id,
-                                        SearchRank {
-                                            literal: true,
-                                            ..rank
-                                        },
-                                    ))
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Some(None) if fuzzy_missing.is_empty() => {}
-                            Some(None) => warm_fuzzy.push((candidate, fuzzy_missing, rank)),
-                            None => cold_transcripts.push((candidate, fuzzy_missing, rank)),
-                        }
-                    }
-                    for (candidate, missing, rank) in warm_fuzzy {
-                        match cached_paths_scan_with_scores(
-                            &candidate.paths,
-                            &missing,
-                            &cancel,
-                            true,
-                            &mut scores,
-                        ) {
-                            Some(Some(score)) => {
-                                if sender
-                                    .send((
-                                        candidate.id,
-                                        SearchRank {
-                                            score: rank.score + score,
-                                            ..rank
-                                        },
-                                    ))
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Some(None) => {}
-                            None => cold_transcripts.push((candidate, missing, rank)),
-                        }
-                    }
-                    let mut fuzzy_transcripts = Vec::new();
-                    for (candidate, fuzzy_missing, rank) in cold_transcripts {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if paths_match_mode(
-                            &candidate.paths,
-                            &candidate.missing_tokens,
-                            &cancel,
-                            false,
-                        ) {
-                            if sender
-                                .send((
-                                    candidate.id,
-                                    SearchRank {
-                                        literal: true,
-                                        ..rank
-                                    },
-                                ))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        } else if !fuzzy_missing.is_empty() {
-                            fuzzy_transcripts.push((candidate, fuzzy_missing, rank));
-                        }
-                    }
-                    // Exact transcript hits must not wait behind typo-tolerant
-                    // scans of unrelated, potentially very large sessions.
-                    for (candidate, missing, rank) in fuzzy_transcripts {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if let Some(score) = scan_paths_with_scores(
-                            &candidate.paths,
-                            &missing,
-                            &cancel,
-                            true,
-                            &mut scores,
-                        ) {
-                            let rank = SearchRank {
-                                score: rank.score + score,
-                                ..rank
-                            };
-                            if sender.send((candidate.id, rank)).is_err() {
-                                return;
+                    std::thread::scope(|scope| {
+                        for shard in shards {
+                            let sender = sender.clone();
+                            let (query, tokens, idf, cancel) = (&query, &tokens, &idf, &cancel);
+                            let spawned = std::thread::Builder::new()
+                                .name("jcode-transcript-search-shard".into())
+                                .spawn_scoped(scope, move || {
+                                    search_shard(shard, query, tokens, idf, cancel, sender)
+                                });
+                            if let Err(error) = spawned {
+                                crate::logging::debug(&format!(
+                                    "Cannot start transcript search shard: {error}"
+                                ));
                             }
                         }
-                    }
+                    });
                 }) {
                 Ok(_) => self.receiver = Some(receiver),
                 Err(error) => {
@@ -540,6 +592,296 @@ impl TranscriptSearch {
         }
         changed
     }
+}
+
+/// Parallel shards for one query. Bounded so search never starves the UI and
+/// small session lists do not pay for idle threads.
+fn search_workers(candidates: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+    (cores / 2).clamp(1, 8).min(candidates.div_ceil(16).max(1))
+}
+
+/// Rank one shard of candidates, cheapest evidence first.
+fn search_shard(
+    candidates: Vec<Candidate>,
+    query: &str,
+    tokens: &[String],
+    idf: &[u32],
+    cancel: &AtomicBool,
+    sender: mpsc::Sender<(String, SearchRank)>,
+) {
+    // Finish the in-memory fuzzy pass before opening any large
+    // transcripts. Neither DP matching nor disk scans belong
+    // on the keystroke/render thread.
+    let mut scores = WordScores::default();
+    let mut fuzzy_candidates = Vec::new();
+    // Metadata matches whose words may have come from a user
+    // prompt rather than a sampled tool dump or reasoning.
+    let mut classify = Vec::new();
+    let phrase = PhraseQuery::new(query);
+    // Sessions whose later user prompts may contain the query
+    // as a retyped phrase, checked after cheaper evidence.
+    let mut phrase_jobs = Vec::new();
+    for (mut candidate, priority) in prioritize_candidates(candidates, &phrase, tokens, idf, cancel)
+    {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if phrase.is_some() && !candidate.paths.is_empty() {
+            phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), priority));
+        }
+        if priority.opening_prompt > 0 {
+            let mut rank =
+                fuzzy_metadata_rank_with_scores(&candidate.search_index, tokens, &mut scores);
+            rank.opening_prompt = priority.opening_prompt;
+            rank.intent_terms = priority.intent_terms;
+            rank.source_weight = priority.source_weight;
+            if sender.send((candidate.id.clone(), rank)).is_err() {
+                return;
+            }
+        }
+        candidate
+            .missing_tokens
+            .retain(|token| !candidate.search_index.contains(token.as_str()));
+        if candidate.missing_tokens.is_empty() {
+            let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
+                .with_exact_field(candidate.exact_field)
+                .with_source_weight(priority.source_weight);
+            rank.opening_prompt = priority.opening_prompt;
+            rank.intent_terms = priority.intent_terms;
+            if sender.send((candidate.id.clone(), rank)).is_err() {
+                return;
+            }
+            if !candidate.paths.is_empty()
+                && candidate
+                    .prior
+                    .iter()
+                    .any(|source| *source != Some(Source::User))
+            {
+                classify.push((candidate, rank));
+            }
+            continue;
+        }
+        fuzzy_candidates.push((candidate, priority));
+    }
+    let mut transcripts = Vec::new();
+    for (mut candidate, priority) in fuzzy_candidates {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut fuzzy_missing = candidate.missing_tokens.clone();
+        let mut rank =
+            fuzzy_metadata_rank_with_scores(&candidate.search_index, tokens, &mut scores)
+                .with_exact_field(candidate.exact_field);
+        rank.opening_prompt = priority.opening_prompt;
+        rank.intent_terms = priority.intent_terms;
+        rank.source_weight = priority.source_weight;
+        fuzzy_missing.retain(|token| !scores.matches_text(token, &candidate.search_index));
+        candidate.search_index = String::new();
+        if fuzzy_missing.is_empty() && sender.send((candidate.id.clone(), rank)).is_err() {
+            return;
+        }
+        if !candidate.paths.is_empty() {
+            transcripts.push((candidate, fuzzy_missing, rank));
+        }
+    }
+    // Fuzzy scoring adds evidence unavailable to the cheap
+    // pass. Use it to schedule disk reads, too.
+    transcripts.sort_by_key(|(_, _, rank)| std::cmp::Reverse(*rank));
+    let mut cold_transcripts = Vec::new();
+    let mut warm_fuzzy = Vec::new();
+    // Reuse resident token evidence before waiting for a typing
+    // pause. Never narrow fuzzy candidates using literal results.
+    for (candidate, fuzzy_missing, rank) in transcripts {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        match cached_paths_scan_with_scores(
+            &candidate.paths,
+            tokens,
+            &candidate.prior,
+            cancel,
+            false,
+            &mut scores,
+        ) {
+            Some(Some(evidence)) => {
+                if sender
+                    .send((
+                        candidate.id,
+                        SearchRank {
+                            literal: true,
+                            source_weight: source::weighted_source_weight(&evidence.sources, idf),
+                            ..rank
+                        },
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Some(None) if fuzzy_missing.is_empty() => {}
+            Some(None) => warm_fuzzy.push((candidate, fuzzy_missing, rank)),
+            None => cold_transcripts.push((candidate, fuzzy_missing, rank)),
+        }
+    }
+    for (candidate, missing, rank) in warm_fuzzy {
+        let prior = fuzzy_prior(tokens, &candidate.prior, &missing);
+        match cached_paths_scan_with_scores(
+            &candidate.paths,
+            tokens,
+            &prior,
+            cancel,
+            true,
+            &mut scores,
+        ) {
+            Some(Some(evidence)) => {
+                if sender
+                    .send((
+                        candidate.id,
+                        SearchRank {
+                            score: rank.score + evidence.score,
+                            source_weight: source::weighted_source_weight(&evidence.sources, idf),
+                            ..rank
+                        },
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Some(None) => {}
+            None => cold_transcripts.push((candidate, missing, rank)),
+        }
+    }
+    let mut fuzzy_transcripts = Vec::new();
+    for (candidate, fuzzy_missing, rank) in cold_transcripts {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(evidence) = scan_paths_with_scores(
+            &candidate.paths,
+            tokens,
+            &candidate.prior,
+            cancel,
+            ScanMode::Literal,
+            &mut scores,
+        ) {
+            if sender
+                .send((
+                    candidate.id,
+                    SearchRank {
+                        literal: true,
+                        source_weight: source::weighted_source_weight(&evidence.sources, idf),
+                        ..rank
+                    },
+                ))
+                .is_err()
+            {
+                return;
+            }
+        } else if !fuzzy_missing.is_empty() {
+            fuzzy_transcripts.push((candidate, fuzzy_missing, rank));
+        }
+    }
+    // Read where metadata matches came from before slower
+    // typo-tolerant scans, so a session whose words the user
+    // typed rises above one where they only appear in tool output.
+    for (candidate, rank) in classify {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(evidence) = scan_paths_with_scores(
+            &candidate.paths,
+            tokens,
+            &candidate.prior,
+            cancel,
+            ScanMode::Classify,
+            &mut scores,
+        ) {
+            let weight = source::weighted_source_weight(&evidence.sources, idf);
+            if weight > rank.source_weight
+                && sender
+                    .send((candidate.id, rank.with_source_weight(weight)))
+                    .is_err()
+            {
+                return;
+            }
+        }
+    }
+    // Exact transcript hits must not wait behind typo-tolerant
+    // scans of unrelated, potentially very large sessions.
+    for (candidate, missing, rank) in fuzzy_transcripts {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let prior = fuzzy_prior(tokens, &candidate.prior, &missing);
+        if let Some(evidence) = scan_paths_with_scores(
+            &candidate.paths,
+            tokens,
+            &prior,
+            cancel,
+            ScanMode::Fuzzy,
+            &mut scores,
+        ) {
+            let rank = SearchRank {
+                score: rank.score + evidence.score,
+                source_weight: source::weighted_source_weight(&evidence.sources, idf),
+                ..rank
+            };
+            if sender.send((candidate.id, rank)).is_err() {
+                return;
+            }
+        }
+    }
+    // A follow-up prompt the user retyped outranks scattered
+    // word hits, the same as a retyped opening prompt.
+    if let Some(phrase) = &phrase {
+        for (id, paths, priority) in phrase_jobs {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let matched = user_prompt_phrase_rank(&paths, phrase, cancel);
+            if matched > priority.opening_prompt
+                && sender
+                    .send((
+                        id,
+                        SearchRank {
+                            opening_prompt: matched,
+                            source_weight: priority.source_weight.max(
+                                source::weighted_source_weight(
+                                    &vec![Some(Source::User); tokens.len()],
+                                    idf,
+                                ),
+                            ),
+                            ..priority
+                        },
+                    ))
+                    .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Sessions decoded ahead of the first query, most recent first. Bounded so
+/// prefetch stays well inside the text cache's entry and byte budgets.
+const PREFETCH_SESSIONS: usize = 96;
+
+/// Start decoding the most recent transcripts as soon as the picker has its
+/// session list, so typing begins against a warm cache.
+pub(super) fn prefetch_recent<'a>(sessions: impl Iterator<Item = &'a SessionInfo>) {
+    if cfg!(test) {
+        return;
+    }
+    let mut recent: Vec<&SessionInfo> = sessions.collect();
+    recent.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    let paths = recent
+        .into_iter()
+        .take(PREFETCH_SESSIONS)
+        .flat_map(|session| transcript_paths(session).into_iter().take(1))
+        .collect();
+    warmup::prefetch(paths);
 }
 
 fn transcript_paths(session: &SessionInfo) -> Vec<PathBuf> {
@@ -575,51 +917,116 @@ fn transcript_paths(session: &SessionInfo) -> Vec<PathBuf> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanMode {
+    /// Stop once every token is found.
+    Literal,
+    /// Typo-tolerant matching. Stop once every token is found.
+    Fuzzy,
+    /// Literal matching that keeps reading until every token was seen in a
+    /// user prompt, so the rank reflects the strongest origin of each word.
+    Classify,
+}
+
 struct Scan<'a> {
     tokens: &'a [String],
     found: Vec<bool>,
+    /// Strongest origin each token was seen in so far.
+    sources: Vec<Option<Source>>,
     cancel: &'a AtomicBool,
     fuzzy: bool,
+    classify: bool,
     score: i64,
     scores: &'a mut WordScores,
 }
 
-impl Scan<'_> {
+impl<'a> Scan<'a> {
+    /// `prior` marks tokens already satisfied by metadata and their origin.
+    fn new(
+        tokens: &'a [String],
+        prior: &[Option<Source>],
+        cancel: &'a AtomicBool,
+        mode: ScanMode,
+        scores: &'a mut WordScores,
+    ) -> Self {
+        let sources: Vec<_> = (0..tokens.len())
+            .map(|index| prior.get(index).copied().flatten())
+            .collect();
+        Self {
+            tokens,
+            found: sources.iter().map(Option::is_some).collect(),
+            sources,
+            cancel,
+            fuzzy: mode == ScanMode::Fuzzy,
+            classify: mode == ScanMode::Classify,
+            score: 0,
+            scores,
+        }
+    }
+
     fn complete(&self) -> bool {
+        if self.classify {
+            self.sources
+                .iter()
+                .all(|source| *source == Some(Source::User))
+        } else {
+            self.found.iter().all(|found| *found)
+        }
+    }
+
+    fn all_found(&self) -> bool {
         self.found.iter().all(|found| *found)
     }
 
-    fn text<E: serde::de::Error>(&mut self, text: &str) -> Result<(), E> {
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(E::custom("search cancelled"));
-        }
-        self.normalized_text(&text.to_lowercase())
+    fn evidence(&self) -> Option<Evidence> {
+        self.all_found().then(|| Evidence {
+            score: self.score,
+            sources: self.sources.clone(),
+        })
     }
 
-    fn normalized_text<E: serde::de::Error>(&mut self, lower: &str) -> Result<(), E> {
+    fn normalized_text<E: serde::de::Error>(
+        &mut self,
+        lower: &str,
+        source: Source,
+    ) -> Result<(), E> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(E::custom("search cancelled"));
         }
-        for (token, found) in self.tokens.iter().zip(&mut self.found) {
-            if !*found {
-                if lower.contains(token) {
-                    *found = true;
-                    if self.fuzzy {
-                        self.score +=
-                            i64::from(jcode_fuzzy::fuzzy_score(token, token).unwrap_or(0));
-                    }
-                } else if self.fuzzy
-                    && token.chars().count() >= 4
-                    && token.chars().all(char::is_alphabetic)
+        for ((token, found), best) in self
+            .tokens
+            .iter()
+            .zip(&mut self.found)
+            .zip(&mut self.sources)
+        {
+            if *found {
+                // Only a stronger origin can change the rank. Skipping weaker
+                // segments keeps tool dumps cheap once a token is found.
+                if best.is_none_or(|best| source.weight() > best.weight())
+                    && lower.contains(token.as_str())
                 {
-                    // Score the words that actually matched, not unrelated
-                    // metadata. Bound DP work for URLs and minified output.
-                    // Transcript evidence prefers the closest word length
-                    // over an incidental longer prefix or suffix match.
-                    if let Some(score) = self.scores.best_score(token, lower, true) {
-                        *found = true;
-                        self.score += i64::from(score);
-                    }
+                    *best = Some(source);
+                }
+                continue;
+            }
+            if lower.contains(token.as_str()) {
+                *found = true;
+                *best = Some(source);
+                if self.fuzzy {
+                    self.score += i64::from(jcode_fuzzy::fuzzy_score(token, token).unwrap_or(0));
+                }
+            } else if self.fuzzy
+                && token.chars().count() >= 4
+                && token.chars().all(char::is_alphabetic)
+            {
+                // Score the words that actually matched, not unrelated
+                // metadata. Bound DP work for URLs and minified output.
+                // Transcript evidence prefers the closest word length
+                // over an incidental longer prefix or suffix match.
+                if let Some(score) = self.scores.best_score(token, lower, true) {
+                    *found = true;
+                    *best = Some(source);
+                    self.score += i64::from(score);
                 }
             }
         }
@@ -632,52 +1039,43 @@ impl Scan<'_> {
 
 // Decode one JSON string at a time, including escaped Unicode and newlines.
 // Do not materialize a many-MB session or mistake JSON field names for prose.
-impl<'de> DeserializeSeed<'de> for &mut Scan<'_> {
-    type Value = ();
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+impl source::Sink for Scan<'_> {
+    fn text(&mut self, text: &str, source: Source) -> Result<(), &'static str> {
         if self.cancel.load(Ordering::Relaxed) {
-            return Err(serde::de::Error::custom("search cancelled"));
+            return Err("search cancelled");
         }
-        deserializer.deserialize_any(self)
+        self.normalized_text::<serde::de::value::Error>(&text.to_lowercase(), source)
+            .map_err(|_| {
+                if self.cancel.load(Ordering::Relaxed) {
+                    "search cancelled"
+                } else {
+                    "search complete"
+                }
+            })
     }
 }
 
-impl<'de> Visitor<'de> for &mut Scan<'_> {
-    type Value = ();
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("transcript JSON")
-    }
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<(), E> {
-        self.text(value)
-    }
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<(), E> {
-        self.text(&value)
-    }
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        while seq.next_element_seed(&mut *self)?.is_some() {}
-        Ok(())
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        while map.next_key::<IgnoredAny>()?.is_some() {
-            map.next_value_seed(&mut *self)?;
-        }
-        Ok(())
-    }
+/// Tokens outside `missing` were already satisfied by metadata.
+fn fuzzy_prior(
+    tokens: &[String],
+    prior: &[Option<Source>],
+    missing: &[String],
+) -> Vec<Option<Source>> {
+    tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| {
+            if missing.contains(token) {
+                None
+            } else {
+                prior
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .or(Some(Source::ToolOutput))
+            }
+        })
+        .collect()
 }
 
 struct CancellableReader<'a> {
@@ -703,6 +1101,7 @@ fn paths_match_scored(paths: &[PathBuf], tokens: &[String], cancel: &AtomicBool)
     scan_paths(paths, tokens, cancel, true)
 }
 
+#[cfg(test)]
 fn paths_match_mode(
     paths: &[PathBuf],
     tokens: &[String],
@@ -712,48 +1111,70 @@ fn paths_match_mode(
     scan_paths(paths, tokens, cancel, fuzzy).is_some()
 }
 
+#[cfg(test)]
+fn mode(fuzzy: bool) -> ScanMode {
+    if fuzzy {
+        ScanMode::Fuzzy
+    } else {
+        ScanMode::Literal
+    }
+}
+
+#[cfg(test)]
 fn scan_paths(
     paths: &[PathBuf],
     tokens: &[String],
     cancel: &AtomicBool,
     fuzzy: bool,
 ) -> Option<i64> {
-    scan_paths_with_scores(paths, tokens, cancel, fuzzy, &mut WordScores::default())
+    scan_paths_with_scores(
+        paths,
+        tokens,
+        &[],
+        cancel,
+        mode(fuzzy),
+        &mut WordScores::default(),
+    )
+    .map(|evidence| evidence.score)
 }
 
 fn scan_paths_with_scores(
     paths: &[PathBuf],
     tokens: &[String],
+    prior: &[Option<Source>],
     cancel: &AtomicBool,
-    fuzzy: bool,
+    mode: ScanMode,
     scores: &mut WordScores,
-) -> Option<i64> {
-    let mut scan = Scan {
-        tokens,
-        found: vec![false; tokens.len()],
-        cancel,
-        fuzzy,
-        score: 0,
-        scores,
-    };
+) -> Option<Evidence> {
+    let mut scan = Scan::new(tokens, prior, cancel, mode, scores);
     for path in paths {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        scan_file(path, &mut scan);
         if scan.complete() {
-            return Some(scan.score);
+            break;
         }
+        scan_file(path, &mut scan);
     }
-    None
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    scan.evidence()
 }
 
-fn apply_token_matches(scan: &mut Scan<'_>, matches: Vec<Option<i64>>) {
-    for (found, score) in scan.found.iter_mut().zip(matches) {
-        if !*found && let Some(score) = score {
+fn apply_token_matches(scan: &mut Scan<'_>, matches: Vec<Option<token_cache::Hit>>) {
+    for ((found, best), hit) in scan
+        .found
+        .iter_mut()
+        .zip(scan.sources.iter_mut())
+        .zip(matches)
+    {
+        let Some(hit) = hit else { continue };
+        if !*found {
             *found = true;
-            scan.score += score;
+            scan.score += hit.score;
         }
+        *best = source::stronger(*best, Some(hit.source));
     }
 }
 
@@ -767,24 +1188,31 @@ fn cached_paths_scan(
     cancel: &AtomicBool,
     fuzzy: bool,
 ) -> Option<Option<i64>> {
-    cached_paths_scan_with_scores(paths, tokens, cancel, fuzzy, &mut WordScores::default())
+    cached_paths_scan_with_scores(
+        paths,
+        tokens,
+        &[],
+        cancel,
+        fuzzy,
+        &mut WordScores::default(),
+    )
+    .map(|evidence| evidence.map(|evidence| evidence.score))
 }
 
 fn cached_paths_scan_with_scores(
     paths: &[PathBuf],
     tokens: &[String],
+    prior: &[Option<Source>],
     cancel: &AtomicBool,
     fuzzy: bool,
     scores: &mut WordScores,
-) -> Option<Option<i64>> {
-    let mut scan = Scan {
-        tokens,
-        found: vec![false; tokens.len()],
-        cancel,
-        fuzzy,
-        score: 0,
-        scores,
+) -> Option<Option<Evidence>> {
+    let mode = if fuzzy {
+        ScanMode::Fuzzy
+    } else {
+        ScanMode::Literal
     };
+    let mut scan = Scan::new(tokens, prior, cancel, mode, scores);
     let mut all_resident = true;
     for path in paths {
         if cancel.load(Ordering::Relaxed) {
@@ -795,7 +1223,7 @@ fn cached_paths_scan_with_scores(
         {
             apply_token_matches(&mut scan, matches);
             if scan.complete() && (!fuzzy || all_resident) {
-                return Some(Some(scan.score));
+                return Some(scan.evidence());
             }
         } else if !std::fs::metadata(path)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -808,7 +1236,7 @@ fn cached_paths_scan_with_scores(
     if cancel.load(Ordering::Relaxed) || !all_resident {
         None
     } else {
-        Some(scan.complete().then_some(scan.score))
+        Some(scan.evidence())
     }
 }
 
@@ -866,8 +1294,8 @@ fn scan_file_streaming(path: &Path, scan: &mut Scan<'_>) {
                 }
                 Ok(_) => {
                     record += 1;
-                    if let Err(error) =
-                        (&mut *scan).deserialize(&mut serde_json::Deserializer::from_slice(&line))
+                    if let Err(error) = source::Walk::new(&mut *scan)
+                        .deserialize(&mut serde_json::Deserializer::from_slice(&line))
                     {
                         log_scan_error(path, Some(record), scan, &error);
                     }
@@ -882,7 +1310,7 @@ fn scan_file_streaming(path: &Path, scan: &mut Scan<'_>) {
     let mut deserializer = serde_json::Deserializer::from_reader(reader);
     // The stream can be one snapshot or multiple JSONL records.
     loop {
-        match (&mut *scan).deserialize(&mut deserializer) {
+        match source::Walk::new(&mut *scan).deserialize(&mut deserializer) {
             Ok(()) => {}
             Err(error) => {
                 // EOF is normal between values or in a live, partially written record.
