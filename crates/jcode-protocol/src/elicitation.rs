@@ -279,3 +279,46 @@ mod tests {
         );
     }
 }
+
+/// Terminal broker outcome, broadcast to withdraw forms on peer clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationResolution {
+    Accepted,
+    Declined,
+    Cancelled,
+    Expired,
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use crate::{Request, ServerEvent};
+    use serde_json::json;
+    #[test]
+    fn elicitation_wire_roundtrips_and_legacy_subscribe_omits_false() {
+        let request = Request::ElicitationResponse {
+            id: 7,
+            session_id: "s".into(),
+            elicitation_id: "e".into(),
+            response: ElicitationResponse::Decline,
+        };
+        assert_eq!(request.id(), 7);
+        assert!(request.is_lightweight_control_request());
+        let encoded = serde_json::to_value(&request).unwrap();
+        let decoded: Request = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        let event = ServerEvent::ElicitationResolved {
+            session_id: "s".into(),
+            elicitation_id: "e".into(),
+            outcome: ElicitationResolution::Accepted,
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        let decoded: ServerEvent = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        let legacy: Request = serde_json::from_value(json!({"type":"subscribe","id":1})).unwrap();
+        let encoded = serde_json::to_value(legacy).unwrap();
+        assert!(encoded.get("supports_elicitation_form").is_none());
+        assert!(encoded.get("applet_elicitation").is_none());
+    }
+}

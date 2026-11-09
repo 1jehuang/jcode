@@ -1553,6 +1553,8 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_elicitation_form: _,
+                applet_elicitation: _,
                 supports_server_failover: requested_server_failover,
                 supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
@@ -2488,6 +2490,11 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::ElicitationResponse { id, .. } => {
+                if let Err(error) = client_event_tx.send(ServerEvent::Error {
+                    id, message: "Form elicitation is not available".into(), retry_after_secs: None,
+                }) { crate::logging::debug(&format!("elicitation response delivery failed: {error}")); }
+            }
             Request::AppletAction {
                 id,
                 session_id,
