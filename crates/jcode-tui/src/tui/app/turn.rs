@@ -1185,7 +1185,7 @@ impl App {
                                             crate::telemetry::record_tool_failure();
                                         }
                                         let native_result = match tool_result {
-                                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
+                                            Ok(output) => crate::provider::NativeToolResult::from_tool_output(request_id, output),
                                             Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
                                         };
                                         if let Some(sender) = self.provider.native_result_sender() {

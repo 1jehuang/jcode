@@ -10,6 +10,7 @@ pub mod fingerprint;
 pub mod model_id;
 pub mod model_names;
 pub mod models;
+mod native_tool;
 pub mod openai_schema;
 pub mod pricing;
 pub mod reasoning;
@@ -17,6 +18,7 @@ pub mod request_compression;
 pub mod retry_after;
 pub mod selection;
 pub mod service_tier;
+pub use native_tool::{NativeToolResult, NativeToolResultPayload, NativeToolResultSender};
 mod simple_completion;
 pub use simple_completion::collect_simple_completion;
 pub mod transport;
@@ -790,53 +792,6 @@ impl CredentialMode {
             }
             (Self::OAuth, DualAuthProvider::OpenAI) => Some(AuthRoute::openai(AuthMode::Oauth)),
             (Self::ApiKey, DualAuthProvider::OpenAI) => Some(AuthRoute::openai(AuthMode::ApiKey)),
-        }
-    }
-}
-
-/// Channel for sending provider-native tool results back to a provider bridge.
-pub type NativeToolResultSender = tokio::sync::mpsc::Sender<NativeToolResult>;
-
-/// Native tool result to send back to provider bridges that delegate tool execution to jcode.
-#[derive(Debug, Clone, Serialize)]
-pub struct NativeToolResult {
-    #[serde(rename = "type")]
-    pub msg_type: &'static str,
-    pub request_id: String,
-    pub result: NativeToolResultPayload,
-    pub is_error: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NativeToolResultPayload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-impl NativeToolResult {
-    pub fn success(request_id: String, output: String) -> Self {
-        Self {
-            msg_type: "native_tool_result",
-            request_id,
-            result: NativeToolResultPayload {
-                output: Some(output),
-                error: None,
-            },
-            is_error: false,
-        }
-    }
-
-    pub fn error(request_id: String, error: String) -> Self {
-        Self {
-            msg_type: "native_tool_result",
-            request_id,
-            result: NativeToolResultPayload {
-                output: None,
-                error: Some(error),
-            },
-            is_error: true,
         }
     }
 }

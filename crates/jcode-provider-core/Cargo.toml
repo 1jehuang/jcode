@@ -20,6 +20,7 @@ httpdate = "1"
 jcode-logging = { path = "../jcode-logging" }
 jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 jcode-message-types = { path = "../jcode-message-types" }
+jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
@@ -30,4 +31,4 @@ tokio = { version = "1", features = ["sync", "time", "macros", "io-util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "macros", "rt", "net", "io-util"] }
-tokio-tungstenite = { version = "0.24", default-features = false }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

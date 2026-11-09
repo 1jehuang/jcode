@@ -29,6 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 
 [dev-dependencies]
+jcode-tool-types = { path = "../jcode-tool-types" }
 futures = "0.3"
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"

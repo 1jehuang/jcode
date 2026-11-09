@@ -299,18 +299,9 @@ async fn answer_tool_call(
         ));
         return;
     };
-    let text = result
-        .result
-        .output
-        .or(result.result.error)
-        .unwrap_or_default();
     let reply = control::control_success(
         &result.request_id,
-        control::mcp_response_body(control::mcp_tool_result(
-            &jsonrpc_id,
-            &text,
-            result.is_error,
-        )),
+        control::mcp_response_body(control::mcp_tool_result(&jsonrpc_id, &result)),
     );
     if let Err(err) = child.send(&reply).await {
         jcode_base::logging::warn(&format!("Claude Code: tool result reply failed: {err}"));
@@ -330,8 +321,7 @@ async fn interrupt(
             &request_id,
             control::mcp_response_body(control::mcp_tool_result(
                 &jsonrpc_id,
-                "Cancelled by the user.",
-                true,
+                &NativeToolResult::error(request_id.clone(), "Cancelled by the user.".into()),
             )),
         );
         let _ = child.send(&reply).await;

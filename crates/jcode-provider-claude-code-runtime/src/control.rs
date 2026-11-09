@@ -6,6 +6,7 @@
 //! only asynchronous request and is surfaced as [`McpAction::CallTool`].
 
 use jcode_message_types::ToolDefinition;
+use jcode_provider_core::NativeToolResult;
 use serde_json::{Value, json};
 
 use crate::translate::JCODE_MCP_PREFIX;
@@ -283,10 +284,25 @@ pub(crate) fn handle_mcp_message_with_file_tools(
 }
 
 /// JSON-RPC reply for a finished `tools/call`.
-pub fn mcp_tool_result(jsonrpc_id: &Value, text: &str, is_error: bool) -> Value {
+pub fn mcp_tool_result(jsonrpc_id: &Value, result: &NativeToolResult) -> Value {
+    let text = result
+        .result
+        .output
+        .as_deref()
+        .or(result.result.error.as_deref())
+        .unwrap_or("");
+    let mut content = vec![json!({"type": "text", "text": text})];
+    for image in &result.images {
+        if let Some(label) = &image.label {
+            content.push(json!({"type": "text", "text": label}));
+        }
+        content.push(json!({
+            "type": "image", "data": image.data, "mimeType": image.media_type
+        }));
+    }
     jsonrpc_result(
         jsonrpc_id,
-        json!({"content": [{"type": "text", "text": text}], "isError": is_error}),
+        json!({"content": content, "isError": result.is_error}),
     )
 }
 
@@ -379,7 +395,10 @@ mod tests {
         let unknown = json!({"method":"tools/call","params":{"name":"bash"},"id":3});
         assert!(matches!(handle_mcp_message(&unknown, &[tool("bash")]),
             McpAction::Reply(r) if r["result"]["isError"] == true));
-        let reply = mcp_tool_result(&json!(2), "MCPOK", false);
+        let reply = mcp_tool_result(
+            &json!(2),
+            &NativeToolResult::success(String::new(), "MCPOK".into()),
+        );
         assert_eq!(reply["result"]["content"][0]["text"], "MCPOK");
         assert_eq!(reply["result"]["isError"], false);
     }
