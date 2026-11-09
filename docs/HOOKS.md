@@ -153,11 +153,11 @@ swarm_member_end   = "~/bin/on-worker-end"     # hook_event_name "SubagentStop"
 truncated to 4000 chars with a marker) and `jcode.status`, `jcode.duration_ms`, `jcode.swarm`.
 Repeated updates of the same status do not refire.
 
-Known limits of worker identity: the swarm fields are registered when the
-worker is spawned, so a headless worker's own `session_start` hook (which runs
-while the agent is being constructed) carries no swarm fields, and identities
-are in memory only, so a worker revived after a daemon restart runs its hooks
-without them. Env overrides:
+Worker identity is registered before a headless worker's own `session_start`
+hook fires, so that hook carries the swarm fields. Identities are saved with
+the swarm member and restored after a daemon restart and when a swarm is
+imported onto another server, so resumed and transferred workers keep their
+swarm fields and `swarm_member_end`. Env overrides:
 `JCODE_HOOK_SWARM_MEMBER_START`, `JCODE_HOOK_SWARM_MEMBER_END`.
 
 ## Feedback hook: `post_tool_feedback`

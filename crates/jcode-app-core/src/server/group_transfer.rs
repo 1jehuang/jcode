@@ -738,6 +738,18 @@ async fn import_bundle(
                 .collect::<Result<Vec<_>>>()
         })
         .collect::<Result<Vec<_>>>()?;
+    // Worker hook identities travel with the bundle. They are registered only
+    // once the import is installed, and never fire a start event.
+    let hook_identities: Vec<(String, crate::hooks::SwarmIdentity)> = swarms
+        .iter()
+        .flat_map(|swarm| swarm.members.iter())
+        .filter_map(|member| {
+            member
+                .hook_identity
+                .clone()
+                .map(|identity| (member.record.session_id.clone(), identity))
+        })
+        .collect();
     // Durable writes happen before installation. No unrelated snapshot is read,
     // rewritten or pruned via the startup loader.
     for swarm in &swarms {
@@ -769,6 +781,9 @@ async fn import_bundle(
         if let Some(coordinator) = swarm.coordinator_session_id {
             coordinators.insert(swarm.swarm_id, coordinator);
         }
+    }
+    for (session_id, identity) in hook_identities {
+        crate::hooks::register_swarm_identity(&session_id, identity);
     }
     Ok(())
 }
