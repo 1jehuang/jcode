@@ -2036,6 +2036,42 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Definitive exhaustion cannot recover by sleeping. Model-scoped
+                // recovery above still gets first refusal, including earned resets.
+                if is_oauth
+                    && !saw_output
+                    && is_account_limit_error(&error_str)
+                    && oauth_account_label.as_deref().is_some_and(|label| {
+                        jcode_base::usage::account_known_exhausted(
+                            jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                            label,
+                        )
+                    })
+                {
+                    // The API often uses the same generic 429 for exhausted plan
+                    // usage and burst throttles. Preserve verified account usage
+                    // evidence so the outer router can skip its countdown too.
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("Usage exhausted: {e:#}")))
+                        .await;
+                    return;
+                }
+                if !saw_output
+                    && jcode_provider_core::failover::is_definitive_usage_exhaustion(&error_str)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
+                let retry_recoverable_limit =
+                    error_classification::should_retry_recoverable_rate_limit(
+                        &error_str,
+                        jcode_provider_core::retry_after::retry_after_from_error(&e),
+                        jcode_base::config::Config::load()
+                            .provider
+                            .anthropic_retry_recoverable_rate_limits,
+                    );
+
                 // Account routing owns pre-output OAuth quota/auth failures when
                 // other pool members exist, even if they are cooling down. Let
                 // the router decide whether to rotate or report exhaustion.
@@ -2049,6 +2085,7 @@ async fn run_stream_with_retries(
                     && !response_accepted
                     && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
                     && jcode_base::provider::has_alternate_account_in_pool("claude")
+                    && !retry_recoverable_limit
                 {
                     let _ = tx.send(Err(e)).await;
                     return;
