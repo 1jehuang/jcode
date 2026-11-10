@@ -30,7 +30,7 @@ pub fn spawn_if_needed(native_ssh: bool) {
     ) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("jcode-companion-autostart".into())
         .spawn(|| {
             if crate::companion_client::is_running() {
@@ -43,7 +43,12 @@ pub fn spawn_if_needed(native_ssh: bool) {
                 // Give it a moment, so the first open/spawn request finds it.
                 std::thread::sleep(Duration::from_millis(200));
             }
-        });
+        })
+    {
+        crate::logging::warn(&format!(
+            "Failed to start companion autostart worker: {error}"
+        ));
+    }
 }
 
 fn spawn_detached() -> anyhow::Result<()> {

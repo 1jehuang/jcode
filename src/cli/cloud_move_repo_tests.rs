@@ -29,6 +29,36 @@ pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifes
 }
 
 #[test]
+fn snapshot_index_copy_errors_are_reported_without_mutating_real_index() {
+    let (root, _stage, _) = repository();
+    let scratch = tempfile::tempdir().unwrap();
+    let index_path = root.path().join(".git/index");
+    let original_index = std::fs::read(&index_path).unwrap();
+    for name in ["snapshot.index", "ours.index"] {
+        std::fs::create_dir(scratch.path().join(name)).unwrap();
+    }
+    let error = prepare_repo_snapshot(root.path(), "copy-error", scratch.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("failed to copy Git index"));
+    let error = snapshot_worktree_tree(root.path(), scratch.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("failed to copy Git index"));
+    assert_eq!(std::fs::read(index_path).unwrap(), original_index);
+}
+
+#[test]
+fn snapshot_rebuilds_a_missing_git_index_without_creating_the_real_index() {
+    let (root, _stage, _) = repository();
+    let scratch = tempfile::tempdir().unwrap();
+    let index_path = root.path().join(".git/index");
+    std::fs::remove_file(&index_path).unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    assert_eq!(
+        tree,
+        git(root.path(), &["rev-parse", "HEAD^{tree}"]).unwrap()
+    );
+    assert!(!index_path.exists());
+}
+
+#[test]
 fn cloud_unreturned_work_is_rescued_and_move_proceeds() {
     let (root, _earlier_stage, _) = repository();
     let stage = tempfile::tempdir().unwrap();
@@ -50,7 +80,11 @@ fn cloud_unreturned_work_is_rescued_and_move_proceeds() {
     );
     let rescued = git(
         root.path(),
-        &["for-each-ref", "--format=%(refname)", "refs/jcode-cloud/rescued"],
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/jcode-cloud/rescued",
+        ],
     )
     .unwrap();
     let rescued = rescued.lines().next().expect("rescue ref");

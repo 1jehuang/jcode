@@ -249,7 +249,9 @@ fn spawn_stream(
                 crate::logging::debug(&format!("Build status stream ended: {error:#}"));
             }
             // Some(None) tells the poller the stream is gone.
-            let _ = sender.send(Some(None));
+            if sender.send(Some(None)).is_err() {
+                crate::logging::debug("Build status receiver closed");
+            }
         });
     }
     receiver

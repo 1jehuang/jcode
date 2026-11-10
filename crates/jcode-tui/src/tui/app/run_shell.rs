@@ -561,7 +561,9 @@ impl StatusSpinnerRenderer {
                 // reuses the existing cell storage.
                 buffer.area = completed.buffer.area;
                 buffer.content.clone_from(&completed.buffer.content);
-                stored_frame.take().unwrap_or_default()
+                stored_frame
+                    .take()
+                    .map_or_else(Default::default, std::convert::identity)
             }
             None => completed.buffer.clone(),
         };

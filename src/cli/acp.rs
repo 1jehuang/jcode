@@ -663,13 +663,16 @@ impl AcpRuntime {
                 .run_prompt(id.clone(), session, text, images, explicit_skill)
                 .await;
             if let Err(err) = result {
-                let _ = runtime
+                if let Err(error) = runtime
                     .write_error_value(
                         id,
                         JSONRPC_INTERNAL_ERROR,
                         format!("Prompt failed: {err:#}"),
                     )
-                    .await;
+                    .await
+                {
+                    crate::logging::warn(&format!("Failed to report ACP prompt error: {error:#}"));
+                }
             }
         });
         Ok(())

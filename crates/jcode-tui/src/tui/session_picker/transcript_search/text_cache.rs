@@ -232,7 +232,9 @@ impl DecodeClaim {
         if claimed.insert(path.to_owned()) {
             return Some(Self(path.to_owned()));
         }
-        let _ = wake.wait_timeout(claimed, std::time::Duration::from_millis(10));
+        if let Err(error) = wake.wait_timeout(claimed, std::time::Duration::from_millis(10)) {
+            crate::logging::debug(&format!("Transcript decode wait poisoned: {error}"));
+        }
         None
     }
 }

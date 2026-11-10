@@ -485,8 +485,13 @@ fn stream_file<S: source::Sink>(path: &Path, sink: &mut S, cancel: &AtomicBool) 
             match reader.read_until(b'\n', &mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let _ = source::Walk::new(&mut *sink)
-                        .deserialize(&mut serde_json::Deserializer::from_slice(&line));
+                    if let Err(error) = source::Walk::new(&mut *sink)
+                        .deserialize(&mut serde_json::Deserializer::from_slice(&line))
+                    {
+                        crate::logging::debug(&format!(
+                            "Skipping invalid transcript search record: {error}"
+                        ));
+                    }
                 }
             }
         }
@@ -572,7 +577,7 @@ impl TranscriptSearch {
         self.identities
             .get()
             .and_then(|identities| identities.get(id).copied())
-            .unwrap_or_default()
+            .unwrap_or((false, false, false))
     }
 
     /// Rarity weights for the current query, once the worker computed them.
@@ -631,7 +636,9 @@ impl TranscriptSearch {
                         })
                         .collect();
                     let identity_ids: Vec<_> = identities.keys().cloned().collect();
-                    let _ = shared_identities.set(identities);
+                    if shared_identities.set(identities).is_err() {
+                        crate::logging::debug("Transcript search identities already initialized");
+                    }
                     for id in identity_ids {
                         if sender.send((id, SearchRank::default())).is_err() {
                             return;
@@ -645,7 +652,9 @@ impl TranscriptSearch {
                             .iter()
                             .map(|candidate| candidate.search_index.as_str()),
                     );
-                    let _ = shared_idf.set(idf.clone());
+                    if shared_idf.set(idf.clone()).is_err() {
+                        crate::logging::debug("Transcript search weights already initialized");
+                    }
                     // Transcript reads and fuzzy scans dominate. Shard sessions
                     // across workers round-robin so every shard sees the same
                     // mix of recent and old sessions and ranks arrive evenly.
