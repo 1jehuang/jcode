@@ -12,6 +12,32 @@ use std::time::Instant;
 static ANTHROPIC_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, UsageData>>> =
     std::sync::OnceLock::new();
 
+static ANTHROPIC_USAGE_KEYS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+/// Publish credential fingerprints when the auth store is read or saved, so
+/// render-time quota lookups need no file access and cannot reuse another login.
+pub(crate) fn update_anthropic_usage_credentials<'a>(
+    accounts: impl Iterator<Item = (&'a str, &'a str)>,
+) {
+    let keys = accounts
+        .filter(|(_, token)| !token.trim().is_empty())
+        .map(|(label, token)| {
+            (
+                label.to_owned(),
+                format!(
+                    "{}{}",
+                    anthropic_label_key_prefix(label),
+                    anthropic_token_fingerprint(token)
+                ),
+            )
+        })
+        .collect();
+    *ANTHROPIC_USAGE_KEYS
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = keys;
+}
+
 static OPENAI_USAGE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn openai_usage_generation() -> u64 {
@@ -277,6 +303,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let _env_lock = crate::storage::lock_test_env();
         let label = "router-cache-only-test";
         let key = anthropic_usage_cache_key_with_accounts(
             "fixture-token",
@@ -284,6 +311,7 @@ mod account_snapshot_tests {
             std::iter::empty(),
         );
         let provider = MultiAccountProviderKind::Anthropic;
+        update_anthropic_usage_credentials([(label, "fixture-token")].into_iter());
         let data = UsageData {
             five_hour: 0.42,
             fetched_at: Some(Instant::now()),
@@ -299,6 +327,11 @@ mod account_snapshot_tests {
         assert!(cached_account_usage_snapshot(MultiAccountProviderKind::OpenAI, label).is_none());
         {
             let _guard = anthropic_usage_cache().lock().unwrap();
+            assert!(cached_account_usage_snapshot(provider, label).is_none());
+            assert!(cached_account_usage_status_snapshot(provider, label).is_none());
+        }
+        {
+            let _guard = ANTHROPIC_USAGE_KEYS.write().unwrap();
             assert!(cached_account_usage_snapshot(provider, label).is_none());
             assert!(cached_account_usage_status_snapshot(provider, label).is_none());
         }
@@ -336,6 +369,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
+        let _env_lock = crate::storage::lock_test_env();
         use crate::auth::account_pool::AccountPool;
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
@@ -358,6 +392,7 @@ mod account_snapshot_tests {
             ..Default::default()
         };
         store_anthropic_usage(key.clone(), data.clone());
+        update_anthropic_usage_credentials([("quota-order-healthy", "fixture-token")].into_iter());
         assert_eq!(
             pool.ordered_members(),
             vec![healthy.clone(), unknown.clone(), lower.clone()]
@@ -571,14 +606,13 @@ fn anthropic_usage_for_label<'a>(
     map: &'a HashMap<String, UsageData>,
     label: &str,
 ) -> Option<&'a UsageData> {
-    let prefix = anthropic_label_key_prefix(label);
-    map.iter()
-        .filter(|(key, _)| key.starts_with(&prefix))
-        .max_by_key(|(_, data)| data.fetched_at)
-        .map(|(_, data)| data)
+    let Ok(keys) = ANTHROPIC_USAGE_KEYS.try_read() else {
+        return None;
+    };
+    map.get(keys.get(label)?)
 }
 
-/// Fresh cached usage for a Claude account label (any credential under it).
+/// Fresh cached usage for the credential currently saved under a Claude label.
 pub(super) fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
     let map = anthropic_usage_cache().lock().ok()?;
     anthropic_usage_for_label(&map, label)

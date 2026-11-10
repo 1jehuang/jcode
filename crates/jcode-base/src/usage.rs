@@ -38,6 +38,7 @@ pub use anthropic_reset::{
 use api_keys::enqueue_api_key_usage_tasks;
 pub use cache::carry_anthropic_usage_across_token_refresh;
 pub(crate) use cache::note_openai_unavailability_observed;
+pub(crate) use cache::update_anthropic_usage_credentials;
 use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
