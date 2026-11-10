@@ -137,8 +137,17 @@ pub(super) fn handle_event(
             state.forms[index].restore_editing_after_rejection(message.clone());
             EventResult::notified(format!("The answer was rejected: {message}"))
         }
-        // Same-session `History` refreshes are not replay completion. Forms,
-        // drafts and response ids survive. Everything else is not ours.
+        ServerEvent::History { session_id, .. } => {
+            // Not replay completion. Adopting a genuinely changed session
+            // clears the old session's drafts immediately, including replay
+            // that arrived before this History. An equal session keeps every
+            // form, draft and response id. Ignored so later handlers still see
+            // History.
+            adopt_session(state, Some(session_id), context);
+            EventResult::ignored()
+        }
+        // Everything else is not ours. `ElicitationReplayComplete` is handled
+        // by the module-level `on_event` entry point before this dispatch.
         _ => EventResult::ignored(),
     }
 }

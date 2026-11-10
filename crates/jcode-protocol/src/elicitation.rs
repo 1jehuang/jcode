@@ -316,6 +316,16 @@ mod wire_tests {
         let encoded = serde_json::to_value(&event).unwrap();
         let decoded: ServerEvent = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        let event = ServerEvent::ElicitationReplayComplete {
+            session_id: "s".into(),
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"type": "elicitation_replay_complete", "session_id": "s"})
+        );
+        let decoded: ServerEvent = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
         let legacy: Request = serde_json::from_value(json!({"type":"subscribe","id":1})).unwrap();
         let encoded = serde_json::to_value(legacy).unwrap();
         assert!(encoded.get("supports_elicitation_form").is_none());

@@ -315,6 +315,7 @@ impl Form {
     }
 
     /// Enter the Submit tab, focusing the summary entry the plan asks for.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn focus_submit_tab(&mut self) {
         self.tab = self.submit_tab();
         self.editor = None;
@@ -436,10 +437,12 @@ impl State {
         *self = Self::default();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn active_form(&self) -> Option<&Form> {
         self.forms.get(self.active)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn active_form_mut(&mut self) -> Option<&mut Form> {
         let active = self.active;
         self.forms.get_mut(active)

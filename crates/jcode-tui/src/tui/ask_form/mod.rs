@@ -11,10 +11,6 @@
 //! v1 renders tagged forms only: the schema root must carry
 //! `_meta["jcode.dev/askUser"]`. Untagged and applet forms are ignored without
 //! a response, so another attached client can still answer them.
-//!
-//! The module is unwired until lane C adds the call sites, so everything in it
-//! is currently dead code from the crate's point of view.
-#![allow(dead_code)]
 
 mod keys;
 mod paste;
@@ -255,6 +251,15 @@ pub(crate) fn handle_paste(app: &mut App, text: &str) -> bool {
 /// deliberately not replay completion: same-session refreshes preserve forms,
 /// drafts and response ownership.
 pub(crate) fn on_event(app: &mut App, event: &ServerEvent) -> bool {
+    if let ServerEvent::ElicitationReplayComplete { session_id } = event {
+        // Reconcile at the app level so the exported entry point owns the
+        // state borrow. Recorded history never answers or discards drafts.
+        if TuiState::is_replay(app) {
+            return false;
+        }
+        on_replay_complete(app, session_id);
+        return true;
+    }
     let context = ViewContext::from_probe(app);
     let result = state::with(|state| reconcile::handle_event(state, &context, event));
     if let Some(notice) = result.notice {
@@ -286,10 +291,6 @@ pub(crate) fn send_failed(app: &mut App, message: &str) {
 }
 
 /// Reconciliation entry point for `ServerEvent::ElicitationReplayComplete`.
-///
-/// Lane C adds the protocol variant and calls this from its event hook. Lane B
-/// ships the function ahead of that variant, so it is dead code here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn on_replay_complete(app: &mut App, session_id: &str) {
     let context = ViewContext::from_probe(app);
     let notice = state::with(|state| reconcile::on_replay_complete(state, &context, session_id));

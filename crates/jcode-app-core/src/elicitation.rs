@@ -76,6 +76,14 @@ impl Broker {
                     ServerEvent::ElicitationRequest(pending.request.clone()),
                 );
             }
+            // Mark the end of replay even when nothing was pending. Reconcile
+            // drafts against this boundary, never against a quiet interval.
+            send(
+                &events,
+                ServerEvent::ElicitationReplayComplete {
+                    session_id: session.into(),
+                },
+            );
         }
         state.connections.insert(
             connection.into(),
@@ -267,11 +275,21 @@ mod tests {
         broker.attach(id, "s", true, true, false, tx);
         rx
     }
+    fn expect_replay_complete(event: Option<ServerEvent>, session: &str) {
+        match event {
+            Some(ServerEvent::ElicitationReplayComplete { session_id }) => {
+                assert_eq!(session_id, session);
+            }
+            other => panic!("expected replay completion for {session}, got {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn fanout_first_valid_reply_wins_and_invalid_reply_stays_pending() {
         let broker = Arc::new(Broker::default());
         let mut a = attach(&broker, "a");
         let mut b = attach(&broker, "b");
+        expect_replay_complete(a.recv().await, "s");
+        expect_replay_complete(b.recv().await, "s");
         let ticket = broker
             .start("s", None, "Question".into(), schema())
             .unwrap()
@@ -328,6 +346,7 @@ mod tests {
     async fn reconnect_catches_up_and_turn_cancel_withdraws() {
         let broker = Arc::new(Broker::default());
         let mut a = attach(&broker, "a");
+        expect_replay_complete(a.recv().await, "s");
         let ticket = broker
             .start("s", None, "Question".into(), schema())
             .unwrap()
@@ -339,6 +358,7 @@ mod tests {
             b.recv().await,
             Some(ServerEvent::ElicitationRequest(_))
         ));
+        expect_replay_complete(b.recv().await, "s");
         assert_eq!(
             ticket.wait(async {}, Duration::from_secs(1)).await,
             ElicitOutcome::Cancelled
@@ -361,6 +381,7 @@ mod tests {
                 .is_none()
         );
         let mut a = attach(&broker, "a");
+        expect_replay_complete(a.recv().await, "s");
         let ticket = broker
             .start("s", None, "Question".into(), schema())
             .unwrap()
@@ -391,5 +412,41 @@ mod tests {
             })
         ));
         assert!(broker.state.lock().unwrap().pending.is_empty());
+    }
+    #[tokio::test]
+    async fn replay_requests_precede_replay_complete() {
+        let broker = Arc::new(Broker::default());
+        let mut a = attach(&broker, "a");
+        expect_replay_complete(a.recv().await, "s");
+        let ticket = broker
+            .start("s", None, "Question".into(), schema())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            a.recv().await,
+            Some(ServerEvent::ElicitationRequest(_))
+        ));
+        broker.detach("a");
+        let mut b = attach(&broker, "b");
+        match b.recv().await {
+            Some(ServerEvent::ElicitationRequest(request)) => {
+                assert_eq!(request.session_id, "s");
+            }
+            other => panic!("expected replayed request first, got {other:?}"),
+        }
+        expect_replay_complete(b.recv().await, "s");
+        assert!(b.try_recv().is_err());
+        drop(ticket);
+    }
+    #[tokio::test]
+    async fn empty_replay_completes_and_non_form_attach_does_not() {
+        let broker = Arc::new(Broker::default());
+        let mut a = attach(&broker, "a");
+        expect_replay_complete(a.recv().await, "s");
+        assert!(a.try_recv().is_err());
+
+        let (tx, mut plain) = mpsc::unbounded_channel();
+        broker.attach("plain", "s", false, true, false, tx);
+        assert!(plain.try_recv().is_err());
     }
 }

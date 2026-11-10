@@ -1097,4 +1097,11 @@ pub enum ServerEvent {
         /// Tool call ID this is associated with
         tool_call_id: String,
     },
+
+    /// The daemon finished replaying pending elicitation forms to this
+    /// attachment. Daemon-internal: it marks the end of reconnect
+    /// reconciliation, including an empty replay set, so a client can discard
+    /// drafts it was not re-sent.
+    #[serde(rename = "elicitation_replay_complete")]
+    ElicitationReplayComplete { session_id: String },
 }

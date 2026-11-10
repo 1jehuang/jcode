@@ -819,6 +819,10 @@ mod tests {
         const CONNECTION: &str = "ask-user-round-trip-connection";
         let (tx, mut rx) = tokio_mpsc::unbounded_channel();
         crate::elicitation::global().attach(CONNECTION, SESSION, true, false, false, tx);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::ElicitationReplayComplete { session_id }) if session_id == SESSION
+        ));
 
         let input = input(json!([
             question(

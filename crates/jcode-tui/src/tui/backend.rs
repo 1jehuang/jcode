@@ -5,6 +5,7 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod elicitation;
 mod ssh_sessions;
 
 use crate::message::ToolCall;
@@ -480,7 +481,7 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
-            supports_elicitation_form: false,
+            supports_elicitation_form: true,
             applet_elicitation: false,
             supports_server_failover: false,
             supports_turn_identity: true,
