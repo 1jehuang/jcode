@@ -934,20 +934,30 @@ mod stale_account_snapshot_tests {
     #[test]
     fn account_snapshot_preserves_all_model_and_future_provider_windows() {
         let data = UsageData {
-            model_scoped: vec![super::super::ModelScopedUsageWindow {
-                model_name: "Fable".into(),
-                utilization: 0.73,
-                resets_at: None,
-            }],
+            model_scoped: vec![
+                super::super::ModelScopedUsageWindow {
+                    model_name: "Fable".into(),
+                    utilization: 0.73,
+                    resets_at: None,
+                },
+                super::super::ModelScopedUsageWindow {
+                    model_name: "Future Zenith 界".into(),
+                    utilization: 0.61,
+                    resets_at: None,
+                },
+            ],
             seven_day_opus: Some(0.28),
             ..Default::default()
         };
         let snapshot = anthropic_snapshot_from_usage("models".into(), None, &data);
-        assert_eq!(snapshot.additional_windows.len(), 2);
+        assert_eq!(snapshot.additional_windows.len(), 3);
         assert_eq!(snapshot.additional_windows[0].label, "Fable 7d");
         assert_eq!(snapshot.additional_windows[0].usage_ratio, 0.73);
-        assert_eq!(snapshot.additional_windows[1].label, "Opus 7d");
+        assert_eq!(snapshot.additional_windows[1].label, "Future Zenith 界 7d");
+        assert_eq!(snapshot.additional_windows[1].usage_ratio, 0.61);
+        assert_eq!(snapshot.additional_windows[2].label, "Opus 7d");
         assert!(snapshot.summary().contains("Fable 7d 73%"));
+        assert!(snapshot.summary().contains("Future Zenith 界 7d 61%"));
 
         let limits = [
             "5-hour",

@@ -189,11 +189,10 @@ fn remote_inventory_lines(
                 format!("{name:<9} {}", masked_identity(account.email.as_deref())),
                 is_current,
             );
-            row.spans
-                .push(Span::styled(" · ", Style::default().fg(dim_color())));
-            if let Some(quota) = remaining_bar(usage, display_used) {
-                row.spans.extend(quota.spans);
-            } else {
+            let quotas = remaining_bars(usage, display_used);
+            if quotas.is_empty() || usage.error.is_some() {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
                 row.spans.push(Span::styled(
                     usage_status_label(Some(usage)),
                     Style::default().fg(dim_color()),
@@ -213,6 +212,7 @@ fn remote_inventory_lines(
                 row.spans.push(banked);
             }
             lines.push(row);
+            lines.extend(quotas);
         }
     }
     lines
@@ -228,6 +228,7 @@ fn inventory_lines(
     use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
     use jcode_provider_core::ActiveProvider;
     let mut entries = Vec::new();
+    let mut quota_rows = std::collections::BTreeMap::new();
     let runtime = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
     let current_provider = jcode_provider_core::parse_provider_hint(provider_name);
     // Preserve the stored login order for defaulted members. Explicit pool
@@ -264,19 +265,20 @@ fn inventory_lines(
             && credential == Some(ActiveCredential::OAuth);
         let usage =
             crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
-        let quota = usage.as_ref().and_then(|usage| {
-            remaining_bar(usage, crate::config::config().display.usage_display_used())
-        });
+        let quotas = usage
+            .as_ref()
+            .map(|usage| {
+                remaining_bars(usage, crate::config::config().display.usage_display_used())
+            })
+            .unwrap_or_default();
         let mut row = detail(
             oauth_credential_status(expired, usage.as_ref()),
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
             is_current,
         );
-        row.spans
-            .push(Span::styled(" · ", Style::default().fg(dim_color())));
-        if let Some(quota) = quota {
-            row.spans.extend(quota.spans);
-        } else {
+        if quotas.is_empty() || usage.as_ref().is_some_and(|usage| usage.error.is_some()) {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
             row.spans.push(Span::styled(
                 usage_status_label(usage.as_ref()),
                 Style::default().fg(dim_color()),
@@ -289,6 +291,7 @@ fn inventory_lines(
                 .push(Span::styled(" · ", Style::default().fg(dim_color())));
             row.spans.push(banked);
         }
+        quota_rows.insert(account_key(account.provider, Some(&account.label)), quotas);
         entries.push((
             account_key(account.provider, Some(&account.label)),
             true,
@@ -366,9 +369,15 @@ fn inventory_lines(
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
                 .map(|(_, _, line)| {
-                    priority_row(line.clone(), inventory.pool.priority(key), &tiers)
+                    std::iter::once(priority_row(
+                        line.clone(),
+                        inventory.pool.priority(key),
+                        &tiers,
+                    ))
+                    .chain(quota_rows.remove(key).unwrap_or_default())
                 })
         })
+        .flatten()
         .collect();
     if lines.is_empty() {
         lines.push(Line::raw(
@@ -481,10 +490,12 @@ fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> Str
     }
 }
 
-fn remaining_bar(
+/// Keep each reported quota on its own logical row. Fitting the account's
+/// identity must never truncate away later model-specific windows.
+fn remaining_bars(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
-) -> Option<Line<'static>> {
+) -> Vec<Line<'static>> {
     let windows = [
         (
             usage.five_hour_ratio,
@@ -503,7 +514,7 @@ fn remaining_bar(
             .iter()
             .map(|window| (window.usage_ratio, window.label.as_str())),
     );
-    let mut spans = Vec::new();
+    let mut rows = Vec::new();
     for (used, window) in windows {
         if !used.is_finite() || !(0.0..=1.0).contains(&used) {
             continue;
@@ -531,14 +542,22 @@ fn remaining_bar(
             )
             .into();
         }
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
-        }
-        spans.extend(bar.spans);
+        bar.spans.insert(0, Span::raw("    "));
+        rows.push(bar);
     }
-    if spans.is_empty() {
+    rows
+}
+
+#[cfg(test)]
+fn remaining_bar(
+    usage: &crate::usage::AccountUsageSnapshot,
+    display_used: bool,
+) -> Option<Line<'static>> {
+    let rows = remaining_bars(usage, display_used);
+    if rows.is_empty() {
         return None;
     }
+    let mut spans: Vec<_> = rows.into_iter().flat_map(|row| row.spans).collect();
     if usage.error.is_some() {
         spans.push(Span::styled(
             format!(" · {}", usage_status_label(Some(usage))),
@@ -687,17 +706,17 @@ mod tests {
             secondary_label: Some("7-day".into()),
             seven_day_ratio: Some(0.42),
             additional_windows: vec![
-                jcode_protocol::AccountUsageWindow {
+                crate::protocol::AccountUsageWindow {
                     label: "Fable 7d".into(),
                     usage_ratio: 0.73,
                     resets_at: None,
                 },
-                jcode_protocol::AccountUsageWindow {
+                crate::protocol::AccountUsageWindow {
                     label: "Spark 界".into(),
                     usage_ratio: 0.91,
                     resets_at: None,
                 },
-                jcode_protocol::AccountUsageWindow {
+                crate::protocol::AccountUsageWindow {
                     label: "future model / month".into(),
                     usage_ratio: 0.32,
                     resets_at: None,
@@ -725,14 +744,33 @@ mod tests {
                 assert!(rendered.contains(&format!("{percent}%")), "{rendered}");
             }
         }
-        let rows = remote_inventory_lines(&[], &[usage.clone()], "openai", Some("work"));
-        assert_eq!(rows.len(), 1);
-        for width in [0, 1, 2, 8, 24, 40, 80, 120, 240] {
-            let fitted = fit_header_lines(rows.clone(), width);
-            assert_eq!(fitted.len(), rows.len());
-            assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
-            if width >= 8 && rows[0].width() > usize::from(width.saturating_sub(1)) {
-                assert!(text(fitted).ends_with('…'));
+        for (anthropic, openai, provider) in [
+            (vec![], vec![usage.clone()], "openai"),
+            (vec![usage.clone()], vec![], "anthropic"),
+        ] {
+            let rows = remote_inventory_lines(&anthropic, &openai, provider, Some("work"));
+            assert_eq!(rows.len(), 6, "identity plus one logical row per quota");
+            for width in [0, 1, 2, 8, 24, 40, 80, 120, 240] {
+                let fitted = fit_header_lines(rows.clone(), width);
+                assert_eq!(fitted.len(), rows.len());
+                for (source, result) in rows.iter().zip(&fitted) {
+                    assert!(result.width() <= usize::from(width.saturating_sub(1)));
+                    if width >= 8 && source.width() > usize::from(width.saturating_sub(1)) {
+                        assert!(text(vec![result.clone()]).ends_with('…'));
+                    }
+                }
+                if width >= 40 {
+                    let rendered = text(fitted);
+                    for label in [
+                        "session",
+                        "7d",
+                        "Fable 7d",
+                        "Spark 界",
+                        "future model / month",
+                    ] {
+                        assert!(rendered.contains(label), "width={width}: {rendered}");
+                    }
+                }
             }
         }
         // One malformed window must not hide the valid windows that follow it.
