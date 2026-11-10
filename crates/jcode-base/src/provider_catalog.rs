@@ -10,6 +10,7 @@ pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENA
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
+pub mod command_code_accounts;
 mod command_code_fallback;
 mod conifer;
 mod profile_credentials;

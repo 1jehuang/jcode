@@ -12,8 +12,8 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
-mod device_login;
 mod command_code;
+mod device_login;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -380,7 +380,7 @@ pub async fn run_login_provider(
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::OpenAiCompatible(profile) => {
-                login_openai_compatible_flow(&profile, &options)
+                login_openai_compatible_flow(&profile, account_label, &options)
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
@@ -846,6 +846,7 @@ fn login_azure_flow() -> Result<()> {
 
 fn login_openai_compatible_flow(
     profile: &OpenAiCompatibleProfile,
+    account_label: Option<&str>,
     options: &LoginOptions,
 ) -> Result<()> {
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
@@ -959,7 +960,7 @@ fn login_openai_compatible_flow(
             &resolved.env_file,
             None,
         )?;
-        save_named_api_key(&resolved.env_file, &resolved.api_key_env, &key)?;
+        command_code::save_profile_key(&resolved, account_label, &key)?;
         eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
         "api_key"
     } else {
@@ -1010,12 +1011,16 @@ fn login_openai_compatible_flow(
         eprintln!("{}", next_step::local_endpoint_hint(&resolved.id));
     }
 
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join(&resolved.env_file)
-            .display()
-    );
+    if resolved.id == "command-code" {
+        eprintln!("Stored in JCode's Command Code account store.");
+    } else {
+        eprintln!(
+            "Stored at {}",
+            crate::storage::app_config_dir()?
+                .join(&resolved.env_file)
+                .display()
+        );
+    }
     if let Some(default_model) = resolved.default_model {
         eprintln!("Default model hint: {}", default_model);
     }

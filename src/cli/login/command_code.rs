@@ -12,6 +12,28 @@ use std::time::Duration;
 
 const WHOAMI_URL: &str = "https://api.commandcode.ai/alpha/whoami";
 
+pub(super) fn save_account_key(label: Option<&str>, api_key: &str) -> Result<String> {
+    crate::provider_catalog::command_code_accounts::save_account(label, api_key)
+}
+
+pub(super) fn save_profile_key(
+    profile: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
+    account_label: Option<&str>,
+    api_key: &str,
+) -> Result<()> {
+    if profile.id == "command-code" {
+        let label = save_account_key(account_label, api_key)?;
+        eprintln!("Stored Command Code account `{label}`.");
+    } else {
+        crate::provider_catalog::save_named_api_key(
+            &profile.env_file,
+            &profile.api_key_env,
+            api_key,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) async fn validate_saved_key() -> Result<()> {
     let profile = crate::provider_catalog::COMMAND_CODE_PROFILE;
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
