@@ -534,7 +534,7 @@ impl App {
                 .get("interleave_message")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .filter(|s| !s.is_empty());
+                .filter(|s| !s.trim().is_empty() || !interleave_images.is_empty());
             let pending_soft_interrupts = value
                 .get("pending_soft_interrupts")
                 .and_then(|v| v.as_array())
