@@ -376,10 +376,8 @@ impl App {
             prompt.from_label, reason, prompt.to_label,
         );
 
-        match crate::config::Config::load()
-            .provider
-            .cross_provider_failover
-        {
+        let config = crate::config::Config::load().provider;
+        match config.cross_provider_failover {
             crate::config::CrossProviderFailoverMode::Manual => {
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
@@ -393,9 +391,11 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
+                let immediate = config.exhausted_usage_immediate_failover
+                    && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
-                    deadline: Instant::now() + Duration::from_secs(3),
+                    deadline: Instant::now() + Duration::from_secs(if immediate { 0 } else { 3 }),
                     remote_resend,
                 });
                 // One line for the cause, one line for the switch. Nothing else.
@@ -409,6 +409,18 @@ impl App {
                         "{}: {}",
                         prompt.from_label, reason
                     )));
+                }
+                if immediate {
+                    // Reuse the normal switch path, including target/pool revalidation
+                    // and remote route acknowledgement before resending the payload.
+                    self.maybe_progress_provider_failover_countdown();
+                    if self.pending_automatic_failover_route.is_some() {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "↪ Switching to {}. Retrying after route confirmation.",
+                            prompt.to_label
+                        )));
+                    }
+                    return;
                 }
                 self.push_display_message(DisplayMessage::system(
                     Self::failover_countdown_message(&prompt.to_label),

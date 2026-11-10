@@ -603,7 +603,9 @@ fn test_handle_turn_error_failover_prompt_manual_mode_shows_system_notice() {
 #[test]
 fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let (mut app, active_provider) = create_switchable_test_app("claude");
         let prompt = crate::provider::ProviderFailoverPrompt {
             from_provider: "claude".to_string(),
@@ -662,6 +664,49 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             "countdown line should be dropped once the switch happens"
         );
     });
+}
+
+#[test]
+fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
+    for (mode, enabled, reason, immediate) in [
+        ("countdown", true, "OAuth usage exhausted", true),
+        ("countdown", false, "OAuth usage exhausted", false),
+        ("manual", true, "OAuth usage exhausted", false),
+        (
+            "countdown",
+            true,
+            "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
+            false,
+        ),
+    ] {
+        with_temp_jcode_home(|| {
+            write_test_config(&format!(
+                "[provider]\ncross_provider_failover = \"{mode}\"\nexhausted_usage_immediate_failover = {enabled}\n"
+            ));
+            let (mut app, active) = create_switchable_test_app("claude");
+            app.handle_turn_error(failover_error_message(
+                &crate::provider::ProviderFailoverPrompt {
+                    from_provider: "claude".into(),
+                    from_label: "Anthropic".into(),
+                    to_provider: "openai".into(),
+                    to_label: "OpenAI".into(),
+                    target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+                    reason: reason.into(),
+                    estimated_input_chars: 400,
+                    estimated_input_tokens: 100,
+                },
+            ));
+            assert_eq!(
+                active.lock().unwrap().as_str(),
+                if immediate { "openai" } else { "claude" }
+            );
+            assert_eq!(app.pending_turn, immediate);
+            assert_eq!(
+                app.pending_provider_failover.is_some(),
+                !immediate && mode == "countdown"
+            );
+        });
+    }
 }
 
 /// A new session must start with auto-poke off when the config says so, and
