@@ -56,6 +56,115 @@ fn invalidating_the_renderer_forgets_the_drawn_composer() {
     );
 }
 
+#[test]
+fn partial_frame_retention_matches_presented_cells_across_buffer_swaps() {
+    for area in [Rect::new(3, 5, 1, 1), Rect::new(0, 2, 20, 3)] {
+        let bounds = Rect::new(0, 0, 20, 8);
+        let mut previous = Buffer::empty(bounds);
+        previous.set_string(0, 0, "header unchanged", Style::default());
+        previous.set_string(0, 7, "composer unchanged", Style::default());
+        let mut renderer = StatusSpinnerRenderer {
+            last_frame: Some(previous),
+            ..Default::default()
+        };
+        let backend = ratatui::backend::TestBackend::new(20, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let storage = renderer.last_frame.as_ref().unwrap().content.as_ptr();
+        for glyph in ["⠋", "⠙", "⠹", "⠸"] {
+            let working = terminal.current_buffer_mut();
+            working
+                .content
+                .clone_from(&renderer.last_frame.as_ref().unwrap().content);
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    working[(x, y)].set_symbol(glyph).set_fg(Color::Cyan);
+                }
+            }
+            let presented = working.clone();
+            terminal.flush().unwrap();
+            renderer.remember_partial_frame(terminal.current_buffer_mut(), area);
+            terminal.swap_buffers();
+            assert_eq!(renderer.last_frame.as_ref().unwrap(), &presented);
+            assert_eq!(
+                renderer.last_frame.as_ref().unwrap().content.as_ptr(),
+                storage
+            );
+            assert_eq!(terminal.backend().buffer(), &presented);
+        }
+    }
+}
+
+#[test]
+#[ignore = "comparative retained-frame benchmark, run with --ignored --nocapture"]
+fn benchmark_partial_frame_retention() {
+    use std::hint::black_box;
+    let bounds = Rect::new(0, 0, 160, 48);
+    let animation_area = Rect::new(0, 3, 160, 14);
+    let spinner_area = Rect::new(2, 46, 1, 1);
+    let iterations = 200;
+    let initial = Buffer::empty(bounds);
+    // Exclude one-time animation/config initialization from the comparison.
+    let mut warmup = initial.clone();
+    crate::tui::ui::render_idle_animation_into(&mut warmup, animation_area, 0.0);
+    for animation in [false, true] {
+        let mut times = Vec::new();
+        let mut baseline_frame = None;
+        for optimized in [false, true] {
+            let mut renderer = StatusSpinnerRenderer {
+                last_frame: Some(initial.clone()),
+                ..Default::default()
+            };
+            let mut working = initial.clone();
+            let start = Instant::now();
+            for i in 0..iterations {
+                let previous = renderer.last_frame.as_ref().unwrap();
+                if optimized {
+                    working.content.clone_from(&previous.content);
+                } else {
+                    working.clone_from(previous);
+                }
+                if animation {
+                    let elapsed = i as f32 / 30.0;
+                    crate::tui::ui::render_idle_animation_into(
+                        &mut working,
+                        animation_area,
+                        elapsed,
+                    );
+                    if optimized {
+                        renderer.remember_partial_frame(&working, animation_area);
+                    } else {
+                        crate::tui::ui::render_idle_animation_into(
+                            renderer.last_frame.as_mut().unwrap(),
+                            animation_area,
+                            elapsed,
+                        );
+                    }
+                } else {
+                    render_status_spinner_into_buffer_mut(&mut working, spinner_area, "⠙");
+                    if optimized {
+                        renderer.remember_partial_frame(&working, spinner_area);
+                    } else {
+                        renderer.last_frame = Some(working.clone());
+                    }
+                }
+                black_box(renderer.last_frame.as_ref().unwrap());
+            }
+            times.push(start.elapsed());
+            if optimized {
+                assert_eq!(renderer.last_frame, baseline_frame);
+            } else {
+                baseline_frame = renderer.last_frame;
+            }
+        }
+        eprintln!(
+            "partial retention animation={animation} iterations={iterations} baseline={:?} optimized={:?} speedup={:.2}x",
+            times[0],
+            times[1],
+            times[0].as_secs_f64() / times[1].as_secs_f64()
+        );
+    }
+}
+
 use super::*;
 use ratatui::style::Color;
 

@@ -347,6 +347,14 @@ impl StatusSpinnerRenderer {
         self.last_full_frame_input.clear();
     }
 
+    /// Remember only the cells a partial repaint changed, before ratatui resets
+    /// its working buffer. The snapshot must match the flushed frame exactly.
+    fn remember_partial_frame(&mut self, rendered: &Buffer, area: Rect) {
+        if let Some(last) = self.last_frame.as_mut() {
+            copy_cells_in(rendered, last, area);
+        }
+    }
+
     /// Present an animation frame and forget its working-buffer seed.
     ///
     /// `Terminal::swap_buffers` resets the buffer that the next tick will draw
@@ -454,7 +462,8 @@ impl StatusSpinnerRenderer {
             if self.seeded_animation_area == Some(area) {
                 copy_cells_in(previous_frame, current_buffer, area);
             } else {
-                current_buffer.clone_from(previous_frame);
+                current_buffer.area = previous_frame.area;
+                current_buffer.content.clone_from(&previous_frame.content);
                 self.seeded_animation_area = Some(area);
             }
             crate::tui::ui::render_idle_animation_into(
@@ -478,20 +487,11 @@ impl StatusSpinnerRenderer {
             RestorePosition,
             EndSynchronizedUpdate
         )?;
+        // Retain exactly the flushed cells. Re-rendering samples a later clock
+        // and doubles scene work while potentially diverging from the screen.
+        self.remember_partial_frame(terminal.current_buffer_mut(), area);
         self.swap_after_animation_frame(terminal);
         terminal.backend_mut().flush()?;
-        // Keep the remembered frame current without cloning the whole screen: it
-        // already matches everywhere except the rows just re-rendered. Re-render
-        // the animation into those rows directly (deterministic for a given
-        // elapsed time, and far cheaper than copying 7680 cells) so
-        // `self.last_frame` stays byte-identical to what the terminal now shows.
-        if let Some(last) = self.last_frame.as_mut() {
-            crate::tui::ui::render_idle_animation_into(
-                last,
-                area,
-                crate::tui::TuiState::animation_elapsed(app),
-            );
-        }
         // Without this the animation-only path was invisible in `draw-stats`:
         // `partial_repaints` stayed at 0 while this path served ~60 repaints a
         // second, which reads as "the cheap path never runs" and sends anyone
@@ -631,16 +631,18 @@ impl StatusSpinnerRenderer {
             return Ok(false);
         }
 
-        let next_frame = {
+        {
             let current_buffer = terminal.current_buffer_mut();
-            current_buffer.clone_from(previous_frame);
+            if current_buffer.area != previous_frame.area {
+                return Ok(false);
+            }
+            current_buffer.content.clone_from(&previous_frame.content);
             if let Some((symbol, area)) = status_symbol.zip(status_area)
                 && status_patchable
             {
                 render_status_spinner_into_buffer_mut(current_buffer, area, symbol);
             }
-            current_buffer.clone()
-        };
+        }
 
         // Keep ratatui's virtual buffers authoritative while preserving the user's cursor position.
         // The only terminal mutation outside ratatui here is cursor save/restore; cell contents still
@@ -657,9 +659,14 @@ impl StatusSpinnerRenderer {
             RestorePosition,
             EndSynchronizedUpdate
         )?;
+        if let Some(area) = status_area {
+            self.remember_partial_frame(
+                terminal.current_buffer_mut(),
+                Rect::new(area.x, area.y, 1, 1),
+            );
+        }
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
-        self.last_frame = Some(next_frame);
         // This path `clone_from`s the whole previous frame and patches one cell,
         // so the animation-only repaint's "everything outside the animated rows
         // is already seeded" assumption no longer holds. Make it re-seed once.
