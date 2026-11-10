@@ -5,8 +5,9 @@ Last updated: 2026-11-10
 ## Repository state
 
 - Upstream: `https://github.com/1jehuang/jcode`
-- Upstream base SHA examined: `e43279cdd`
-- Latest code commit before this status update: `d30da763d`
+- Upstream bases examined: `e43279cdd` for the original branch and `eb867111f`
+  for the final rebase.
+- Latest code commit before this status update: `fa5bb0261`
 - Feature branch: `command-code-native-provider`
 - Working tree: clean after each milestone commit
 - No upstream branch was modified, forced-pushed, or merged.
@@ -75,7 +76,7 @@ Last updated: 2026-11-10
 
 Status: complete.
 
-Commit: `67b2f3b58` (`feat(provider): add Command Code metadata and endpoint catalog fields`).
+Commit: `9dc0f6ec9` (`feat(provider): add Command Code metadata and endpoint catalog fields`).
 
 Implemented:
 
@@ -105,7 +106,7 @@ Notes:
 
 Status: complete.
 
-Commit: `1150c2a56` (`feat(provider): wire Command Code native login and Chat transport`).
+Commit: `256a42ce0` (`feat(provider): wire Command Code native login and Chat transport`).
 
 Implemented:
 
@@ -142,7 +143,7 @@ Verification:
 
 Status: complete for the implemented Muse path.
 
-Commit: `40ac26a99` (`feat(provider): add Command Code Responses transport and strict stream terminals`).
+Commit: `41b4b84f1` (`feat(provider): add Command Code Responses transport and strict stream terminals`).
 
 Implemented:
 
@@ -176,7 +177,7 @@ Verification:
 Status: implemented and transport-verified. Successful Claude generation is
 blocked by the available account's plan.
 
-Commit: `b164330b7` (`feat(provider): route Command Code Claude models through Messages`).
+Commit: `4607a2c5d` (`feat(provider): route Command Code Claude models through Messages`).
 
 Implemented:
 
@@ -205,7 +206,7 @@ Verification:
 
 Status: complete for the declared transport surface.
 
-Commits: `53e851def`, `7ad660ec9`, `9aa28a24a`, `84df3f0d8`, `9e8035c6e`.
+Commits: `876ce6db4`, `79c958889`, `13becbc0a`, `3f957ba98`, `8004bc77f`.
 
 Implemented:
 
@@ -224,17 +225,21 @@ Verified:
   `jcode run --resume session_shrimp_... -p command-code -m deepseek/deepseek-v4-flash`
   returned `RESUMED_OK` with `cache_read: 14080`.
 - `cargo test -p jcode-provider-openrouter-runtime --lib command_code_mock_tests`:
-  10 passed, 0 failed. The suite runs the real provider HTTP client against a
+  12 passed, 0 failed. The suite runs the real provider HTTP client against a
   loopback server and covers:
   - Chat tool call and tool-result replay.
   - Responses function call and `function_call_output` replay.
-  - Anthropic Messages text streaming.
+  - Anthropic Messages text streaming and tool-use/result replay.
   - Incomplete Chat and Responses streams as errors.
   - 403 `MODEL_NOT_IN_PLAN` not retried.
   - 429 retried once, then successful.
   - 500 exhausting the bounded retry and reporting status.
   - A stalled response body cancelled promptly.
   - Two concurrent streams without cross-talk.
+  - Saved-account pinning across a global active-account switch.
+- `cargo test -p jcode-app-core --lib cancellation_during_tool_execution_aborts_tool_and_continuation`:
+  1 passed. The streaming turn aborts the running tool future and makes no
+  continuation request after cancellation.
 - `jcode provider-doctor command-code --tier full` against the isolated store:
   every strict checkpoint passed, including live catalog, picker, non-streaming
   chat, streaming chat, tool parse, tool loop, tool-result follow-up, and real
@@ -264,7 +269,7 @@ Verified:
 Status: complete for labeled API-key accounts. Automatic failover is explicitly
 out of scope.
 
-Commits: `0c5b05be6`, `0bcf16827`, `40391a590`.
+Commits: `77a57328e`, `db6d47fd9`, `cc8ed289d`, `fa5bb0261`.
 
 Implemented:
 
@@ -280,6 +285,12 @@ Implemented:
 - The login notice and success message name the account store instead of
   claiming the key is in `command-code.env`.
 - Corrupt store files are preserved rather than silently overwritten.
+- Session account affinity: the session records
+  `openai-compatible:command-code@<label>` and keeps that account pinned across
+  global active-account changes, provider forks, process restart, and daemon
+  restart plus ACP resume.
+- Pinned accounts fail closed if removed; JCode does not silently substitute the
+  current global active account.
 
 Verified:
 
@@ -293,6 +304,12 @@ Verified:
     `UNAUTHORIZED` and spent no generation;
   - switching active to `work` produced `PONG` on
     `deepseek/deepseek-v4-flash`.
+- Daemon restart check:
+  - created a headless session on account `alpha`;
+  - switched the global active account to invalid `beta`;
+  - stopped and restarted the isolated daemon;
+  - resumed the session through ACP and received `DAEMON_ACP_RESUMED` on the
+    pinned `alpha` account.
 
 Not implemented:
 
@@ -344,9 +361,12 @@ Final verdict: `READY_FOR_REVIEW_WITH_DECLARED_BLOCKERS`.
 | `cargo test -p jcode-provider-openai --lib incomplete_responses_stream` | 1 passed, 0 failed |
 | `cargo test -p jcode-provider-anthropic-runtime --lib command_code_constructor` | 1 passed, 0 failed |
 | `cargo test -p jcode --lib list_cli_providers_includes_command_code` | 1 passed, 0 failed |
-| `cargo test -p jcode-provider-openrouter-runtime --lib command_code_mock_tests` | 10 passed, 0 failed |
-| `cargo test -p jcode-provider-openrouter-runtime --lib` | 208 passed, 1 ignored, 0 failed |
+| `cargo test -p jcode-provider-openrouter-runtime --lib command_code_mock_tests` | 12 passed, 0 failed |
+| `cargo test -p jcode-provider-openrouter-runtime --lib` | 210 passed, 1 ignored, 0 failed |
 | `cargo test -p jcode-base --lib command_code_accounts` | 5 passed, 0 failed |
+| `cargo test -p jcode-base --lib provider::tests::session_binding` | target test added for fork account inheritance |
+| `cargo test -p jcode-app-core --lib resumed_session_keeps_its_saved_api_key_account` | 1 passed |
+| `cargo test -p jcode-app-core --lib cancellation_during_tool_execution_aborts_tool_and_continuation` | 1 passed |
 | `cargo test -p jcode --lib 'cli::login'` | 34 passed, 0 failed |
 | `cargo test -p jcode-provider-doctor` | 39 passed, 0 failed |
 | `jcode provider-doctor command-code --tier full` | all strict checkpoints passed, 3 billable calls, 476 tokens |
@@ -354,25 +374,24 @@ Final verdict: `READY_FOR_REVIEW_WITH_DECLARED_BLOCKERS`.
 ### Broader suite results and unrelated failures
 
 `cargo test -p jcode-base --lib` with `umask 0022`: 2167 passed, 4 failed, 12
-ignored. The failures are outside the Command Code change surface:
+ignored. Each failure was rerun individually against upstream base
+`e43279cdd` in a detached worktree:
 
-- `config_env_fingerprint_tracks_every_apply_env_override_var` reports a missing
-  `JCODE_RESUME_OPEN_ELSEWHERE` entry in `CONFIG_ENV_KEYS`.
-- `hanging_browser_cli_times_out_instead_of_blocking_forever`,
-  `cached_oauth_reports_refresh_local_totals_without_refetching_quota`, and
-  `test_default_swarm_prompt_defines_lane_ownership_and_parallel_work` fail on
-  environment-dependent timing or existing repository state.
+| Test | Upstream base individual | Branch full suite |
+| --- | --- | --- |
+| `config_env_fingerprint_tracks_every_apply_env_override_var` | FAIL | FAIL, pre-existing missing `JCODE_RESUME_OPEN_ELSEWHERE` |
+| `hanging_browser_cli_times_out_instead_of_blocking_forever` | PASS | FAIL, parallel-suite timing flake |
+| `cached_oauth_reports_refresh_local_totals_without_refetching_quota` | PASS | FAIL, parallel-suite timing flake |
+| `test_default_swarm_prompt_defines_lane_ownership_and_parallel_work` | FAIL | FAIL, pre-existing prompt-length assertion |
 
-`cargo test -p jcode --lib` with `umask 0022`: 455 passed, 5 failed. The failures
-are outside the Command Code change surface:
+`cargo test -p jcode --lib` with `umask 0022`: 455 passed, 5 failed. Individual
+upstream-base reruns:
 
-- Three `restart` tests require debug control, which is disabled in this
-  environment.
-- `cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state`
-  requires an external Jade session helper.
-- `auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key`
-  expects `0.0.0.0` not to count as local, while upstream base already treats
-  every bare IP as local in `api_base_uses_localhost`.
+| Test | Upstream base individual | Branch full suite |
+| --- | --- | --- |
+| Three `restart_*` tests | FAIL | FAIL, debug control disabled |
+| `auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key` | FAIL | FAIL, stale localhost expectation |
+| `cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state` | PASS | FAIL, external Jade helper absent in the full-suite environment |
 
 Repo-wide `cargo fmt --all -- --check` is red on unrelated pre-existing files.
 Every Rust file changed by this branch passes `rustfmt --check`.

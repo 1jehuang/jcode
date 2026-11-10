@@ -83,6 +83,25 @@ the stored credential. The existing `COMMAND_CODE_API_KEY` environment variable
 still takes precedence over the active stored account. A legacy
 `command-code.env` file remains a fallback for older installations.
 
+### Session-to-account affinity
+
+Switching the global active account only affects new sessions. A session records
+its Command Code account in `route_api_method` as
+`openai-compatible:command-code@<label>` and pins that label on its provider
+instance.
+
+The pin survives:
+
+- later turns after the global active account changes;
+- provider forks used for compaction and subagent work;
+- process restart and `jcode run --resume`;
+- daemon restart and ACP/TUI resume.
+
+If the pinned account is removed, requests fail closed with an instruction to
+restore that label. JCode does not silently substitute the current active
+account. Sessions created before account-affinity metadata existed are bound to
+the account active when they are next resumed.
+
 Post-login validation uses the authenticated `/alpha/whoami` endpoint as a best
 effort check. That endpoint is used by Command Code's own CLI but is not
 documented as a third-party contract. An explicit 401 or 403 fails the login. A
