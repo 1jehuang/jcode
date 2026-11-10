@@ -2,6 +2,7 @@ use super::*;
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+use serde_json::json;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -3599,6 +3600,18 @@ fn default_reasoning_effort_matches_disabled_thinking_aliases() {
         responses.default_reasoning_effort(),
         None,
         "Responses builders ignore the chat thinking override"
+    );
+    let extra_body_override = OpenRouterProvider {
+        extra_body: json!({"thinking": {"type": "enabled"}})
+            .as_object()
+            .cloned(),
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        extra_body_override.default_reasoning_effort(),
+        None,
+        "extra_body is merged last and can re-enable thinking"
     );
 }
 

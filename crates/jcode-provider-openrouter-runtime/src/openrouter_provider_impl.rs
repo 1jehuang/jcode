@@ -511,6 +511,12 @@ impl Provider for OpenRouterProvider {
                 self.profile_id.as_deref(),
                 &self.model(),
             )
+            // `extra_body` is merged after the generated thinking field, so it
+            // can re-enable thinking even when the override says disabled.
+            || self
+                .extra_body
+                .as_ref()
+                .is_some_and(|body| body.get("thinking").is_some())
         {
             return None;
         }
