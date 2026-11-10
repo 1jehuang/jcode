@@ -69,7 +69,10 @@ pub(super) fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
             if current.uid() != metadata.uid || current.gid() != metadata.gid {
                 let c_path = std::ffi::CString::new(temporary.as_os_str().as_bytes())?;
                 let result = unsafe { libc::chown(c_path.as_ptr(), metadata.uid, metadata.gid) };
-                ensure!(result == 0, "Could not preserve file owner and group");
+                if result != 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("Could not preserve file owner and group");
+                }
             }
         }
         // Set the original access ACL before chmod can enable an inherited
@@ -157,6 +160,6 @@ pub(super) fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
     result
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 #[path = "file_history_acl_tests.rs"]
 mod tests;
