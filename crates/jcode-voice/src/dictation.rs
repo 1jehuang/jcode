@@ -97,18 +97,26 @@ pub fn focused_cli_session() -> Result<Option<String>> {
     let Some(window) = focused_window_niri()? else {
         return Ok(None);
     };
-    let registry_stamp = jcode_base::storage::jcode_dir()
-        .ok()
-        .and_then(|dir| std::fs::metadata(dir.join("client_sessions")).ok())
-        .and_then(|meta| meta.modified().ok());
+    let registry_stamp = match (|| -> Result<std::time::SystemTime> {
+        let dir = jcode_base::storage::jcode_dir()?;
+        Ok(std::fs::metadata(dir.join("client_sessions"))?.modified()?)
+    })() {
+        Ok(stamp) => Some(stamp),
+        Err(error) => {
+            // A missing registry is normal until a CLI first registers.
+            jcode_base::logging::debug(&format!(
+                "Cannot read client registry timestamp: {error:#}"
+            ));
+            None
+        }
+    };
     let key = (window.pid, registry_stamp);
-    static CACHE: std::sync::Mutex<
-        Option<(
-            (u32, Option<std::time::SystemTime>),
-            std::time::Instant,
-            Option<String>,
-        )>,
-    > = std::sync::Mutex::new(None);
+    type FocusCacheEntry = (
+        (u32, Option<std::time::SystemTime>),
+        std::time::Instant,
+        Option<String>,
+    );
+    static CACHE: std::sync::Mutex<Option<FocusCacheEntry>> = std::sync::Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((cached_key, at, session)) = cache.as_ref()
         && *cached_key == key
@@ -283,15 +291,84 @@ fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
 
 #[cfg(unix)]
 fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
-    use std::io::{BufRead, BufReader, Write};
     let path = std::env::var_os("NIRI_SOCKET")?;
-    let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
+    match focused_window_niri_socket_at(&path) {
+        Ok(window) => Some(window),
+        Err(error) => {
+            jcode_base::logging::debug(&format!(
+                "Niri socket focus lookup failed, falling back to command: {error:#}"
+            ));
+            None
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod socket_tests {
+    use super::focused_window_niri_socket_at;
+
+    fn query(reply: &'static str) -> anyhow::Result<Option<super::NiriFocusedWindow>> {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("niri.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(socket.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(request, "\"FocusedWindow\"\n");
+            socket.write_all(reply.as_bytes()).unwrap();
+        });
+        let result = focused_window_niri_socket_at(path.as_os_str());
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn socket_no_focus_is_success_not_fallback() {
+        assert!(
+            query("{\"Ok\":{\"FocusedWindow\":null}}\n")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn malformed_reply_preserves_error_context() {
+        let error = query("not json\n").unwrap_err();
+        assert!(error.to_string().contains("parse niri focused window"));
+    }
+
+    #[test]
+    fn missing_socket_preserves_error_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let error =
+            focused_window_niri_socket_at(dir.path().join("missing").as_os_str()).unwrap_err();
+        assert!(error.to_string().contains("connect niri socket"));
+    }
+}
+
+#[cfg(unix)]
+fn focused_window_niri_socket_at(path: &std::ffi::OsStr) -> Result<Option<NiriFocusedWindow>> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(path).context("connect niri socket")?;
     let limit = Some(std::time::Duration::from_millis(500));
-    stream.set_read_timeout(limit).ok()?;
-    stream.set_write_timeout(limit).ok()?;
-    stream.write_all(b"\"FocusedWindow\"\n").ok()?;
+    stream
+        .set_read_timeout(limit)
+        .context("set niri read timeout")?;
+    stream
+        .set_write_timeout(limit)
+        .context("set niri write timeout")?;
+    stream
+        .write_all(b"\"FocusedWindow\"\n")
+        .context("request niri focused window")?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .context("read niri focused window")?;
     #[derive(Deserialize)]
     enum Reply {
         Ok(Inner),
@@ -300,8 +377,8 @@ fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
     enum Inner {
         FocusedWindow(Option<NiriFocusedWindow>),
     }
-    match serde_json::from_str::<Reply>(&line).ok()? {
-        Reply::Ok(Inner::FocusedWindow(window)) => Some(window),
+    match serde_json::from_str::<Reply>(&line).context("parse niri focused window")? {
+        Reply::Ok(Inner::FocusedWindow(window)) => Ok(window),
     }
 }
 

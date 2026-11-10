@@ -155,8 +155,18 @@ fn clients_showing_session_in(
     let mut pids: Vec<u32> = entries
         .flatten()
         .filter_map(|entry| {
-            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-            let shown = std::fs::read_to_string(entry.path()).ok()?;
+            let pid = match entry.file_name().to_str()?.parse::<u32>() {
+                Ok(pid) => pid,
+                // Unrelated files in the registry are not client markers.
+                Err(_) => return None,
+            };
+            let shown = match std::fs::read_to_string(entry.path()) {
+                Ok(shown) => shown,
+                Err(error) => {
+                    crate::logging::debug(&format!("Cannot read client session marker: {error}"));
+                    return None;
+                }
+            };
             (pid != own_pid && shown.trim() == session_id && is_live(pid)).then_some(pid)
         })
         .collect();
@@ -170,13 +180,16 @@ fn is_live_jcode_client(pid: u32) -> bool {
     if !cfg!(target_os = "linux") {
         return false;
     }
-    std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .and_then(|exe| {
-            exe.file_name()
-                .map(|name| name.to_string_lossy().starts_with("jcode"))
-        })
-        .unwrap_or(false)
+    match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(exe) => exe
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("jcode")),
+        // Exited or inaccessible processes cannot safely be identified as clients.
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot identify client process {pid}: {error}"));
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +203,9 @@ mod tests {
             std::fs::write(dir.path().join(pid.to_string()), session).unwrap();
         }
         std::fs::write(dir.path().join("junk"), "a").unwrap();
+        std::fs::write(dir.path().join("999999999999999999999999"), "a").unwrap();
+        // A numeric entry that cannot be read must not hide valid clients.
+        std::fs::create_dir(dir.path().join("15")).unwrap();
         // 13 is this process, 14 has exited.
         let found = clients_showing_session_in(dir.path(), "a", 13, |pid| pid != 14);
         assert_eq!(found, vec![10, 11]);

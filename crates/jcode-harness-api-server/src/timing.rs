@@ -25,21 +25,37 @@ pub fn log(line: &str) {
     let Some(path) = path() else { return };
     let Ok(mut guard) = FILE.lock() else { return };
     if guard.is_none() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        if let Some(dir) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(dir)
+        {
+            eprintln!("Cannot create API timing log directory: {error}");
         }
         // Keep one previous generation instead of growing forever.
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
-            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES)
+            && let Err(error) = std::fs::rename(&path, path.with_extension("log.1"))
+        {
+            eprintln!("Cannot rotate API timing log: {error}");
         }
-        *guard = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        *guard = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => Some(file),
+            Err(error) => {
+                eprintln!("Cannot open API timing log: {error}");
+                None
+            }
+        };
     }
     if let Some(file) = guard.as_mut() {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let _ = writeln!(file, "{ms} pid={} {line}", std::process::id());
+        if let Err(error) = writeln!(file, "{ms} pid={} {line}", std::process::id()) {
+            eprintln!("Cannot write API timing log: {error}");
+        }
     }
 }
 
@@ -71,7 +87,8 @@ impl Pending {
         if self.inflight.len() > 1024 {
             self.inflight.clear();
         }
-        self.inflight.insert(id, (kind.to_string(), received, translate));
+        self.inflight
+            .insert(id, (kind.to_string(), received, translate));
     }
 
     /// A reply was written. `source` is "bridge" (answered locally) or
