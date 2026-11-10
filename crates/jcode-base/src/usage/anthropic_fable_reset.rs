@@ -94,7 +94,15 @@ async fn status(client: &reqwest::Client, base: &str, token: &str) -> Result<Opt
         return Ok(None);
     };
     // Missing or malformed fields are unknown, not permission to spend.
-    Ok(serde_json::from_value(block.clone()).ok())
+    Ok(match serde_json::from_value(block.clone()) {
+        Ok(status) => Some(status),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Ignoring malformed Fable reset eligibility: {error}"
+            ));
+            None
+        }
+    })
 }
 
 /// Redeem an earned Fable grant only after fresh, account-bound exhaustion checks.

@@ -265,12 +265,13 @@ fn inventory_lines(
             && credential == Some(ActiveCredential::OAuth);
         let usage =
             crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
-        let quotas = usage
-            .as_ref()
-            .map(|usage| {
+        let quotas = match usage.as_ref() {
+            Some(usage) => {
                 remaining_bars(usage, crate::config::config().display.usage_display_used())
-            })
-            .unwrap_or_default();
+            }
+            // Accounts without cached usage have no quota rows yet.
+            None => Vec::new(),
+        };
         let mut row = detail(
             oauth_credential_status(expired, usage.as_ref()),
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
@@ -374,7 +375,8 @@ fn inventory_lines(
                         inventory.pool.priority(key),
                         &tiers,
                     ))
-                    .chain(quota_rows.remove(key).unwrap_or_default())
+                    // Non-OAuth credentials have no quota rows to append.
+                    .chain(quota_rows.remove(key).into_iter().flatten())
                 })
         })
         .flatten()

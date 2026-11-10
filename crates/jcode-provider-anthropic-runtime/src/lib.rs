@@ -2051,15 +2051,21 @@ async fn run_stream_with_retries(
                     // The API often uses the same generic 429 for exhausted plan
                     // usage and burst throttles. Preserve verified account usage
                     // evidence so the outer router can skip its countdown too.
-                    let _ = tx
+                    if tx
                         .send(Err(anyhow::anyhow!("Usage exhausted: {e:#}")))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        jcode_base::logging::debug("Anthropic exhaustion event receiver closed");
+                    }
                     return;
                 }
                 if !saw_output
                     && jcode_provider_core::failover::is_definitive_usage_exhaustion(&error_str)
                 {
-                    let _ = tx.send(Err(e)).await;
+                    if tx.send(Err(e)).await.is_err() {
+                        jcode_base::logging::debug("Anthropic exhaustion event receiver closed");
+                    }
                     return;
                 }
 
