@@ -61,8 +61,27 @@ Baseline login is an API key created in Command Code Studio:
 jcode login --provider command-code
 ```
 
-The key is stored in JCode's own `command-code.env` with mode `0600`. The
-existing `COMMAND_CODE_API_KEY` environment variable takes precedence.
+The key is stored in JCode's Command Code account store
+(`command_code_accounts.json`, mode `0600`). The store supports labeled
+accounts:
+
+```sh
+jcode login --provider command-code --account work
+jcode login --provider command-code --account personal
+```
+
+An unnamed login receives an auto-generated label. Logging in again with the
+same label replaces that account's key and makes it active. To switch to an
+already-stored account without pasting the key again:
+
+```sh
+jcode login --provider command-code --account work
+```
+
+When the label exists and no new key is supplied, JCode selects it and validates
+the stored credential. The existing `COMMAND_CODE_API_KEY` environment variable
+still takes precedence over the active stored account. A legacy
+`command-code.env` file remains a fallback for older installations.
 
 Post-login validation uses the authenticated `/alpha/whoami` endpoint as a best
 effort check. That endpoint is used by Command Code's own CLI but is not
@@ -175,8 +194,9 @@ the generation critical path.
 
 ## Known limitations
 
-- Multi-account storage and switching are not implemented in this change.
-  Command Code currently uses a single active API key per JCode profile.
+- Accounts are selected at login time. The provider resolves the active account
+  when it builds its request authentication. JCode does not perform automatic
+  cross-account failover when the active account is rate-limited or out of plan.
 - Browser-assisted login is not implemented. The API key flow is official and
   is the supported path.
 - Claude models are routed through Anthropic Messages, but the test account used

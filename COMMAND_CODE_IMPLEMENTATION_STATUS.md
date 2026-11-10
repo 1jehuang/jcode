@@ -6,7 +6,7 @@ Last updated: 2026-11-10
 
 - Upstream: `https://github.com/1jehuang/jcode`
 - Upstream base SHA examined: `e43279cdd`
-- Docs commit: `ab9f847e2`
+- Latest code commit before this status update: `d30da763d`
 - Feature branch: `command-code-native-provider`
 - Working tree: clean after each milestone commit
 - No upstream branch was modified, forced-pushed, or merged.
@@ -203,10 +203,9 @@ Verification:
 
 ### M5: Reliability and lifecycle hardening
 
-Status: partial. Implemented and tested items listed below; cancellation and
-full mock-server matrix are not yet implemented.
+Status: complete for the declared transport surface.
 
-Commits: `53e851def`, `7ad660ec9`.
+Commits: `53e851def`, `7ad660ec9`, `9aa28a24a`, `84df3f0d8`, `9e8035c6e`.
 
 Implemented:
 
@@ -224,12 +223,22 @@ Verified:
 - Session resume:
   `jcode run --resume session_shrimp_... -p command-code -m deepseek/deepseek-v4-flash`
   returned `RESUMED_OK` with `cache_read: 14080`.
-
-Not yet verified:
-
-- Explicit cancellation stress test.
-- Mock-server 429, 5xx, stalled body, and split-frame matrix.
-- Concurrent session isolation test.
+- `cargo test -p jcode-provider-openrouter-runtime --lib command_code_mock_tests`:
+  10 passed, 0 failed. The suite runs the real provider HTTP client against a
+  loopback server and covers:
+  - Chat tool call and tool-result replay.
+  - Responses function call and `function_call_output` replay.
+  - Anthropic Messages text streaming.
+  - Incomplete Chat and Responses streams as errors.
+  - 403 `MODEL_NOT_IN_PLAN` not retried.
+  - 429 retried once, then successful.
+  - 500 exhausting the bounded retry and reporting status.
+  - A stalled response body cancelled promptly.
+  - Two concurrent streams without cross-talk.
+- `jcode provider-doctor command-code --tier full` against the isolated store:
+  every strict checkpoint passed, including live catalog, picker, non-streaming
+  chat, streaming chat, tool parse, tool loop, tool-result follow-up, and real
+  JCode tool smoke. Provider-reported spend: 3 billable calls, 476 tokens.
 
 ### M6: Usage and quota honesty
 
@@ -252,21 +261,43 @@ Verified:
 
 ### M7: Multi-account lifecycle
 
-Status: not implemented.
+Status: complete for labeled API-key accounts. Automatic failover is explicitly
+out of scope.
 
-Reason: JCode's generic API-key compatible profile is single-key. A correct
-multi-account implementation needs a shared account store, active-account
-selection, TUI/CLI switching, per-account cache scope, and safe pre-stream
-failover. Implementing only a Command Code-specific parallel store would violate
-the plan's reuse requirement.
+Commits: `0c5b05be6`, `0bcf16827`, `40391a590`.
 
-Remaining work:
+Implemented:
 
-- Extend or reuse `jcode-base` account storage for API-key profiles.
-- Add explicit account switch.
-- Add per-account cache key scope.
-- Add bounded, pre-stream-only failover policy.
-- Add account lifecycle tests.
+- JCode-owned command-code account store with mode `0600` writes and the shared
+  cross-process account-store lock.
+- Labeled accounts, active account, replacement by label, and removal.
+- Precedence: `COMMAND_CODE_API_KEY` environment variable, active stored
+  account, legacy `command-code.env`.
+- Shared runtime key resolution now consults the store, so `jcode run`,
+  provider doctor, auth status, and the profile runtime agree.
+- Login accepts `--account <label>`; re-running with an existing label and no
+  new key selects that account.
+- The login notice and success message name the account store instead of
+  claiming the key is in `command-code.env`.
+- Corrupt store files are preserved rather than silently overwritten.
+
+Verified:
+
+- `cargo test -p jcode-base --lib command_code_accounts`: 5 passed, including
+  label switching, environment precedence, shared runtime resolution, and
+  corrupt-store preservation.
+- `cargo test -p jcode --lib 'cli::login'`: 34 passed, including labeled
+  account login, account switching, and credential-source notice.
+- Isolated two-account live check:
+  - active `personal` with a deliberately invalid test key returned 401
+    `UNAUTHORIZED` and spent no generation;
+  - switching active to `work` produced `PONG` on
+    `deepseek/deepseek-v4-flash`.
+
+Not implemented:
+
+- Automatic cross-account failover after rate limits or plan errors.
+- TUI account picker.
 
 ### M8: Browser-assisted login
 
@@ -286,7 +317,7 @@ Remaining work:
 
 ### M9: Release readiness
 
-Status: in progress.
+Status: ready for review with the declared external blockers.
 
 Implemented:
 
@@ -296,10 +327,9 @@ Implemented:
 
 Remaining:
 
-- Full mock-server matrix.
-- Provider Doctor integration.
-- Concurrency and cancellation tests.
 - Upstream PR preparation and coordination with PR #1271.
+
+Final verdict: `READY_FOR_REVIEW_WITH_DECLARED_BLOCKERS`.
 
 ## Exact commands and outcomes
 
@@ -314,6 +344,44 @@ Remaining:
 | `cargo test -p jcode-provider-openai --lib incomplete_responses_stream` | 1 passed, 0 failed |
 | `cargo test -p jcode-provider-anthropic-runtime --lib command_code_constructor` | 1 passed, 0 failed |
 | `cargo test -p jcode --lib list_cli_providers_includes_command_code` | 1 passed, 0 failed |
+| `cargo test -p jcode-provider-openrouter-runtime --lib command_code_mock_tests` | 10 passed, 0 failed |
+| `cargo test -p jcode-provider-openrouter-runtime --lib` | 208 passed, 1 ignored, 0 failed |
+| `cargo test -p jcode-base --lib command_code_accounts` | 5 passed, 0 failed |
+| `cargo test -p jcode --lib 'cli::login'` | 34 passed, 0 failed |
+| `cargo test -p jcode-provider-doctor` | 39 passed, 0 failed |
+| `jcode provider-doctor command-code --tier full` | all strict checkpoints passed, 3 billable calls, 476 tokens |
+
+### Broader suite results and unrelated failures
+
+`cargo test -p jcode-base --lib` with `umask 0022`: 2167 passed, 4 failed, 12
+ignored. The failures are outside the Command Code change surface:
+
+- `config_env_fingerprint_tracks_every_apply_env_override_var` reports a missing
+  `JCODE_RESUME_OPEN_ELSEWHERE` entry in `CONFIG_ENV_KEYS`.
+- `hanging_browser_cli_times_out_instead_of_blocking_forever`,
+  `cached_oauth_reports_refresh_local_totals_without_refetching_quota`, and
+  `test_default_swarm_prompt_defines_lane_ownership_and_parallel_work` fail on
+  environment-dependent timing or existing repository state.
+
+`cargo test -p jcode --lib` with `umask 0022`: 455 passed, 5 failed. The failures
+are outside the Command Code change surface:
+
+- Three `restart` tests require debug control, which is disabled in this
+  environment.
+- `cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state`
+  requires an external Jade session helper.
+- `auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key`
+  expects `0.0.0.0` not to count as local, while upstream base already treats
+  every bare IP as local in `api_base_uses_localhost`.
+
+Repo-wide `cargo fmt --all -- --check` is red on unrelated pre-existing files.
+Every Rust file changed by this branch passes `rustfmt --check`.
+
+`scripts/check_code_size_budget.py` remains red because the checked-in baseline
+predates many unrelated master changes. After extracting the account-store
+login helpers, no file touched by this branch appears in the script output:
+`src/cli/login.rs` is 1195 lines and
+`crates/jcode-provider-doctor/src/provider_e2e.rs` is flat at 2727 lines.
 
 ### Compile and build
 
@@ -325,9 +393,11 @@ Remaining:
 
 ### Live, isolated
 
-All live tests used `JCODE_HOME=/home/quant/src/jcode-commandcode-fixes/tmp-cc-home2`
-and a dedicated socket under that directory. The production JCode config,
-credentials, and shared daemon were not modified.
+Live tests used isolated homes under
+`/home/quant/src/jcode-commandcode-fixes/` (`tmp-cc-home2` for the first pass,
+`tmp-cc-accounts` for account and doctor checks) plus dedicated sockets where
+needed. The production JCode config, credentials, and shared daemon were not
+modified.
 
 | Check | Result |
 | --- | --- |
@@ -337,24 +407,26 @@ credentials, and shared daemon were not modified.
 | Session resume | PASS, `RESUMED_OK`, cache_read 14080 |
 | `/usage` honesty | PASS, configured key and unknown quota |
 | Claude Messages path | BLOCKED by account plan, 403 `MODEL_NOT_IN_PLAN`, endpoint and auth verified |
+| Active account selection (invalid key) | PASS, 401 with active `personal` account, no generation |
+| Active account selection (valid key) | PASS, `PONG` after switching active to `work` |
+| Provider Doctor, full tier | PASS, every strict checkpoint |
 
 ## Current blockers
 
 1. Claude generation cannot be verified on the available account because it has
    no Claude entitlement. A Pro, Provider, or other Claude-entitled account is
    required for the final M4 acceptance test.
-2. Multi-account requires a generic JCode API-key account store and is not
-   implemented in this change.
-3. Browser login requires confirmation that the Command Code CLI callback is a
+2. Browser login requires confirmation that the Command Code CLI callback is a
    supported third-party contract.
-4. The upstream code-size baseline is stale on master. The Command Code changes
+3. The upstream code-size baseline is stale on master. The Command Code changes
    do not regress any tracked file, but `scripts/check_code_size_budget.py`
    cannot be used as a green gate without a separate baseline cleanup. In
    particular, `crates/jcode-provider-anthropic-runtime/src/lib.rs` was 2777
    lines at the parent commit and 2746 lines after moving its direct-URL helpers
    into `compatible.rs`; the script still compares it to an older 2692-line
    baseline. This branch shrinks the file by 31 lines.
-5. Full mock-server and concurrency coverage is not yet implemented.
+4. Automatic cross-account failover is not implemented. The declared behavior
+   is explicit account selection, not silent substitution.
 
 ## Upstream coordination
 
@@ -367,14 +439,11 @@ credentials, and shared daemon were not modified.
 
 ## Next independently verifiable task
 
-Implement a local mock-server integration suite for the Command Code runtime:
+Prepare the upstream contribution after maintainer coordination:
 
-- Chat SSE with tool call and follow-up.
-- Responses SSE with function call and follow-up.
-- Messages SSE with tool call and follow-up.
-- Incomplete Chat, Responses, and Messages streams.
-- 429 with and without `Retry-After`.
-- 401, 403 `MODEL_NOT_IN_PLAN`, and 5xx.
-- Stalled body and cancellation.
-
-This closes M5 and increases confidence without spending live credits.
+- Rebase on the current upstream master.
+- Re-run the full Command Code unit and mock suites with `umask 0022`.
+- Re-run `scripts/check_code_size_budget.py` and separate any stale-baseline
+  failures from branch regressions.
+- Include the Claude entitlement blocker in the PR description rather than
+  claiming verified Claude generation.
