@@ -36,6 +36,16 @@ pub(crate) fn model_uses_responses_api(
     if profile_id == Some("muse-subscription") {
         return api_base.trim_end_matches('/') == "https://api.meta.ai/v1";
     }
+    if profile_id.is_some_and(|id| id.eq_ignore_ascii_case("command-code")) {
+        // Command Code routes Muse models over Responses for encrypted
+        // reasoning replay and stable prompt-cache affinity. Other advertised
+        // Responses models remain on Chat until their tool and reasoning
+        // behavior is verified per family.
+        return model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("meta/muse");
+    }
     let is_go_profile = profile_id.is_some_and(|id| id.eq_ignore_ascii_case("opencode-go"));
     let is_go_endpoint = api_base
         .to_ascii_lowercase()
@@ -88,6 +98,48 @@ pub(crate) fn build_request(
         );
     }
 
+    request
+}
+
+/// Build a Command Code Responses request using the native OpenAI Responses
+/// input builder so encrypted reasoning items and deferred tools replay
+/// correctly. `prompt_cache_key` is an opaque per-session identity, never
+/// transcript content or a credential.
+pub(crate) fn build_command_code_responses_request(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
+    max_output_tokens: Option<u32>,
+    prompt_cache_key: Option<&str>,
+) -> Value {
+    let mut input = jcode_provider_openai::request::build_responses_input(messages);
+    jcode_provider_openai::request::insert_additional_tools(&mut input, messages, tools);
+    let api_tools = jcode_provider_openai::request::build_tools(tools);
+    let mut request = serde_json::json!({
+        "model": model,
+        "input": input,
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+    });
+    if !system.is_empty() {
+        request["instructions"] = Value::String(system.to_string());
+    }
+    if !api_tools.is_empty() {
+        request["tools"] = Value::Array(api_tools);
+        request["tool_choice"] = Value::String("auto".to_string());
+    }
+    if let Some(effort) = reasoning_effort.filter(|value| *value != "none") {
+        request["reasoning"] = serde_json::json!({ "effort": effort });
+    }
+    if let Some(max_output_tokens) = max_output_tokens {
+        request["max_output_tokens"] = serde_json::json!(max_output_tokens);
+    }
+    if let Some(key) = prompt_cache_key.map(str::trim).filter(|key| !key.is_empty()) {
+        request["prompt_cache_key"] = Value::String(key.to_string());
+    }
     request
 }
 
@@ -535,6 +587,40 @@ mod tests {
             "https://opencode.ai/zen/v1",
             Some("opencode"),
             "gpt-5.6-luna"
+        ));
+    }
+
+    #[test]
+    fn command_code_responses_request_carries_cache_key_and_encrypted_reasoning() {
+        let request = build_command_code_responses_request(
+            &[jcode_message_types::Message::user("hello")],
+            &[],
+            "system",
+            "meta/muse-ember",
+            None,
+            Some(64),
+            Some("jcode-session-key"),
+        );
+        assert_eq!(request["model"], "meta/muse-ember");
+        assert_eq!(request["prompt_cache_key"], "jcode-session-key");
+        assert_eq!(request["include"][0], "reasoning.encrypted_content");
+        assert_eq!(request["max_output_tokens"], 64);
+        assert_eq!(request["stream"], true);
+        assert_eq!(request["store"], false);
+        assert_eq!(request["instructions"], "system");
+    }
+
+    #[test]
+    fn command_code_responses_routing_is_scoped_to_muse() {
+        assert!(model_uses_responses_api(
+            "https://api.commandcode.ai/provider/v1",
+            Some("command-code"),
+            "meta/muse-ember"
+        ));
+        assert!(!model_uses_responses_api(
+            "https://api.commandcode.ai/provider/v1",
+            Some("command-code"),
+            "deepseek/deepseek-v4-flash"
         ));
     }
 

@@ -734,3 +734,55 @@ fn positional_fallback_tool_call_ids_are_unique_across_responses() {
 
     assert_ne!(first_turn_id, second_turn_id);
 }
+
+#[test]
+fn strict_stream_errors_on_eof_without_terminal() {
+    futures::executor::block_on(async {
+    let chunks = vec![Ok::<_, reqwest::Error>(Bytes::from(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+    ))];
+    let mut stream = OpenRouterStream::new_strict(
+        futures::stream::iter(chunks),
+        "test-model".to_string(),
+        Arc::new(std::sync::Mutex::new(None)),
+    );
+    let mut saw_text = false;
+    let mut saw_error = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::TextDelta(text)) => {
+                saw_text = true;
+                assert_eq!(text, "partial");
+            }
+            Ok(StreamEvent::MessageEnd { .. }) => {
+                panic!("strict stream must not report success without a terminal signal")
+            }
+            Err(_) => saw_error = true,
+            _ => {}
+        }
+    }
+    assert!(saw_text);
+    assert!(saw_error);
+    });
+}
+
+#[test]
+fn strict_stream_accepts_done_terminal() {
+    futures::executor::block_on(async {
+    let chunks = vec![Ok::<_, reqwest::Error>(Bytes::from(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+    ))];
+    let mut stream = OpenRouterStream::new_strict(
+        futures::stream::iter(chunks),
+        "test-model".to_string(),
+        Arc::new(std::sync::Mutex::new(None)),
+    );
+    let mut saw_end = false;
+    while let Some(item) = stream.next().await {
+        if matches!(item.expect("event"), StreamEvent::MessageEnd { .. }) {
+            saw_end = true;
+        }
+    }
+    assert!(saw_end);
+    });
+}

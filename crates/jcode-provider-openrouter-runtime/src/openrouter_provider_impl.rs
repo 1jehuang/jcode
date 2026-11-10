@@ -163,6 +163,14 @@ impl Provider for OpenRouterProvider {
             }
         }
 
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+        {
+            request["prompt_cache_key"] = serde_json::json!(self.conversation_id);
+        }
+
         // Optional thinking override for OpenRouter (provider-specific).
         // Skip for strict OpenAI-schema endpoints (e.g. Mistral) which reject
         // the non-standard top-level `thinking` field with a 422 (issue #261).
@@ -233,15 +241,31 @@ impl Provider for OpenRouterProvider {
         // provider-only fields cannot leak into `/responses`; configured extra
         // body fields remain an intentional escape hatch and are merged last.
         if responses_api {
-            request = super::opencode_go_responses::build_request(
-                &effective_messages,
-                tools,
-                system,
-                &model,
-                reasoning_effort.as_deref(),
-                self.max_tokens,
-                jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
-            );
+            if self
+                .profile_id
+                .as_deref()
+                .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+            {
+                request = super::opencode_go_responses::build_command_code_responses_request(
+                    &effective_messages,
+                    tools,
+                    system,
+                    &model,
+                    reasoning_effort.as_deref(),
+                    self.max_tokens,
+                    Some(&self.conversation_id),
+                );
+            } else {
+                request = super::opencode_go_responses::build_request(
+                    &effective_messages,
+                    tools,
+                    system,
+                    &model,
+                    reasoning_effort.as_deref(),
+                    self.max_tokens,
+                    jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
+                );
+            }
             if let Some(extra) = self.extra_body.as_ref()
                 && let Some(request_obj) = request.as_object_mut()
             {
