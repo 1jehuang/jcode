@@ -216,23 +216,14 @@ impl SessionPicker {
             return self.all_session_refs();
         }
 
-        // Keep literal matches immediate. Expensive typo-tolerant matching is
-        // scheduled immediately on the worker alongside transcript search,
-        // never on the UI thread. Reconsider all sessions for new worker results.
+        // Only consume worker evidence here. Metadata and structured identity
+        // matching run on the worker, regardless of history size.
         let candidates = self.all_session_refs();
-        let tokens = loading::search_query_tokens(&normalized);
-
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
-                self.session_by_ref(*session_ref).is_some_and(|session| {
-                    identity_search::rank(session, &tokens).0
-                        || (!self.transcript_search.defers_metadata()
-                            && tokens
-                                .iter()
-                                .all(|token| session.search_index.contains(token)))
-                        || self.transcript_search.contains(&session.id)
-                })
+                self.session_by_ref(*session_ref)
+                    .is_some_and(|session| self.transcript_search.contains(&session.id))
             })
             .collect::<Vec<_>>();
 
@@ -274,6 +265,9 @@ impl SessionPicker {
     /// Called once per rendered frame, so completed scans update results even
     /// when the user is not typing. Never wait for the worker on the UI thread.
     pub(super) fn poll_transcript_search(&mut self) {
+        if std::mem::take(&mut self.search_edit_pending) {
+            self.rebuild_items();
+        }
         let changed = self.transcript_search.poll();
         // A search that ends without any result must still release held rows.
         let release = self.search_selection.holding() && !self.transcript_search.pending();
@@ -323,50 +317,14 @@ impl SessionPicker {
                     .unwrap_or_default(),
             )
         });
-        // Cache once per candidate, never run matching from the comparator.
-        // Stable sorting keeps recency as the deterministic final tie-break.
+        // Sort only numeric evidence computed by the worker. Stable sorting
+        // keeps recency as the deterministic final tie-break.
         if !self.search_query.trim().is_empty() {
-            let normalized = Self::normalized_search_query(&self.search_query);
-            let tokens = loading::search_query_tokens(&normalized);
             filtered.sort_by_cached_key(|session_ref| {
                 std::cmp::Reverse(self.session_by_ref(*session_ref).map(|session| {
-                    let rank = if self.transcript_search.contains(&session.id) {
-                        self.transcript_search.rank(&session.id)
-                    } else if self.transcript_search.defers_metadata() {
-                        transcript_search::SearchRank::default()
-                    } else {
-                        transcript_search::literal_metadata_rank(&session.search_index, &tokens)
-                            .with_exact_field(transcript_search::exact_metadata_field(
-                                session,
-                                &normalized,
-                            ))
-                    };
-                    // A renamed conversation's opening request is stronger
-                    // intent evidence than incidental matches in tool output.
-                    let fields = [
-                        session.title.as_str(),
-                        session.save_label.as_deref().unwrap_or(""),
-                        session.first_user_prompt.as_deref().unwrap_or(""),
-                    ];
-                    let fields = fields.map(transcript_search::lowercase_field);
-                    let intent_terms = tokens
-                        .iter()
-                        .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
-                        .count();
-                    let rank = if self.transcript_search.contains(&session.id) {
-                        rank
-                    } else {
-                        let [title, label, prompt] = &fields;
-                        rank.with_source_weight(transcript_search::metadata_source_weight(
-                            &[title, label, prompt],
-                            &session.search_index,
-                            &tokens,
-                            self.transcript_search.idf(),
-                        ))
-                    };
                     (
-                        identity_search::rank(session, &tokens),
-                        rank.with_intent_terms(intent_terms),
+                        self.transcript_search.identity_rank(&session.id),
+                        self.transcript_search.rank(&session.id),
                     )
                 }))
             });
@@ -474,6 +432,7 @@ impl SessionPicker {
 
     /// Rebuild the items list based on current filters.
     pub(super) fn rebuild_items(&mut self) {
+        self.search_edit_pending = false;
         let selected = self.selected_session().map(|session| session.id.clone());
         let (scroll, auto_scroll) = (self.scroll_offset, self.auto_scroll_preview);
         self.rebuild_items_inner();

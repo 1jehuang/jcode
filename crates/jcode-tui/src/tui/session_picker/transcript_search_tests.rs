@@ -401,6 +401,9 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
             has_prompt: !opening.is_empty(),
             opening_prompt: opening.into(),
             intent_text: intent.into(),
+            working_dir: None,
+            server_name: None,
+            cloud: false,
         }),
         missing_tokens: Vec::new(),
         exact_field: false,
@@ -586,7 +589,7 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
 }
 
 #[test]
-fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
+fn typing_starts_cold_work_on_first_poll_and_metadata_is_async() {
     let temp = tempfile::tempdir().unwrap();
     let session = external_session("one", &temp.path().join("absent.jsonl"));
     let mut picker = SessionPicker::new(vec![session]);
@@ -597,6 +600,8 @@ fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
     assert!(picker.transcript_search.candidates.is_empty());
     picker.search_query = "TITLE metadata".into();
     picker.rebuild_items();
+    assert!(picker.transcript_search.pending());
+    wait_for_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(!picker.transcript_search.pending());
 }
@@ -613,11 +618,7 @@ fn fuzzy_metadata_matching_runs_on_worker_not_on_keystroke() {
     assert!(picker.search_selection.holding());
     assert!(!picker.transcript_search.has_results());
     assert!(picker.transcript_search.receiver.is_none());
-    assert_eq!(picker.transcript_search.candidates.len(), 1);
-    assert_eq!(
-        picker.transcript_search.candidates[0].missing_tokens,
-        ["conifg"]
-    );
+    assert!(picker.transcript_search.candidates.is_empty());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, "one");
     assert!(!picker.transcript_search.contains_literal("one"));
@@ -808,6 +809,11 @@ fn progressive_results_preserve_selected_preview_scroll() {
     let mut picker = SessionPicker::new(vec![direct, discovered]);
     picker.search_query = "needle".into();
     picker.rebuild_items();
+    picker
+        .transcript_search
+        .ranks
+        .insert("direct".into(), SearchRank::default());
+    picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "direct");
     picker.scroll_offset = 17;
     picker.auto_scroll_preview = false;
@@ -824,6 +830,11 @@ fn picker_with_pending_better_match() -> SessionPicker {
     let discovered = external_session("discovered", Path::new("unused"));
     let mut picker = SessionPicker::new(vec![direct, discovered]);
     picker.search_query = "needle".into();
+    picker.rebuild_items();
+    picker
+        .transcript_search
+        .ranks
+        .insert("direct".into(), SearchRank::default());
     picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "direct");
     let (sender, receiver) = mpsc::channel();

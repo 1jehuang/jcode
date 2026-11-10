@@ -314,6 +314,7 @@ pub struct SessionPicker {
     last_mouse_scroll: Option<std::time::Instant>,
     /// Normalized query from the most recent search pass.
     cached_search_query: String,
+    search_edit_pending: bool,
     /// Session refs that matched the cached search query.
     cached_search_refs: Vec<SessionRef>,
     /// Cancellable full-text scan, separate from the bounded display cache.
@@ -418,6 +419,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -482,6 +484,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -578,6 +581,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -1404,6 +1408,9 @@ impl SessionPicker {
             // In particular, never queue Enter to unexpectedly resume a session
             // when the background load eventually completes.
             KeyCode::Enter if self.loading_message.is_some() => {}
+            KeyCode::Enter if self.search_edit_pending => {
+                self.pending_search_submission = Some(modifiers);
+            }
             KeyCode::Enter => {
                 if self.queue_search_submission(modifiers) {
                     return Ok(OverlayAction::Continue);
@@ -1425,27 +1432,27 @@ impl SessionPicker {
             // send for Ctrl+Backspace) delete the previous word in the query.
             KeyCode::Backspace if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Char('\u{8}') => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Ctrl+U clears the whole query (like readline's kill-to-start).
             KeyCode::Char('u') if ctrl => {
                 self.search_query.clear();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Vim-style / readline navigation that keeps working while typing.
             KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
             KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
             KeyCode::Char('w') if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Char(c) => {
                 if ctrl && c == 'c' {
@@ -1457,7 +1464,7 @@ impl SessionPicker {
                     return Ok(OverlayAction::Continue);
                 }
                 self.search_query.push(c);
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.previous(),

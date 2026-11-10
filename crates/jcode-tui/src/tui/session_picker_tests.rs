@@ -304,6 +304,7 @@ fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
     );
     picker.search_query = "local".into();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert!(picker.visible_sessions.is_empty());
 }
 
@@ -839,6 +840,7 @@ fn resume_search_battery_prompt_outranks_incidental_tool_mentions() {
     let mut picker = SessionPicker::new(sessions);
     picker.search_query = "battery".into();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 98);
     assert_eq!(
         picker
@@ -953,6 +955,7 @@ fn benchmark_resume_search_reports_incremental_timings() {
     picker.rebuild_items();
     let third_ms = third_start.elapsed().as_secs_f64() * 1000.0;
 
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
     eprintln!(
         "resume search bench: first_char={:.3}ms second_char={:.3}ms full_query={:.3}ms sessions=500",
@@ -2304,6 +2307,7 @@ fn test_reseed_grouped_preserves_selection_and_search() {
     picker.search_active = true;
     picker.focus = PaneFocus::Preview;
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     let search_selected = picker
         .selected_session()
         .map(|s| s.id.clone())
@@ -2312,6 +2316,7 @@ fn test_reseed_grouped_preserves_selection_and_search() {
     // Reseed with the same data (as the async refresh would).
     picker.reseed_grouped(Vec::new(), sessions);
 
+    wait_for_picker_search(&mut picker);
     // Search query, search mode, focus, and the matched selection survive.
     assert_eq!(picker.search_query, "reseed4");
     assert!(picker.search_active);

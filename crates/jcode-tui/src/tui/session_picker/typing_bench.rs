@@ -53,6 +53,46 @@ fn ms(values: &[Duration]) -> serde_json::Value {
 }
 
 #[test]
+fn editing_coalesces_without_rebuilding_or_starting_search() {
+    let mut picker = large_history(12, 1);
+    picker.activate_search();
+    let rows = picker.visible_sessions.clone();
+    let selected = picker.list_state.selected();
+    let query = picker.cached_search_query.clone();
+    for ch in "deployment thr".chars() {
+        picker
+            .handle_overlay_key(KeyCode::Char(ch), KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(picker.visible_sessions, rows);
+        assert_eq!(picker.list_state.selected(), selected);
+        assert_eq!(picker.cached_search_query, query);
+        assert!(!picker.transcript_search.pending());
+    }
+    assert!(picker.search_edit_pending);
+    assert!(picker.has_pending_preview_work());
+    assert_eq!(picker.search_query, "deployment thr");
+    // A subsequent poll submits only the final edit, not fourteen searches.
+    picker.poll_transcript_search();
+    assert!(!picker.search_edit_pending);
+    assert_eq!(picker.cached_search_query, "deployment thr");
+}
+
+#[test]
+fn enter_before_first_poll_never_resumes_a_stale_row() {
+    let mut picker = large_history(2, 1);
+    picker.activate_search();
+    picker
+        .handle_overlay_key(KeyCode::Char('z'), KeyModifiers::NONE)
+        .unwrap();
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    assert!(matches!(action, OverlayAction::Continue));
+    assert!(picker.search_submission_pending());
+    assert!(picker.search_edit_pending);
+}
+
+#[test]
 #[ignore = "manual typing benchmark, run alone with --nocapture --test-threads=1"]
 fn benchmark_resume_typing_experience() {
     let mut picker = large_history(700, 8);
