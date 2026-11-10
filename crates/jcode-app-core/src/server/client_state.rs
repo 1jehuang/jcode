@@ -353,10 +353,12 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        persisted
-                            .as_ref()
-                            .and_then(|session| session.reasoning_effort.clone())
-                            .or_else(|| provider.default_reasoning_effort()),
+                        // Catalog replies are non-authoritative, and the busy
+                        // fallback may read a different provider handle. A
+                        // persisted effort can also be stale after a model
+                        // switch cleared it. Publish no effort so clients keep
+                        // the authoritative `ModelChanged`/History value.
+                        None,
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),

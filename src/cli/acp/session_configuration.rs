@@ -71,7 +71,11 @@ pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&'static str> {
 /// model ids the client cannot recognize. The ladder only constrains the
 /// inferred default used when no daemon value exists.
 pub(super) fn displayed_effort<'a>(state: &'a SessionUiState) -> &'a str {
-    if let Some(effort) = state.reasoning_effort.as_deref() {
+    if let Some(effort) = state
+        .reasoning_effort
+        .as_deref()
+        .filter(|effort| !effort.starts_with("swarm"))
+    {
         return effort;
     }
     let efforts = available_efforts(state);

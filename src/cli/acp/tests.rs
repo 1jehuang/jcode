@@ -535,6 +535,25 @@ fn reported_effort_preserves_daemon_values() {
         "a daemon-accepted value the inferred ladder misses must be preserved"
     );
 
+    // `swarm` is a TUI sentinel, not a selectable ACP effort.
+    state.reasoning_effort = Some("swarm".to_string());
+    assert_eq!(displayed_effort(&state), "high");
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert!(
+        !effort["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["value"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("swarm"))),
+        "swarm must not leak into the ACP effort selector"
+    );
+
     state.provider_name = Some("unknown".to_string());
     state.model = Some("mystery".to_string());
     state.reasoning_effort = Some("none".to_string());
