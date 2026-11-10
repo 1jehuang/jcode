@@ -353,8 +353,6 @@ pub(super) async fn handle_remote_key_internal(
             return Ok(());
         }
     }
-    let macos_option_shortcut =
-        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
     if app.toggle_keys.diagram_pane.matches(code, modifiers) {
         app.toggle_diagram_pane_position();
         return Ok(());
@@ -407,9 +405,8 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers.contains(KeyModifiers::ALT) || macos_option_shortcut.is_some() {
-        let alt_code = macos_option_shortcut.map(KeyCode::Char).unwrap_or(code);
-        match alt_code {
+    if modifiers.contains(KeyModifiers::ALT) {
+        match code {
             KeyCode::Char('b') => {
                 // Cloud/reconnected clients can display a connection phase while
                 // the server is still executing a tool. The server is authoritative.

@@ -785,13 +785,7 @@ impl App {
             return;
         }
         // Only modified chords (or BackTab) can be hotkeys; skip plain typing.
-        // Exception: macOS terminals that keep Option as a character key send
-        // Option+M as a bare 'µ' with no ALT modifier; `KeyBinding::matches`
-        // translates those, so let them through to the lookup.
-        let macos_option_char = cfg!(target_os = "macos")
-            && modifiers.is_empty()
-            && jcode_tui_core::keybind::macos_option_char_to_ascii_key(code).is_some();
-        if modifiers.is_empty() && code != KeyCode::BackTab && !macos_option_char {
+        if modifiers.is_empty() && code != KeyCode::BackTab {
             return;
         }
         // Shift alone on a character is just typing (uppercase letters, symbols).
