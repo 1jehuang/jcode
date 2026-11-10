@@ -36,6 +36,9 @@ struct Snapshot {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct Entry {
+    /// Reset metadata from the same coordinated usage response. Contains no credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_status: Option<serde_json::Value>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -238,6 +241,15 @@ fn entry_usage(entry: &Entry) -> UsageData {
     usage
 }
 
+pub(super) fn reset_status(key: &str) -> Option<serde_json::Value> {
+    let entry = load().remove(key)?;
+    if entry.error.is_some() || deadline(&entry)? <= now_ms() {
+        return None;
+    }
+    entry.last_good.as_ref()?;
+    entry.reset_status
+}
+
 pub(super) fn fresh(key: &str) -> Option<UsageData> {
     let entry = load().remove(key)?;
     (deadline(&entry)? > now_ms()).then(|| entry_usage(&entry))
@@ -251,6 +263,14 @@ pub(super) fn last_good(key: &str) -> Option<UsageData> {
 }
 
 pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
+    store_success_with_reset_status(key, data, None)
+}
+
+pub(super) fn store_success_with_reset_status(
+    key: &str,
+    data: &UsageData,
+    reset_status: Option<serde_json::Value>,
+) -> UsageData {
     let snapshot = Snapshot {
         fetched_unix_ms: now_ms(),
         five_hour: data.five_hour,
@@ -271,6 +291,7 @@ pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
             entry.adaptive_interval_secs = RATE_LIMIT_BACKOFF.as_secs() * 2;
         }
         entry.last_good = Some(snapshot);
+        entry.reset_status = reset_status;
         entry.error = None;
         entry.error_unix_ms = None;
         // Do not clear learned slowdown or a provider's outstanding deadline.

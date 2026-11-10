@@ -180,6 +180,8 @@ pub struct ModelScopedUsageWindow {
 /// API response structures
 #[derive(Deserialize, Debug)]
 pub(super) struct UsageResponse {
+    /// Read reset eligibility with the quota response, never a second poll.
+    pub juniper_tide: Option<serde_json::Value>,
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,
