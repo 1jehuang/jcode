@@ -18,6 +18,7 @@ use ratatui::{DefaultTerminal, Terminal, backend::Backend};
 use std::time::{Duration, Instant};
 
 mod input_dispatch;
+use input_dispatch::key_scroll_delta;
 mod key_handling;
 mod latency;
 mod login_completion;
@@ -654,6 +655,8 @@ async fn apply_terminal_event<B: Backend>(
             });
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if !app.handle_voice_key_event(&key)
@@ -707,7 +710,8 @@ async fn apply_terminal_event<B: Backend>(
                     )));
                 }
             }
-            needs_redraw = true;
+            needs_redraw =
+                before_release.is_none_or(|before| before != app.key_release_visible_state());
             needs_redraw |= dispatch_compacted_history_load(app, remote).await;
         }
         Some(Ok(Event::Paste(text))) => {
@@ -739,16 +743,6 @@ async fn apply_terminal_event<B: Backend>(
     }
     crate::tui::ui::set_frame_input_attribution(input_attribution);
     Ok(needs_redraw)
-}
-
-fn key_scroll_delta(key: &KeyEvent) -> Option<i32> {
-    match key.code {
-        KeyCode::Up => Some(-1),
-        KeyCode::PageUp => Some(-10),
-        KeyCode::Down => Some(1),
-        KeyCode::PageDown => Some(10),
-        _ => None,
-    }
 }
 
 fn mouse_scroll_delta(mouse: &MouseEvent) -> Option<i32> {

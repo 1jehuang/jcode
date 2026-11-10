@@ -3442,6 +3442,35 @@ impl App {
         self.copy_badge_ui.key_active = Some((key, expiry));
     }
 
+    /// Everything a key *release* can change on screen: the held-modifier and
+    /// held-key copy badges and the voice-input phase. Compared before and
+    /// after a release so releases that change none of it skip the full
+    /// frame. Under kitty's keyboard protocol every keystroke also reports a
+    /// release, which doubled the frames drawn while typing.
+    pub(super) fn key_release_visible_state(
+        &self,
+    ) -> (
+        bool,
+        bool,
+        Option<char>,
+        Option<super::voice_input::VoicePhase>,
+    ) {
+        // Badges render only through the `*_is_active` gates (the held key
+        // only shows under Alt+Shift), so compare those, not raw fields.
+        let now = std::time::Instant::now();
+        let badge = &self.copy_badge_ui;
+        let shift = badge.shift_is_active(now);
+        (
+            badge.alt_is_active(now),
+            shift,
+            badge
+                .key_active
+                .filter(|(_, expires_at)| shift && *expires_at > now)
+                .map(|(c, _)| c.to_ascii_lowercase()),
+            self.voice_input.as_ref().map(|voice| voice.phase),
+        )
+    }
+
     pub(super) fn record_copy_badge_feedback(&mut self, key: char, success: bool) {
         self.copy_badge_ui.copied_feedback = Some(crate::tui::app::CopyBadgeFeedback {
             key,
