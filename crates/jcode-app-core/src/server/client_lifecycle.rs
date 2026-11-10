@@ -2703,7 +2703,9 @@ server_resumes: false,
                     &swarm_members,
                 )
                 .await;
-                let _ = client_event_tx.send(event);
+                if let Err(error) = client_event_tx.send(event) {
+                    crate::logging::debug(&format!("client disconnected before voice activity reply: {error}"));
+                }
             }
 
             Request::InputShell { id, command } => {

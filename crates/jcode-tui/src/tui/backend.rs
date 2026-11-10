@@ -740,7 +740,12 @@ impl RemoteConnection {
                     drop(w);
                     pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                     let failed = result.is_err();
-                    let _ = done.send(result.map_err(|error| error.to_string()));
+                    if done
+                        .send(result.map_err(|error| error.to_string()))
+                        .is_err()
+                    {
+                        crate::logging::debug("Remote write acknowledgement receiver closed");
+                    }
                     if failed {
                         crate::logging::warn("Remote writer task stopped after write error");
                         break;
@@ -749,17 +754,17 @@ impl RemoteConnection {
             });
             *slot = Some(tx);
         }
+        let sender = slot
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote connection writer unavailable"))?;
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         self.outbound_pending
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        slot.as_ref()
-            .expect("outbound sender initialized")
-            .send((bytes, done_tx))
-            .map_err(|_| {
-                self.outbound_pending
-                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                anyhow::anyhow!("remote connection writer closed")
-            })?;
+        sender.send((bytes, done_tx)).map_err(|_| {
+            self.outbound_pending
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            anyhow::anyhow!("remote connection writer closed")
+        })?;
         Ok(done_rx)
     }
 

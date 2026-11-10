@@ -2069,7 +2069,10 @@ fn load_external_sessions(enabled: bool, scan_limit: usize) -> Vec<SessionInfo> 
 
         let mut external = Vec::new();
         for handle in [claude, codex, pi, opencode, cursor] {
-            external.extend(handle.join().unwrap_or_default());
+            match handle.join() {
+                Ok(sessions) => external.extend(sessions),
+                Err(_) => crate::logging::warn("External session loader panicked"),
+            }
         }
         external
     })

@@ -1683,7 +1683,7 @@ impl SessionPicker {
             })
             && !self
                 .preview_load_failures
-                .contains(&self.latency_selection_id().unwrap_or_default());
+                .contains(self.latency_selection_id().as_deref().unwrap_or(""));
     }
 
     /// While `loading_id` loads, the session whose preview is still on screen,

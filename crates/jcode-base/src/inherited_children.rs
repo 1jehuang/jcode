@@ -34,7 +34,15 @@ mod imp {
             if let Ok(text) = std::fs::read_to_string(path) {
                 out.extend(
                     text.split_whitespace()
-                        .filter_map(|p| p.parse::<i32>().ok()),
+                        .filter_map(|p| match p.parse::<i32>() {
+                            Ok(pid) => Some(pid),
+                            Err(error) => {
+                                crate::logging::info(&format!(
+                                    "Invalid inherited PID {p}: {error}"
+                                ));
+                                None
+                            }
+                        }),
                 );
             }
         }
@@ -88,14 +96,17 @@ mod imp {
         if inherited.is_empty() {
             return;
         }
-        let _ = std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("jcode-inherited-reaper".to_string())
             .spawn(move || {
                 while !inherited.is_empty() {
                     std::thread::sleep(REAP_INTERVAL);
                     reap(&mut inherited);
                 }
-            });
+            })
+        {
+            crate::logging::info(&format!("Unable to start inherited child reaper: {error}"));
+        }
     }
 
     #[cfg(test)]
@@ -123,7 +134,22 @@ mod imp {
                 .arg("5")
                 .spawn()
                 .unwrap();
-            assert!(super::has_mcp_marker(child.id() as i32));
+            // Some process launchers return before the final image's environ is
+            // visible through procfs. Wait for the observable marker, not a
+            // fixed startup delay, and retain diagnostics on a real failure.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !super::has_mcp_marker(child.id() as i32) {
+                if std::time::Instant::now() >= deadline {
+                    let environ = std::fs::read(format!("/proc/{}/environ", child.id()))
+                        .map(|bytes| format!("read {} bytes without marker", bytes.len()));
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    plain.kill().unwrap();
+                    plain.wait().unwrap();
+                    panic!("MCP marker did not become visible: {environ:?}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             assert!(!super::has_mcp_marker(plain.id() as i32));
             assert!(super::children_of(std::process::id()).contains(&(child.id() as i32)));
             let _ = child.kill();

@@ -303,7 +303,14 @@ pub fn ip_addr_from_host(host: &str) -> Option<std::net::IpAddr> {
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
     // `IpAddr` rejects zone ids, so compare on the address part only.
-    host.split('%').next().and_then(|host| host.parse().ok())
+    #[expect(
+        clippy::manual_ok_err,
+        reason = "DNS hostnames are valid inputs but are explicitly not IP literals"
+    )]
+    match host.split('%').next()?.parse() {
+        Ok(address) => Some(address),
+        Err(_) => None, // DNS names and malformed literals are not IP addresses.
+    }
 }
 
 fn normalize_provider_input(input: &str) -> Option<String> {

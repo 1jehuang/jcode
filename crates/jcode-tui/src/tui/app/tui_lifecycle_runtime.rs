@@ -256,7 +256,11 @@ impl App {
             self.session.provider_session_id = self.provider_session_id.clone();
             self.session
                 .set_status(crate::session::SessionStatus::Reloaded);
-            let _ = self.session.save();
+            if let Err(error) = self.session.save() {
+                crate::logging::warn(&format!(
+                    "Failed to save session during TUI lifecycle: {error}"
+                ));
+            }
             self.session.id.clone()
         };
         self.append_reload_message("Newer jcode build published; hot reloading client...");

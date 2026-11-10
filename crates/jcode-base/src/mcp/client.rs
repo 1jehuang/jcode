@@ -698,7 +698,9 @@ impl Drop for McpClient {
     fn drop(&mut self) {
         if let Backend::Stdio(child) = &mut self.backend {
             kill_process_group(child);
-            let _ = child.start_kill();
+            if let Err(error) = child.start_kill() {
+                crate::logging::info(&format!("MCP child cleanup failed: {error}"));
+            }
         }
     }
 }

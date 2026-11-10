@@ -1,9 +1,8 @@
 {
-  "total": 183,
+  "total": 178,
   "tracked_files": {
     "crates/jcode-app-core/src/agent/conversation_reset.rs": 1,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
-    "crates/jcode-app-core/src/mobile_push.rs": 3,
     "crates/jcode-app-core/src/server/client_lifecycle.rs": 1,
     "crates/jcode-app-core/src/server/runtime_commands.rs": 1,
     "crates/jcode-app-core/src/server/usage_limit_resume.rs": 1,
@@ -65,8 +64,6 @@
     "crates/jcode-tui/src/tui/app/onboarding_flow.rs": 1,
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": 1,
     "crates/jcode-tui/src/tui/app/usage_reset.rs": 1,
-    "crates/jcode-tui/src/tui/backend.rs": 1,
-    "crates/jcode-tui/src/tui/terminal_events.rs": 1,
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": 1,
     "src/bin/memory_recall_bench.rs": 14,
     "src/cli/acp.rs": 2,
