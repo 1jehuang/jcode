@@ -4,13 +4,18 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      expedite:
+        description: Publish this master snapshot without the quiet wait, retaining all validation
+        type: boolean
+        default: false
 
-# A new master push cancels the sleep, CI wait, and any obsolete builds.
-# Manual/recovery retries use the same gates and a fresh preview number, but
-# never cancel an active build if the Actions run-list API briefly lags.
+# Automatic runs debounce master and discard obsolete builds. Explicit expedited
+# dispatches pin their master snapshot in a separate, non-cancelling group so
+# ongoing development cannot starve publication. All validation still applies.
 # No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
 concurrency:
-  group: v1-preview-master
+  group: v1-preview-${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'pinned' || 'master' }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
@@ -19,6 +24,7 @@ permissions:
 
 env:
   JCODE_CI: "1"
+  JCODE_PREVIEW_PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'true' || 'false' }}
   JCODE_RELEASE_BUILD: "1"
   JCODE_CI_BUILD: "1"
   JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}
@@ -37,6 +43,7 @@ jobs:
     timeout-minutes: 205
     steps:
       - name: Require 15 quiet minutes on master
+        if: env.JCODE_PREVIEW_PINNED != 'true'
         run: sleep 900
       - uses: actions/checkout@v4
         with:
@@ -45,7 +52,10 @@ jobs:
       - name: Reject superseded master commit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER"
+        run: |
+          set --
+          if [ "$JCODE_PREVIEW_PINNED" = true ]; then set -- --pinned; fi
+          python3 scripts/preview_release.py check-head --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" "$@"
       - name: Require exact-commit source CI under preview policy
         env:
           GH_TOKEN: ${{ github.token }}
@@ -234,10 +244,13 @@ jobs:
           pattern: preview-jcode-*
           merge-multiple: true
           path: dist
-      - name: Publish complete preview only if master is still current
+      - name: Publish validated current head or explicitly pinned master snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist
+        run: |
+          set --
+          if [ "$JCODE_PREVIEW_PINNED" = true ]; then set -- --pinned; fi
+          python3 scripts/preview_release.py publish --sha "$GITHUB_SHA" --tag "$JCODE_BUILD_SEMVER" --assets dist "$@"
 
   publish-sdk:
     needs: publish
