@@ -754,6 +754,19 @@ mod reconnect {
         let (result, _conn) = timed(async { tokio::join!(harness.prompt(&session), daemon) }).await;
         result.expect("prompt after a daemon restart should reattach and succeed");
 
+        let update = timed(harness.next_output()).await;
+        assert_eq!(
+            update["params"]["update"]["sessionUpdate"],
+            "config_option_update"
+        );
+        let options = update["params"]["update"]["configOptions"]
+            .as_array()
+            .unwrap();
+        let model = options
+            .iter()
+            .find(|option| option["id"] == CONFIG_ID_MODEL)
+            .unwrap();
+        assert_eq!(model["currentValue"], "reattached-model");
         let response = timed(harness.next_output()).await;
         assert_eq!(response["id"], 7);
         assert_eq!(response["result"]["stopReason"], "end_turn");
@@ -761,6 +774,114 @@ mod reconnect {
             session.ui_state.lock().await.model.as_deref(),
             Some("reattached-model")
         );
+        assert!(!session.prompt_running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_prompt_is_not_resent_after_reconnect() {
+        let mut harness = Harness::new();
+        let (session, first) = harness.session().await;
+        harness
+            .runtime
+            .sessions
+            .lock()
+            .await
+            .insert(SESSION.into(), Arc::clone(&session));
+        drop(first);
+
+        let daemon = async {
+            let mut conn = FakeConn::accept(&harness.listener).await;
+            let Request::Subscribe { id, .. } = conn.read().await else {
+                panic!("expected a reattach subscription");
+            };
+            // Cancel while reattachment is waiting on the daemon. The old
+            // socket cannot deliver the cancel, but the retry must honor it.
+            harness
+                .runtime
+                .handle_session_cancel(JsonRpcMessage {
+                    id: None,
+                    method: Some("session/cancel".into()),
+                    params: json!({"sessionId": SESSION}),
+                })
+                .await
+                .unwrap();
+            conn.write(json!({
+                "type": "history", "id": id, "session_id": SESSION,
+                "messages": [], "provider_model": "reattached-model",
+            }))
+            .await;
+            conn.write(json!({"type": "done", "id": id})).await;
+            conn
+        };
+        let (result, mut conn) =
+            timed(async { tokio::join!(harness.prompt(&session), daemon) }).await;
+        result.expect("cancellation during reattach should complete normally");
+        let update = timed(harness.next_output()).await;
+        assert_eq!(
+            update["params"]["update"]["sessionUpdate"],
+            "config_option_update"
+        );
+        let response = timed(harness.next_output()).await;
+        assert_eq!(response["result"]["stopReason"], "cancelled");
+        assert!(!session.prompt_running.load(Ordering::SeqCst));
+        let mut line = String::new();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                conn.reader.read_line(&mut line),
+            )
+            .await
+            .is_err(),
+            "cancelled prompt reached the restored daemon: {line}"
+        );
+
+        let (result, ()) =
+            timed(async { tokio::join!(harness.prompt(&session), conn.complete_prompt()) }).await;
+        result.expect("cancellation must not poison the next prompt");
+        let response = timed(harness.next_output()).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn cancel_after_retry_reaches_the_restored_connection() {
+        let mut harness = Harness::new();
+        let (session, first) = harness.session().await;
+        harness
+            .runtime
+            .sessions
+            .lock()
+            .await
+            .insert(SESSION.into(), Arc::clone(&session));
+        drop(first);
+
+        let daemon = async {
+            let mut conn = FakeConn::accept_reattach(&harness.listener).await;
+            let Request::Message { id, .. } = conn.read().await else {
+                panic!("expected the retried prompt");
+            };
+            harness
+                .runtime
+                .handle_session_cancel(JsonRpcMessage {
+                    id: None,
+                    method: Some("session/cancel".into()),
+                    params: json!({"sessionId": SESSION}),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(conn.read().await, Request::Cancel { .. }));
+            conn.write(json!({"type": "interrupted"})).await;
+            conn.write(json!({"type": "done", "id": id})).await;
+            conn
+        };
+        let (result, _conn) = timed(async { tokio::join!(harness.prompt(&session), daemon) }).await;
+        result.expect("cancel on the restored socket should complete");
+        let update = timed(harness.next_output()).await;
+        assert_eq!(
+            update["params"]["update"]["sessionUpdate"],
+            "config_option_update"
+        );
+        let response = timed(harness.next_output()).await;
+        assert_eq!(response["result"]["stopReason"], "cancelled");
         assert!(!session.prompt_running.load(Ordering::SeqCst));
     }
 
@@ -796,6 +917,12 @@ mod reconnect {
             "unexpected error: {err:#}"
         );
         assert!(!session.prompt_running.load(Ordering::SeqCst));
+
+        let update = timed(harness.next_output()).await;
+        assert_eq!(
+            update["params"]["update"]["sessionUpdate"],
+            "config_option_update"
+        );
 
         // The session was reattached, so the next prompt works without a new agent.
         let (result, ()) =

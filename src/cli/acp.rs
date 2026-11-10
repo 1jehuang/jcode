@@ -380,9 +380,34 @@ impl DaemonSession {
     }
 
     async fn send(&self, request: &Request) -> Result<()> {
+        let mut writer = self.writer.lock().await;
+        Self::write_request(&mut writer, request).await
+    }
+
+    /// Serialize the cancellation check with sends and connection replacement.
+    /// If cancellation wins this lock, no prompt reaches the restored daemon;
+    /// otherwise the cancel is sent after the prompt on the same connection.
+    async fn send_prompt(&self, request: &Request) -> Result<bool> {
+        let mut writer = self.writer.lock().await;
+        if self.cancel_requested.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        Self::write_request(&mut writer, request).await?;
+        Ok(true)
+    }
+
+    async fn cancel_prompt(&self) -> Result<()> {
+        let mut writer = self.writer.lock().await;
+        if !self.prompt_running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.cancel_requested.store(true, Ordering::SeqCst);
+        Self::write_request(&mut writer, &Request::Cancel { id: self.next_id() }).await
+    }
+
+    async fn write_request(writer: &mut WriteHalf, request: &Request) -> Result<()> {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
-        let mut writer = self.writer.lock().await;
         writer.write_all(json.as_bytes()).await?;
         writer.flush().await?;
         Ok(())
@@ -731,9 +756,7 @@ impl AcpRuntime {
             // daemon cancel can emit a stray interrupt that the next prompt
             // would otherwise misattribute to itself.
             if session.prompt_running.load(Ordering::SeqCst) {
-                session.cancel_requested.store(true, Ordering::SeqCst);
-                let cancel_id = session.next_id();
-                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+                let _ = session.cancel_prompt().await;
             }
         }
         if let Some(id) = message.id {
@@ -977,6 +1000,7 @@ impl AcpRuntime {
         let fresh_state = ui_state.into_inner();
         if fresh_state.model.is_some() {
             *session.ui_state.lock().await = fresh_state;
+            self.write_config_option_update(session).await?;
         }
         crate::logging::info(&format!(
             "ACP: reattached session {} to the daemon",
@@ -1294,11 +1318,20 @@ impl AcpRuntime {
         // to a closed socket fails (EPIPE) without reaching any daemon, so it
         // is safe to reattach and send once more.
         let send_result = self
-            .with_reconnect(&session, || session.send(&request))
+            .with_reconnect(&session, || session.send_prompt(&request))
             .await;
-        if let Err(err) = send_result {
-            cleanup_prompt_state(&session).await;
-            return Err(err);
+        match send_result {
+            Ok(true) => {}
+            Ok(false) => {
+                cleanup_prompt_state(&session).await;
+                self.write_result(rpc_id, prompt_response("cancelled", &TurnUsage::default()))
+                    .await?;
+                return Ok(());
+            }
+            Err(err) => {
+                cleanup_prompt_state(&session).await;
+                return Err(err);
+            }
         }
 
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
