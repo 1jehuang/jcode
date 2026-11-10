@@ -47,6 +47,7 @@ impl Source {
 }
 
 /// Weight of the best source per token, summed across query tokens.
+#[cfg(test)]
 pub(crate) fn source_weight(best: &[Option<Source>]) -> u32 {
     best.iter().flatten().map(|source| source.weight()).sum()
 }

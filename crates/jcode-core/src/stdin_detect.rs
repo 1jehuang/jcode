@@ -95,7 +95,9 @@ pub mod linux {
             if fd == "0" {
                 continue;
             }
-            let Ok(link) = std::fs::read_link(entry.path()) else { continue };
+            let Ok(link) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
             let link = link.to_string_lossy();
             let blocking_kind = link.starts_with("pipe:")
                 || link.starts_with("socket:")
@@ -240,7 +242,7 @@ pub mod linux {
                 {
                     for line in status.lines() {
                         if let Some(ppid_str) = line.strip_prefix("PPid:\t")
-                            && ppid_str.trim().parse::<u32>().ok() == Some(pid)
+                            && ppid_str.trim().parse::<u32>() == Ok(pid)
                         {
                             children.push(child_pid);
                             break;

@@ -9,8 +9,10 @@ on:
   pull_request:
     branches: [main, master]
 
+# Release authorization needs completed exact-SHA main-push CI. Keep those
+# runs alive when master advances, while still cancelling obsolete PR checks.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.sha || 'latest' }}
   cancel-in-progress: true
 
 env:

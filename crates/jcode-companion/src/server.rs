@@ -239,22 +239,12 @@ async fn open(target: &str) -> Result<String> {
 }
 
 fn terminal_command_from_parts(
-    program: PathBuf,
-    args: Vec<String>,
+    mut command: jcode_base::terminal_launch::TerminalCommand,
     title: Option<String>,
     kind: Option<String>,
     session_id: Option<String>,
     env: Vec<(String, String)>,
-    client_terminal_env: Vec<(String, String)>,
-    runtime_env: Vec<(String, String)>,
-    fresh_spawn: bool,
 ) -> jcode_base::terminal_launch::TerminalCommand {
-    let mut command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
-        .client_terminal_env(client_terminal_env)
-        .runtime_env(runtime_env);
-    if fresh_spawn {
-        command = command.fresh_spawn();
-    }
     if let Some(title) = title {
         command = command.title(title);
     }
@@ -285,15 +275,12 @@ fn terminal_command_from_request(
             client_terminal_env,
         } => Some((
             terminal_command_from_parts(
-                program,
-                args,
+                jcode_base::terminal_launch::TerminalCommand::new(program, args)
+                    .client_terminal_env(client_terminal_env),
                 title,
                 kind,
                 session_id,
                 env,
-                client_terminal_env,
-                Vec::new(),
-                false,
             ),
             cwd,
         )),
@@ -310,15 +297,20 @@ fn terminal_command_from_request(
             fresh_spawn,
         } => Some((
             terminal_command_from_parts(
-                program,
-                args,
+                {
+                    let command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
+                        .client_terminal_env(client_terminal_env)
+                        .runtime_env(runtime_env);
+                    if fresh_spawn {
+                        command.fresh_spawn()
+                    } else {
+                        command
+                    }
+                },
                 title,
                 kind,
                 session_id,
                 env,
-                client_terminal_env,
-                runtime_env,
-                fresh_spawn,
             ),
             cwd,
         )),

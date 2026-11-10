@@ -1438,20 +1438,18 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
     }
 
     let card_lines = if crate::config::config().display.pin_todos {
-        payload
-            .map(|payload| {
-                // Distinct title keeps the line cache from sharing entries with
-                // the width-capped inline transcript card.
-                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
-                msg.title = Some("Pinned todos".to_string());
-                super::messages::get_cached_message_lines(
-                    &msg,
-                    width,
-                    diff_mode,
-                    super::messages::render_pinned_todos_message,
-                )
-            })
-            .unwrap_or_default()
+        payload.map_or_else(Vec::new, |payload| {
+            // Distinct title keeps the line cache from sharing entries with
+            // the width-capped inline transcript card.
+            let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+            msg.title = Some("Pinned todos".to_string());
+            super::messages::get_cached_message_lines(
+                &msg,
+                width,
+                diff_mode,
+                super::messages::render_pinned_todos_message,
+            )
+        })
     } else {
         Vec::new()
     };

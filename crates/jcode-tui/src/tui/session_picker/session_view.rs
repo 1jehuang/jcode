@@ -70,8 +70,7 @@ impl SessionView<'_> {
     fn live_status(&self) -> ProcessingStatus {
         self.live
             .as_ref()
-            .map(|live| live.status.clone())
-            .unwrap_or_default()
+            .map_or_else(ProcessingStatus::default, |live| live.status.clone())
     }
 }
 
@@ -132,10 +131,12 @@ impl TuiState for SessionView<'_> {
         self.scroll.is_some()
     }
     fn provider_name(&self) -> String {
-        self.provider.clone().unwrap_or_default()
+        self.provider
+            .as_ref()
+            .map_or_else(String::new, Clone::clone)
     }
     fn provider_model(&self) -> String {
-        self.model.clone().unwrap_or_default()
+        self.model.as_ref().map_or_else(String::new, Clone::clone)
     }
     fn upstream_provider(&self) -> Option<String> {
         None
@@ -402,10 +403,14 @@ pub(crate) fn draw_session_view(
     let (rendered, geometry) = crate::tui::markdown::with_center_code_blocks(center, || {
         crate::tui::ui::with_secondary_render(|| {
             jcode_tui_mermaid::with_image_frame_offset(area.x, area.y, || {
-                let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).ok()?;
-                let completed = terminal
-                    .draw(|inner| crate::tui::ui::draw(inner, view))
-                    .ok()?;
+                let mut terminal = super::preview_result(
+                    Terminal::new(TestBackend::new(area.width, area.height)),
+                    "preview terminal initialization",
+                )?;
+                let completed = super::preview_result(
+                    terminal.draw(|inner| crate::tui::ui::draw(inner, view)),
+                    "preview render",
+                )?;
                 Some(completed.buffer.clone())
             })
         })

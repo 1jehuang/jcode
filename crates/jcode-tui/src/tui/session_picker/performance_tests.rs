@@ -292,6 +292,27 @@ fn missing_preview_is_a_cache_miss_and_rebuilds_on_render() {
     assert!(picker.preview_cache.as_ref().unwrap().key == key);
 }
 
+#[test]
+fn query_edits_reuse_transcript_messages_and_refresh_jump_target() {
+    let mut picker = SessionPicker::new(vec![session(0, 2)]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    draw_preview(&mut picker, &mut terminal);
+    let cache = picker.preview_cache.as_ref().unwrap();
+    let messages = cache.messages.as_ptr();
+    let mut key = cache.key.clone();
+    key.search_query = "resume".into();
+    assert!(picker.reuse_preview(&key));
+    let cache = picker.preview_cache.as_ref().unwrap();
+    assert_eq!(cache.messages.as_ptr(), messages);
+    assert_eq!(cache.key.search_query, "resume");
+    assert!(cache.first_match_line.is_some());
+    key.search_query = "zzzzqqqq".into();
+    assert!(picker.reuse_preview(&key));
+    let cache = picker.preview_cache.as_ref().unwrap();
+    assert_eq!(cache.messages.as_ptr(), messages);
+    assert!(cache.first_match_line.is_none());
+}
+
 fn tiny_cache(id: u64, bytes: usize) -> PreviewRenderCache {
     PreviewRenderCache {
         key: PreviewCacheKey {

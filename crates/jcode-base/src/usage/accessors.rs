@@ -29,8 +29,15 @@ async fn fetch_usage() -> Result<UsageData> {
             .await
         {
             Ok(refreshed) => refreshed.access_token,
+            Err(error) if creds.expires_at < now => {
+                return Err(anthropic_response::credential_error(error));
+            }
             Err(_) => creds.access_token,
         }
+    } else if creds.expires_at < now {
+        return Err(anthropic_response::credential_error(anyhow::anyhow!(
+            "OAuth token expired"
+        )));
     } else {
         creds.access_token
     };
@@ -449,6 +456,7 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
                 &usage,
             )),
             Err(err) => snapshots.push(AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: account.label.clone(),
                 email: account.email.clone(),
                 exhausted: false,
@@ -504,6 +512,7 @@ fn openai_account_usage_probe_sync() -> Option<AccountUsageProbe> {
         match usage {
             Ok(snapshot) => snapshots.push(snapshot),
             Err(err) => snapshots.push(AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: account.label.clone(),
                 email: account.email.clone(),
                 exhausted: false,

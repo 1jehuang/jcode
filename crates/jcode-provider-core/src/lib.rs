@@ -34,7 +34,7 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    parse_failover_prompt_message,
+    is_definitive_usage_exhaustion, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
@@ -609,7 +609,7 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     model,
                     source: anyhow::anyhow!(
                         "simple completion stopped by provider guardrail (stop_reason={})",
-                        stop_reason.as_deref().unwrap_or_default()
+                        stop_reason.as_deref().unwrap_or("")
                     ),
                 }
                 .into());

@@ -140,7 +140,10 @@ fn wire_snapshot(
             || lower.contains("rate limit")
             || lower.contains("too many requests")
         {
-            "Couldn't fetch usage (429: lookup throttled)".to_string()
+            match crate::usage::usage_error_retry_at(&error) {
+                Some(at) => format!("Couldn't fetch usage (429: lookup throttled) (retry at {at})"),
+                None => "Couldn't fetch usage (429: lookup throttled)".to_string(),
+            }
         } else if lower.contains("401") || lower.contains("unauthorized") {
             "Usage authentication failed (401)".to_string()
         } else {
@@ -149,6 +152,11 @@ fn wire_snapshot(
     });
     let failed = error.is_some();
     AccountUsageSnapshot {
+        additional_windows: if !failed || preserve_last_known {
+            value.additional_windows
+        } else {
+            Vec::new()
+        },
         label: value.label,
         email: value.email,
         exhausted: !failed && value.exhausted,
@@ -178,6 +186,7 @@ mod tests {
 
     fn account(error: Option<&str>) -> crate::usage::AccountUsageSnapshot {
         crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -208,6 +217,10 @@ mod tests {
                 "Usage authentication failed (401)",
             ),
             ("secret transport diagnostic", "Usage unavailable"),
+            (
+                "HTTP 429 secret (retry at 2026-01-01T00:00:00Z)",
+                "Couldn't fetch usage (429: lookup throttled) (retry at 2026-01-01T00:00:00Z)",
+            ),
         ] {
             let account = wire_snapshot(account(Some(raw)), true);
             assert_eq!(account.error.as_deref(), Some(safe));
@@ -223,18 +236,27 @@ mod tests {
     #[test]
     fn stale_wire_values_remain_display_only_and_unknown_stays_unknown() {
         let mut known = account(Some("HTTP 429 secret diagnostics"));
+        known
+            .additional_windows
+            .push(crate::protocol::AccountUsageWindow {
+                label: "Fable 7d".into(),
+                usage_ratio: 0.8,
+                resets_at: None,
+            });
         known.seven_day_ratio = Some(0.42);
         let stale = wire_snapshot(known.clone(), true);
         assert_eq!(stale.five_hour_ratio, Some(1.0));
         assert_eq!(stale.seven_day_ratio, Some(0.42));
         assert!(stale.error.is_some());
         assert!(!stale.exhausted);
+        assert_eq!(stale.additional_windows, known.additional_windows);
 
         // OpenAI has no equivalent provenance gate yet, so keep its failed
         // wire snapshots unknown rather than broadening this Anthropic fix.
         let unsupported = wire_snapshot(known.clone(), false);
         assert!(unsupported.five_hour_ratio.is_none());
         assert!(unsupported.seven_day_ratio.is_none());
+        assert!(unsupported.additional_windows.is_empty());
 
         known.five_hour_ratio = None;
         known.seven_day_ratio = None;

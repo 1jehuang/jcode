@@ -189,11 +189,10 @@ fn remote_inventory_lines(
                 format!("{name:<9} {}", masked_identity(account.email.as_deref())),
                 is_current,
             );
-            row.spans
-                .push(Span::styled(" · ", Style::default().fg(dim_color())));
-            if let Some(quota) = remaining_bar(usage, display_used) {
-                row.spans.extend(quota.spans);
-            } else {
+            let quotas = remaining_bars(usage, display_used);
+            if quotas.is_empty() || usage.error.is_some() {
+                row.spans
+                    .push(Span::styled(" · ", Style::default().fg(dim_color())));
                 row.spans.push(Span::styled(
                     usage_status_label(Some(usage)),
                     Style::default().fg(dim_color()),
@@ -212,7 +211,7 @@ fn remote_inventory_lines(
                     .push(Span::styled(" · ", Style::default().fg(dim_color())));
                 row.spans.push(banked);
             }
-            lines.push(row);
+            lines.push(inline_account_row(row, quotas));
         }
     }
     lines
@@ -228,6 +227,7 @@ fn inventory_lines(
     use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
     use jcode_provider_core::ActiveProvider;
     let mut entries = Vec::new();
+    let mut quota_rows = std::collections::BTreeMap::new();
     let runtime = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
     let current_provider = jcode_provider_core::parse_provider_hint(provider_name);
     // Preserve the stored login order for defaulted members. Explicit pool
@@ -264,19 +264,21 @@ fn inventory_lines(
             && credential == Some(ActiveCredential::OAuth);
         let usage =
             crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
-        let quota = usage.as_ref().and_then(|usage| {
-            remaining_bar(usage, crate::config::config().display.usage_display_used())
-        });
+        let quotas = match usage.as_ref() {
+            Some(usage) => {
+                remaining_bars(usage, crate::config::config().display.usage_display_used())
+            }
+            // Accounts without cached usage have no quota rows yet.
+            None => Vec::new(),
+        };
         let mut row = detail(
             oauth_credential_status(expired, usage.as_ref()),
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
             is_current,
         );
-        row.spans
-            .push(Span::styled(" · ", Style::default().fg(dim_color())));
-        if let Some(quota) = quota {
-            row.spans.extend(quota.spans);
-        } else {
+        if quotas.is_empty() || usage.as_ref().is_some_and(|usage| usage.error.is_some()) {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
             row.spans.push(Span::styled(
                 usage_status_label(usage.as_ref()),
                 Style::default().fg(dim_color()),
@@ -289,6 +291,7 @@ fn inventory_lines(
                 .push(Span::styled(" · ", Style::default().fg(dim_color())));
             row.spans.push(banked);
         }
+        quota_rows.insert(account_key(account.provider, Some(&account.label)), quotas);
         entries.push((
             account_key(account.provider, Some(&account.label)),
             true,
@@ -366,7 +369,11 @@ fn inventory_lines(
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
                 .map(|(_, _, line)| {
-                    priority_row(line.clone(), inventory.pool.priority(key), &tiers)
+                    let row = priority_row(line.clone(), inventory.pool.priority(key), &tiers);
+                    match quota_rows.remove(key) {
+                        Some(quotas) => inline_account_row(row, quotas),
+                        None => row,
+                    }
                 })
         })
         .collect();
@@ -376,6 +383,104 @@ fn inventory_lines(
         ));
     }
     lines
+}
+
+const QUOTA_SEPARATOR: &str = " │ ";
+
+fn inline_account_row(mut identity: Line<'static>, quotas: Vec<Line<'static>>) -> Line<'static> {
+    if quotas.is_empty() {
+        return identity;
+    }
+    // Keep status/error and banked-reset telemetry after the quotas, so fitting
+    // cannot sacrifice a model window just to retain a countdown.
+    let suffix = identity.spans.split_off(3);
+    for quota in quotas {
+        identity.spans.push(Span::styled(
+            QUOTA_SEPARATOR,
+            Style::default().fg(dim_color()),
+        ));
+        identity.spans.extend(quota.spans);
+    }
+    identity.spans.extend(suffix);
+    identity
+}
+
+/// Account rows remain one logical row at every width. Drop decoration before
+/// quota labels/percentages, then truncate by terminal cells, never bytes.
+pub(super) fn fit_account_row(mut row: Line<'static>, budget: usize) -> Line<'static> {
+    if row.width() <= budget
+        || row
+            .spans
+            .get(3)
+            .is_none_or(|s| s.content != QUOTA_SEPARATOR)
+    {
+        return row;
+    }
+    let mut end = 3;
+    while row
+        .spans
+        .get(end)
+        .is_some_and(|s| s.content == QUOTA_SEPARATOR)
+        && row.spans.len() >= end + 5
+    {
+        end += 5;
+    }
+    let suffix = row.spans.split_off(end);
+    let original_identity = row.spans[2].clone();
+    // Prefer a short identity over losing any limit, retaining the provider.
+    let provider = original_identity
+        .content
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    row.spans[2].content = format!(" {provider}").into();
+    if row.width() > budget {
+        for quota in row.spans[3..].as_chunks_mut::<5>().0 {
+            // These are the shared renderer's filled and empty spans. Preserve
+            // its colors and convention, shrinking only their cell counts.
+            for span in &mut quota[2..4] {
+                span.content = span.content.chars().take(1).collect::<String>().into();
+            }
+        }
+    }
+    if row.width() > budget {
+        for (index, quota) in row.spans[3..].as_chunks_mut::<5>().0.iter_mut().enumerate() {
+            quota[0].content = " ".into();
+            quota[2].content = "".into();
+            quota[3].content = "".into();
+            // One explicit convention applies to the whole compact row.
+            if index == 0 {
+                continue;
+            }
+            let percent = quota[4]
+                .content
+                .trim()
+                .split(' ')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            quota[4].content = percent.into();
+        }
+    }
+    // Restore as much identity as the quotas permit, using cell-aware ellipsis.
+    let identity_budget = budget.saturating_sub(row.width() - row.spans[2].width());
+    let fitted_identity = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+        &Line::from(vec![original_identity.clone()]),
+        identity_budget,
+    );
+    row.spans[2] = Span::styled(
+        fitted_identity
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>(),
+        original_identity.style,
+    );
+    let with_suffix = Line::from(row.spans.iter().cloned().chain(suffix).collect::<Vec<_>>());
+    if with_suffix.width() <= budget {
+        row = with_suffix;
+    }
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(&row, budget)
 }
 
 fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
@@ -463,62 +568,97 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
-fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> &'static str {
+fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> String {
     match usage {
-        None => "limits pending",
+        None => "limits pending".into(),
         Some(usage) => match usage.error.as_deref() {
-            Some(error) if error.contains("429") => "usage fetch failed (429)",
-            Some(error) if error.contains("401") => "usage fetch needs login",
-            Some(_) => "usage fetch failed",
-            None => "limits not reported",
+            Some(error) if error.contains("429") => {
+                match crate::usage::usage_error_retry_at(error).map(crate::usage::format_reset_time)
+                {
+                    Some(wait) if wait != "now" => format!("usage throttled, retry in {wait}"),
+                    _ => "usage throttled, retrying soon".into(),
+                }
+            }
+            Some(error) if error.contains("401") => "usage fetch needs login".into(),
+            Some(_) => "usage fetch failed".into(),
+            None => "limits not reported".into(),
         },
     }
 }
 
+/// Render every reported quota through the info widget's shared limit renderer.
+fn remaining_bars(
+    usage: &crate::usage::AccountUsageSnapshot,
+    display_used: bool,
+) -> Vec<Line<'static>> {
+    let windows = [
+        (
+            usage.five_hour_ratio,
+            usage.primary_label.as_deref().unwrap_or("5h"),
+        ),
+        (
+            usage.seven_day_ratio,
+            usage.secondary_label.as_deref().unwrap_or("7d"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(ratio, label)| ratio.map(|ratio| (ratio, label)))
+    .chain(
+        usage
+            .additional_windows
+            .iter()
+            .map(|window| (window.usage_ratio, window.label.as_str())),
+    );
+    let mut rows = Vec::new();
+    for (used, window) in windows {
+        if !used.is_finite() || !(0.0..=1.0).contains(&used) {
+            continue;
+        }
+        let label = match window {
+            "5-hour" | "5-hour window" => "5h",
+            "7-day" | "7-day window" => "7d",
+            label => label,
+        };
+        let used_pct = (used * 100.0).round() as u8;
+        let mut bar = crate::tui::info_widget::render_usage_limit_bar(
+            label,
+            used_pct,
+            100u8.saturating_sub(used_pct),
+            None,
+            22,
+            display_used,
+        );
+        // Inline quotas do not need the info widget's fixed-width label column.
+        if let Some(label_span) = bar.spans.first_mut() {
+            label_span.content = format!(
+                "{}{} ",
+                label,
+                if usage.error.is_some() { " stale" } else { "" }
+            )
+            .into();
+        }
+        rows.push(bar);
+    }
+    rows
+}
+
+#[cfg(test)]
 fn remaining_bar(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
 ) -> Option<Line<'static>> {
-    let (used, window) = match usage.five_hour_ratio {
-        Some(used) => (used, usage.primary_label.as_deref().unwrap_or("5h")),
-        None => (
-            usage.seven_day_ratio?,
-            usage.secondary_label.as_deref().unwrap_or("7d"),
-        ),
-    };
-    if !used.is_finite() || !(0.0..=1.0).contains(&used) {
+    let rows = remaining_bars(usage, display_used);
+    if rows.is_empty() {
         return None;
     }
-    let label = match window {
-        "5-hour" | "5-hour window" => "5h",
-        "7-day" | "7-day window" => "7d",
-        label => label,
-    };
-    let used_pct = (used * 100.0).round() as u8;
-    let mut bar = crate::tui::info_widget::render_usage_limit_bar(
-        label,
-        used_pct,
-        100u8.saturating_sub(used_pct),
-        None,
-        22,
-        display_used,
-    );
-    // Inline quotas do not need the info widget's fixed-width label column.
-    if let Some(label) = bar.spans.first_mut() {
-        label.content = format!(
-            "{}{} ",
-            label.content.trim_end(),
-            if usage.error.is_some() { " stale" } else { "" },
-        )
-        .into();
-    }
+    let mut spans: Vec<_> = rows.into_iter().flat_map(|row| row.spans).collect();
     if usage.error.is_some() {
-        bar.spans.push(Span::styled(
+        spans.push(Span::styled(
             format!(" · {}", usage_status_label(Some(usage))),
             Style::default().fg(dim_color()),
         ));
     }
-    Some(bar)
+    Some(Line::from(spans))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -574,6 +714,12 @@ fn oauth_credential_status(
     if [usage.five_hour_ratio, usage.seven_day_ratio]
         .into_iter()
         .flatten()
+        .chain(
+            usage
+                .additional_windows
+                .iter()
+                .map(|window| window.usage_ratio),
+        )
         .any(|ratio| ratio.is_finite() && (0.0..=1.0).contains(&ratio))
     {
         CredentialStatus::Available
@@ -620,6 +766,7 @@ mod tests {
     #[test]
     fn remote_rows_mask_email_and_show_quota() {
         let account = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "work".into(),
             email: Some("jeremy@example.com".into()),
             exhausted: false,
@@ -640,6 +787,144 @@ mod tests {
         assert!(out.contains("j***y@example.com"), "{out}");
         assert!(!out.contains("jeremy@"), "{out}");
         assert!(out.contains("85%"), "{out}");
+    }
+
+    #[test]
+    fn inline_account_rows_prioritize_all_limits_at_80_cells() {
+        let usage = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("界界界@example.com".into()),
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.42),
+            additional_windows: vec![crate::protocol::AccountUsageWindow {
+                label: "Fable 7d".into(),
+                usage_ratio: 0.73,
+                resets_at: None,
+            }],
+            resets_at: None,
+            error: None,
+        };
+        for display_used in [false, true] {
+            let mut identity = detail(
+                CredentialStatus::Available,
+                "anthropic 界***界@example.com".into(),
+                true,
+            );
+            identity
+                .spans
+                .push(Span::raw(" · ↻ 2 resets · exp tomorrow"));
+            let row = inline_account_row(identity, remaining_bars(&usage, display_used));
+            for budget in [79, 119, 239] {
+                let fitted = fit_account_row(row.clone(), budget);
+                assert!(fitted.width() <= budget);
+                let rendered = text(vec![fitted]);
+                for label in ["5h", "7d", "Fable 7d"] {
+                    assert!(rendered.contains(label), "{rendered}");
+                }
+                for percent in if display_used {
+                    ["15%", "42%", "73%"]
+                } else {
+                    ["85%", "58%", "27%"]
+                } {
+                    assert!(rendered.contains(percent), "{rendered}");
+                }
+            }
+            let narrow = fit_account_row(row.clone(), 39);
+            assert!(narrow.width() <= 39);
+            assert!(text(vec![narrow]).contains('…'));
+            assert!(text(vec![fit_account_row(row, 239)]).contains("2 resets"));
+        }
+    }
+
+    #[test]
+    fn account_headers_render_all_usage_windows_and_fit_unicode_widths() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("界界@example.com".into()),
+            exhausted: false,
+            primary_label: Some("session".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.42),
+            additional_windows: vec![
+                crate::protocol::AccountUsageWindow {
+                    label: "Fable 7d".into(),
+                    usage_ratio: 0.73,
+                    resets_at: None,
+                },
+                crate::protocol::AccountUsageWindow {
+                    label: "Spark 界".into(),
+                    usage_ratio: 0.91,
+                    resets_at: None,
+                },
+                crate::protocol::AccountUsageWindow {
+                    label: "future model / month".into(),
+                    usage_ratio: 0.32,
+                    resets_at: None,
+                },
+            ],
+            resets_at: None,
+            error: None,
+        };
+        for display_used in [false, true] {
+            let rendered = text(vec![remaining_bar(&usage, display_used).unwrap()]);
+            for label in [
+                "session",
+                "7d",
+                "Fable 7d",
+                "Spark 界",
+                "future model / month",
+            ] {
+                assert!(rendered.contains(label), "{rendered}");
+            }
+            for percent in if display_used {
+                [15, 42, 73, 91, 32]
+            } else {
+                [85, 58, 27, 9, 68]
+            } {
+                assert!(rendered.contains(&format!("{percent}%")), "{rendered}");
+            }
+        }
+        for (anthropic, openai, provider) in [
+            (vec![], vec![usage.clone()], "openai"),
+            (vec![usage.clone()], vec![], "anthropic"),
+        ] {
+            let rows = remote_inventory_lines(&anthropic, &openai, provider, Some("work"));
+            assert_eq!(
+                rows.len(),
+                1,
+                "identity and all quotas share one logical row"
+            );
+            for width in [0u16, 1, 2, 8, 24, 40, 80, 120, 240] {
+                let fitted = fit_header_lines(rows.clone(), width);
+                assert_eq!(fitted.len(), rows.len());
+                for result in &fitted {
+                    assert!(result.width() <= usize::from(width.saturating_sub(1)));
+                }
+                if width >= 120 {
+                    let rendered = text(fitted);
+                    for label in [
+                        "session",
+                        "7d",
+                        "Fable 7d",
+                        "Spark 界",
+                        "future model / month",
+                    ] {
+                        assert!(rendered.contains(label), "width={width}: {rendered}");
+                    }
+                }
+            }
+        }
+        // One malformed window must not hide the valid windows that follow it.
+        usage.five_hour_ratio = Some(f32::NAN);
+        usage.seven_day_ratio = None;
+        let rendered = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(!rendered.contains("session"));
+        assert!(rendered.contains("Fable 7d"));
+        assert!(rendered.contains("future model / month"));
     }
 
     fn auth() -> AuthStatus {
@@ -821,6 +1106,7 @@ mod tests {
     #[test]
     fn router_priorities_only_dim_original_identity_colors_and_fit_narrow_headers() {
         let usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -864,6 +1150,7 @@ mod tests {
     #[test]
     fn router_inventory_usability_requires_account_scoped_evidence() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -993,6 +1280,7 @@ mod tests {
     fn router_inventory_missing_usage_has_explicit_safe_status() {
         assert_eq!(usage_status_label(None), "limits pending");
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: false,
@@ -1007,11 +1295,11 @@ mod tests {
         for (error, expected) in [
             (
                 "Usage temporarily rate limited (429)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Couldn't fetch usage (429: lookup throttled)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Usage authentication failed (401)",
@@ -1093,6 +1381,7 @@ mod tests {
     #[test]
     fn router_inventory_weekly_only_usage_shows_reported_window() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "weekly-only".into(),
             email: None,
             exhausted: false,
@@ -1123,6 +1412,7 @@ mod tests {
     #[test]
     fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -1151,7 +1441,11 @@ mod tests {
         let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
         assert!(stale.contains("100% left"));
         assert!(stale.contains("5h stale"));
-        assert!(stale.contains("usage fetch failed (429)"));
+        assert!(stale.contains("usage throttled, retrying soon"));
+        usage.error = Some("HTTP 429 (retry at 2099-01-01T00:00:00Z)".into());
+        let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(stale.contains("usage throttled, retry in "), "{stale}");
+        usage.error = Some("HTTP 429".into());
         assert_eq!(
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Unknown

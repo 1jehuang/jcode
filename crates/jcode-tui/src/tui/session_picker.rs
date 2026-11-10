@@ -8,7 +8,9 @@ mod presence;
 
 use super::color_support::rgb;
 use crate::session::{CrashedSessionsInfo, Session};
-use crate::tui::{DisplayMessage, markdown};
+use crate::tui::DisplayMessage;
+#[cfg(test)]
+use crate::tui::markdown;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use jcode_session_types::SessionStatus;
@@ -60,6 +62,8 @@ mod saved_placement;
 mod session_view;
 use session_view::highlight_buffer_matches;
 mod transcript_search;
+#[cfg(test)]
+mod typing_bench;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
@@ -312,6 +316,7 @@ pub struct SessionPicker {
     last_mouse_scroll: Option<std::time::Instant>,
     /// Normalized query from the most recent search pass.
     cached_search_query: String,
+    search_edit_pending: bool,
     /// Session refs that matched the cached search query.
     cached_search_refs: Vec<SessionRef>,
     /// Cancellable full-text scan, separate from the bounded display cache.
@@ -326,6 +331,10 @@ pub struct SessionPicker {
     resume_latency: latency::Latency,
     latency_transcript_rendered: bool,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
+    /// Session whose loaded preview was drawn last.
+    preview_shown_id: Option<String>,
+    /// Session awaited while the previous preview stays up, and since when.
+    preview_hold: Option<(String, std::time::Instant)>,
     pending_workspace_load: Option<progressive_preview::PendingWorkspaceLoad>,
     preview_load_failures: HashSet<String>,
     /// Pinned todos + prompt offset per loaded preview, keyed by session id.
@@ -412,6 +421,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -421,6 +431,8 @@ impl SessionPicker {
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
+            preview_shown_id: None,
+            preview_hold: None,
             pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
@@ -474,6 +486,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -483,6 +496,8 @@ impl SessionPicker {
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
+            preview_shown_id: None,
+            preview_hold: None,
             pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
@@ -568,6 +583,7 @@ impl SessionPicker {
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
             cached_search_query: String::new(),
+            search_edit_pending: false,
             cached_search_refs: Vec::new(),
             transcript_search: Default::default(),
             search_selection: Default::default(),
@@ -577,6 +593,8 @@ impl SessionPicker {
             resume_latency: Default::default(),
             latency_transcript_rendered: false,
             pending_preview_load: None,
+            preview_shown_id: None,
+            preview_hold: None,
             pending_workspace_load: None,
             preview_load_failures: HashSet::new(),
             preview_extras: HashMap::new(),
@@ -1120,6 +1138,7 @@ impl SessionPicker {
         }
     }
 
+    #[cfg(test)]
     fn apply_session_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
         self.apply_session_preview_with_search(session_id, preview, None);
     }
@@ -1342,6 +1361,11 @@ impl SessionPicker {
             return None;
         }
         self.pending_search_submission = None;
+        if self.transcript_search.pending() && self.search_selection.holding() {
+            // Nothing matched within the wait. The rows on screen belong to
+            // the previous query, so keep editing instead of resuming one.
+            return None;
+        }
         self.rebuild_items_following();
         let targets = self.selection_or_current_targets();
         if targets.is_empty() {
@@ -1357,7 +1381,8 @@ impl SessionPicker {
 
     fn queue_search_submission(&mut self, modifiers: KeyModifiers) -> bool {
         if !self.search_query.trim().is_empty()
-            && self.search_selection.following()
+            // Held rows belong to the previous query: never resume one of them.
+            && (self.search_selection.following() || self.search_selection.holding())
             && self.transcript_search.pending()
         {
             self.pending_search_submission = Some(modifiers);
@@ -1386,6 +1411,9 @@ impl SessionPicker {
             // In particular, never queue Enter to unexpectedly resume a session
             // when the background load eventually completes.
             KeyCode::Enter if self.loading_message.is_some() => {}
+            KeyCode::Enter if self.search_edit_pending => {
+                self.pending_search_submission = Some(modifiers);
+            }
             KeyCode::Enter => {
                 if self.queue_search_submission(modifiers) {
                     return Ok(OverlayAction::Continue);
@@ -1407,27 +1435,27 @@ impl SessionPicker {
             // send for Ctrl+Backspace) delete the previous word in the query.
             KeyCode::Backspace if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Char('\u{8}') => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Ctrl+U clears the whole query (like readline's kill-to-start).
             KeyCode::Char('u') if ctrl => {
                 self.search_query.clear();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Vim-style / readline navigation that keeps working while typing.
             KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
             KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
             KeyCode::Char('w') if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Char(c) => {
                 if ctrl && c == 'c' {
@@ -1439,7 +1467,7 @@ impl SessionPicker {
                     return Ok(OverlayAction::Continue);
                 }
                 self.search_query.push(c);
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.previous(),
@@ -1729,6 +1757,22 @@ impl SessionPicker {
                 .pending_preview_load
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
+        let selected_id = session.id.clone();
+        if preview_still_loading {
+            if let Some(shown_ref) = self.held_preview_ref(&selected_id) {
+                // Most previews load within a frame or two. Keep the last one
+                // up meanwhile instead of flashing a loading placeholder.
+                let scroll = Some(self.scroll_offset as usize);
+                self.draw_selected_view(frame, inner, shown_ref, scroll);
+                self.latency_transcript_rendered = false;
+                return;
+            }
+        } else {
+            self.preview_hold = None;
+            if self.preview_shown_id.as_deref() != Some(selected_id.as_str()) {
+                self.preview_shown_id = Some(selected_id);
+            }
+        }
         let Some(content_hash) = self.selected_preview_content_hash(session_ref, diff_mode) else {
             return;
         };
@@ -1785,7 +1829,27 @@ impl SessionPicker {
             })
             && !self
                 .preview_load_failures
-                .contains(&self.latency_selection_id().unwrap_or_default());
+                .contains(self.latency_selection_id().as_deref().unwrap_or(""));
+    }
+
+    /// While `loading_id` loads, the session whose preview is still on screen,
+    /// for a short grace period. Past it the loading placeholder is honest.
+    fn held_preview_ref(&mut self, loading_id: &str) -> Option<SessionRef> {
+        const GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+        if self
+            .preview_hold
+            .as_ref()
+            .is_none_or(|(id, _)| id != loading_id)
+        {
+            self.preview_hold = Some((loading_id.to_string(), std::time::Instant::now()));
+        }
+        let (_, since) = self.preview_hold.as_ref()?;
+        if since.elapsed() >= GRACE {
+            return None;
+        }
+        self.preview_cache.as_ref()?;
+        let shown = self.preview_shown_id.clone()?;
+        self.session_ref_for_id(&shown)
     }
 
     /// Draw the selected session through the real chat renderer.
@@ -1959,6 +2023,7 @@ impl SessionPicker {
     /// Apply search-match highlighting to already-built preview lines in place.
     /// Returns the index of the first line that contains a highlighted match, if
     /// any. Each token highlights independently (matching the AND-token filter).
+    #[cfg(test)]
     fn highlight_lines_in_place(lines: &mut [Line<'static>], tokens: &[String]) -> Option<usize> {
         if tokens.is_empty() {
             return None;
@@ -1991,6 +2056,7 @@ impl SessionPicker {
     /// Lines for the pinned "previous prompt" header in the preview pane.
     /// Mirrors the main chat viewport's `prompt_preview`: the last user prompt
     /// whose wrapped start has scrolled above the viewport, drawn dimmed.
+    #[cfg(test)]
     fn preview_prompt_header_lines(
         &self,
         scroll: usize,

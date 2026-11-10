@@ -406,7 +406,7 @@ pub(super) async fn start_processing_message(
             result
                 .as_ref()
                 .err()
-                .map(|error| crate::util::format_error_chain(error))
+                .map(crate::util::format_error_chain)
                 .as_deref(),
         );
         // Mobile push: fire-and-forget, skipped for user cancellation and for

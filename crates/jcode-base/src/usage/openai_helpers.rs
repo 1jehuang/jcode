@@ -132,7 +132,18 @@ pub(super) fn classify_openai_limits(limits: &[UsageLimit]) -> OpenAIUsageData {
             .cloned();
     }
 
+    let additional_windows = limits
+        .iter()
+        .filter(|limit| {
+            ![five_hour.as_ref(), seven_day.as_ref(), spark.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|window| window.name == limit.name && window.resets_at == limit.resets_at)
+        })
+        .map(to_openai_window)
+        .collect();
     OpenAIUsageData {
+        additional_windows,
         five_hour,
         seven_day,
         spark,

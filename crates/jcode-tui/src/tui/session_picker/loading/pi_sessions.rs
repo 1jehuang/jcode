@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(in crate::tui::session_picker) fn load_pi_preview_from_path(
     path: &Path,
 ) -> Option<Vec<PreviewMessage>> {

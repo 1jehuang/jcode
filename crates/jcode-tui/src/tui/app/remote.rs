@@ -595,6 +595,8 @@ async fn apply_terminal_event<B: Backend>(
             });
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if !app.handle_voice_key_event(&key)
@@ -653,7 +655,8 @@ async fn apply_terminal_event<B: Backend>(
                     }
                 }
             }
-            needs_redraw = true;
+            needs_redraw =
+                before_release.is_none_or(|before| before != app.key_release_visible_state());
             needs_redraw |= dispatch_compacted_history_load(app, remote).await;
         }
         Some(Ok(Event::Paste(text))) => {
@@ -1136,6 +1139,8 @@ pub(super) fn handle_disconnect(
     // queued prompt for reconnect, but release the transient model-setup gate so
     // it cannot remain blocked forever waiting for an event that was lost.
     app.finish_auth_catalog_refresh();
+    // The cancel answer cannot arrive on a dead connection. Ask again later.
+    app.soft_interrupt_recovery = None;
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =
@@ -1451,6 +1456,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     let _ = recover_stranded_soft_interrupts(app, remote).await;
+    if app.soft_interrupt_recovery_in_flight() {
+        return;
+    }
 
     if app.pending_queued_dispatch {
         note_startup_submit_deferred(app, "pending_queued_dispatch in progress");

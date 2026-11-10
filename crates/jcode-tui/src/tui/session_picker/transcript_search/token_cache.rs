@@ -358,6 +358,8 @@ fn resolve(
         Some(outcomes)
     }
 }
+type LiteralEvidence = (Option<Hit>, Option<Arc<[u32]>>);
+
 /// Literal match over the given segments, with the same semantics as the
 /// literal scanner (substring match, score 0, strongest origin), plus the
 /// list of matching segments when it is small enough to keep.
@@ -366,7 +368,7 @@ fn literal_in_segments(
     token: &str,
     candidates: impl Iterator<Item = u32>,
     cancel: &AtomicBool,
-) -> Option<(Option<Hit>, Option<Arc<[u32]>>)> {
+) -> Option<LiteralEvidence> {
     let mut best: Option<Source> = None;
     let mut found = Vec::new();
     let mut bounded = true;

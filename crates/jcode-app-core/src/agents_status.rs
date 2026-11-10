@@ -318,15 +318,29 @@ pub fn host_id() -> &'static str {
     HOST.get_or_init(|| {
         let raw = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
             .iter()
-            .find_map(|p| std::fs::read_to_string(p).ok())
+            .find_map(|p| host_source(std::fs::read_to_string(p), p))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-            .or_else(|| std::env::var("COMPUTERNAME").ok())
+            .or_else(|| host_source(std::env::var("HOSTNAME"), "HOSTNAME"))
+            .or_else(|| host_source(std::fs::read_to_string("/etc/hostname"), "/etc/hostname"))
+            .or_else(|| host_source(std::env::var("COMPUTERNAME"), "COMPUTERNAME"))
             .unwrap_or_else(|| "jcode-host".to_string());
         sanitize_host(&raw)
     })
+}
+
+// Missing platform-specific identity sources are expected. Log failures at debug
+// level and continue to the next source, keeping host reporting best-effort.
+fn host_source(result: Result<String, impl std::fmt::Display>, source: &str) -> Option<String> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "host identity source {source} unavailable: {error}"
+            ));
+            None
+        }
+    }
 }
 
 pub fn sanitize_host(raw: &str) -> String {
@@ -530,6 +544,18 @@ mod tests {
             .map(|s| s.session_id.as_str())
             .collect();
         assert_eq!(ids, ["b"]);
+    }
+
+    #[test]
+    fn unavailable_host_source_allows_fallback() {
+        assert_eq!(
+            host_source(Err::<String, _>("missing"), "test-source"),
+            None
+        );
+        assert_eq!(
+            host_source(Ok::<_, std::io::Error>("host".to_string()), "test-source"),
+            Some("host".to_string())
+        );
     }
 
     #[test]

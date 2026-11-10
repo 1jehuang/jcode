@@ -338,7 +338,13 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     RUNNING
-        .get_or_init(|| std::env::current_exe().ok().map(resolve_launch_path))
+        .get_or_init(|| match std::env::current_exe() {
+            Ok(exe) => Some(resolve_launch_path(exe)),
+            Err(error) => {
+                crate::logging::warn(&format!("cannot identify running server binary: {error}"));
+                None
+            }
+        })
         .clone()
 }
 

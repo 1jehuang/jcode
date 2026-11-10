@@ -69,6 +69,31 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
+/// Only explicit plan/window or balance exhaustion bypasses the TUI countdown.
+/// HTTP 429, rate limits, billing errors and generic quota errors are ambiguous.
+pub fn is_definitive_usage_exhaustion(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "usage_limit_reached",
+        "usage limit reached",
+        "usage limit has been reached",
+        "you have reached your usage limit",
+        "you have reached your weekly limit",
+        "usage exhausted",
+        "quota exhausted",
+        "quota has been exhausted",
+        "credits have run out",
+        "credit balance is too low",
+        "insufficient_quota",
+        "insufficient credit",
+        "weekly limit reached",
+        "weekly limit has been reached",
+        "weekly usage limit reached",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
@@ -93,23 +118,24 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         return FailoverDecision::RetryNextProvider;
     }
 
-    let rate_or_quota = [
-        "rate limit",
-        "rate-limited",
-        "too many requests",
-        "quota",
-        "credit balance",
-        "credits have run out",
-        "insufficient credit",
-        "billing",
-        "payment required",
-        "usage tier",
-        // Plan/usage-window exhaustion, e.g. OpenAI OAuth `usage_limit_reached`.
-        "usage_limit",
-        "usage limit",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    let rate_or_quota = is_definitive_usage_exhaustion(message)
+        || [
+            "rate limit",
+            "rate-limited",
+            "too many requests",
+            "quota",
+            "credit balance",
+            "credits have run out",
+            "insufficient credit",
+            "billing",
+            "payment required",
+            "usage tier",
+            // Plan/usage-window exhaustion, e.g. OpenAI OAuth `usage_limit_reached`.
+            "usage_limit",
+            "usage limit",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
         || contains_independent_status_code(&lower, "429")
         || contains_independent_status_code(&lower, "402");
     if rate_or_quota {
@@ -148,6 +174,32 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn definitive_exhaustion_excludes_ambiguous_rate_limits() {
+        for message in [
+            "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
+            "429 Too Many Requests",
+            "quota exceeded",
+            "billing error",
+            "usage tier limit",
+            "rate limit exceeded; retry in 60 seconds",
+        ] {
+            assert!(!is_definitive_usage_exhaustion(message), "{message}");
+        }
+        for message in [
+            "usage_limit_reached: The usage limit has been reached",
+            "You have reached your usage limit",
+            "You have reached your weekly limit",
+            "OAuth usage exhausted",
+            "429 quota exhausted",
+            "credits have run out",
+            "insufficient_quota",
+            "Your credit balance is too low",
+        ] {
+            assert!(is_definitive_usage_exhaustion(message), "{message}");
+        }
+    }
 
     #[test]
     fn failover_prompt_roundtrips_from_error_message() {
