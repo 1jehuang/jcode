@@ -55,11 +55,8 @@ pub async fn run_provider_doctor_command(
 
     // Resolve the API key when the tier needs one.
     let api_key = if tier.requires_api_key() {
-        let key = crate::provider_catalog::load_api_key_from_env_or_config(
-            &resolved.api_key_env,
-            &resolved.env_file,
-        )
-        .with_context(|| {
+        let key = crate::provider_catalog::load_openai_compatible_profile_api_key(&resolved)
+            .with_context(|| {
             format!(
                 "no API key found for `{provider}` (looked in env `{}` and `{}`). \
                  Run `jcode login --provider {provider}`, or use `--tier offline` to check wiring only.",
