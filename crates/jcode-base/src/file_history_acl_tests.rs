@@ -1,9 +1,12 @@
 use super::*;
 use crate::file_history::tests::fixture;
+#[cfg(target_os = "linux")]
 use std::cell::Cell;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(target_os = "linux")]
 use std::rc::Rc;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_private_edit_and_rewind_settle_access_before_writing() {
     let _env = crate::storage::lock_test_env();
@@ -73,4 +76,76 @@ fn linux_private_edit_and_rewind_settle_access_before_writing() {
             mode
         );
     }
+}
+
+#[test]
+fn denied_owner_restore_retains_permission_error_without_replacing_original() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("shared");
+    fs::write(&path, b"before").unwrap();
+    let original = fs::metadata(&path).unwrap();
+    let dir = directory("denied-owner").unwrap();
+    let before = state(&dir, &path).unwrap();
+    let mut after = before.clone();
+    after.blob = Some(store_blob(&dir, b"after").unwrap());
+    after.metadata.as_mut().unwrap().uid = 0;
+    let error = apply(
+        &dir,
+        &Change {
+            path: path.clone(),
+            before,
+            after,
+        },
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied),
+        "ownership failure must reach the ordinary-write fallback: {error:#}"
+    );
+    let retained = fs::metadata(&path).unwrap();
+    assert_eq!(retained.ino(), original.ino());
+    assert_eq!(
+        (retained.uid(), retained.gid()),
+        (original.uid(), original.gid())
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"before");
+    assert_eq!(fs::read_dir(work.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn denied_staging_edits_original_inode_and_blocks_rewind() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("shared");
+    fs::write(&path, b"before").unwrap();
+    let original = fs::metadata(&path).unwrap();
+    let checkpoint = checkpoint("denied-staging", 0, "shared edit").unwrap();
+    let permissions = fs::metadata(work.path()).unwrap().permissions();
+    fs::set_permissions(work.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let result = mutate("denied-staging", &path, Some(b"after"));
+    fs::set_permissions(work.path(), permissions).unwrap();
+    result.unwrap();
+    let retained = fs::metadata(&path).unwrap();
+    assert_eq!(retained.ino(), original.ino());
+    assert_eq!(
+        (retained.uid(), retained.gid()),
+        (original.uid(), original.gid())
+    );
+    assert_eq!(retained.permissions().mode(), original.permissions().mode());
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+    assert!(!checkpoints("denied-staging").unwrap()[0].can_restore_files);
+    assert!(restore("denied-staging", &checkpoint.id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"after");
 }
