@@ -4442,6 +4442,7 @@ dependencies = [
  "futures",
  "jcode-base",
  "jcode-message-types",
+ "jcode-provider-anthropic-runtime",
  "jcode-provider-core",
  "jcode-provider-metadata",
  "jcode-provider-openai",

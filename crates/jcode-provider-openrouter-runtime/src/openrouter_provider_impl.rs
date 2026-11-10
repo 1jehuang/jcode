@@ -40,7 +40,7 @@ impl Provider for OpenRouterProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         if self.profile_id.as_deref() == Some("muse-subscription") {
             jcode_base::auth::muse::ensure_enabled()?;
@@ -51,6 +51,26 @@ impl Provider for OpenRouterProvider {
             return self.complete_azure_responses(messages, tools, system).await;
         }
         let model = self.model.read().await.clone();
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+            && model.trim().to_ascii_lowercase().starts_with("claude-")
+        {
+            let auth = (self.auth)()?;
+            let crate::ProviderAuth::AuthorizationBearer { token, .. } = auth else {
+                anyhow::bail!("Command Code Messages requires bearer API-key authentication");
+            };
+            let delegate =
+                jcode_provider_anthropic_runtime::AnthropicProvider::new_command_code(
+                    &self.api_base,
+                    &token,
+                    &model,
+                )?;
+            return delegate
+                .complete(messages, tools, system, resume_session_id)
+                .await;
+        }
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
         let reasoning_effort = self.reasoning_effort();
