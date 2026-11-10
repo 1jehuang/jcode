@@ -1,6 +1,26 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+/// Recover the base-tag distance forwarded by a source-only hosted build.
+#[allow(dead_code)]
+pub fn base_tag_offset(description: &str, base: (u32, u32, u32)) -> Option<u32> {
+    let tag = format!("v{}.{}.{}", base.0, base.1, base.2);
+    let description = description.trim();
+    if description == tag {
+        return Some(0);
+    }
+    let suffix = description.strip_prefix(&format!("{tag}-"))?;
+    let (count, hash) = suffix.split_once("-g")?;
+    if count.is_empty()
+        || !count.bytes().all(|byte| byte.is_ascii_digit())
+        || hash.is_empty()
+        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    count.parse().ok()
+}
+
 /// Accept release identities without accepting arbitrary environment text.
 pub fn release_semver(value: &str) -> Option<String> {
     let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
@@ -71,6 +91,24 @@ pub fn metadata_rerun_inputs(path: Option<&OsStr>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_base_tag_distance() {
+        let base = (0, 99, 1);
+        assert_eq!(base_tag_offset("v0.99.1-42-gabc1234", base), Some(42));
+        assert_eq!(base_tag_offset("v0.99.1-0-gabc1234", base), Some(0));
+        assert_eq!(base_tag_offset("v0.99.1", base), Some(0));
+        for invalid in [
+            "v0.98.1-42-gabc1234",
+            "abc1234",
+            "v0.99.1-x-gabc",
+            "v0.99.1-42-g",
+            "v0.99.1-42-gxyz",
+            "v0.99.1-4294967296-gabc",
+        ] {
+            assert_eq!(base_tag_offset(invalid, base), None, "{invalid}");
+        }
+    }
 
     #[test]
     fn release_identity_accepts_stable_and_prereleases() {
