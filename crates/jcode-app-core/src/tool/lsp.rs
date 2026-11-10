@@ -127,6 +127,9 @@ fn expand_json_with_data(
 }
 
 fn read_config_file(root: &Path, relative: &str) -> Result<Value> {
+    let relative = relative
+        .strip_prefix("${CLAUDE_PLUGIN_ROOT}/")
+        .unwrap_or(relative);
     ensure!(
         !Path::new(relative).is_absolute(),
         "Plugin LSP config path must be relative"
@@ -617,22 +620,29 @@ mod tests {
 
     #[test]
     fn custom_config_paths_and_invalid_shapes() {
-        let dir = fixture_plugin(json!({"lspServers":["servers.json"]}));
-        std::fs::write(
-            dir.path().join("servers.json"),
-            json!({"test":{"command":"test-lsp","extensionToLanguage":{".test":"test"}}})
-                .to_string(),
-        )
-        .unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        assert_eq!(
-            load_servers(&root, "one/plugin", &root).unwrap()[0].name,
-            "one/plugin:test"
-        );
-        std::fs::write(dir.path().join("servers.json"), json!({"test":{"command":"test-lsp","transport":"socket","extensionToLanguage":{".test":"test"}}}).to_string()).unwrap();
-        assert!(load_servers(&root, "one/plugin", &root).is_err());
-        std::fs::write(dir.path().join("servers.json"), "[]").unwrap();
-        assert!(load_servers(&root, "one/plugin", &root).is_err());
+        for declared in [
+            json!("servers.json"),
+            json!(["servers.json"]),
+            json!("${CLAUDE_PLUGIN_ROOT}/servers.json"),
+            json!(["${CLAUDE_PLUGIN_ROOT}/servers.json"]),
+        ] {
+            let dir = fixture_plugin(json!({"lspServers":declared}));
+            std::fs::write(
+                dir.path().join("servers.json"),
+                json!({"test":{"command":"test-lsp","extensionToLanguage":{".test":"test"}}})
+                    .to_string(),
+            )
+            .unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            assert_eq!(
+                load_servers(&root, "one/plugin", &root).unwrap()[0].name,
+                "one/plugin:test"
+            );
+            std::fs::write(dir.path().join("servers.json"), json!({"test":{"command":"test-lsp","transport":"socket","extensionToLanguage":{".test":"test"}}}).to_string()).unwrap();
+            assert!(load_servers(&root, "one/plugin", &root).is_err());
+            std::fs::write(dir.path().join("servers.json"), "[]").unwrap();
+            assert!(load_servers(&root, "one/plugin", &root).is_err());
+        }
     }
 
     #[test]
@@ -657,12 +667,35 @@ mod tests {
         let dir = fixture_plugin(json!({}));
         let root = dir.path().canonicalize().unwrap();
         assert!(read_config_file(&root, "/etc/passwd").is_err());
+        assert!(read_config_file(&root, "${CLAUDE_PLUGIN_ROOT}//etc/passwd").is_err());
         assert!(read_config_file(&root, "../outside.json").is_err());
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let traversal = format!(
+            "../{}",
+            outside.path().file_name().unwrap().to_str().unwrap()
+        );
+        for path in [
+            traversal.clone(),
+            format!("${{CLAUDE_PLUGIN_ROOT}}/{traversal}"),
+        ] {
+            assert!(
+                read_config_file(&root, &path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("escapes plugin root")
+            );
+        }
         #[cfg(unix)]
         {
-            let outside = tempfile::NamedTempFile::new().unwrap();
             std::os::unix::fs::symlink(outside.path(), root.join("escape.json")).unwrap();
-            assert!(read_config_file(&root, "escape.json").is_err());
+            for path in ["escape.json", "${CLAUDE_PLUGIN_ROOT}/escape.json"] {
+                assert!(
+                    read_config_file(&root, path)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("escapes plugin root")
+                );
+            }
         }
     }
 
