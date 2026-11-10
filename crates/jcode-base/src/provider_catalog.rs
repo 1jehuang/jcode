@@ -52,6 +52,7 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     // model, which has different content-use implications.
     if profile.id != OPENAI_COMPAT_PROFILE.id
         && profile.id != "muse-subscription"
+        && profile.id != "command-code"
         && let Some(newest_model) =
             newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
     {
@@ -751,7 +752,14 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     models
 }
 
-pub fn openai_compatible_profile_model_supports_chat(_profile_id: &str, _model: &str) -> bool {
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    if profile_id.eq_ignore_ascii_case("command-code") {
+        // Command Code serves Claude-family models only on the Anthropic
+        // Messages endpoint. Chat and Responses reject them. The dedicated
+        // Command Code runtime will route these models once Messages is wired;
+        // until then the generic compatible runtime must not advertise them.
+        return !model.trim().to_ascii_lowercase().starts_with("claude-");
+    }
     true
 }
 

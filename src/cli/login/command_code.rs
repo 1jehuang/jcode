@@ -1,0 +1,70 @@
+//! Command Code login validation.
+//!
+//! The public model catalog is unauthenticated, so a successful `/models`
+//! response does not prove that an API key is valid. Command Code exposes an
+//! authenticated `/alpha/whoami` endpoint used by its own CLI, but it is not a
+//! documented third-party contract. Validate best effort: reject explicit
+//! authentication failures, and keep the key with a warning when the validator
+//! is unavailable.
+
+use anyhow::{Context, Result};
+use std::time::Duration;
+
+const WHOAMI_URL: &str = "https://api.commandcode.ai/alpha/whoami";
+
+pub(super) async fn validate_saved_key() -> Result<()> {
+    let profile = crate::provider_catalog::COMMAND_CODE_PROFILE;
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    let key = crate::provider_catalog::load_openai_compatible_profile_api_key(&resolved)
+        .context("Command Code API key was not saved")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build Command Code validation client")?;
+    let response = client
+        .get(WHOAMI_URL)
+        .bearer_auth(key)
+        .header(reqwest::header::USER_AGENT, format!("jcode/{}", env!("CARGO_PKG_VERSION")))
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let body = response.text().await.unwrap_or_default();
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let user_name = value
+                .pointer("/user/userName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if user_name.is_empty() {
+                eprintln!(
+                    "Warning: Command Code accepted the key but returned no user identity. The first model request will confirm access."
+                );
+            } else {
+                eprintln!("Authenticated to Command Code as {user_name}.");
+            }
+            Ok(())
+        }
+        Ok(response)
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                || response.status() == reqwest::StatusCode::FORBIDDEN =>
+        {
+            anyhow::bail!(
+                "Command Code rejected the API key ({}). Check the key in Command Code Studio and try again.",
+                response.status()
+            )
+        }
+        Ok(response) => {
+            eprintln!(
+                "Warning: Command Code key validation is unavailable ({}). The key was saved; the first model request will confirm access.",
+                response.status()
+            );
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: could not reach Command Code to validate the key ({error}). The key was saved; the first model request will confirm access."
+            );
+            Ok(())
+        }
+    }
+}

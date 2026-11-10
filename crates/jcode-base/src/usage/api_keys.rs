@@ -112,7 +112,10 @@ pub(super) fn enqueue_api_key_usage_tasks(
         }
 
         let source_key = format!("openai-compatible:{}", profile.id);
-        let has_balance_api = matches!(profile.id, "deepseek" | "moonshotai" | "kimi" | "zai");
+        let has_balance_api = matches!(
+            profile.id,
+            "deepseek" | "moonshotai" | "kimi" | "zai" | "command-code"
+        );
         // Only surface profiles jcode has actually used (or that expose a real
         // balance API); listing every configured-but-idle key is noise.
         let used_before = provider_activity::last_used_unix_secs(&source_key).is_some()
@@ -271,6 +274,24 @@ async fn fetch_compatible_profile_report(
                         extra_info.push(("Key status".to_string(), status));
                     }
                 }
+            }
+        }
+        "command-code" => {
+            // Command Code documents Studio usage and the CLI `/usage`
+            // command, but no public quota API. `GET /provider/v1/models` is
+            // public and returns 200 for invalid keys, so it must not be
+            // reported as a validity check. Account quota, when available, is
+            // an unofficial `/alpha/billing/credits` snapshot handled outside
+            // this generic API-key report.
+            if configured_key(profile.api_key_env, profile.env_file).is_some() {
+                extra_info.push((
+                    "Key status".to_string(),
+                    "configured (no documented key-status endpoint)".to_string(),
+                ));
+                extra_info.push((
+                    "Quota".to_string(),
+                    "unknown (no documented account-quota API)".to_string(),
+                ));
             }
         }
         "muse-subscription" => {

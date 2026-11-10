@@ -13,6 +13,7 @@ use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
 mod device_login;
+mod command_code;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -433,6 +434,9 @@ pub async fn run_login_provider(
             &[("method", provider.auth_kind.label())],
         );
         return Ok(());
+    }
+    if provider.id == "command-code" && !options.no_validate {
+        command_code::validate_saved_key().await?;
     }
     auth::AuthStatus::invalidate_cache();
     if options.no_validate {
