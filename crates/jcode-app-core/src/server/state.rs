@@ -409,6 +409,24 @@ pub(super) async fn unregister_session_event_sender(
     }
 }
 
+/// Send synchronously, moving the original payload into the final live queue.
+/// In particular, a closed queue must not cause a large swarm snapshot clone.
+pub(super) fn send_event_to_targets<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> usize {
+    let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
+    let mut delivered = 0;
+    while let Some(tx) = targets.next() {
+        if targets.peek().is_none() {
+            delivered += usize::from(tx.send(event).is_ok());
+            break;
+        }
+        delivered += usize::from(tx.send(event.clone()).is_ok());
+    }
+    delivered
+}
+
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
@@ -433,13 +451,7 @@ pub(super) async fn fanout_session_event(
         }
     };
 
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
-        }
-    }
-    delivered
+    send_event_to_targets(&targets, event)
 }
 
 pub(super) async fn fanout_live_client_event(
@@ -457,13 +469,7 @@ pub(super) async fn fanout_live_client_event(
         member.event_txs.values().cloned().collect::<Vec<_>>()
     };
 
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
-        }
-    }
-    delivered
+    send_event_to_targets(&targets, event)
 }
 
 /// Deliver `event` to every live attachment of `session_id` except the
@@ -487,13 +493,7 @@ pub(super) async fn fanout_peer_client_event(
             .map(|(_, tx)| tx.clone())
             .collect::<Vec<_>>()
     };
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
-        }
-    }
-    delivered
+    send_event_to_targets(&targets, event)
 }
 
 /// Owns one turn's event queue. Closing or aborting the producer drains all
