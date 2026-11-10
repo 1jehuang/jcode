@@ -1,9 +1,12 @@
 //! Names and locations describe the session itself, unlike transcript mentions.
-use super::{SessionInfo, transcript_search::lowercase_field};
+#[cfg(test)]
+use super::SessionInfo;
+use super::transcript_search::lowercase_field;
 
 /// Complete structured matches lead. An exact animal/name and actual cloud
 /// ownership break ties, so `swan cloud` finds the cloud swan even if renamed.
 /// Partial identity matches must not elevate unrelated transcript results.
+#[cfg(test)]
 pub(super) fn rank(session: &SessionInfo, tokens: &[String]) -> (bool, bool, bool) {
     rank_fields(
         [

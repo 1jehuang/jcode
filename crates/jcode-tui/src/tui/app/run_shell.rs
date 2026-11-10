@@ -537,7 +537,7 @@ impl StatusSpinnerRenderer {
 
         // Take the previous frame so its allocation can be reused below
         // (`clone_from`) instead of allocating a whole new buffer per frame.
-        let mut stored_frame = self.last_frame.take();
+        let stored_frame = self.last_frame.take();
         let previous_frame = stored_frame.as_ref();
         let draw_start = Instant::now();
         let mut render_elapsed = Duration::ZERO;
@@ -555,15 +555,13 @@ impl StatusSpinnerRenderer {
             .filter(|previous| previous.area == completed.buffer.area)
             .map(|_| completed.flushed_updates);
         let total_cells = Some(completed.buffer.content.len());
-        let completed_buffer = match stored_frame.as_mut() {
-            Some(buffer) => {
+        let completed_buffer = match stored_frame {
+            Some(mut buffer) => {
                 // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
                 // reuses the existing cell storage.
                 buffer.area = completed.buffer.area;
                 buffer.content.clone_from(&completed.buffer.content);
-                stored_frame
-                    .take()
-                    .map_or_else(Default::default, std::convert::identity)
+                buffer
             }
             None => completed.buffer.clone(),
         };

@@ -8,7 +8,9 @@ mod presence;
 
 use super::color_support::rgb;
 use crate::session::{CrashedSessionsInfo, Session};
-use crate::tui::{DisplayMessage, markdown};
+use crate::tui::DisplayMessage;
+#[cfg(test)]
+use crate::tui::markdown;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use jcode_session_types::SessionStatus;
@@ -1136,6 +1138,7 @@ impl SessionPicker {
         }
     }
 
+    #[cfg(test)]
     fn apply_session_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
         self.apply_session_preview_with_search(session_id, preview, None);
     }
@@ -2020,6 +2023,7 @@ impl SessionPicker {
     /// Apply search-match highlighting to already-built preview lines in place.
     /// Returns the index of the first line that contains a highlighted match, if
     /// any. Each token highlights independently (matching the AND-token filter).
+    #[cfg(test)]
     fn highlight_lines_in_place(lines: &mut [Line<'static>], tokens: &[String]) -> Option<usize> {
         if tokens.is_empty() {
             return None;
@@ -2052,6 +2056,7 @@ impl SessionPicker {
     /// Lines for the pinned "previous prompt" header in the preview pane.
     /// Mirrors the main chat viewport's `prompt_preview`: the last user prompt
     /// whose wrapped start has scrolled above the viewport, drawn dimmed.
+    #[cfg(test)]
     fn preview_prompt_header_lines(
         &self,
         scroll: usize,
