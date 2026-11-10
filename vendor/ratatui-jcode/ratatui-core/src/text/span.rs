@@ -312,12 +312,12 @@ impl<'a> Span<'a> {
         // ratatui-jcode: printable ASCII is one grapheme per byte, so skip the
         // Unicode segmentation state machine.
         if crate::fast::is_printable_ascii(content) {
-            itertools::Either::Left(
-                (0..content.len()).map(move |i| StyledGrapheme {
-                    symbol: &content[i..=i],
-                    style,
-                }),
-            )
+            itertools::Either::Left((0..content.len()).map(move |i| StyledGrapheme {
+                // The branch above guarantees every byte is a UTF-8 boundary.
+                #[allow(clippy::string_slice)]
+                symbol: &content[i..=i],
+                style,
+            }))
         } else {
             itertools::Either::Right(
                 content
@@ -342,7 +342,7 @@ impl<'a> Span<'a> {
         Line::from(self).left_aligned()
     }
 
-    #[expect(clippy::wrong_self_convention)]
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_left_aligned_line()` instead"]
     pub fn to_left_aligned_line(self) -> Line<'a> {
         self.into_left_aligned_line()
@@ -362,7 +362,7 @@ impl<'a> Span<'a> {
         Line::from(self).centered()
     }
 
-    #[expect(clippy::wrong_self_convention)]
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_centered_line()` instead"]
     pub fn to_centered_line(self) -> Line<'a> {
         self.into_centered_line()
@@ -382,7 +382,7 @@ impl<'a> Span<'a> {
         Line::from(self).right_aligned()
     }
 
-    #[expect(clippy::wrong_self_convention)]
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_right_aligned_line()` instead"]
     pub fn to_right_aligned_line(self) -> Line<'a> {
         self.into_right_aligned_line()
