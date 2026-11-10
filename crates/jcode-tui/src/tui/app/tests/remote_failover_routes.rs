@@ -250,7 +250,9 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
 #[test]
 fn test_remote_failover_countdown_holds_payload_and_stages_exact_route_after_deadline() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
@@ -293,9 +295,33 @@ fn test_remote_failover_countdown_holds_payload_and_stages_exact_route_after_dea
 }
 
 #[test]
-fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
+fn test_remote_definitive_exhaustion_immediately_stages_exact_route_not_resend() {
     with_temp_jcode_home(|| {
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (app, _remote) = remote_exact_failover_fixture();
+        assert!(app.pending_provider_failover.is_none());
+        let target = app
+            .pending_automatic_failover_route
+            .as_ref()
+            .expect("immediate route switch");
+        assert_eq!(
+            target.routed_model_spec(),
+            "openai-oauth@openai-fox:gpt-5.4"
+        );
+        assert!(app.pending_fallback_resend.is_some());
+        assert_eq!(app.remote_provider_name.as_deref(), Some("Anthropic"));
+        assert!(!app.pending_turn);
+    });
+}
+
+#[test]
+fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         seed_failover_openai_fox();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -315,7 +341,9 @@ fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
 #[test]
 fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         seed_failover_openai_fox();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -367,7 +395,9 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
 #[test]
 fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         seed_failover_openai_fox();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -399,7 +429,9 @@ fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
 #[test]
 fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         seed_failover_openai_fox();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -437,7 +469,9 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
 #[test]
 fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
@@ -511,7 +545,9 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
 #[test]
 fn test_remote_failover_esc_cancels_without_route_request_or_resend() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
@@ -531,7 +567,9 @@ fn test_remote_failover_esc_cancels_without_route_request_or_resend() {
 #[test]
 fn test_remote_failover_typing_and_enter_queue_instead_of_canceling() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
@@ -562,7 +600,9 @@ fn test_remote_failover_typing_and_enter_queue_instead_of_canceling() {
 #[test]
 fn test_cancel_image_only_failover_restores_attachments() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
@@ -592,7 +632,9 @@ fn test_cancel_image_only_failover_restores_attachments() {
 #[test]
 fn test_pending_failover_honors_changed_manual_configuration() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();

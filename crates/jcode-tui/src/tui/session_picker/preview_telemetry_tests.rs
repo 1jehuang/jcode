@@ -18,6 +18,7 @@ fn fixture() -> (Session, SessionTelemetry) {
         credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
         account_label: Some("account-a".into()),
         account_usage: Some(crate::protocol::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "account-a".into(),
             email: None,
             exhausted: false,

@@ -57,7 +57,10 @@ fn valid_timestamp(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(value).is_ok()
 }
 
-fn authorize(request: reqwest::RequestBuilder, access_token: &str) -> reqwest::RequestBuilder {
+pub(super) fn authorize(
+    request: reqwest::RequestBuilder,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
     crate::provider::anthropic::apply_oauth_attribution_headers(
         request
             .bearer_auth(access_token)
@@ -72,7 +75,7 @@ fn authorize(request: reqwest::RequestBuilder, access_token: &str) -> reqwest::R
     )
 }
 
-fn reset_client() -> Result<reqwest::Client> {
+pub(super) fn reset_client() -> Result<reqwest::Client> {
     // Never follow redirects with credentials or retry the claim automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(35))
@@ -96,7 +99,11 @@ fn http_failure(status: reqwest::StatusCode) -> anyhow::Error {
     )
 }
 
-async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Result<serde_json::Value> {
+pub(super) async fn get_json(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<serde_json::Value> {
     let response = authorize(client.get(url), token)
         .timeout(Duration::from_secs(12))
         .send()
@@ -232,7 +239,7 @@ fn display_text(value: &str) -> String {
         .collect()
 }
 
-async fn fresh_access_token(account_label: Option<&str>) -> Result<String> {
+pub(super) async fn fresh_access_token(account_label: Option<&str>) -> Result<String> {
     let credentials = match account_label {
         Some(label) => auth::claude::load_credentials_for_account(label),
         None => auth::claude::load_credentials(),

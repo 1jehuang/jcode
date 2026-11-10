@@ -546,9 +546,19 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
-# Try another account on the same provider before switching providers (default: true).
-# Only the window that ran out moves. `/accounts failover off` turns it off per window.
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
+# Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Opt in to spending earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: false.
+# openai_auto_banked_reset = true
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
 # After failover, go back to the preferred account at the start of a turn once
 # its usage limit has reset (default: true)
 # account_failover_return_home = false

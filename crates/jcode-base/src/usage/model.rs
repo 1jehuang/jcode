@@ -233,6 +233,7 @@ pub struct OpenAIUsageWindow {
 /// Cached OpenAI/Codex usage snapshot for info widgets.
 #[derive(Debug, Clone, Default)]
 pub struct OpenAIUsageData {
+    pub additional_windows: Vec<OpenAIUsageWindow>,
     pub five_hour: Option<OpenAIUsageWindow>,
     pub seven_day: Option<OpenAIUsageWindow>,
     pub spark: Option<OpenAIUsageWindow>,
@@ -326,7 +327,11 @@ impl OpenAIUsageData {
             self.five_hour.as_ref().and_then(|w| w.resets_at.as_deref()),
             self.seven_day.as_ref().and_then(|w| w.resets_at.as_deref()),
             self.spark.as_ref().and_then(|w| w.resets_at.as_deref()),
-        ]) {
+        ]) || self
+            .additional_windows
+            .iter()
+            .any(|window| usage_reset_passed([window.resets_at.as_deref()]))
+        {
             return true;
         }
 
@@ -362,7 +367,10 @@ impl OpenAIUsageData {
     }
 
     pub fn has_limits(&self) -> bool {
-        self.five_hour.is_some() || self.seven_day.is_some() || self.spark.is_some()
+        self.five_hour.is_some()
+            || self.seven_day.is_some()
+            || self.spark.is_some()
+            || !self.additional_windows.is_empty()
     }
 
     /// True only when this snapshot positively shows ordinary usage is open
@@ -417,6 +425,7 @@ impl MultiAccountProviderKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountUsageSnapshot {
+    pub additional_windows: Vec<jcode_protocol::AccountUsageWindow>,
     pub label: String,
     pub email: Option<String>,
     pub exhausted: bool,
@@ -447,6 +456,13 @@ impl AccountUsageSnapshot {
                 "{} {:.0}%",
                 self.secondary_label.as_deref().unwrap_or("secondary"),
                 ratio * 100.0
+            ));
+        }
+        for window in &self.additional_windows {
+            parts.push(format!(
+                "{} {:.0}%",
+                window.label,
+                window.usage_ratio * 100.0
             ));
         }
         if let Some(reset) = &self.resets_at {

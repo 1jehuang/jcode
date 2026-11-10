@@ -239,6 +239,13 @@ fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
 
 fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
     for account in accounts {
+        account.additional_windows.retain(|window| {
+            !window
+                .resets_at
+                .as_deref()
+                .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+                .is_some_and(|reset| i128::from(reset.timestamp_millis()) <= i128::from(now_ms))
+        });
         let expired = account
             .resets_at
             .as_deref()
@@ -316,6 +323,7 @@ mod tests {
         // Keep test artifacts inside the temporary directory, not global cache.
         publisher.path = dir.path().join("usage.json");
         let account = AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: Some("private@example.test".into()),
             exhausted: false,
@@ -369,6 +377,18 @@ mod tests {
     #[test]
     fn reset_boundary_discards_exhaustion_but_preserves_error() {
         let mut accounts = vec![AccountUsageSnapshot {
+            additional_windows: vec![
+                jcode_protocol::AccountUsageWindow {
+                    label: "Fable".into(),
+                    usage_ratio: 0.9,
+                    resets_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Future".into(),
+                    usage_ratio: 0.3,
+                    resets_at: Some("2099-01-01T00:00:00Z".into()),
+                },
+            ],
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -386,8 +406,11 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         discard_expired_windows(&mut accounts, reset - 1);
+        assert_eq!(accounts[0].additional_windows.len(), 2);
         assert!(accounts[0].exhausted);
         discard_expired_windows(&mut accounts, reset);
+        assert_eq!(accounts[0].additional_windows.len(), 1);
+        assert_eq!(accounts[0].additional_windows[0].label, "Future");
         assert!(!accounts[0].exhausted);
         assert!(accounts[0].five_hour_ratio.is_none());
         assert!(accounts[0].seven_day_ratio.is_none());

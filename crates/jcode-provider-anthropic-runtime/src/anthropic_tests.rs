@@ -2963,7 +2963,7 @@ async fn two_anthropic_forks_with_different_pins_send_different_bearers() {
     assert!(window_b.account_pin(AccountProviderKind::Claude).is_some());
 }
 
-/// A turn held on otter's usage limit is waiting to retry when this window is
+/// A turn retrying otter's short throttle is waiting when this window is
 /// pinned to fox. The retry must wake and finish on fox.
 #[tokio::test]
 async fn anthropic_retry_after_pin_change_uses_new_account() {
@@ -2972,7 +2972,7 @@ async fn anthropic_retry_after_pin_change_uses_new_account() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
     jcode_base::auth::claude::set_active_account_override(None);
-    let (url, seen) = spawn_fake_messages_api(60).await;
+    let (url, seen) = spawn_fake_messages_api(3).await;
     let _url = OAuthUrlOverride::set(&url);
 
     let mut otter = oauth_account("claude-1", "token-otter-LIMITED", "refresh-otter");

@@ -152,6 +152,11 @@ fn wire_snapshot(
     });
     let failed = error.is_some();
     AccountUsageSnapshot {
+        additional_windows: if !failed || preserve_last_known {
+            value.additional_windows
+        } else {
+            Vec::new()
+        },
         label: value.label,
         email: value.email,
         exhausted: !failed && value.exhausted,
@@ -181,6 +186,7 @@ mod tests {
 
     fn account(error: Option<&str>) -> crate::usage::AccountUsageSnapshot {
         crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -230,18 +236,27 @@ mod tests {
     #[test]
     fn stale_wire_values_remain_display_only_and_unknown_stays_unknown() {
         let mut known = account(Some("HTTP 429 secret diagnostics"));
+        known
+            .additional_windows
+            .push(crate::protocol::AccountUsageWindow {
+                label: "Fable 7d".into(),
+                usage_ratio: 0.8,
+                resets_at: None,
+            });
         known.seven_day_ratio = Some(0.42);
         let stale = wire_snapshot(known.clone(), true);
         assert_eq!(stale.five_hour_ratio, Some(1.0));
         assert_eq!(stale.seven_day_ratio, Some(0.42));
         assert!(stale.error.is_some());
         assert!(!stale.exhausted);
+        assert_eq!(stale.additional_windows, known.additional_windows);
 
         // OpenAI has no equivalent provenance gate yet, so keep its failed
         // wire snapshots unknown rather than broadening this Anthropic fix.
         let unsupported = wire_snapshot(known.clone(), false);
         assert!(unsupported.five_hour_ratio.is_none());
         assert!(unsupported.seven_day_ratio.is_none());
+        assert!(unsupported.additional_windows.is_empty());
 
         known.five_hour_ratio = None;
         known.seven_day_ratio = None;

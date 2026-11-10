@@ -183,7 +183,7 @@ impl MultiProvider {
             .flatten();
         let Some(from_profile) = from_profile else {
             return self
-                .complete_candidate(candidate, messages, tools, mode, resume_session_id)
+                .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
                 .await;
         };
         let model = self.model();
@@ -191,7 +191,7 @@ impl MultiProvider {
         if siblings.is_empty() {
             // Nobody else serves this model: keep today's behaviour.
             return self
-                .complete_candidate(candidate, messages, tools, mode, resume_session_id)
+                .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
                 .await;
         }
 
@@ -199,7 +199,7 @@ impl MultiProvider {
             Some(detail) => detail,
             None => {
                 let stream = self
-                    .complete_candidate(candidate, messages, tools, mode, resume_session_id)
+                    .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
                     .await?;
                 match peek_before_output(stream).await {
                     Peeked::Stream(stream) => return Ok(stream),

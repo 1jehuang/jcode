@@ -513,6 +513,7 @@ fn test_account_usage_probe_prefers_best_available_alternative() {
         current_label: "work".to_string(),
         accounts: vec![
             AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: "work".to_string(),
                 email: Some("work@example.com".to_string()),
                 exhausted: true,
@@ -524,6 +525,7 @@ fn test_account_usage_probe_prefers_best_available_alternative() {
                 error: None,
             },
             AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: "backup".to_string(),
                 email: Some("backup@example.com".to_string()),
                 exhausted: false,
@@ -535,6 +537,7 @@ fn test_account_usage_probe_prefers_best_available_alternative() {
                 error: None,
             },
             AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: "secondary".to_string(),
                 email: Some("secondary@example.com".to_string()),
                 exhausted: false,
@@ -565,6 +568,7 @@ fn test_account_usage_probe_detects_all_accounts_exhausted() {
         current_label: "primary".to_string(),
         accounts: vec![
             AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: "primary".to_string(),
                 email: None,
                 exhausted: true,
@@ -576,6 +580,7 @@ fn test_account_usage_probe_detects_all_accounts_exhausted() {
                 error: None,
             },
             AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: "backup".to_string(),
                 email: None,
                 exhausted: true,
