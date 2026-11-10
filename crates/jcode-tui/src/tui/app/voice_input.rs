@@ -36,7 +36,7 @@ pub(crate) enum VoicePhase {
 pub(crate) struct VoiceInput {
     recording: NariRecording,
     waker_done: Arc<AtomicBool>,
-    phase: VoicePhase,
+    pub(super) phase: VoicePhase,
     started: Instant,
     pressed_at: Instant,
     live: String,
