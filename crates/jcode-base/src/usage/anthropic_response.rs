@@ -1,4 +1,4 @@
-//! Quota telemetry already returned by successful subscription model requests.
+//! Quota telemetry already returned by subscription model requests.
 //! This must not clear the usage endpoint's independent polling backoff.
 use super::*;
 
@@ -20,8 +20,8 @@ fn window(headers: &reqwest::header::HeaderMap, name: &str) -> Option<(f32, Stri
     (reset > chrono::Utc::now()).then(|| (ratio, reset.to_rfc3339()))
 }
 
-/// Record real quota ratios, not token-count estimates, from a successful
-/// official Anthropic OAuth response. Call on a blocking worker, never from a
+/// Record real quota ratios, not token-count estimates, from an official
+/// Anthropic OAuth success or quota-wall response. Call on a blocking worker, never from a
 /// renderer. Incomplete, malformed, or expired header sets are ignored rather
 /// than manufacturing a zero-usage window. API-key responses must not call this.
 pub fn record_anthropic_response_limits(
@@ -119,6 +119,15 @@ mod tests {
                     disk_cache::store_error_with_hint(&key, "Usage API error (429)", Some("3600"));
                 let deadline = before.refresh_after.unwrap();
                 record_anthropic_response_limits("fixture", Some("passive-recovery"), &headers());
+                // Simulate a different process recording the headers while
+                // this daemon retains the earlier failure in memory.
+                store_anthropic_usage(key.clone(), before);
+                assert!(
+                    cached_or_shared_anthropic_usage(&key)
+                        .unwrap()
+                        .last_error
+                        .is_none()
+                );
                 let data = disk_cache::fresh(&key).unwrap();
                 assert_eq!((data.five_hour, data.seven_day), (0.37, 0.62));
                 assert!(data.last_error.is_none());
