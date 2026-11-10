@@ -678,7 +678,7 @@ impl App {
             &current_provider,
             &current_api_method,
             options,
-            &pool.members,
+            &pool.ordered_members(),
         );
         if automatic {
             // Never let an excluded preferred route hide an approved later one.
