@@ -2156,7 +2156,6 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
 }
 
 #[cfg(test)]
-
 pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_claude_code_external_preview(path).map(|preview| preview.messages)
 }
@@ -2206,7 +2205,6 @@ pub(super) fn load_claude_code_external_preview(path: &Path) -> Option<ExternalP
 }
 
 #[cfg(test)]
-
 pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let sessions = match crate::import::list_claude_code_sessions() {
         Ok(sessions) => sessions,
@@ -2359,7 +2357,6 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-
 pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_codex_external_preview(path).map(|preview| preview.messages)
 }
@@ -2563,7 +2560,6 @@ fn load_legacy_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
 }
 
 #[cfg(test)]
-
 pub(super) fn load_opencode_preview_from_path(
     path: &Path,
     session_id: &str,

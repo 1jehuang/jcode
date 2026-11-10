@@ -3,7 +3,6 @@
 use super::*;
 
 #[cfg(test)]
-
 pub(super) fn unavailable(width: u16) -> PreparedMessages {
     crate::logging::warn("Unbounded history preview unexpectedly failed to complete");
     wrap_lines_with_map(

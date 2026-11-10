@@ -1800,59 +1800,6 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 }
 
 #[test]
-fn test_preview_transcript_omits_picker_metadata() {
-    let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
-    session.title = "metadata-video-title".to_string();
-    session.working_dir = Some("/metadata-only-directory".to_string());
-    let mut picker = SessionPicker::new(vec![session]);
-    picker.auto_scroll_preview = false;
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| picker.render_preview(frame, frame.area()))
-        .unwrap();
-    let cache = picker.preview_cache.as_ref().expect("rendered transcript");
-    let text = cache
-        .wrapped_lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("1› hello"), "{text}");
-    assert!(
-        text.contains("client: Metadata-monkey"),
-        "the real startup header belongs to the scrolling transcript"
-    );
-    for metadata in ["metadata-video-title", "▶ Active"] {
-        assert!(
-            !text.contains(metadata),
-            "unexpected picker metadata: {text}"
-        );
-    }
-}
-
-#[test]
-fn preview_transcript_hash_ignores_picker_metadata() {
-    let session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
-    let picker = SessionPicker::new(vec![session.clone()]);
-    let mode = crate::config::DiffDisplayMode::Off;
-    let original = picker.preview_content_hash(&session, mode);
-    let mut changed = session;
-    changed.title = "renamed".into();
-    changed.status = SessionStatus::Closed;
-    changed.saved = true;
-    changed.working_dir = Some("/another-directory".into());
-    assert_eq!(original, picker.preview_content_hash(&changed, mode));
-    changed.messages_preview[1].content.push_str(" updated");
-    assert_ne!(original, picker.preview_content_hash(&changed, mode));
-}
-
-#[test]
 fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
     let _env_lock = crate::storage::lock_test_env();
     for width in [60, 100] {

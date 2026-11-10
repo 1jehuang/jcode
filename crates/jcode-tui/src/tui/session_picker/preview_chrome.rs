@@ -128,7 +128,6 @@ pub(super) fn selected_info(
 }
 
 #[cfg(test)]
-
 fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> usize {
     let visible_users = session
         .messages_preview
@@ -150,7 +149,6 @@ fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> 
 /// Draw only the image rows intersecting the scrolling transcript. Raster
 /// images retain their original fit box when partially scrolled off screen.
 #[cfg(test)]
-
 /// Reserve stationary chrome around the scrolling transcript, like the live
 /// layout. At tiny heights prefer preserving one transcript row over widgets.
 #[cfg(test)]

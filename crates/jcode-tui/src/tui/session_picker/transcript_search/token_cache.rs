@@ -584,31 +584,29 @@ mod tests {
         let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
             panic!("extension must reuse its prefix's segments")
         };
-        let resolve_one =
-            |token: &str,
-             scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
-                resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
-            };
+        let resolve_one = |token: &str| {
+            resolve(&cache, &text, &tokens(&[token]), &cancel, false, &never).unwrap()[0]
+        };
         let user = Some(Hit {
             score: 0,
             source: Source::User,
         });
-        assert_eq!(resolve_one("al", &never), user);
-        assert_eq!(resolve_one("alp", &never), user);
-        assert_eq!(resolve_one("alpha", &never), user);
+        assert_eq!(resolve_one("al"), user);
+        assert_eq!(resolve_one("alp"), user);
+        assert_eq!(resolve_one("alpha"), user);
         assert_eq!(
-            resolve_one("alpine", &never),
+            resolve_one("alpine"),
             Some(Hit {
                 score: 0,
                 source: Source::Other
             })
         );
-        assert_eq!(resolve_one("alphax", &never), None);
+        assert_eq!(resolve_one("alphax"), None);
         // Narrowed evidence agrees with a full scan.
         for token in ["alp", "alpha", "alpine", "alphax", "alpha tool"] {
             assert_eq!(
                 scan_token(&text, token, &cancel, false).unwrap(),
-                resolve_one(token, &never),
+                resolve_one(token),
                 "{token}"
             );
         }
