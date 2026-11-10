@@ -11,8 +11,15 @@ impl MultiProvider {
         // OAuth HTTP runtimes return their channel before sending the request.
         // An Ok(channel) is not an accepted request: otherwise a subsequent
         // HTTP 429 bypasses the account router and the client retries forever.
+        let config = crate::config::Config::load().provider;
+        let automatic_reset = match provider {
+            ActiveProvider::OpenAI => config.openai_auto_banked_reset,
+            ActiveProvider::Claude => config.anthropic_auto_fable_reset,
+            _ => false,
+        };
         if (self.selected_account_for_provider(provider).is_none()
-            && active_account_label_for_provider(provider).is_none())
+            && active_account_label_for_provider(provider).is_none()
+            && !automatic_reset)
             || !self.provider_uses_oauth_accounts(provider)
         {
             return attempt;

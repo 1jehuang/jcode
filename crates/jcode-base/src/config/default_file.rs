@@ -538,6 +538,11 @@ preserve_reasoning_context = true
 # cross_provider_failover = "manual"
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Opt in to spending earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: false.
+# openai_auto_banked_reset = true
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

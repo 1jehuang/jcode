@@ -1254,6 +1254,12 @@ pub struct ProviderConfig {
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// Automatically redeem an earned OpenAI banked reset when weekly OAuth
+    /// usage is exhausted. Never purchases credits. Disabled by default.
+    pub openai_auto_banked_reset: bool,
+    /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
+    /// OAuth usage. Never purchases credits. Disabled by default.
+    pub anthropic_auto_fable_reset: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1307,6 +1313,8 @@ impl Default for ProviderConfig {
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
+            openai_auto_banked_reset: false,
+            anthropic_auto_fable_reset: false,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
