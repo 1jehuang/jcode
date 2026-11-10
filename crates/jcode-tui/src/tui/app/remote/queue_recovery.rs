@@ -1,9 +1,22 @@
 use super::*;
 
+/// How long queue dispatch waits for the server's by-id cancel answer before
+/// falling back to requeueing every pending soft interrupt.
+const SOFT_INTERRUPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl App {
-    pub(super) fn track_pending_soft_interrupt(&mut self, request_id: u64, content: String) {
+    pub(in crate::tui::app) fn track_pending_soft_interrupt(
+        &mut self,
+        request_id: u64,
+        content: String,
+    ) {
         let content_bytes = content.len();
         let content_chars = content.chars().count();
+        if self.pending_soft_interrupts.is_empty() {
+            self.sent_soft_interrupts.clear();
+        }
+        self.sent_soft_interrupts
+            .push((request_id, content.clone()));
         self.pending_soft_interrupt_requests
             .push((request_id, content.clone()));
         self.pending_soft_interrupts.push(content);
@@ -52,6 +65,105 @@ impl App {
         ));
         self.pending_soft_interrupts.clear();
         self.pending_soft_interrupt_requests.clear();
+        self.sent_soft_interrupts.clear();
+        self.soft_interrupt_recovery = None;
+    }
+
+    fn forget_sent_soft_interrupt(&mut self, content: &str) {
+        if let Some(index) = self
+            .sent_soft_interrupts
+            .iter()
+            .position(|(_, sent)| sent == content)
+        {
+            self.sent_soft_interrupts.remove(index);
+        }
+    }
+
+    /// Server caller ids for every pending soft interrupt, or `None` when any
+    /// of them cannot be named (restored from a reload snapshot, for example).
+    fn pending_soft_interrupt_client_ids(&self) -> Option<Vec<String>> {
+        let mut used = vec![false; self.sent_soft_interrupts.len()];
+        let mut ids = Vec::with_capacity(self.pending_soft_interrupts.len());
+        for pending in &self.pending_soft_interrupts {
+            let index = self
+                .sent_soft_interrupts
+                .iter()
+                .enumerate()
+                .position(|(index, (_, sent))| !used[index] && sent == pending)?;
+            used[index] = true;
+            ids.push(crate::tui::backend::soft_interrupt_client_id(
+                self.sent_soft_interrupts[index].0,
+            ));
+        }
+        Some(ids)
+    }
+
+    /// True while the server has been asked which pending soft interrupts are
+    /// still queued. Queue dispatch waits for the answer: requeueing first
+    /// would resend a prompt the server already started as its own turn.
+    pub(super) fn soft_interrupt_recovery_in_flight(&self) -> bool {
+        self.soft_interrupt_recovery
+            .is_some_and(|(_, started)| started.elapsed() < SOFT_INTERRUPT_RECOVERY_TIMEOUT)
+    }
+
+    /// Apply the server's verdict on a by-id recovery cancel. Only interrupts
+    /// the server still had queued (or never acknowledged) are requeued. One it
+    /// already accepted is running or injected, so requeueing would duplicate it.
+    pub(super) fn finish_soft_interrupt_recovery(
+        &mut self,
+        id: u64,
+        cancelled: &[String],
+        not_queued: &[String],
+    ) -> bool {
+        if self.soft_interrupt_recovery.map(|(request, _)| request) != Some(id) {
+            return false;
+        }
+        self.soft_interrupt_recovery = None;
+        let mut recovered = Vec::new();
+        let mut accepted = 0usize;
+        for (client_id, was_queued) in cancelled
+            .iter()
+            .map(|id| (id, true))
+            .chain(not_queued.iter().map(|id| (id, false)))
+        {
+            let Some(index) = self.sent_soft_interrupts.iter().position(|(request, _)| {
+                &crate::tui::backend::soft_interrupt_client_id(*request) == client_id
+            }) else {
+                continue;
+            };
+            let (request_id, content) = self.sent_soft_interrupts.remove(index);
+            let unacked = self
+                .pending_soft_interrupt_requests
+                .iter()
+                .position(|(request, _)| *request == request_id)
+                .map(|index| self.pending_soft_interrupt_requests.remove(index))
+                .is_some();
+            let Some(pending) = self
+                .pending_soft_interrupts
+                .iter()
+                .position(|pending| pending == &content)
+            else {
+                continue;
+            };
+            self.pending_soft_interrupts.remove(pending);
+            if was_queued || unacked {
+                recovered.push(content);
+            } else {
+                accepted += 1;
+            }
+        }
+        crate::logging::info(&format!(
+            "REMOTE_SOFT_INTERRUPT_RECOVERY_RESULT id={} requeued={} already_accepted={}",
+            id,
+            recovered.len(),
+            accepted
+        ));
+        if !recovered.is_empty() {
+            recovered.append(&mut self.queued_messages);
+            self.queued_messages = recovered;
+            self.set_status_notice("Recovered queued interleave after turn finished");
+        }
+        true
     }
 
     pub(super) fn mark_soft_interrupt_injected(&mut self, content: &str) {
@@ -72,6 +184,7 @@ impl App {
             .position(|pending| pending == content)
         {
             self.pending_soft_interrupts.remove(index);
+            self.forget_sent_soft_interrupt(content);
         }
 
         if let Some(index) = self
@@ -95,6 +208,7 @@ impl App {
                 let count = index + 1;
                 let removed: Vec<String> = self.pending_soft_interrupts.drain(..count).collect();
                 for removed_content in removed {
+                    self.forget_sent_soft_interrupt(&removed_content);
                     if let Some(request_index) = self
                         .pending_soft_interrupt_requests
                         .iter()
@@ -189,7 +303,29 @@ pub(super) async fn recover_stranded_soft_interrupts(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> bool {
-    if app.is_processing || app.pending_soft_interrupts.is_empty() {
+    if app.pending_soft_interrupts.is_empty() {
+        app.soft_interrupt_recovery = None;
+        return false;
+    }
+    if app.is_processing || app.soft_interrupt_recovery_in_flight() {
+        return false;
+    }
+    // The turn ended on this client, but the server may already have accepted
+    // a pending interrupt: one that reaches an idle session starts its own
+    // turn. Ask which are still queued and requeue only those. Blind requeueing
+    // sent the same prompt twice and drew "Already processing a message".
+    let unanswered = app.soft_interrupt_recovery.take().is_some();
+    if !unanswered && let Some(client_ids) = app.pending_soft_interrupt_client_ids() {
+        match remote.cancel_soft_interrupts_by_id(client_ids).await {
+            Ok(id) => app.soft_interrupt_recovery = Some((id, Instant::now())),
+            Err(err) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to recover queued interleave message: {}",
+                    err
+                )));
+                app.set_status_notice("Queued interleave recovery failed");
+            }
+        }
         return false;
     }
 
@@ -213,6 +349,7 @@ pub(super) async fn recover_stranded_soft_interrupts(
         recovered_interrupts.len()
     ));
     app.pending_soft_interrupt_requests.clear();
+    app.sent_soft_interrupts.clear();
 
     let mut recovered_queue = recovered_interrupts;
     recovered_queue.append(&mut app.queued_messages);

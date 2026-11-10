@@ -305,6 +305,11 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
 
+/// Caller id attached to a TUI soft interrupt, derived from its request id.
+pub(crate) fn soft_interrupt_client_id(request_id: u64) -> String {
+    format!("tui-{request_id}")
+}
+
 fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
     last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
 }
@@ -1283,10 +1288,27 @@ impl RemoteConnection {
             content,
             images,
             urgent,
-            client_id: None,
+            // Named so stranded-interrupt recovery can ask the server exactly
+            // which interrupts are still queued instead of guessing.
+            client_id: Some(soft_interrupt_client_id(id)),
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
+            .await?;
+        Ok(id)
+    }
+
+    /// Cancel only the named soft interrupts. The server answers with
+    /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
+    /// removed) and not-queued (already injected or started as a turn).
+    pub async fn cancel_soft_interrupts_by_id(&mut self, client_ids: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::CancelSoftInterrupts {
+            id,
+            client_ids: Some(client_ids),
+        };
+        self.next_request_id += 1;
+        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
             .await?;
         Ok(id)
     }
