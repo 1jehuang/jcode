@@ -1144,7 +1144,6 @@ impl SessionPicker {
     }
 
     #[cfg(test)]
-
     fn apply_session_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
         self.apply_session_preview_with_search(session_id, preview, None);
     }

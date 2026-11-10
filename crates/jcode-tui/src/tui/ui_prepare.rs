@@ -1233,7 +1233,6 @@ pub(crate) fn prepare_history_preview_for_viewport(
 }
 
 #[cfg(test)]
-
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
     hidden_prompts: usize,

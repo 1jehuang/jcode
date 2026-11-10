@@ -282,3 +282,75 @@ fn failed_preview_is_not_retried_or_rendered_as_loading() {
     assert!(text.contains("Preview unavailable"));
     assert!(!text.contains("Loading preview"));
 }
+
+#[test]
+fn test_preview_transcript_omits_picker_metadata() {
+    let _render_state = crate::tui::ui::render_state_test_lock();
+    let _changelog =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(vec![
+            "Deterministic preview changelog fixture".to_string(),
+        ]);
+    let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
+    session.title = "metadata-video-title".to_string();
+    session.working_dir = Some("/metadata-only-directory".to_string());
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.auto_scroll_preview = false;
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render_preview(frame, frame.area()))
+        .unwrap();
+    let cache = picker.preview_cache.as_ref().expect("rendered transcript");
+    let text = cache
+        .wrapped_lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("1› hello"), "{text}");
+    assert!(text.contains("Updates"), "{text}");
+    assert!(
+        text.contains("Deterministic preview changelog fixture"),
+        "{text}"
+    );
+    assert!(
+        text.contains("client: Metadata-monkey"),
+        "the real startup header belongs to the scrolling transcript"
+    );
+    for metadata in ["metadata-video-title", "▶ Active"] {
+        assert!(
+            !text.contains(metadata),
+            "unexpected picker metadata: {text}"
+        );
+    }
+    // Startup Updates boxes legitimately contain horizontal borders. Only the
+    // standalone picker separator is metadata, not every run of border glyphs.
+    assert!(
+        !text.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("────") && line.chars().all(|ch| ch == '─')
+        }),
+        "unexpected standalone picker separator: {text}"
+    );
+}
+
+#[test]
+fn preview_transcript_hash_ignores_picker_metadata() {
+    let session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
+    let picker = SessionPicker::new(vec![session.clone()]);
+    let mode = crate::config::DiffDisplayMode::Off;
+    let original = picker.preview_content_hash(&session, mode);
+    let mut changed = session;
+    changed.title = "renamed".into();
+    changed.status = SessionStatus::Closed;
+    changed.saved = true;
+    changed.working_dir = Some("/another-directory".into());
+    assert_eq!(original, picker.preview_content_hash(&changed, mode));
+    changed.messages_preview[1].content.push_str(" updated");
+    assert_ne!(original, picker.preview_content_hash(&changed, mode));
+}

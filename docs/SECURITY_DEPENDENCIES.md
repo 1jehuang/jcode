@@ -1,6 +1,6 @@
 # Dependency Security Triage
 
-Last reviewed: 2026-11-09
+Last reviewed: 2026-11-10
 
 This file tracks the current `cargo audit` findings for jcode and the intended remediation path.
 It is not an allowlist. It is a triage record so advisories are visible and actionable.
@@ -21,14 +21,17 @@ It is not an allowlist. It is a triage record so advisories are visible and acti
 | `RUSTSEC-2026-0187` | `lopdf` | `jcode-pdf -> pdf-extract 0.8.2 -> lopdf 0.34` | PDF text extraction (`/pdf`, image/PDF reads) | Stack overflow parsing deeply nested PDF objects. Only reached when extracting text from a (potentially malicious) PDF the user opens; not in the auth/provider/network path. `pdf-extract 0.8.2` pins `lopdf 0.34`, so it cannot be bumped to the fixed `>=0.42` without an upstream `pdf-extract` release. | Upgrade once `pdf-extract` ships a release depending on `lopdf >=0.42`; remove the ignore then. |
 | `RUSTSEC-2023-0086` | `lexical-core` | `imap -> imap-proto -> lexical-core` | Gmail/IMAP support path | Old unsound transitive dependency in the mail stack. Higher priority than the UI-only findings because it touches network-parsed data. | Investigate upgrading or replacing `imap` / `imap-proto`. If no maintained path exists, isolate or remove the IMAP dependency. |
 
-## Resolved bundled SQLite advisory (2026-11-09)
+## Resolved bundled SQLite advisory (2026-11-10)
 
-- Upgraded both `rusqlite` dependencies to 0.41. The lockfile selects
-  `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`, which bundles SQLite 3.54.1
-  and fixes [RUSTSEC-2026-0459](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md).
-- Enabled `fallible_uint` to retain the existing checked unsigned-integer
-  conversions used by usage records and the recent-session index.
-- `scripts/security_preflight.sh --strict` passes with the existing triage list.
+- `RUSTSEC-2026-0459` affected the bundled SQLite in `libsqlite3-sys 0.30.1`.
+  Both `jcode-base` and `jcode-harness-api-server` now use `rusqlite 0.41`,
+  with the lockfile selecting `rusqlite 0.41.1` and patched
+  `libsqlite3-sys 0.39.1`. No advisory ignore was added.
+- Enable `fallible_uint` alongside `bundled` to preserve existing checked
+  `u64` SQL conversions. Values beyond SQLite signed-integer capacity remain
+  errors, rather than wrapping or changing the database representation.
+- `scripts/security_preflight.sh --strict` passes with its unchanged triage
+  list. Existing storage and harness regression tests cover compatibility.
 
 ## Resolved native SSH advisories (2026-11-03)
 
