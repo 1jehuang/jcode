@@ -2,6 +2,49 @@
 // act on what the window shows (failover toggle, pins restored on resume).
 
 #[test]
+fn remote_unpin_all_includes_claude_code() {
+    with_temp_jcode_home(|| {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        runtime.block_on(async {
+            for (command, families) in [
+                ("/accounts unpin", &["claude", "openai", "claude-code"][..]),
+                ("/accounts unpin all", &["claude", "openai", "claude-code"][..]),
+                ("/accounts claude-code unpin", &["claude-code"][..]),
+            ] {
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                let mut reader = BufReader::new(remote.take_dummy_peer().unwrap());
+                assert!(
+                    super::auth::handle_account_command_remote(&mut app, command, &mut remote)
+                        .await
+                        .unwrap()
+                );
+                for family in families {
+                    let mut line = String::new();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        reader.read_line(&mut line),
+                    )
+                    .await
+                    .expect("every account family must receive an unpin request")
+                    .unwrap();
+                    let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+                    assert!(matches!(
+                        request,
+                        crate::protocol::Request::SetSessionAccount { provider, label: None, .. }
+                            if provider == *family
+                    ), "{command}: expected an unpin for {family}");
+                }
+                assert_eq!(remote.next_request_id_for_test(), 1 + families.len() as u64);
+            }
+        });
+    });
+}
+
+#[test]
 fn inline_account_search_accepts_navigation_and_default_letters() {
     let mut app = create_test_app();
     let mut picker = model_browser_state(false);
