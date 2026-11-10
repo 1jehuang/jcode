@@ -275,6 +275,13 @@ struct NiriFocusedWindow {
 
 /// Ask niri over its IPC socket directly. Spawning `niri msg` costs a fork,
 /// exec and dynamic link per call, which dominated the companion's idle CPU.
+#[cfg(not(unix))]
+fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
+    // niri is a Wayland compositor and its IPC is a Unix socket.
+    None
+}
+
+#[cfg(unix)]
 fn focused_window_niri_socket() -> Option<Option<NiriFocusedWindow>> {
     use std::io::{BufRead, BufReader, Write};
     let path = std::env::var_os("NIRI_SOCKET")?;
