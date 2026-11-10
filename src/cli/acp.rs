@@ -1543,7 +1543,25 @@ fn apply_model_changed(
     if provider_name.is_some() {
         state.provider_name = provider_name;
     }
-    state.reasoning_effort = reasoning_effort;
+    match reasoning_effort {
+        Some(effort) => state.reasoning_effort = Some(effort),
+        None => {
+            // Older daemons omit the field entirely, and the wire cannot
+            // distinguish that from an explicit clear. Keep a confirmed value
+            // unless the switch lands on a known ladder that excludes it.
+            let efforts = crate::provider::inferred_reasoning_efforts(
+                state.provider_name.as_deref(),
+                state.model.as_deref(),
+            );
+            let keep = state
+                .reasoning_effort
+                .as_deref()
+                .is_some_and(|effort| efforts.is_empty() || efforts.contains(&effort));
+            if !keep {
+                state.reasoning_effort = None;
+            }
+        }
+    }
 }
 
 async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {

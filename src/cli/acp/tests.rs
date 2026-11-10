@@ -516,7 +516,7 @@ fn config_options_current_model_prepended_when_not_listed() {
 }
 
 #[test]
-fn reported_effort_stays_inside_the_model_ladder() {
+fn reported_effort_preserves_daemon_values() {
     let mut state = SessionUiState {
         provider_name: Some("deepseek".to_string()),
         model: Some("deepseek-v4-flash".to_string()),
@@ -531,19 +531,38 @@ fn reported_effort_stays_inside_the_model_ladder() {
     state.reasoning_effort = Some("xhigh".to_string());
     assert_eq!(
         displayed_effort(&state),
-        "high",
-        "an out-of-ladder daemon value must not be reported"
+        "xhigh",
+        "a daemon-accepted value the inferred ladder misses must be preserved"
     );
 
     state.provider_name = Some("unknown".to_string());
     state.model = Some("mystery".to_string());
     state.reasoning_effort = Some("none".to_string());
-    assert_eq!(displayed_effort(&state), "provider default");
+    assert_eq!(displayed_effort(&state), "none");
     assert!(
         session_config_options(&state)
             .iter()
             .all(|option| option["id"] != CONFIG_ID_EFFORT),
         "a model with no effort ladder must not expose an effort selector"
+    );
+
+    // A non-empty ladder exposes a confirmed value it did not guess.
+    state.provider_name = Some("OpenAI".to_string());
+    state.model = Some("gpt-5.4".to_string());
+    state.reasoning_effort = Some("ultra".to_string());
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("gpt-5.4 exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "ultra");
+    assert!(
+        effort["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["value"] == "ultra"),
+        "the selector must include the confirmed value"
     );
 }
 
@@ -662,23 +681,23 @@ fn config_options_report_openai_pro_default_within_its_ladder() {
 }
 
 #[test]
-fn model_change_replaces_stale_reasoning_effort() {
+fn model_change_clears_only_effort_the_new_ladder_rejects() {
     let mut state = SessionUiState {
         provider_name: Some("OpenAI".to_string()),
         model: Some("gpt-5.4".to_string()),
         available_models: Vec::new(),
-        reasoning_effort: Some("high".to_string()),
+        reasoning_effort: Some("minimal".to_string()),
     };
 
-    // A switch to a model with no effort must clear the old selection.
+    // DeepSeek's ladder has no `minimal`, so the old selection is stale.
     apply_model_changed(
         &mut state,
-        "glm-5.3".to_string(),
-        Some("Z.AI".to_string()),
+        "deepseek-v4-flash".to_string(),
+        Some("DeepSeek".to_string()),
         None,
     );
-    assert_eq!(state.model.as_deref(), Some("glm-5.3"));
-    assert_eq!(state.provider_name.as_deref(), Some("Z.AI"));
+    assert_eq!(state.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(state.provider_name.as_deref(), Some("DeepSeek"));
     assert_eq!(state.reasoning_effort, None);
 
     // A switch that reports an effort installs the server's value.
@@ -687,6 +706,24 @@ fn model_change_replaces_stale_reasoning_effort() {
         "gpt-5.4".to_string(),
         Some("OpenAI".to_string()),
         Some("low".to_string()),
+    );
+    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+
+    // Older daemons omit the field on reselect; preserve the known value.
+    apply_model_changed(
+        &mut state,
+        "gpt-5.4".to_string(),
+        Some("OpenAI".to_string()),
+        None,
+    );
+    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+
+    // An unknown ladder cannot prove the value stale.
+    apply_model_changed(
+        &mut state,
+        "mystery".to_string(),
+        Some("Unknown".to_string()),
+        None,
     );
     assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
 }

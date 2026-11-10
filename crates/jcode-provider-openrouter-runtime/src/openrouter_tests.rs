@@ -3590,6 +3590,16 @@ fn default_reasoning_effort_matches_disabled_thinking_aliases() {
         None,
         "strict OpenAI-schema endpoints suppress the thinking field"
     );
+    let responses = OpenRouterProvider {
+        profile_id: Some("opencode-go".to_string()),
+        model: Arc::new(RwLock::new("gpt-5.6-luna".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        responses.default_reasoning_effort(),
+        None,
+        "Responses builders ignore the chat thinking override"
+    );
 }
 
 #[path = "catalog_auth_tests.rs"]

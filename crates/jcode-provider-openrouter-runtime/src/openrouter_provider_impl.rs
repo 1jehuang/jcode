@@ -506,6 +506,11 @@ impl Provider for OpenRouterProvider {
         // top-level thinking field. Reporting `none` there would be a lie.
         if self.builtin_azure
             || Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base)
+            || crate::opencode_go_responses::model_uses_responses_api(
+                &self.api_base,
+                self.profile_id.as_deref(),
+                &self.model(),
+            )
         {
             return None;
         }
