@@ -421,7 +421,20 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     if state.client_focused() || state.copy_selection_edge_autoscroll_active() {
         interval
     } else {
-        interval.max(REDRAW_UNFOCUSED_MIN)
+        interval.max(unfocused_redraw_min(state))
+    }
+}
+
+/// Fastest tick for an unfocused client. Text that is still being revealed
+/// (or a scroll animation) keeps [`REDRAW_UNFOCUSED_MIN`] so a visible tiled
+/// pane still shows live output. A background turn that is only thinking or
+/// running a tool has nothing but a spinner and timer to move, so it ticks at
+/// the passive liveness rate: measured 10 full frames/s per such session before.
+fn unfocused_redraw_min(state: &dyn TuiState) -> Duration {
+    if state.stream_reveal_pending() || state.has_pending_mouse_scroll_animation() {
+        REDRAW_UNFOCUSED_MIN
+    } else {
+        REDRAW_PASSIVE_LIVENESS
     }
 }
 
