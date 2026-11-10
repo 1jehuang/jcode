@@ -1809,6 +1809,11 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 
 #[test]
 fn test_preview_transcript_omits_picker_metadata() {
+    let _render_state = crate::tui::ui::render_state_test_lock();
+    let _changelog =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(vec![
+            "Deterministic preview changelog fixture".to_string(),
+        ]);
     let mut session = make_session("metadata", "metadata-monkey", false, SessionStatus::Active);
     session.title = "metadata-video-title".to_string();
     session.working_dir = Some("/metadata-only-directory".to_string());
@@ -1832,16 +1837,30 @@ fn test_preview_transcript_omits_picker_metadata() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("1› hello"), "{text}");
+    assert!(text.contains("Updates"), "{text}");
+    assert!(
+        text.contains("Deterministic preview changelog fixture"),
+        "{text}"
+    );
     assert!(
         text.contains("client: Metadata-monkey"),
         "the real startup header belongs to the scrolling transcript"
     );
-    for metadata in ["metadata-video-title", "▶ Active", "────"] {
+    for metadata in ["metadata-video-title", "▶ Active"] {
         assert!(
             !text.contains(metadata),
             "unexpected picker metadata: {text}"
         );
     }
+    // Startup Updates boxes legitimately contain horizontal borders. Only the
+    // standalone picker separator is metadata, not every run of border glyphs.
+    assert!(
+        !text.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("────") && line.chars().all(|ch| ch == '─')
+        }),
+        "unexpected standalone picker separator: {text}"
+    );
 }
 
 #[test]
