@@ -2192,19 +2192,58 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
-                // Account routing owns pre-output OAuth auth failures (after the
-                // forced refresh above) when other pool members exist: the
-                // per-window failover moves this window to another login.
-                // Usage limits that reset far out already failed fast above;
-                // a short 429 stays here and retries this account, since it
-                // recovers on its own. Transport and post-output retries stay
-                // below. WaitingForResponse commits routing to this runtime
-                // after HTTP success, so early SSE errors keep the inner retry.
+                // Definitive exhaustion cannot recover by sleeping. Model-scoped
+                // recovery above still gets first refusal, including earned resets.
+                if is_oauth
+                    && !saw_output
+                    && is_account_limit_error(&error_str)
+                    && usage_recording::credential_label(is_oauth, &token)
+                        .as_deref()
+                        .is_some_and(|label| {
+                            jcode_base::usage::account_known_exhausted(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                label,
+                            )
+                        })
+                {
+                    // The API often uses the same generic 429 for exhausted plan
+                    // usage and burst throttles. Preserve verified account usage
+                    // evidence so the outer router can skip its countdown too.
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("Usage exhausted: {e:#}")))
+                        .await;
+                    return;
+                }
+                if !saw_output
+                    && jcode_provider_core::failover::is_definitive_usage_exhaustion(&error_str)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
+                let retry_recoverable_limit =
+                    error_classification::should_retry_recoverable_rate_limit(
+                        &error_str,
+                        jcode_provider_core::retry_after::retry_after_from_error(&e),
+                        jcode_base::config::Config::load()
+                            .provider
+                            .anthropic_retry_recoverable_rate_limits,
+                    );
+
+                // Account routing owns pre-output OAuth quota/auth failures when
+                // other pool members exist, even if they are cooling down. Let
+                // the router decide whether to rotate or report exhaustion.
+                // Waiting through this runtime's Retry-After backoff would hide
+                // the error for up to two minutes. Preserve refresh/model recovery
+                // above and retain transport and post-output retries below.
+                // WaitingForResponse commits routing to this runtime after HTTP
+                // success, so early SSE errors still belong to its inner retry.
                 if is_oauth
                     && !saw_output
                     && !response_accepted
-                    && is_oauth_auth_error(&error_str)
+                    && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
                     && jcode_base::provider::has_alternate_account_in_pool("claude")
+                    && !retry_recoverable_limit
                 {
                     let _ = tx.send(Err(e)).await;
                     return;

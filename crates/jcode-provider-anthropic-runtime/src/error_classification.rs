@@ -2,6 +2,40 @@
 
 use super::*;
 
+/// Account-local limits can be escaped by selecting another OAuth pool member.
+/// Do not classify model/transport overload or arbitrary server failures here.
+pub(super) fn is_account_limit_error(error: &str) -> bool {
+    [
+        "429 too many requests",
+        "rate limit",
+        "rate_limit",
+        "quota",
+        "usage exhausted",
+        "usage limit",
+        "limit reached",
+        "billing",
+        "credit balance",
+        "payment required",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
+/// A short burst throttle can recover on the same login. Long reset windows
+/// belong to the account router, and explicit exhaustion must never be retried.
+pub(super) fn should_retry_recoverable_rate_limit(
+    error: &str,
+    retry_after: Option<std::time::Duration>,
+    enabled: bool,
+) -> bool {
+    enabled
+        && !jcode_provider_core::failover::is_definitive_usage_exhaustion(error)
+        && (error.contains("429 too many requests")
+            || error.contains("rate limit")
+            || error.contains("rate_limit"))
+        && retry_after.is_none_or(|delay| delay <= std::time::Duration::from_secs(5))
+}
+
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)

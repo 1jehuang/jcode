@@ -526,6 +526,7 @@ impl MultiProvider {
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
                     .or_else(|| self.session_account_exhausted(active))
+                && !self.try_auto_banked_reset(active).await
             {
                 self.try_same_provider_account_failover(
                     active,
@@ -544,9 +545,8 @@ impl MultiProvider {
                 );
             }
             let attempt = self
-                .complete_candidate(active, messages, tools, mode, resume_session_id)
+                .complete_with_auto_reset(active, messages, tools, mode, resume_session_id)
                 .await;
-            let attempt = self.await_account_stream_start(active, attempt).await;
             match attempt {
                 Ok(stream) => {
                     match active {
@@ -640,6 +640,7 @@ impl MultiProvider {
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
+                && !self.try_auto_banked_reset(candidate).await
             {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
@@ -682,7 +683,6 @@ impl MultiProvider {
             {
                 return attempt;
             }
-            let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {
                 Ok(stream) => {

@@ -10,7 +10,7 @@ on:
     branches: [main, master]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.sha || 'latest' }}
   cancel-in-progress: true
 
 env:

@@ -930,6 +930,16 @@ pub(super) fn openai_snapshot_from_usage(
     let exhausted = usage.exhausted();
 
     AccountUsageSnapshot {
+        additional_windows: usage
+            .spark
+            .iter()
+            .chain(usage.additional_windows.iter())
+            .map(|window| jcode_protocol::AccountUsageWindow {
+                label: window.name.trim_end_matches(" window").to_string(),
+                usage_ratio: window.usage_ratio,
+                resets_at: window.resets_at.clone(),
+            })
+            .collect(),
         label,
         email,
         exhausted,
@@ -983,6 +993,34 @@ pub(super) fn anthropic_snapshot_from_usage(
     let five_hour_ratio = ratio(usage.five_hour, usage.five_hour_resets_at.as_deref());
     let seven_day_ratio = ratio(usage.seven_day, usage.seven_day_resets_at.as_deref());
     AccountUsageSnapshot {
+        additional_windows: usage
+            .model_scoped
+            .iter()
+            .filter_map(|window| {
+                Some(jcode_protocol::AccountUsageWindow {
+                    label: format!("{} 7d", window.model_name),
+                    usage_ratio: ratio(window.utilization, window.resets_at.as_deref())?,
+                    resets_at: window.resets_at.clone(),
+                })
+            })
+            .chain(
+                usage
+                    .seven_day_opus
+                    .filter(|_| {
+                        !usage
+                            .model_scoped
+                            .iter()
+                            .any(|window| window.model_name.eq_ignore_ascii_case("opus"))
+                    })
+                    .and_then(|value| {
+                        Some(jcode_protocol::AccountUsageWindow {
+                            label: "Opus 7d".into(),
+                            usage_ratio: ratio(value, usage.seven_day_resets_at.as_deref())?,
+                            resets_at: usage.seven_day_resets_at.clone(),
+                        })
+                    }),
+            )
+            .collect(),
         label,
         email,
         exhausted: usage.last_error.is_none()
@@ -1002,75 +1040,5 @@ pub(super) fn anthropic_snapshot_from_usage(
 }
 
 #[cfg(test)]
-mod stale_account_snapshot_tests {
-    use super::*;
-
-    fn last_good() -> UsageData {
-        UsageData {
-            five_hour: 1.0,
-            seven_day: 0.42,
-            five_hour_resets_at: Some(
-                (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-            ),
-            seven_day_resets_at: Some(
-                (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
-            ),
-            fetched_at: Some(Instant::now()),
-            last_success_at: Some(Instant::now()),
-            last_error: Some("HTTP 429".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn stale_limits_preserve_error_but_never_exhaust_or_route() {
-        let data = last_good();
-        let snapshot = anthropic_snapshot_from_usage("stale-test".into(), None, &data);
-        assert_eq!(snapshot.five_hour_ratio, Some(1.0));
-        assert_eq!(snapshot.seven_day_ratio, Some(0.42));
-        assert_eq!(snapshot.error.as_deref(), Some("HTTP 429"));
-        assert!(!snapshot.exhausted);
-    }
-
-    #[test]
-    fn stale_limits_require_provenance_and_each_unexpired_valid_window() {
-        let snapshot = |data: &UsageData| anthropic_snapshot_from_usage("test".into(), None, data);
-        let mut data = last_good();
-        data.last_success_at = None;
-        assert!(snapshot(&data).five_hour_ratio.is_none());
-        assert!(snapshot(&data).seven_day_ratio.is_none());
-        data = last_good();
-        data.fetched_at = None;
-        assert!(snapshot(&data).five_hour_ratio.is_none());
-        data = last_good();
-        for reset in [
-            None,
-            Some("invalid".into()),
-            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
-        ] {
-            data.five_hour_resets_at = reset;
-            assert!(snapshot(&data).five_hour_ratio.is_none());
-            assert_eq!(snapshot(&data).seven_day_ratio, Some(0.42));
-            assert_eq!(snapshot(&data).resets_at, data.seven_day_resets_at);
-        }
-        data = last_good();
-        for ratio in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
-            data.five_hour = ratio;
-            assert!(snapshot(&data).five_hour_ratio.is_none());
-        }
-    }
-
-    #[test]
-    fn successful_but_rolled_over_window_does_not_exhaust() {
-        let mut data = last_good();
-        data.last_error = None;
-        data.five_hour_resets_at =
-            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
-        let snapshot = anthropic_snapshot_from_usage("test".into(), None, &data);
-        assert!(snapshot.five_hour_ratio.is_none());
-        assert_eq!(snapshot.seven_day_ratio, Some(0.42));
-        assert_eq!(snapshot.resets_at, data.seven_day_resets_at);
-        assert!(!snapshot.exhausted);
-        assert!(snapshot.error.is_none());
-    }
-}
+#[path = "cache_snapshot_tests.rs"]
+mod stale_account_snapshot_tests;
