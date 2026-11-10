@@ -5,7 +5,9 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod soft_interrupts;
 mod ssh_sessions;
+pub(crate) use soft_interrupts::soft_interrupt_client_id;
 
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
@@ -1345,38 +1347,6 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("background_tool"))
-            .await
-    }
-
-    /// Queue a soft interrupt message to be injected at the next safe point
-    /// This doesn't cancel anything - the message is naturally incorporated
-    pub async fn soft_interrupt(
-        &mut self,
-        content: String,
-        images: Vec<(String, String)>,
-        urgent: bool,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        let request = Request::SoftInterrupt {
-            id,
-            content,
-            images,
-            urgent,
-            client_id: None,
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
-            .await?;
-        Ok(id)
-    }
-
-    pub async fn cancel_soft_interrupts(&mut self) -> Result<()> {
-        let request = Request::CancelSoftInterrupts {
-            id: self.next_request_id,
-            client_ids: None,
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
             .await
     }
 

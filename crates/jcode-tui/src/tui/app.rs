@@ -162,12 +162,7 @@ pub(crate) fn has_safe_slash_command_token(input: &str) -> bool {
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
 
-fn active_runtime_provider_key() -> Option<String> {
-    std::env::var("JCODE_RUNTIME_PROVIDER")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-}
+use tui_lifecycle_runtime::active_runtime_provider_key;
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
@@ -1774,6 +1769,11 @@ pub struct App {
     pending_soft_interrupts: Vec<String>,
     // Soft interrupts written to the socket but not yet acknowledged by the server.
     pending_soft_interrupt_requests: Vec<(u64, String)>,
+    // Every soft interrupt still shown as pending, by request id. Unlike the
+    // list above this survives the ack, so recovery can name them to the server.
+    sent_soft_interrupts: Vec<(u64, String)>,
+    // In-flight by-id cancel used to recover stranded soft interrupts.
+    soft_interrupt_recovery: Option<(u64, Instant)>,
     // Whether the current remote turn should trigger autoreview after completion.
     autoreview_after_current_turn: bool,
     // Whether the current remote turn should trigger autojudge after completion.

@@ -6,18 +6,7 @@ pub(super) mod reload_input;
 use super::*;
 use crate::tui::{backend, keybind};
 
-/// Hot-exec resumes must not turn a client-only handoff into a shared daemon
-/// reload. Older clients already export these markers, so this also protects
-/// handoffs from binaries that predate this policy. Ordinary `--resume` and
-/// fresh launches retain the configured behavior. Manual `/reload` is separate.
-pub(super) fn remote_auto_server_reload(
-    configured: bool,
-    has_resume_target: bool,
-    resuming_handoff: bool,
-    reload_fast_start: bool,
-) -> bool {
-    configured && !(has_resume_target && (resuming_handoff || reload_fast_start))
-}
+pub(super) use super::tui_lifecycle_runtime::remote_auto_server_reload;
 
 #[cfg(test)]
 #[path = "tui_lifecycle_reload_policy_tests.rs"]
@@ -840,6 +829,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
@@ -1366,6 +1357,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
