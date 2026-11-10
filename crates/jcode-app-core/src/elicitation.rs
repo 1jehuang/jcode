@@ -1,4 +1,6 @@
 //! Session-scoped form broker. A single mutex makes validation and winning atomic.
+pub mod ask_user;
+
 use crate::protocol::{
     ServerEvent,
     elicitation::{ElicitationResolution, ElicitationResponse, FormElicitation, FormSchema},
@@ -100,6 +102,14 @@ impl Broker {
             .values()
             .filter(|c| c.session == session)
             .fold((false, false), |(d, a), c| (d || c.desktop, a || c.applet))
+    }
+    /// True when at least one live, form-capable connection is attached to the session.
+    pub fn forms(&self, session: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state
+            .connections
+            .values()
+            .any(|c| c.session == session && c.forms && !c.events.is_closed())
     }
     pub fn start(
         self: &Arc<Self>,
