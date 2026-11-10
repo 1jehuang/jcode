@@ -305,7 +305,7 @@ fn http_retry_decision_with_policy(
                                 "access-second"
                             }
                         } else {
-                        "access-first"
+                            "access-first"
                         };
                         assert!(
                             headers

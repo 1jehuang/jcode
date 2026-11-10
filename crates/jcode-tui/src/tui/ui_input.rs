@@ -2707,6 +2707,7 @@ pub(crate) fn wrap_input_text<'a>(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 fn wrap_input_text_with_images<'a>(
