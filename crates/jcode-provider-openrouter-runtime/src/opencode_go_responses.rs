@@ -41,10 +41,7 @@ pub(crate) fn model_uses_responses_api(
         // reasoning replay and stable prompt-cache affinity. Other advertised
         // Responses models remain on Chat until their tool and reasoning
         // behavior is verified per family.
-        return model
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("meta/muse");
+        return model.trim().to_ascii_lowercase().starts_with("meta/muse");
     }
     let is_go_profile = profile_id.is_some_and(|id| id.eq_ignore_ascii_case("opencode-go"));
     let is_go_endpoint = api_base
@@ -137,7 +134,10 @@ pub(crate) fn build_command_code_responses_request(
     if let Some(max_output_tokens) = max_output_tokens {
         request["max_output_tokens"] = serde_json::json!(max_output_tokens);
     }
-    if let Some(key) = prompt_cache_key.map(str::trim).filter(|key| !key.is_empty()) {
+    if let Some(key) = prompt_cache_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
         request["prompt_cache_key"] = Value::String(key.to_string());
     }
     request

@@ -61,12 +61,11 @@ impl Provider for OpenRouterProvider {
             let crate::ProviderAuth::AuthorizationBearer { token, .. } = auth else {
                 anyhow::bail!("Command Code Messages requires bearer API-key authentication");
             };
-            let delegate =
-                jcode_provider_anthropic_runtime::AnthropicProvider::new_command_code(
-                    &self.api_base,
-                    &token,
-                    &model,
-                )?;
+            let delegate = jcode_provider_anthropic_runtime::AnthropicProvider::new_command_code(
+                &self.api_base,
+                &token,
+                &model,
+            )?;
             return delegate
                 .complete(messages, tools, system, resume_session_id)
                 .await;

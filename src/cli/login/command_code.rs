@@ -24,7 +24,10 @@ pub(super) async fn validate_saved_key() -> Result<()> {
     let response = client
         .get(WHOAMI_URL)
         .bearer_auth(key)
-        .header(reqwest::header::USER_AGENT, format!("jcode/{}", env!("CARGO_PKG_VERSION")))
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("jcode/{}", env!("CARGO_PKG_VERSION")),
+        )
         .send()
         .await;
     match response {

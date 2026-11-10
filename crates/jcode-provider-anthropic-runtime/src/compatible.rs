@@ -7,10 +7,7 @@ use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::sync::Arc;
 
-use super::{
-    AnthropicCredentialMode, AnthropicProvider, DirectTransportConfig,
-    RwLock,
-};
+use super::{AnthropicCredentialMode, AnthropicProvider, DirectTransportConfig, RwLock};
 
 pub(super) fn direct_api_url() -> String {
     let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
@@ -96,7 +93,10 @@ mod tests {
             Some(&["claude-sonnet-5".to_string()][..])
         );
         assert_eq!(
-            provider.profile_api_key.as_ref().and_then(|key| key.as_deref().ok()),
+            provider
+                .profile_api_key
+                .as_ref()
+                .and_then(|key| key.as_deref().ok()),
             Some("test-key")
         );
         assert_eq!(provider.max_tokens_override, Some(32_000));

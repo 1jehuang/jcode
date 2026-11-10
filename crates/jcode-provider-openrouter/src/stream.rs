@@ -589,10 +589,7 @@ impl Stream for OpenRouterStream {
                         return Poll::Ready(Some(Ok(event)));
                     }
                     if !self.message_end_emitted {
-                        if self.strict_terminal
-                            && !self.saw_done
-                            && self.finish_reason.is_none()
-                        {
+                        if self.strict_terminal && !self.saw_done && self.finish_reason.is_none() {
                             self.message_end_emitted = true;
                             return Poll::Ready(Some(Err(anyhow::anyhow!(
                                 "provider chat stream ended without [DONE] or a finish reason"

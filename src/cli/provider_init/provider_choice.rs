@@ -1,6 +1,8 @@
 //! Provider-choice to login-provider mapping.
 
-use crate::provider_catalog::{LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile};
+use crate::provider_catalog::{
+    LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile,
+};
 
 use super::{PROVIDER_CHOICE_LOGIN_PROVIDERS, ProviderChoice};
 
