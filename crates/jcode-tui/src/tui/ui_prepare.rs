@@ -1195,6 +1195,7 @@ pub(crate) fn prepare_history_preview(
         .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
 
+#[cfg(test)]
 #[path = "ui_prepare/preview_fallback.rs"]
 mod preview_fallback;
 

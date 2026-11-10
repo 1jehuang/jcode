@@ -358,6 +358,7 @@ fn resolve(
         Some(outcomes)
     }
 }
+
 /// Literal match over the given segments, with the same semantics as the
 /// literal scanner (substring match, score 0, strongest origin), plus the
 /// list of matching segments when it is small enough to keep.

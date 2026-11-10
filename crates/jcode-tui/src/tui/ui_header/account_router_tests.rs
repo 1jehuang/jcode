@@ -41,6 +41,56 @@ fn remote_rows_mask_email_and_show_quota() {
 }
 
 #[test]
+fn inline_account_rows_prioritize_all_limits_at_80_cells() {
+    let usage = crate::usage::AccountUsageSnapshot {
+        label: "work".into(),
+        email: Some("界界界@example.com".into()),
+        exhausted: false,
+        primary_label: Some("5-hour".into()),
+        five_hour_ratio: Some(0.15),
+        secondary_label: Some("7-day".into()),
+        seven_day_ratio: Some(0.42),
+        additional_windows: vec![crate::protocol::AccountUsageWindow {
+            label: "Fable 7d".into(),
+            usage_ratio: 0.73,
+            resets_at: None,
+        }],
+        resets_at: None,
+        error: None,
+    };
+    for display_used in [false, true] {
+        let mut identity = detail(
+            CredentialStatus::Available,
+            "anthropic 界***界@example.com".into(),
+            true,
+        );
+        identity
+            .spans
+            .push(Span::raw(" · ↻ 2 resets · exp tomorrow"));
+        let row = inline_account_row(identity, remaining_bars(&usage, display_used));
+        for budget in [79, 119, 239] {
+            let fitted = fit_account_row(row.clone(), budget);
+            assert!(fitted.width() <= budget);
+            let rendered = text(vec![fitted]);
+            for label in ["5h", "7d", "Fable 7d"] {
+                assert!(rendered.contains(label), "{rendered}");
+            }
+            for percent in if display_used {
+                ["15%", "42%", "73%"]
+            } else {
+                ["85%", "58%", "27%"]
+            } {
+                assert!(rendered.contains(percent), "{rendered}");
+            }
+        }
+        let narrow = fit_account_row(row.clone(), 39);
+        assert!(narrow.width() <= 39);
+        assert!(text(vec![narrow]).contains('…'));
+        assert!(text(vec![fit_account_row(row, 239)]).contains("2 resets"));
+    }
+}
+
+#[test]
 fn account_headers_render_all_usage_windows_and_fit_unicode_widths() {
     let mut usage = crate::usage::AccountUsageSnapshot {
         label: "work".into(),
@@ -94,17 +144,18 @@ fn account_headers_render_all_usage_windows_and_fit_unicode_widths() {
         (vec![usage.clone()], vec![], "anthropic"),
     ] {
         let rows = remote_inventory_lines(&anthropic, &openai, provider, Some("work"));
-        assert_eq!(rows.len(), 6, "identity plus one logical row per quota");
-        for width in [0, 1, 2, 8, 24, 40, 80, 120, 240] {
+        assert_eq!(
+            rows.len(),
+            1,
+            "identity and all quotas share one logical row"
+        );
+        for width in [0u16, 1, 2, 8, 24, 40, 80, 120, 240] {
             let fitted = fit_header_lines(rows.clone(), width);
             assert_eq!(fitted.len(), rows.len());
-            for (source, result) in rows.iter().zip(&fitted) {
+            for result in &fitted {
                 assert!(result.width() <= usize::from(width.saturating_sub(1)));
-                if width >= 8 && source.width() > usize::from(width.saturating_sub(1)) {
-                    assert!(text(vec![result.clone()]).ends_with('…'));
-                }
             }
-            if width >= 40 {
+            if width >= 120 {
                 let rendered = text(fitted);
                 for label in [
                     "session",
@@ -592,8 +643,7 @@ fn router_inventory_weekly_only_usage_shows_reported_window() {
         error: None,
     };
     let bar = remaining_bar(&usage, false).unwrap();
-    assert_eq!(bar.spans[0].content, "    ");
-    assert_eq!(bar.spans[1].content, "7d ");
+    assert_eq!(bar.spans[0].content, "7d ");
     assert!(text(vec![bar]).contains("100% left"));
     usage.seven_day_ratio = Some(1.0);
     assert!(text(vec![remaining_bar(&usage, false).unwrap()]).contains("0% left"));
@@ -628,10 +678,9 @@ fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
     assert!(text(vec![bar.clone()]).contains('▰'));
     assert!(text(vec![bar.clone()]).contains('▱'));
     assert!(!text(vec![bar.clone()]).contains('['));
-    assert_eq!(bar.spans[0].content, "    ");
-    assert_eq!(bar.spans[1].content, "5h ");
+    assert_eq!(bar.spans[0].content, "5h ");
     let shared = crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false);
-    assert_eq!(bar.spans[2..], shared.spans[1..]);
+    assert_eq!(bar.spans[1..], shared.spans[1..]);
     assert!(text(vec![remaining_bar(&usage, true).unwrap()]).contains("48% used"));
     for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
         usage.five_hour_ratio = ratio;

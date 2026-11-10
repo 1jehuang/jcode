@@ -526,7 +526,9 @@ impl MultiProvider {
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
                     .or_else(|| self.session_account_exhausted(active))
-                && !self.try_auto_banked_reset(active).await
+                && !self
+                    .try_auto_banked_reset(active, &reason, messages, tools, mode)
+                    .await?
             {
                 self.try_same_provider_account_failover(
                     active,
@@ -565,6 +567,9 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    if parse_failover_prompt_message(&err.to_string()).is_some() {
+                        return Err(err);
+                    }
                     let decision = Self::classify_failover_error(&err);
                     if decision.should_failover() {
                         let reason = Self::summarize_error(&err);
@@ -640,7 +645,9 @@ impl MultiProvider {
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
-                && !self.try_auto_banked_reset(candidate).await
+                && !self
+                    .try_auto_banked_reset(candidate, &reason, messages, tools, mode)
+                    .await?
             {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
@@ -709,6 +716,9 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    if parse_failover_prompt_message(&err.to_string()).is_some() {
+                        return Err(err);
+                    }
                     let summary = Self::summarize_error(&err);
                     let display_summary = if self.provider_uses_oauth_accounts(candidate) {
                         maybe_annotate_limit_summary(candidate, summary.clone())

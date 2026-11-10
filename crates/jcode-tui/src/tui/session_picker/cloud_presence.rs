@@ -86,10 +86,20 @@ fn poll_host(host: &str) -> Option<HashMap<String, Option<std::time::SystemTime>
 }
 
 impl SessionPicker {
+    fn presence_sessions(&self) -> impl Iterator<Item = &SessionInfo> {
+        self.all_sessions
+            .iter()
+            .chain(self.all_orphan_sessions.iter())
+            .chain(
+                self.all_server_groups
+                    .iter()
+                    .flat_map(|group| group.sessions.iter()),
+            )
+    }
+
     fn cloud_hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self
-            .all_sessions
-            .iter()
+            .presence_sessions()
             .filter(|session| session.server_icon.as_deref() == Some("☁"))
             .filter_map(|session| {
                 session
@@ -165,7 +175,7 @@ impl SessionPicker {
         self.live_presence
             .retain(|_, presence| !(presence.pid == 0 && presence.streaming));
         for (session_id, since) in &self.cloud_presence.streaming {
-            let is_cloud = self.all_sessions.iter().any(|session| {
+            let is_cloud = self.presence_sessions().any(|session| {
                 session.id == *session_id && session.server_icon.as_deref() == Some("☁")
             });
             if !is_cloud {
@@ -222,6 +232,63 @@ mod tests {
         // A local refresh must not drop the remote running state.
         picker.refresh_live_presence();
         assert!(picker.session_is_streaming(&session));
+    }
+
+    fn cloud_group(sessions: Vec<SessionInfo>) -> ServerGroup {
+        ServerGroup {
+            name: "cloud: jcode-cloud".into(),
+            icon: "☁".into(),
+            version: String::new(),
+            git_hash: String::new(),
+            is_running: false,
+            sessions,
+        }
+    }
+
+    #[test]
+    fn grouped_cloud_sessions_are_polled_and_show_running_in_active_view() {
+        let session = make_cloud_session();
+        let mut picker =
+            SessionPicker::new_grouped(vec![cloud_group(vec![session.clone()])], vec![]);
+        assert!(picker.all_sessions.is_empty(), "exercise grouped storage");
+        assert_eq!(picker.cloud_hosts(), vec!["jcode-cloud"]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        picker.cloud_presence.pending = Some(rx);
+        picker.cloud_presence.started_at = Some(std::time::Instant::now());
+        picker.activate_active_filter();
+        assert!(picker.selected_session().is_none());
+        tx.send(HashMap::from([(session.id.clone(), None)]))
+            .unwrap();
+        assert!(picker.maybe_refresh_cloud_presence());
+        assert!(picker.session_is_streaming(&session));
+        assert_eq!(picker.selected_session().unwrap().id, session.id);
+        picker.refresh_live_presence();
+        assert!(picker.session_is_streaming(&session));
+
+        // A completed remote poll must remove the running badge and Active row.
+        let (tx, rx) = std::sync::mpsc::channel();
+        picker.cloud_presence.pending = Some(rx);
+        tx.send(HashMap::new()).unwrap();
+        assert!(picker.maybe_refresh_cloud_presence());
+        assert!(!picker.session_is_streaming(&session));
+        assert!(picker.selected_session().is_none());
+    }
+
+    #[test]
+    fn grouped_picker_orphans_and_reseed_keep_cloud_presence() {
+        let session = make_cloud_session();
+        let mut picker =
+            SessionPicker::new_grouped(vec![cloud_group(vec![])], vec![session.clone()]);
+        assert_eq!(picker.cloud_hosts(), vec!["jcode-cloud"]);
+        picker
+            .cloud_presence
+            .streaming
+            .insert(session.id.clone(), None);
+        picker.merge_cloud_presence();
+        assert!(picker.session_is_streaming(&session));
+        picker.reseed_grouped(vec![cloud_group(vec![session.clone()])], vec![]);
+        assert!(picker.session_is_streaming(&session));
+        assert_eq!(picker.cloud_hosts(), vec!["jcode-cloud"]);
     }
 
     fn make_cloud_session() -> SessionInfo {

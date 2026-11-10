@@ -562,6 +562,9 @@ anthropic_retry_recoverable_rate_limits = true
 # After failover, go back to the preferred account at the start of a turn once
 # its usage limit has reset (default: true)
 # account_failover_return_home = false
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       expedite:
-        description: Publish this exact master commit after source CI, without the quiet period
+        description: Publish this master snapshot without the quiet wait, retaining all validation
         type: boolean
         default: false
 
-# A new master push cancels the sleep, CI wait, and any obsolete builds.
-# Manual/recovery retries use the same gates and a fresh preview number, but
-# never cancel an active build if the Actions run-list API briefly lags.
+# Automatic runs debounce master and discard obsolete builds. Explicit expedited
+# dispatches pin their master snapshot in a separate, non-cancelling group so
+# ongoing development cannot starve publication. All validation still applies.
 # No tag/release/workflow_run trigger, and only GITHUB_TOKEN may publish.
 concurrency:
   group: v1-preview-${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'pinned' || 'master' }}
@@ -23,8 +23,8 @@ permissions:
   actions: read
 
 env:
-  JCODE_PREVIEW_PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'true' || 'false' }}
   JCODE_CI: "1"
+  JCODE_PREVIEW_PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'true' || 'false' }}
   JCODE_RELEASE_BUILD: "1"
   JCODE_CI_BUILD: "1"
   JCODE_BUILD_SEMVER: v1.0.0-preview.${{ github.run_number }}
@@ -244,7 +244,7 @@ jobs:
           pattern: preview-jcode-*
           merge-multiple: true
           path: dist
-      - name: Publish complete preview only if master is still current
+      - name: Publish validated current head or explicitly pinned master snapshot
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

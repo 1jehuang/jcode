@@ -211,8 +211,7 @@ fn remote_inventory_lines(
                     .push(Span::styled(" · ", Style::default().fg(dim_color())));
                 row.spans.push(banked);
             }
-            lines.push(row);
-            lines.extend(quotas);
+            lines.push(inline_account_row(row, quotas));
         }
     }
     lines
@@ -265,12 +264,13 @@ fn inventory_lines(
             && credential == Some(ActiveCredential::OAuth);
         let usage =
             crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
-        let quotas = usage
-            .as_ref()
-            .map(|usage| {
+        let quotas = match usage.as_ref() {
+            Some(usage) => {
                 remaining_bars(usage, crate::config::config().display.usage_display_used())
-            })
-            .unwrap_or_default();
+            }
+            // Accounts without cached usage have no quota rows yet.
+            None => Vec::new(),
+        };
         let mut row = detail(
             oauth_credential_status(expired, usage.as_ref()),
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
@@ -369,15 +369,13 @@ fn inventory_lines(
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
                 .map(|(_, _, line)| {
-                    std::iter::once(priority_row(
-                        line.clone(),
-                        inventory.pool.priority(key),
-                        &tiers,
-                    ))
-                    .chain(quota_rows.remove(key).unwrap_or_default())
+                    let row = priority_row(line.clone(), inventory.pool.priority(key), &tiers);
+                    match quota_rows.remove(key) {
+                        Some(quotas) => inline_account_row(row, quotas),
+                        None => row,
+                    }
                 })
         })
-        .flatten()
         .collect();
     if lines.is_empty() {
         lines.push(Line::raw(
@@ -385,6 +383,104 @@ fn inventory_lines(
         ));
     }
     lines
+}
+
+const QUOTA_SEPARATOR: &str = " │ ";
+
+fn inline_account_row(mut identity: Line<'static>, quotas: Vec<Line<'static>>) -> Line<'static> {
+    if quotas.is_empty() {
+        return identity;
+    }
+    // Keep status/error and banked-reset telemetry after the quotas, so fitting
+    // cannot sacrifice a model window just to retain a countdown.
+    let suffix = identity.spans.split_off(3);
+    for quota in quotas {
+        identity.spans.push(Span::styled(
+            QUOTA_SEPARATOR,
+            Style::default().fg(dim_color()),
+        ));
+        identity.spans.extend(quota.spans);
+    }
+    identity.spans.extend(suffix);
+    identity
+}
+
+/// Account rows remain one logical row at every width. Drop decoration before
+/// quota labels/percentages, then truncate by terminal cells, never bytes.
+pub(super) fn fit_account_row(mut row: Line<'static>, budget: usize) -> Line<'static> {
+    if row.width() <= budget
+        || row
+            .spans
+            .get(3)
+            .is_none_or(|s| s.content != QUOTA_SEPARATOR)
+    {
+        return row;
+    }
+    let mut end = 3;
+    while row
+        .spans
+        .get(end)
+        .is_some_and(|s| s.content == QUOTA_SEPARATOR)
+        && row.spans.len() >= end + 5
+    {
+        end += 5;
+    }
+    let suffix = row.spans.split_off(end);
+    let original_identity = row.spans[2].clone();
+    // Prefer a short identity over losing any limit, retaining the provider.
+    let provider = original_identity
+        .content
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    row.spans[2].content = format!(" {provider}").into();
+    if row.width() > budget {
+        for quota in row.spans[3..].as_chunks_mut::<5>().0 {
+            // These are the shared renderer's filled and empty spans. Preserve
+            // its colors and convention, shrinking only their cell counts.
+            for span in &mut quota[2..4] {
+                span.content = span.content.chars().take(1).collect::<String>().into();
+            }
+        }
+    }
+    if row.width() > budget {
+        for (index, quota) in row.spans[3..].as_chunks_mut::<5>().0.iter_mut().enumerate() {
+            quota[0].content = " ".into();
+            quota[2].content = "".into();
+            quota[3].content = "".into();
+            // One explicit convention applies to the whole compact row.
+            if index == 0 {
+                continue;
+            }
+            let percent = quota[4]
+                .content
+                .trim()
+                .split(' ')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            quota[4].content = percent.into();
+        }
+    }
+    // Restore as much identity as the quotas permit, using cell-aware ellipsis.
+    let identity_budget = budget.saturating_sub(row.width() - row.spans[2].width());
+    let fitted_identity = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+        &Line::from(vec![original_identity.clone()]),
+        identity_budget,
+    );
+    row.spans[2] = Span::styled(
+        fitted_identity
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>(),
+        original_identity.style,
+    );
+    let with_suffix = Line::from(row.spans.iter().cloned().chain(suffix).collect::<Vec<_>>());
+    if with_suffix.width() <= budget {
+        row = with_suffix;
+    }
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(&row, budget)
 }
 
 fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
@@ -490,8 +586,7 @@ fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> Str
     }
 }
 
-/// Keep each reported quota on its own logical row. Fitting the account's
-/// identity must never truncate away later model-specific windows.
+/// Render every reported quota through the info widget's shared limit renderer.
 fn remaining_bars(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
@@ -542,7 +637,6 @@ fn remaining_bars(
             )
             .into();
         }
-        bar.spans.insert(0, Span::raw("    "));
         rows.push(bar);
     }
     rows

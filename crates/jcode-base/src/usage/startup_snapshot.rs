@@ -243,7 +243,15 @@ fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
             !window
                 .resets_at
                 .as_deref()
-                .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+                .and_then(|reset| match chrono::DateTime::parse_from_rfc3339(reset) {
+                    Ok(reset) => Some(reset),
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Keeping usage window with invalid reset timestamp: {error}"
+                        ));
+                        None
+                    }
+                })
                 .is_some_and(|reset| i128::from(reset.timestamp_millis()) <= i128::from(now_ms))
         });
         let expired = account
@@ -388,6 +396,16 @@ mod tests {
                     usage_ratio: 0.3,
                     resets_at: Some("2099-01-01T00:00:00Z".into()),
                 },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Invalid reset".into(),
+                    usage_ratio: 0.7,
+                    resets_at: Some("not-a-timestamp".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Unknown reset".into(),
+                    usage_ratio: 0.8,
+                    resets_at: None,
+                },
             ],
             label: "test".into(),
             email: None,
@@ -406,10 +424,12 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         discard_expired_windows(&mut accounts, reset - 1);
-        assert_eq!(accounts[0].additional_windows.len(), 2);
+        assert_eq!(accounts[0].additional_windows.len(), 4);
         assert!(accounts[0].exhausted);
         discard_expired_windows(&mut accounts, reset);
-        assert_eq!(accounts[0].additional_windows.len(), 1);
+        assert_eq!(accounts[0].additional_windows.len(), 3);
+        assert_eq!(accounts[0].additional_windows[1].label, "Invalid reset");
+        assert_eq!(accounts[0].additional_windows[2].label, "Unknown reset");
         assert_eq!(accounts[0].additional_windows[0].label, "Future");
         assert!(!accounts[0].exhausted);
         assert!(accounts[0].five_hour_ratio.is_none());
