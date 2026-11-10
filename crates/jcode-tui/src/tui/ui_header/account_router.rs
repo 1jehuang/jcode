@@ -897,14 +897,8 @@ mod tests {
                 1,
                 "identity and all quotas share one logical row"
             );
-            for width in [0, 1, 2, 8, 24, 40, 80, 120, 240] {
-                let fitted = fit_header_lines(
-                    rows.iter()
-                        .cloned()
-                        .map(|row| fit_account_row(row, usize::from(width.saturating_sub(1))))
-                        .collect(),
-                    width,
-                );
+            for width in [0u16, 1, 2, 8, 24, 40, 80, 120, 240] {
+                let fitted = fit_header_lines(rows.clone(), width);
                 assert_eq!(fitted.len(), rows.len());
                 for result in &fitted {
                     assert!(result.width() <= usize::from(width.saturating_sub(1)));
@@ -1398,8 +1392,7 @@ mod tests {
             error: None,
         };
         let bar = remaining_bar(&usage, false).unwrap();
-        assert_eq!(bar.spans[0].content, "    ");
-        assert_eq!(bar.spans[1].content, "7d ");
+        assert_eq!(bar.spans[0].content, "7d ");
         assert!(text(vec![bar]).contains("100% left"));
         usage.seven_day_ratio = Some(1.0);
         assert!(text(vec![remaining_bar(&usage, false).unwrap()]).contains("0% left"));
@@ -1434,10 +1427,9 @@ mod tests {
         assert!(text(vec![bar.clone()]).contains('▰'));
         assert!(text(vec![bar.clone()]).contains('▱'));
         assert!(!text(vec![bar.clone()]).contains('['));
-        assert_eq!(bar.spans[0].content, "    ");
-        assert_eq!(bar.spans[1].content, "5h ");
+        assert_eq!(bar.spans[0].content, "5h ");
         let shared = crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false);
-        assert_eq!(bar.spans[2..], shared.spans[1..]);
+        assert_eq!(bar.spans[1..], shared.spans[1..]);
         assert!(text(vec![remaining_bar(&usage, true).unwrap()]).contains("48% used"));
         for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
             usage.five_hour_ratio = ratio;
