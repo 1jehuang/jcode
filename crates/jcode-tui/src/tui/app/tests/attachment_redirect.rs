@@ -200,6 +200,28 @@ fn test_interleave_image_reload_reaches_queued_provider_payload() {
 }
 
 #[test]
+fn test_image_only_interleave_reload_reaches_queued_provider_payload() {
+    for message in ["", "  "] {
+        let mut app = create_test_app();
+        app.interleave_message = Some(message.to_string());
+        app.interleave_images = vec![("image/png".to_string(), "aGk=".to_string())];
+        let mut reloaded = reload_queued_image_app(&app, "image-only-interleave");
+        assert!(
+            reloaded.has_queued_followups(),
+            "image-only follow-up must survive the disk reload"
+        );
+        reloaded.prepare_queued_local_turn();
+        let messages = reloaded.materialized_provider_messages();
+        let content = &messages.last().unwrap().content;
+        assert!(content.iter().any(|block| matches!(block,
+            ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "aGk=")));
+        assert!(content.iter().all(|block| !matches!(block,
+            ContentBlock::Text { text, .. } if !text.trim().is_empty())));
+    }
+}
+
+#[test]
 fn test_inflight_queued_image_reload_preserves_existing_queued_images() {
     let mut app = local_image_redirect_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
@@ -363,6 +385,8 @@ fn test_reload_orphan_images_do_not_attach_to_recovered_soft_interrupt() {
         let mut data: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         data["queued_messages"] = serde_json::json!([]);
+        data["interleave_message"] = serde_json::Value::Null;
+        data["interleave_images"] = serde_json::json!([["image/png", "orphaned-interleave"]]);
         data["pending_soft_interrupt_resend"] = serde_json::json!(["unrelated recovered prompt"]);
         std::fs::write(path, data.to_string()).unwrap();
         let restored = App::restore_input_for_reload(&session_id).unwrap();

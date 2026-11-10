@@ -91,7 +91,7 @@ impl App {
         };
         let mut recovered_followups = Vec::new();
         if let Some(interleave_message) = restored.interleave_message
-            && !interleave_message.trim().is_empty()
+            && (!interleave_message.trim().is_empty() || !restored.interleave_images.is_empty())
         {
             recovered_followups.push(interleave_message);
             queued_message_images.splice(0..0, restored.interleave_images);

@@ -4212,38 +4212,6 @@ impl App {
         self.pending_turn = true;
     }
 
-    /// Commit the combined queued user turn at the real provider/session boundary.
-    /// Taking attachments here keeps them out of unrelated composer submissions.
-    pub(super) fn append_queued_user_payload(&mut self, combined: &str) {
-        let rewind_checkpoint_id = match crate::session::is_authentic_user_input(
-            combined,
-            !self.queued_message_images.is_empty(),
-        )
-        .then(|| self.session.create_rewind_checkpoint(combined))
-        .transpose()
-        {
-            Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.id),
-            Err(error) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Could not create rewind checkpoint: {error}"
-                )));
-                None
-            }
-        };
-        let images = std::mem::take(&mut self.queued_message_images);
-        self.add_provider_message(Message::user_with_images(combined, images.clone()));
-        let mut blocks: Vec<ContentBlock> = images
-            .into_iter()
-            .map(|(media_type, data)| ContentBlock::Image { media_type, data })
-            .collect();
-        blocks.push(ContentBlock::Text {
-            text: combined.to_string(),
-            cache_control: None,
-        });
-        self.session.add_message(Role::User, blocks);
-        self.bind_local_rewind_checkpoint(rewind_checkpoint_id);
-    }
-
     /// Prepare the next queued turn without entering the terminal/provider loop.
     pub(super) fn prepare_queued_local_turn(&mut self) -> (bool, bool) {
         let queued_messages = std::mem::take(&mut self.queued_messages);
@@ -4251,7 +4219,8 @@ impl App {
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
-        let has_combined = !combined.is_empty();
+        let has_combined = !combined.is_empty()
+            || (!messages.is_empty() && !self.queued_message_images.is_empty());
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
         self.commit_pending_streaming_assistant_message();
         for msg in display_system_messages {
