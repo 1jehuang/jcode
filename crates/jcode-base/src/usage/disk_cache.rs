@@ -262,6 +262,7 @@ pub(super) fn last_good(key: &str) -> Option<UsageData> {
     (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| to_usage(&good, None))
 }
 
+#[cfg(test)]
 pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
     store_success_with_reset_status(key, data, None)
 }
