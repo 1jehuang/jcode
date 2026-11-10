@@ -758,7 +758,7 @@ impl App {
             AccountCommand::Unpin { provider_id } => {
                 let families: Vec<&str> = match provider_id.as_deref().and_then(account_family) {
                     Some(family) => vec![family],
-                    None => vec!["claude", "openai"],
+                    None => vec!["claude", "openai", CLAUDE_CODE_FAMILY],
                 };
                 for family in &families {
                     let id = remote.set_session_account(family, None).await?;
