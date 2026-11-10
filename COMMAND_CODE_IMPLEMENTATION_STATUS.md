@@ -401,6 +401,10 @@ predates many unrelated master changes. After extracting the account-store
 login helpers, no file touched by this branch appears in the script output:
 `src/cli/login.rs` is 1195 lines and
 `crates/jcode-provider-doctor/src/provider_e2e.rs` is flat at 2727 lines.
+The affinity refactor also shrank the two touched baseline files relative to
+their pre-change branch values:
+`crates/jcode-base/src/provider/mod.rs` 3238 -> 3222 and
+`crates/jcode-provider-core/src/lib.rs` 1653 -> 1641.
 
 ### Compile and build
 
