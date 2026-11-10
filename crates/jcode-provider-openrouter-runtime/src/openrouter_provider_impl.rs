@@ -1124,6 +1124,45 @@ impl OpenRouterProvider {
     }
 }
 
+#[cfg(test)]
+impl OpenRouterProvider {
+    pub(crate) fn new_command_code_test(api_base: String, key: String, model: &str) -> Self {
+        let auth: AuthResolver = Arc::new(move || {
+            Ok(ProviderAuth::AuthorizationBearer {
+                token: key.clone(),
+                label: "test-key".to_string(),
+            })
+        });
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new(model.to_string())),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base,
+            auth,
+            supports_provider_features: false,
+            supports_model_catalog: false,
+            profile_id: Some("command-code".to_string()),
+            builtin_azure: false,
+            reasoning_effort_support: None,
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
+            max_tokens: None,
+            extra_body: None,
+            static_models: Vec::new(),
+            static_context_limits: HashMap::new(),
+            static_image_input_support: HashMap::new(),
+            send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(EndpointsCache::default())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        }
+    }
+}
+
 /// Whether one catalog entry declares `image` as an accepted input modality.
 fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
     model
@@ -1131,3 +1170,7 @@ fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
         .iter()
         .any(|modality| modality.eq_ignore_ascii_case("image"))
 }
+
+#[cfg(test)]
+#[path = "command_code_mock_tests.rs"]
+mod command_code_mock_tests;
