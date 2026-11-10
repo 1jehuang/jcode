@@ -189,15 +189,17 @@ fn secure_file(file: &File, _path: &Path) -> Result<()> {
 }
 
 fn secret_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
         options
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    OpenOptions::new()
 }
 
 fn load_store_at(path: &Path) -> Result<Store> {

@@ -505,7 +505,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        // The measured-rss notice only renders when the host exposes process
+        // memory snapshots (Linux and Windows). macOS falls back to the short
+        // notice, so keep the assert conditional on measurement availability.
+        if private_memory_bytes().is_some() {
+            assert!(screen.contains("private mem"));
+        }
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);

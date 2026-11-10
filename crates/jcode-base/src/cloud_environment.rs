@@ -5,6 +5,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+// `Write` is only needed by the unix staging paths below (write_all on the
+// O_EXCL descriptors); the Windows fallbacks use std::fs APIs directly.
+#[cfg(not(unix))]
+use std::io::Read;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 

@@ -49,7 +49,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1344,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1476,
     "src/cli/args/tests.rs": 1225,
-    "src/cli/commands_tests.rs": 1764
+    "src/cli/commands_tests.rs": 1765
   },
   "version": 1
 }
