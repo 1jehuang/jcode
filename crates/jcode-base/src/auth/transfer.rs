@@ -761,6 +761,9 @@ fn parse_cloud(
     Ok(envelope)
 }
 
+// Only the unix import/export paths read and rewrite the cloud store; the
+// Windows fallbacks never touch these helpers.
+#[cfg(unix)]
 fn cloud_store(
     bytes: &[u8],
     provider: TransferProvider,
@@ -965,6 +968,7 @@ pub fn import_cloud_local(
     import_cloud_at(&home, provider, expected_label, bytes)
 }
 
+#[cfg(unix)]
 fn identity_hints_match(
     provider: TransferProvider,
     old: &serde_json::Value,
@@ -992,6 +996,7 @@ fn identity_hints_match(
     shared || fields.iter().all(|key| old[*key] == new[*key])
 }
 
+#[cfg(unix)]
 fn identity_hints_present(provider: TransferProvider, account: &serde_json::Value) -> bool {
     let fields: &[&str] = match provider {
         TransferProvider::OpenAi => &["account_id", "email"],
@@ -1002,6 +1007,7 @@ fn identity_hints_present(provider: TransferProvider, account: &serde_json::Valu
         .any(|key| account[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
 }
 
+#[cfg(unix)]
 fn cloud_expiry(provider: TransferProvider, account: &serde_json::Value) -> Option<i64> {
     match provider {
         TransferProvider::Claude => account["expires"].as_i64(),
