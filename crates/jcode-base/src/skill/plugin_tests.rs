@@ -30,7 +30,7 @@ fn plugin_registry_explicit_commands_replace_defaults_but_skills_extend() {
         .unwrap();
     write(
         &installed.root.join(".claude-plugin/plugin.json"),
-        r#"{"name":"registry-fixture","commands":"./extra-commands","agents":"./extra-agents","skills":"./extra-skills"}"#,
+        r#"{"name":"registry-fixture","commands":"${CLAUDE_PLUGIN_ROOT}/extra-commands","agents":"${CLAUDE_PLUGIN_ROOT}/extra-agents","skills":"${CLAUDE_PLUGIN_ROOT}/extra-skills"}"#,
     );
     let registry = SkillRegistry::load_for_working_dir(Some(&f.project)).unwrap();
     assert!(registry.contains("registry-fixture:default"));
@@ -172,6 +172,22 @@ fn plugin_registry_rejects_manifest_and_skill_symlink_escapes() {
     // component. No contribution from that plugin may survive validation.
     assert!(f.manager.enabled_roots().unwrap().is_empty());
     assert!(!registry.contains("registry-fixture:default"));
+
+    write(
+        &installed.root.parent().unwrap().join("outside.md"),
+        "Outside",
+    );
+    for commands in [
+        serde_json::json!("${CLAUDE_PLUGIN_ROOT}/commands/leak.md"),
+        serde_json::json!(["${CLAUDE_PLUGIN_ROOT}/../outside.md"]),
+    ] {
+        write(
+            &manifest_path,
+            &serde_json::json!({"name": "registry-fixture", "commands": commands}).to_string(),
+        );
+        assert!(crate::plugin_components::component_paths(&installed.root, "commands").is_empty());
+        assert!(f.manager.enabled_roots().unwrap().is_empty());
+    }
 
     // With a valid manifest, the component loader must still reject individual
     // escaping symlinks without dropping unrelated, contained skill files.

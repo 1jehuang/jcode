@@ -97,12 +97,13 @@ pub(crate) fn component_paths(root: &Path, component: &str) -> Vec<PathBuf> {
             candidates.clear();
         }
         match value {
-            serde_json::Value::String(path) => candidates.push(root.join(path)),
+            serde_json::Value::String(path) => candidates
+                .push(root.join(path.strip_prefix("${CLAUDE_PLUGIN_ROOT}/").unwrap_or(path))),
             serde_json::Value::Array(paths) => candidates.extend(
                 paths
                     .iter()
                     .filter_map(|p| p.as_str())
-                    .map(|p| root.join(p)),
+                    .map(|p| root.join(p.strip_prefix("${CLAUDE_PLUGIN_ROOT}/").unwrap_or(p))),
             ),
             _ => {}
         }
