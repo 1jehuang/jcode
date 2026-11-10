@@ -494,6 +494,13 @@ impl Provider for OpenRouterProvider {
             .and_then(|effort| effort.clone())
     }
 
+    fn default_reasoning_effort(&self) -> Option<String> {
+        // `JCODE_OPENROUTER_THINKING` is read in this process, where requests
+        // are built, rather than in the connecting client. Reuse the request
+        // parser so every accepted spelling (`disable` and `disabled`) agrees.
+        (Self::thinking_override() == Some(false)).then(|| "none".to_string())
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(

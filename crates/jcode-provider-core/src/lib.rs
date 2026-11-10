@@ -339,6 +339,16 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Effective effort the provider applies when the session has no explicit
+    /// selection, including daemon-owned configuration (for example an
+    /// environment override that disables thinking). Unlike
+    /// [`Self::reasoning_effort`], this is not persisted as a user choice.
+    ///
+    /// Providers that do not know their default return `None`.
+    fn default_reasoning_effort(&self) -> Option<String> {
+        None
+    }
+
     /// Set the reasoning effort level (if applicable).
     fn set_reasoning_effort(&self, _effort: &str) -> Result<()> {
         Err(anyhow::anyhow!(

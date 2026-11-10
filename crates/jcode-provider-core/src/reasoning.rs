@@ -39,12 +39,11 @@ pub fn default_reasoning_effort(
     }
 
     // DeepSeek thinking mode is enabled by default at effort `high`
-    // (https://api-docs.deepseek.com/guides/thinking_mode), but an explicit
-    // thinking-mode override disables it entirely.
+    // (https://api-docs.deepseek.com/guides/thinking_mode). A thinking-mode
+    // override that disables it is owned by the daemon's provider and reported
+    // separately via `Provider::default_reasoning_effort`, so clients never
+    // infer it from their own environment.
     if provider.contains("deepseek") || model.contains("deepseek") {
-        if thinking_mode_override_disabled() {
-            return Some("none");
-        }
         return Some("high");
     }
 
@@ -65,15 +64,6 @@ pub fn default_reasoning_effort(
     }
 
     None
-}
-
-/// `JCODE_OPENROUTER_THINKING=disabled` turns thinking off regardless of the
-/// model's default effort, so the effective effort is `none`.
-fn thinking_mode_override_disabled() -> bool {
-    std::env::var("JCODE_OPENROUTER_THINKING")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "disabled" | "off" | "false" | "0"))
 }
 
 /// Convert a provider-advertised OpenAI/OpenRouter effort into the canonical

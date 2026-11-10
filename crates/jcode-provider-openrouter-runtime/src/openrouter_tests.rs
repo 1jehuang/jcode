@@ -3540,5 +3540,26 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
     assert!(OpenRouterProvider::with_profile_default_extra_body(Some("cerebras"), None).is_none());
 }
 
+#[test]
+fn default_reasoning_effort_matches_disabled_thinking_aliases() {
+    let _lock = ENV_LOCK.lock();
+    let make_provider = || OpenRouterProvider {
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+
+    for value in ["disabled", "disable", "off", "false", "0"] {
+        let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", value);
+        assert_eq!(
+            make_provider().default_reasoning_effort().as_deref(),
+            Some("none"),
+            "JCODE_OPENROUTER_THINKING={value} should disable the provider's default effort"
+        );
+    }
+
+    let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", "enabled");
+    assert_eq!(make_provider().default_reasoning_effort(), None);
+}
+
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
