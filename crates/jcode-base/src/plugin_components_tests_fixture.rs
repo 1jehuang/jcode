@@ -32,7 +32,7 @@ impl Fixture {
         );
         write(
             &source.join(".claude-plugin/plugin.json"),
-            r#"{"name":"registry-fixture","version":"1.0.0","skills":["./extra-skills"],"commands":["./commands","./extra-commands"],"agents":["./agents","./extra-agents"]}"#,
+            r#"{"name":"registry-fixture","version":"1.0.0","skills":["${CLAUDE_PLUGIN_ROOT}/extra-skills"],"commands":["./commands","${CLAUDE_PLUGIN_ROOT}/extra-commands"],"agents":["./agents","${CLAUDE_PLUGIN_ROOT}/extra-agents"]}"#,
         );
         write(
             &source.join("skills/default/SKILL.md"),
