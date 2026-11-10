@@ -110,6 +110,7 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
+#[cfg(test)]
 fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     matches!(
         member.status.as_deref(),
@@ -117,6 +118,7 @@ fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     )
 }
 
+#[cfg(test)]
 fn coordination_in_flight_count(
     summary: &PlanGraphStatus,
     members: &[AgentInfo],
@@ -136,6 +138,7 @@ fn coordination_in_flight_count(
 /// assignment (and therefore one it is safe to await): a spawned headless worker,
 /// or one owned by the coordinator that issued the run. Foreign client-attached
 /// sessions are not drivable and must not count toward its in-flight workers.
+#[cfg(test)]
 fn swarm_member_is_drivable_worker(member: &AgentInfo, coordinator_session_id: &str) -> bool {
     member.is_headless.unwrap_or(false)
         || member.report_back_to_session_id.as_deref() == Some(coordinator_session_id)

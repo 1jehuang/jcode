@@ -147,16 +147,38 @@ fn lookup_session_title(session_id: &str) -> Option<String> {
         .map(|t| truncate_chars(&t, 120))
 }
 
+fn cached_regex(
+    cache: &'static std::sync::OnceLock<Option<regex::Regex>>,
+    pattern: &str,
+) -> Option<&'static regex::Regex> {
+    cache
+        .get_or_init(|| match regex::Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(error) => {
+                crate::logging::warn(&format!("invalid mobile push summary regex: {error}"));
+                None
+            }
+        })
+        .as_ref()
+}
+
 /// Strip inline Markdown so a notification reads as plain prose.
 fn plain_inline(text: &str) -> String {
-    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static EMPH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let link = LINK.get_or_init(|| regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap());
-    let emph = EMPH.get_or_init(|| {
-        regex::Regex::new(r"\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~").unwrap()
-    });
-    let text = link.replace_all(text, "$1");
-    let text = emph.replace_all(&text, "$1$2$3$4");
+    static LINK: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    static EMPH: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    let link = cached_regex(&LINK, r"!?\[([^\]]*)\]\([^)]*\)");
+    let emph = cached_regex(
+        &EMPH,
+        r"\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~",
+    );
+    let text = match link {
+        Some(link) => link.replace_all(text, "$1"),
+        None => std::borrow::Cow::Borrowed(text),
+    };
+    let text = match emph {
+        Some(emph) => emph.replace_all(&text, "$1$2$3$4"),
+        None => std::borrow::Cow::Borrowed(text.as_ref()),
+    };
     text.replace('`', "")
 }
 
@@ -273,19 +295,28 @@ fn trailing_question(text: &str) -> Option<String> {
 /// Errors arrive as `context: cause: cause`. Drop JSON blobs and noise, keep
 /// the most specific readable cause.
 fn summarize_error(text: &str) -> String {
-    static JSON: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let json = JSON.get_or_init(|| regex::Regex::new(r"\{.*\}").unwrap());
+    static JSON: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(json) = cached_regex(&JSON, r"\{.*\}") else {
+        return flat;
+    };
     // Pull a human message out of an embedded provider JSON error if present.
     let message = json.find(&flat).and_then(|m| {
-        serde_json::from_str::<serde_json::Value>(m.as_str())
-            .ok()
-            .and_then(|v| {
-                v.pointer("/error/message")
-                    .or_else(|| v.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
+        match serde_json::from_str::<serde_json::Value>(m.as_str()) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                crate::logging::debug(&format!(
+                    "mobile push error contains non-JSON braces: {error}"
+                ));
+                None
+            }
+        }
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
     });
     let stripped = json.replace_all(&flat, "");
     let mut parts: Vec<&str> = stripped
@@ -336,24 +367,21 @@ fn summarize_wake(text: &str) -> String {
         return line;
     }
     if let Some(rest) = text.trim().strip_prefix("**Background task stalled** ") {
-        let header = rest.lines().next().unwrap_or_default();
-        let label = header
-            .split(" · ")
-            .nth(1)
-            .map(plain_inline)
-            .unwrap_or_default();
-        let label = label
-            .split(" (")
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let idle = header
+        // Incomplete optional wake headers intentionally render missing pieces empty.
+        let header = rest.lines().next().unwrap_or("");
+        let label = match header.split(" · ").nth(1) {
+            Some(label) => plain_inline(label),
+            None => String::new(),
+        };
+        let label = label.split(" (").next().unwrap_or("").trim().to_string();
+        let idle = match header
             .split("no output or progress for ")
             .nth(1)
             .and_then(|s| s.split(' ').next())
-            .map(humanize_secs)
-            .unwrap_or_default();
+        {
+            Some(idle) => humanize_secs(idle),
+            None => String::new(),
+        };
         return format!("{label} has been silent for {idle} and may be stuck")
             .trim()
             .to_string();
@@ -664,23 +692,40 @@ fn record(
     crate::logging::info(&format!(
         "mobile push {:?} {outcome}{}",
         payload.map(|p| p.kind).unwrap_or(requested),
-        detail.map(|d| format!(": {d}")).unwrap_or_default()
+        // No detail is a normal outcome, not a failed operation.
+        match detail {
+            Some(detail) => format!(": {detail}"),
+            None => String::new(),
+        }
     ));
     let Some(dir) = dirs::home_dir().map(|h| h.join(".jcode").join("logs")) else {
         return;
     };
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!(
+            "cannot create mobile push history directory: {error}"
+        ));
+        return;
+    }
     let path = dir.join("mobile-push.jsonl");
     // Keep the history bounded: rotate once past 5 MB.
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
-        let _ = std::fs::rename(&path, dir.join("mobile-push.1.jsonl"));
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024)
+        && let Err(error) = std::fs::rename(&path, dir.join("mobile-push.1.jsonl"))
+    {
+        crate::logging::warn(&format!("cannot rotate mobile push history: {error}"));
+        return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(file, "{line}");
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "{line}") {
+                crate::logging::warn(&format!("cannot write mobile push history: {error}"));
+            }
+        }
+        Err(error) => crate::logging::warn(&format!("cannot open mobile push history: {error}")),
     }
 }
 
@@ -813,7 +858,10 @@ async fn send_inner(
             let timing = PushTiming::new("body");
             let result = resp.text().await;
             timing.finish(if result.is_ok() { "read" } else { "error" });
-            let body = result.unwrap_or_default();
+            let body = match result {
+                Ok(body) => body,
+                Err(error) => format!("unable to read rejection body: {error}"),
+            };
             crate::logging::warn(&format!(
                 "mobile push {:?} rejected: HTTP {status}: {}",
                 payload.kind,
@@ -836,6 +884,28 @@ mod http_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_summary_regex_is_cached_without_panicking() {
+        static CACHE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+        assert!(cached_regex(&CACHE, "[").is_none());
+        assert!(
+            cached_regex(&CACHE, "valid").is_none(),
+            "failed initialization is cached"
+        );
+    }
+
+    #[test]
+    fn malformed_error_json_keeps_readable_context() {
+        assert_eq!(
+            summarize_error("request failed: {not json}: retry later"),
+            "request failed: retry later"
+        );
+        assert_eq!(
+            summarize_wake("**Background task stalled** partial"),
+            "has been silent for  and may be stuck"
+        );
+    }
 
     #[test]
     fn cancelled_marker_survives_poisoned_state() {

@@ -66,12 +66,24 @@ fn niri_json(args: &[&str]) -> Option<serde_json::Value> {
         .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            crate::logging::debug(&format!("niri query {args:?} unavailable: {error}"));
+            return None;
+        }
+    };
     if !output.status.success() {
         return None;
     }
-    serde_json::from_slice(&output.stdout).ok()
+    match serde_json::from_slice(&output.stdout) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::warn(&format!("invalid niri query {args:?} response: {error}"));
+            None
+        }
+    }
 }
 
 fn niri_action(args: &[String]) -> bool {
@@ -99,7 +111,13 @@ fn process_ancestry(pid: u32) -> Vec<u32> {
         let Some(parent) = stat
             .rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-            .and_then(|ppid| ppid.parse::<u32>().ok())
+            .and_then(|ppid| match ppid.parse::<u32>() {
+                Ok(parent) => Some(parent),
+                Err(error) => {
+                    crate::logging::debug(&format!("invalid parent pid for {pid}: {error}"));
+                    None
+                }
+            })
         else {
             break;
         };
