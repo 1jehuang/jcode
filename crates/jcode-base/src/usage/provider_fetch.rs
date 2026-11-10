@@ -37,14 +37,11 @@ pub(super) async fn fetch_anthropic_usage_for_token(
             .await
         {
             Ok(refreshed) => refreshed.access_token,
-            Err(_) => {
+            Err(error) => {
                 if expires_at < now_ms {
                     return ProviderUsage {
                         provider_name: display_name,
-                        error: Some(
-                            "OAuth token expired - use `/login claude` to re-authenticate"
-                                .to_string(),
-                        ),
+                        error: Some(anthropic_response::credential_error(error).to_string()),
                         ..Default::default()
                     };
                 }

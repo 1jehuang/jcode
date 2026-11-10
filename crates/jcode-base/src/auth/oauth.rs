@@ -696,6 +696,7 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
         scopes,
     };
     claude_auth::upsert_account(account)?;
+    crate::usage::invalidate_anthropic_usage_auth_failure(label);
     Ok(())
 }
 
@@ -1033,21 +1034,6 @@ pub async fn refresh_claude_tokens_scoped(
     }
 }
 
-/// Stored Claude tokens for `label`, expressed as [`OAuthTokens`].
-fn stored_claude_tokens(label: &str) -> Option<OAuthTokens> {
-    let account = claude_auth::list_accounts()
-        .ok()?
-        .into_iter()
-        .find(|account| account.label == label)?;
-    Some(OAuthTokens {
-        access_token: account.access,
-        refresh_token: account.refresh,
-        expires_at: account.expires,
-        id_token: None,
-        scopes: account.scopes,
-    })
-}
-
 /// Refresh Claude OAuth tokens for a specific account.
 ///
 /// Serialized per account via the refresh coordinator: Anthropic rotates
@@ -1063,7 +1049,7 @@ pub async fn refresh_claude_tokens_for_account(
         format!("claude:{label}"),
         {
             let label = label.clone();
-            move || stored_claude_tokens(&label)
+            move || claude_auth::stored_claude_tokens(&label)
         },
         {
             let observed = observed_refresh.clone();
@@ -1079,6 +1065,14 @@ pub async fn refresh_claude_tokens_for_account(
                 .map(|tokens| tokens.refresh_token)
                 .filter(|token| !token.is_empty())
                 .unwrap_or(observed_refresh);
+            // Check the newest stored token under the flight lock, not the
+            // caller's possibly superseded token. Usage polling used to bypass
+            // the terminal-rejection guard and retry invalid_grant forever.
+            crate::auth::refresh_state::ensure_refresh_allowed(
+                "claude",
+                &token,
+                "Run `/login claude` to sign in again.",
+            )?;
             refresh_claude_tokens_inner(&token, &label).await
         },
     )
