@@ -63,6 +63,36 @@ pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&'static str> {
     .collect()
 }
 
+/// Effort to report for the current session, filtered through the model's
+/// ladder.
+///
+/// The daemon may report an effective default (for example `none` when the
+/// provider has thinking disabled). Only show it when the model can actually
+/// run that value; otherwise fall back to a rung the ladder contains.
+pub(super) fn displayed_effort(state: &SessionUiState) -> &'static str {
+    let efforts = available_efforts(state);
+    if let Some(effort) = state
+        .reasoning_effort
+        .as_deref()
+        .and_then(|effort| efforts.iter().copied().find(|value| *value == effort))
+    {
+        return effort;
+    }
+    if let Some(effort) = crate::provider::default_reasoning_effort(
+        state.provider_name.as_deref(),
+        state.model.as_deref(),
+    )
+    .filter(|effort| efforts.contains(effort))
+    {
+        return effort;
+    }
+    if efforts.contains(&"medium") {
+        "medium"
+    } else {
+        efforts.first().copied().unwrap_or("provider default")
+    }
+}
+
 /// Build the ACP `configOptions` array (model selector plus reasoning effort)
 /// from the current session provider state. Empty when the daemon reported no
 /// usable model state.
@@ -90,28 +120,9 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 
     let efforts = available_efforts(state);
     if !efforts.is_empty() {
-        // An unset effort still needs a concrete `currentValue`. Prefer the
-        // provider's documented default so the snapshot tells the truth (e.g.
-        // DeepSeek runs at `high` when no effort is sent), then fall back to a
-        // middle rung for providers whose default is not modelled here.
-        let current = state
-            .reasoning_effort
-            .as_deref()
-            .filter(|effort| efforts.contains(effort))
-            .or_else(|| {
-                crate::provider::default_reasoning_effort(
-                    state.provider_name.as_deref(),
-                    state.model.as_deref(),
-                )
-                .filter(|effort| efforts.contains(effort))
-            })
-            .unwrap_or_else(|| {
-                if efforts.contains(&"medium") {
-                    "medium"
-                } else {
-                    efforts[0]
-                }
-            });
+        // An unset effort still needs a concrete `currentValue`; the helper
+        // keeps a daemon-reported value inside the model's ladder.
+        let current = displayed_effort(state);
         let select_options: Vec<Value> = efforts
             .iter()
             .map(|name| json!({ "value": name, "name": name }))

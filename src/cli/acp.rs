@@ -1382,22 +1382,7 @@ impl AcpRuntime {
             AcpSlashCommand::Effort(None) => {
                 let state = session.ui_state.lock().await;
                 let available = available_efforts(&state);
-                // Report the effort the provider actually runs with, matching
-                // the `config_options` snapshot (e.g. DeepSeek defaults to
-                // `high` when no explicit effort was sent). Keep the inferred
-                // default inside the model's ladder so a model that cannot run
-                // a value never has it reported.
-                let current = state
-                    .reasoning_effort
-                    .as_deref()
-                    .or_else(|| {
-                        crate::provider::default_reasoning_effort(
-                            state.provider_name.as_deref(),
-                            state.model.as_deref(),
-                        )
-                        .filter(|effort| available.contains(effort))
-                    })
-                    .unwrap_or("provider default");
+                let current = displayed_effort(&state);
                 if available.is_empty() {
                     Ok(format!("Current reasoning effort: `{current}`."))
                 } else {

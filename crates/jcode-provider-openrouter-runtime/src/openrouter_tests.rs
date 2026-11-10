@@ -3559,6 +3559,37 @@ fn default_reasoning_effort_matches_disabled_thinking_aliases() {
 
     let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", "enabled");
     assert_eq!(make_provider().default_reasoning_effort(), None);
+
+    let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", "disable");
+    let unsupported = OpenRouterProvider {
+        model: Arc::new(RwLock::new("anthropic/claude-opus-5.5".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        unsupported.default_reasoning_effort(),
+        None,
+        "models with no effort ladder must not report `none`"
+    );
+    let azure = OpenRouterProvider {
+        builtin_azure: true,
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        azure.default_reasoning_effort(),
+        None,
+        "Azure requests return before the thinking override is read"
+    );
+    let strict_schema = OpenRouterProvider {
+        profile_id: Some("mistral".to_string()),
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        strict_schema.default_reasoning_effort(),
+        None,
+        "strict OpenAI-schema endpoints suppress the thinking field"
+    );
 }
 
 #[path = "catalog_auth_tests.rs"]

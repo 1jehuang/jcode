@@ -516,6 +516,38 @@ fn config_options_current_model_prepended_when_not_listed() {
 }
 
 #[test]
+fn reported_effort_stays_inside_the_model_ladder() {
+    let mut state = SessionUiState {
+        provider_name: Some("deepseek".to_string()),
+        model: Some("deepseek-v4-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    assert_eq!(displayed_effort(&state), "high");
+
+    state.reasoning_effort = Some("none".to_string());
+    assert_eq!(displayed_effort(&state), "none");
+
+    state.reasoning_effort = Some("xhigh".to_string());
+    assert_eq!(
+        displayed_effort(&state),
+        "high",
+        "an out-of-ladder daemon value must not be reported"
+    );
+
+    state.provider_name = Some("unknown".to_string());
+    state.model = Some("mystery".to_string());
+    state.reasoning_effort = Some("none".to_string());
+    assert_eq!(displayed_effort(&state), "provider default");
+    assert!(
+        session_config_options(&state)
+            .iter()
+            .all(|option| option["id"] != CONFIG_ID_EFFORT),
+        "a model with no effort ladder must not expose an effort selector"
+    );
+}
+
+#[test]
 fn legacy_models_catalog_is_emitted_alongside_config_options() {
     let state = SessionUiState {
         provider_name: Some("deepseek".to_string()),

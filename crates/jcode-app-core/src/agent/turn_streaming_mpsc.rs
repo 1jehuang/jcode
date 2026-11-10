@@ -1228,7 +1228,7 @@ impl Agent {
                     resolved_credential: credential_after_stream,
                     provider_oauth_email: oauth_email_after_stream,
                     provider_oauth_account_label: oauth_account_label_after_stream,
-                    reasoning_effort: self.provider.reasoning_effort(),
+                    reasoning_effort: self.provider_reasoning_effort(),
                 });
             }
 

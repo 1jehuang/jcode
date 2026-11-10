@@ -498,6 +498,17 @@ impl Provider for OpenRouterProvider {
         // `JCODE_OPENROUTER_THINKING` is read in this process, where requests
         // are built, rather than in the connecting client. Reuse the request
         // parser so every accepted spelling (`disable` and `disabled`) agrees.
+        if !self.supports_any_reasoning_effort() {
+            return None;
+        }
+        // These paths build their request without consulting the override:
+        // Azure responses and strict OpenAI-schema endpoints suppress the
+        // top-level thinking field. Reporting `none` there would be a lie.
+        if self.builtin_azure
+            || Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base)
+        {
+            return None;
+        }
         (Self::thinking_override() == Some(false)).then(|| "none".to_string())
     }
 
