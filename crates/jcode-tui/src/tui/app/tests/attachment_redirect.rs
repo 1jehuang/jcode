@@ -222,6 +222,35 @@ fn test_image_only_interleave_reload_reaches_queued_provider_payload() {
 }
 
 #[test]
+fn test_inflight_image_only_reload_reaches_queued_provider_payload() {
+    for message in ["", "  "] {
+        let mut app = create_test_app();
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: message.to_string(),
+            images: vec![("image/png".to_string(), "aGk=".to_string())],
+            is_system: true,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+            overload_attempts: 0,
+        });
+        let mut reloaded = reload_queued_image_app(&app, "inflight-image-only");
+        assert!(reloaded.rate_limit_pending_message.is_none());
+        assert!(reloaded.rate_limit_reset.is_none());
+        assert!(reloaded.has_queued_followups());
+        reloaded.prepare_queued_local_turn();
+        let messages = reloaded.materialized_provider_messages();
+        let content = &messages.last().unwrap().content;
+        assert!(content.iter().any(|block| matches!(block,
+            ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "aGk=")));
+        assert!(content.iter().all(|block| !matches!(block,
+            ContentBlock::Text { text, .. } if !text.trim().is_empty())));
+    }
+}
+
+#[test]
 fn test_inflight_queued_image_reload_preserves_existing_queued_images() {
     let mut app = local_image_redirect_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {

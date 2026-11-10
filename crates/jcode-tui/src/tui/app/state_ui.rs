@@ -260,14 +260,13 @@ impl App {
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
-        // An in-flight queued follow-up lives only in rate_limit_pending_message
-        // (is_system). Without a reset, tick cannot dispatch it after restore.
-        // Persist it back into queued/hidden lists so it is sent once the turn
-        // is proven idle (issue #391).
+        // Requeue in-flight follow-ups without retry deadlines so reload can dispatch them (#391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
         });
         if self.input.is_empty()
             && self.pending_images.is_empty()
@@ -345,7 +344,7 @@ impl App {
             };
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
+                if !pending.content.trim().is_empty() || !pending.images.is_empty() {
                     queued_messages.insert(0, pending.content.clone());
                     queued_message_images.splice(0..0, pending.images.clone());
                 }
