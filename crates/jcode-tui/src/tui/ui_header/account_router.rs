@@ -369,10 +369,11 @@ fn inventory_lines(
                 .iter()
                 .find(|(candidate, _, _)| candidate == key)
                 .map(|(_, _, line)| {
-                    inline_account_row(
-                        priority_row(line.clone(), inventory.pool.priority(key), &tiers),
-                        quota_rows.remove(key).unwrap_or_default(),
-                    )
+                    let row = priority_row(line.clone(), inventory.pool.priority(key), &tiers);
+                    match quota_rows.remove(key) {
+                        Some(quotas) => inline_account_row(row, quotas),
+                        None => row,
+                    }
                 })
         })
         .collect();
@@ -434,7 +435,7 @@ pub(super) fn fit_account_row(mut row: Line<'static>, budget: usize) -> Line<'st
         .unwrap_or("");
     row.spans[2].content = format!(" {provider}").into();
     if row.width() > budget {
-        for quota in row.spans[3..].chunks_exact_mut(5) {
+        for quota in row.spans[3..].as_chunks_mut::<5>().0 {
             // These are the shared renderer's filled and empty spans. Preserve
             // its colors and convention, shrinking only their cell counts.
             for span in &mut quota[2..4] {
@@ -443,7 +444,7 @@ pub(super) fn fit_account_row(mut row: Line<'static>, budget: usize) -> Line<'st
         }
     }
     if row.width() > budget {
-        for (index, quota) in row.spans[3..].chunks_exact_mut(5).enumerate() {
+        for (index, quota) in row.spans[3..].as_chunks_mut::<5>().0.iter_mut().enumerate() {
             quota[0].content = " ".into();
             quota[2].content = "".into();
             quota[3].content = "".into();

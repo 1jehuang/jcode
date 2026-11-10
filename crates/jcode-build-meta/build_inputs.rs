@@ -18,7 +18,9 @@ pub fn base_tag_offset(description: &str, base: (u32, u32, u32)) -> Option<u32> 
     {
         return None;
     }
-    count.parse().ok()
+    count.bytes().try_fold(0u32, |offset, digit| {
+        offset.checked_mul(10)?.checked_add(u32::from(digit - b'0'))
+    })
 }
 
 /// Accept release identities without accepting arbitrary environment text.

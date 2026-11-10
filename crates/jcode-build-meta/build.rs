@@ -248,9 +248,15 @@ fn resolve_build_semver(base_version: (u32, u32, u32)) -> Result<String, String>
     // keeps incremental rebuilds incremental.
     let offset = commits_since_base_tag(base_version)
         .or_else(|| {
-            let description = std::env::var("JCODE_BUILD_GIT_TAG")
-                .ok()
-                .or_else(|| metadata_value("git_tag"))?;
+            let description = match std::env::var("JCODE_BUILD_GIT_TAG") {
+                Ok(description) => Some(description),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    println!("cargo:warning=Ignoring non-Unicode JCODE_BUILD_GIT_TAG");
+                    None
+                }
+            }
+            .or_else(|| metadata_value("git_tag"))?;
             build_inputs::base_tag_offset(&description, base_version)
         })
         .unwrap_or(0);
