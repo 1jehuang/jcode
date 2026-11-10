@@ -333,6 +333,80 @@ mod account_snapshot_tests {
         assert!(!stale.exhausted);
         anthropic_usage_cache().lock().unwrap().remove(&key);
     }
+
+    #[test]
+    fn pool_prefers_fresh_quota_within_priority_tier() {
+        use crate::auth::account_pool::AccountPool;
+        let unknown = "claude:quota-order-unknown".to_string();
+        let healthy = "claude:quota-order-healthy".to_string();
+        let lower = "claude:quota-order-lower".to_string();
+        let mut pool = AccountPool::default();
+        pool.members = vec![unknown.clone(), healthy.clone(), lower.clone()];
+        pool.set_priority(&unknown, 0);
+        pool.set_priority(&healthy, 0);
+        pool.set_priority(&lower, 1);
+        let key = anthropic_usage_cache_key_with_accounts(
+            "fixture-token",
+            Some("quota-order-healthy"),
+            std::iter::empty(),
+        );
+        let data = UsageData {
+            five_hour: 0.2,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        store_anthropic_usage(key.clone(), data.clone());
+        assert_eq!(
+            pool.ordered_members(),
+            vec![healthy.clone(), unknown.clone(), lower.clone()]
+        );
+        let accounts = pool
+            .members
+            .iter()
+            .map(|key| (key.clone(), true))
+            .collect::<Vec<_>>();
+        assert_eq!(pool.partition(&accounts).0[0], healthy);
+        assert_eq!(
+            pool.rotation(
+                "claude",
+                Some("quota-order-lower"),
+                &[
+                    "quota-order-unknown".into(),
+                    "quota-order-healthy".into(),
+                    "quota-order-lower".into()
+                ]
+            )[0],
+            "quota-order-healthy"
+        );
+        pool.set_priority(&healthy, 1);
+        assert_eq!(pool.ordered_members()[0], unknown);
+        pool.set_priority(&healthy, 0);
+        for data in [
+            UsageData {
+                last_error: Some("HTTP 429".into()),
+                ..data.clone()
+            },
+            UsageData {
+                fetched_at: Some(
+                    Instant::now()
+                        - super::super::ANTHROPIC_CACHE_DURATION
+                        - std::time::Duration::from_secs(1),
+                ),
+                ..data.clone()
+            },
+            UsageData {
+                five_hour: 1.0,
+                seven_day: 1.0,
+                ..data.clone()
+            },
+        ] {
+            store_anthropic_usage(key.clone(), data);
+            assert_eq!(pool.ordered_members()[0], unknown);
+        }
+        pool.excluded.push(healthy.clone());
+        assert!(!pool.ordered_members().contains(&healthy));
+        anthropic_usage_cache().lock().unwrap().remove(&key);
+    }
 }
 
 pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_label: Option<&str>) {
@@ -903,7 +977,7 @@ pub(super) fn anthropic_snapshot_from_usage(
         resets_at: five_hour_ratio
             .and(usage.five_hour_resets_at.clone())
             .or_else(|| seven_day_ratio.and(usage.seven_day_resets_at.clone())),
-        error: usage.last_error.clone(),
+        error: super::usage_error_with_retry(usage.last_error.clone(), usage.refresh_after),
     }
 }
 

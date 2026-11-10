@@ -359,6 +359,7 @@ fn unfocused_streaming_client_is_capped_but_focused_is_not() {
     let mut state = TestState {
         status: ProcessingStatus::Streaming,
         streaming_text: "partial reply".to_string(),
+        stream_reveal_pending: Some(true),
         ..Default::default()
     };
     let focused = crate::tui::redraw_interval_with_policy(&state, &policy);
@@ -368,4 +369,26 @@ fn unfocused_streaming_client_is_capped_but_focused_is_not() {
         crate::tui::redraw_interval_with_policy(&state, &policy),
         crate::tui::redraw_schedule::REDRAW_UNFOCUSED_MIN
     );
+}
+
+/// A background turn with nothing left to reveal (thinking, running a tool)
+/// only moves a spinner, so it ticks at the 1s liveness rate. Measured live:
+/// such sessions held 10 full frames/s each before.
+#[test]
+fn unfocused_turn_without_reveal_backlog_ticks_at_liveness_rate() {
+    let policy = full_tier_policy();
+    for text in ["", "already revealed reply"] {
+        let state = TestState {
+            status: ProcessingStatus::Streaming,
+            streaming_text: text.to_string(),
+            stream_reveal_pending: Some(false),
+            unfocused: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::tui::redraw_interval_with_policy(&state, &policy),
+            crate::tui::redraw_schedule::REDRAW_PASSIVE_LIVENESS,
+            "text={text:?}"
+        );
+    }
 }

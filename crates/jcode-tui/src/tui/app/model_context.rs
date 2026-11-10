@@ -646,8 +646,11 @@ impl App {
         error: &str,
         remote_resend: Option<super::FallbackResendPayload>,
     ) -> bool {
-        // Never compete with the automatic countdown switcher.
-        if self.pending_provider_failover.is_some() {
+        // Never compete with the automatic countdown switcher. A migration
+        // lease block is not a provider failure: switching model cannot help.
+        if self.pending_provider_failover.is_some()
+            || error.contains("Session is not runnable here")
+        {
             return false;
         }
         let routes = self.fallback_candidate_routes();
@@ -730,7 +733,7 @@ impl App {
             &current_provider,
             &current_api_method,
             options,
-            &pool.members,
+            &pool.ordered_members(),
         );
         if automatic {
             // Never let an excluded preferred route hide an approved later one.
@@ -2113,27 +2116,3 @@ impl App {
 #[path = "model_context_messages.rs"]
 mod messages;
 pub(super) use messages::*;
-
-/// Match `/usage <provider>` queries against report names such as
-/// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
-pub(super) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
-    let normalize = |text: &str| -> String {
-        text.chars()
-            .filter(|ch| ch.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    let name = normalize(provider_name);
-    let query = normalize(query);
-    if query.is_empty() {
-        return true;
-    }
-    let alias = match query.as_str() {
-        "claude" | "anthropic" => "anthropic",
-        "openai" | "chatgpt" | "codex" | "gpt" => "openai",
-        "gemini" | "google" => "gemini",
-        "copilot" | "github" => "copilot",
-        _ => query.as_str(),
-    };
-    name.contains(&query) || name.contains(alias)
-}

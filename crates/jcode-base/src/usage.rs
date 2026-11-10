@@ -114,7 +114,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Usage API endpoint
-const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1";
 
 /// OpenAI ChatGPT usage endpoint
 #[cfg(not(test))]
@@ -277,6 +277,7 @@ async fn fetch_anthropic_usage_data_uncached(
             .as_ref()
             .and_then(|window| window.utilization)
             .is_some();
+    let reset_status = serde_json::json!({ "juniper_tide": data.juniper_tide });
     let usage = UsageData {
         five_hour: data
             .five_hour
@@ -341,7 +342,7 @@ async fn fetch_anthropic_usage_data_uncached(
             probe_started,
         );
     }
-    let usage = disk_cache::store_success(&cache_key, &usage);
+    let usage = disk_cache::store_success_with_reset_status(&cache_key, &usage, Some(reset_status));
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
 }

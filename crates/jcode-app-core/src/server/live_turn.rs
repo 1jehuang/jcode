@@ -154,6 +154,12 @@ pub(super) async fn idle_live_agent(
         return None;
     }
 
+    // A session that moved to another machine (or a stale copy) cannot run
+    // turns here. Starting one only produces a lease error per wake, so leave
+    // the wake queued for whichever copy is runnable.
+    if agent.session_lease_blocked() {
+        return None;
+    }
     Some(agent)
 }
 

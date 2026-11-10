@@ -282,6 +282,34 @@ pub(super) async fn forward_voice_activity(
     ServerEvent::Done { id }
 }
 
+/// Passive, read-only event streams. Matches the commands accepted by
+/// `maybe_handle_event_subscription_command`, which only the server namespace
+/// reaches.
+fn is_event_subscription_command(command: &str) -> bool {
+    let (namespace, command) = parse_namespaced_command(command);
+    namespace == "server"
+        && (command == "events:subscribe" || command.starts_with("events:subscribe:"))
+}
+
+#[cfg(test)]
+mod event_subscription_tests {
+    use super::is_event_subscription_command;
+
+    #[test]
+    fn passive_event_streams_do_not_reserve_activity() {
+        assert!(is_event_subscription_command("events:subscribe"));
+        assert!(is_event_subscription_command(
+            " events:subscribe:status_change,member_change"
+        ));
+        assert!(is_event_subscription_command("server:events:subscribe"));
+        assert!(!is_event_subscription_command("client:events:subscribe"));
+        assert!(!is_event_subscription_command("events:subscribed"));
+        assert!(!is_event_subscription_command("events:recent"));
+        assert!(!is_event_subscription_command("sessions"));
+        assert!(!is_event_subscription_command("group_transfer:inspect:{}"));
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "debug client wiring fans out across sessions, swarms, files, channels, jobs, and transport state"
@@ -344,7 +372,12 @@ pub(super) async fn handle_debug_client(
         // shared request reservation here would make it reject its own request.
         let transfer_control = matches!(&request, Request::DebugCommand { command, .. }
             if command.trim().starts_with("group_transfer:") || command.trim().starts_with("server:group_transfer:"));
-        let read_only_probe = matches!(&request, Request::Ping { .. });
+        // An event subscription is a passive stream that stays open for the
+        // life of the observer (status bars, dashboards). Reserving activity
+        // for it would block every group transfer until the observer exits.
+        let read_only_probe = matches!(&request, Request::Ping { .. })
+            || matches!(&request, Request::DebugCommand { command, .. }
+                if is_event_subscription_command(command));
         let _request_activity = match if transfer_control || read_only_probe {
             Ok(None)
         } else {

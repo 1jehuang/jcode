@@ -463,14 +463,20 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
-fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> &'static str {
+fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> String {
     match usage {
-        None => "limits pending",
+        None => "limits pending".into(),
         Some(usage) => match usage.error.as_deref() {
-            Some(error) if error.contains("429") => "usage fetch failed (429)",
-            Some(error) if error.contains("401") => "usage fetch needs login",
-            Some(_) => "usage fetch failed",
-            None => "limits not reported",
+            Some(error) if error.contains("429") => {
+                match crate::usage::usage_error_retry_at(error).map(crate::usage::format_reset_time)
+                {
+                    Some(wait) if wait != "now" => format!("usage throttled, retry in {wait}"),
+                    _ => "usage throttled, retrying soon".into(),
+                }
+            }
+            Some(error) if error.contains("401") => "usage fetch needs login".into(),
+            Some(_) => "usage fetch failed".into(),
+            None => "limits not reported".into(),
         },
     }
 }
@@ -1006,11 +1012,11 @@ mod tests {
         for (error, expected) in [
             (
                 "Usage temporarily rate limited (429)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Couldn't fetch usage (429: lookup throttled)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Usage authentication failed (401)",
@@ -1150,7 +1156,11 @@ mod tests {
         let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
         assert!(stale.contains("100% left"));
         assert!(stale.contains("5h stale"));
-        assert!(stale.contains("usage fetch failed (429)"));
+        assert!(stale.contains("usage throttled, retrying soon"));
+        usage.error = Some("HTTP 429 (retry at 2099-01-01T00:00:00Z)".into());
+        let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(stale.contains("usage throttled, retry in "), "{stale}");
+        usage.error = Some("HTTP 429".into());
         assert_eq!(
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Unknown

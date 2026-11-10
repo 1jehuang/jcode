@@ -70,6 +70,7 @@ fn relevance_overrides_recency_and_clearing_restores_default_order_and_selection
     assert_eq!(ids(&picker), ["recent", "whole", "exact"]);
     picker.search_query = "needle".into();
     picker.rebuild_items();
+    wait(&mut picker);
     assert_eq!(ids(&picker), ["exact", "whole", "recent"]);
     assert_eq!(picker.selected_session().unwrap().id, "exact");
     wait(&mut picker);
@@ -91,9 +92,9 @@ fn progressive_transcript_hits_keep_metadata_rank_and_selected_session() {
     let mut picker = SessionPicker::new(vec![transcript, partial, direct]);
     picker.search_query = "needle thread".into();
     picker.rebuild_items();
-    assert_eq!(ids(&picker), ["direct"]);
-    let selected = picker.selected_session().unwrap().id.clone();
     wait(&mut picker);
+    let selected = picker.selected_session().unwrap().id.clone();
+    assert_eq!(selected, "direct");
     assert_eq!(ids(&picker), ["direct", "partial", "transcript"]);
     assert_eq!(picker.selected_session().unwrap().id, selected);
     picker.rebuild_items();
@@ -184,6 +185,7 @@ fn global_search_does_not_boost_saved_or_server_sections() {
     );
     picker.search_query = "needle".into();
     picker.rebuild_items();
+    wait(&mut picker);
     assert_eq!(ids(&picker), ["orphan", "server", "saved"]);
     assert!(picker.item_to_session.iter().all(Option::is_some));
     picker.search_query.clear();

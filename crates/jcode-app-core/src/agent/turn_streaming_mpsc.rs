@@ -19,62 +19,6 @@ impl Agent {
     /// route the provider will use next. Runs on success and on every stream
     /// error exit, because a failed turn still leaves the provider on the new
     /// route.
-    fn sync_route_change_after_stream(
-        &mut self,
-        event_tx: &mpsc::UnboundedSender<ServerEvent>,
-        model_at_request_start: &str,
-        provider_at_request_start: &str,
-        credential_at_request_start: &Option<jcode_provider_core::ResolvedCredential>,
-        oauth_email_at_request_start: &Option<crate::protocol::ProviderOAuthEmail>,
-        oauth_account_label_at_request_start: &Option<String>,
-    ) {
-        // Same-provider account failover can move this session's pin during
-        // the request. Persist and announce it on every exit path too.
-        self.sync_account_pins_after_stream(Some(event_tx));
-        let model_after_stream = self.provider.model();
-        let provider_after_stream = self.provider.display_name();
-        let route_changed = model_after_stream != model_at_request_start
-            || provider_after_stream != provider_at_request_start;
-        if route_changed {
-            logging::warn(&format!(
-                "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
-                model_at_request_start,
-                provider_at_request_start,
-                model_after_stream,
-                provider_after_stream
-            ));
-            self.session.model = Some(self.provider_model());
-            self.provider_runtime_state.apply(
-                crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                    model: model_after_stream.clone(),
-                },
-            );
-            self.persist_session_best_effort("model fallback");
-        }
-        // Refresh authoritative credential identity after every upstream
-        // request, including auto credential resolution and OAuth failover.
-        let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
-        let credential_after_stream = self.provider.active_resolved_credential();
-        let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
-        if route_changed
-            || credential_after_stream != *credential_at_request_start
-            || oauth_email_after_stream != *oauth_email_at_request_start
-            || oauth_account_label_after_stream != *oauth_account_label_at_request_start
-        {
-            let _ = event_tx.send(ServerEvent::ModelChanged {
-                id: 0,
-                model: model_after_stream,
-                provider_name: Some(provider_after_stream),
-                context_window: Some(self.provider.context_window() as u64),
-                error: None,
-                resolved_credential: credential_after_stream,
-                provider_oauth_email: oauth_email_after_stream,
-                provider_oauth_account_label: oauth_account_label_after_stream,
-                reasoning_effort: self.provider.reasoning_effort(),
-            });
-        }
-    }
-
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
@@ -1846,7 +1790,14 @@ impl Agent {
                     ));
 
                     let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
+                        .adopt_with_options(
+                            &tc.name,
+                            tool_handoff::handoff_display_name(&tc.input),
+                            &self.session.id,
+                            true,
+                            false,
+                            tool_handle,
+                        )
                         .await;
 
                     let reason = if automatic_background {

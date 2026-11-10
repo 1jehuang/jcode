@@ -44,6 +44,7 @@ fn assert_cached_selection(
             SessionFilterMode::All
         }
     );
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, expected);
     assert!(rendered_text(&mut picker).contains(expected));
     let mut action = picker
