@@ -952,3 +952,13 @@ mod ssh_slash_tests {
         });
     }
 }
+
+pub(super) fn key_scroll_delta(key: &KeyEvent) -> Option<i32> {
+    match key.code {
+        KeyCode::Up => Some(-1),
+        KeyCode::PageUp => Some(-10),
+        KeyCode::Down => Some(1),
+        KeyCode::PageDown => Some(10),
+        _ => None,
+    }
+}
