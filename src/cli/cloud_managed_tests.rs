@@ -1,6 +1,7 @@
 //! Local-only execution of the exact generated shell, with downloaded artifacts
 //! supplied by a fake curl. No network, cloud host or user installation is used.
 use super::*;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::path::Path;
 
 #[test]

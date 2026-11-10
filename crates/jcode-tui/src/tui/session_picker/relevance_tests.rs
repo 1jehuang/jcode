@@ -393,8 +393,8 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     std::fs::write(&loose, r#"{"text":"maxboxes"}"#).unwrap();
     let tokens = search_query_tokens("mxabox");
     let cancel = AtomicBool::new(false);
-    let close_score = paths_match_scored(&[close.clone()], &tokens, &cancel).unwrap();
-    let loose_score = paths_match_scored(&[loose.clone()], &tokens, &cancel).unwrap();
+    let close_score = paths_match_scored(std::slice::from_ref(&close), &tokens, &cancel).unwrap();
+    let loose_score = paths_match_scored(std::slice::from_ref(&loose), &tokens, &cancel).unwrap();
     assert!(close_score > loose_score, "{close_score} <= {loose_score}");
     let mut picker = SessionPicker::new(vec![
         session("loose", "unrelated", 0, &loose),

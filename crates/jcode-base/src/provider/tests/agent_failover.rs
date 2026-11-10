@@ -121,16 +121,16 @@ fn automatic_reset_defers_to_ready_pool_route_before_any_redemption() {
         config.provider.anthropic_auto_fable_reset = true;
         config.save().unwrap();
         let provider = agent_failover_fixture(&["gpt-5.4"]);
-        let error = rt
-            .block_on(provider.try_auto_banked_reset(
-                ActiveProvider::Claude,
-                "usage exhausted",
-                &[],
-                &[],
-                CompletionMode::Unified { system: "" },
-            ))
-            .err()
-            .expect("ready alternate must route, not redeem");
+        let error = match rt.block_on(provider.try_auto_banked_reset(
+            ActiveProvider::Claude,
+            "usage exhausted",
+            &[],
+            &[],
+            CompletionMode::Unified { system: "" },
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("ready alternate must route, not redeem"),
+        };
         assert!(error.to_string().contains("openai-api:gpt-5.4"));
         assert!(
             models::provider_unavailability_detail_for_account_label(

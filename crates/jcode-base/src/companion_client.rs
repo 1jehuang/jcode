@@ -472,6 +472,7 @@ mod tests {
 
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum OldCompanionRequest {
     Status,

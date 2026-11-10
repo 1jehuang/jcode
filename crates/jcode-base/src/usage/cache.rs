@@ -329,8 +329,10 @@ mod account_snapshot_tests {
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
         let lower = "claude:quota-order-lower".to_string();
-        let mut pool = AccountPool::default();
-        pool.members = vec![unknown.clone(), healthy.clone(), lower.clone()];
+        let mut pool = AccountPool {
+            members: vec![unknown.clone(), healthy.clone(), lower.clone()],
+            ..Default::default()
+        };
         pool.set_priority(&unknown, 0);
         pool.set_priority(&healthy, 0);
         pool.set_priority(&lower, 1);

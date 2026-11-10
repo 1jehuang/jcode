@@ -29,27 +29,28 @@ pub(super) fn is_healthy() -> bool {
     )
 )]
 pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let root = repo_root.to_path_buf();
-        let spawned = std::thread::Builder::new()
-            .name("jcode-git-watch".to_string())
-            .spawn(move || imp::run(&root, on_change));
-        if spawned.is_err() {
-            HEALTHY.store(false, Ordering::Release);
+    if !STARTED.swap(true, Ordering::AcqRel) {
+        #[cfg(target_os = "linux")]
+        {
+            let root = repo_root.to_path_buf();
+            let spawned = std::thread::Builder::new()
+                .name("jcode-git-watch".to_string())
+                .spawn(move || imp::run(&root, on_change));
+            if spawned.is_err() {
+                HEALTHY.store(false, Ordering::Release);
+            }
         }
     }
 }
 
 /// Whether an event on `name` inside the git dir can change the widget.
 /// Lock files and temp objects churn during every git command.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn git_dir_event_relevant(name: &str) -> bool {
     !(name.ends_with(".lock") || name.starts_with("tmp_") || name == "ORIG_HEAD.lock")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// Directories never worth watching even if not gitignored.
 pub(super) fn skip_dir(name: &str) -> bool {
     name == ".git"

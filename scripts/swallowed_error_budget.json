@@ -1,9 +1,9 @@
 {
-  "total": 3877,
+  "total": 3855,
   "totals_by_pattern": {
-    "dot_ok": 1529,
-    "let_underscore": 1410,
-    "unwrap_or_default": 938
+    "dot_ok": 1528,
+    "let_underscore": 1399,
+    "unwrap_or_default": 928
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -348,7 +348,7 @@
     },
     "crates/jcode-app-core/src/server/swarm.rs": {
       "dot_ok": 8,
-      "let_underscore": 7,
+      "let_underscore": 6,
       "unwrap_or_default": 8
     },
     "crates/jcode-app-core/src/server/swarm_channels.rs": {
@@ -493,8 +493,8 @@
     },
     "crates/jcode-app-core/src/tool/communicate.rs": {
       "dot_ok": 0,
-      "let_underscore": 4,
-      "unwrap_or_default": 11
+      "let_underscore": 0,
+      "unwrap_or_default": 8
     },
     "crates/jcode-app-core/src/tool/communicate/transport.rs": {
       "dot_ok": 1,
@@ -2222,8 +2222,8 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/helpers.rs": {
-      "dot_ok": 17,
-      "let_underscore": 4,
+      "dot_ok": 16,
+      "let_underscore": 5,
       "unwrap_or_default": 4
     },
     "crates/jcode-tui/src/tui/app/helpers/clipboard_helper.rs": {
@@ -2453,7 +2453,7 @@
     },
     "crates/jcode-tui/src/tui/cloud_git.rs": {
       "dot_ok": 6,
-      "let_underscore": 2,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/cloud_status.rs": {
@@ -2532,9 +2532,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/session_picker.rs": {
-      "dot_ok": 6,
+      "dot_ok": 7,
       "let_underscore": 4,
-      "unwrap_or_default": 7
+      "unwrap_or_default": 6
     },
     "crates/jcode-tui/src/tui/session_picker/cloud_preview/cache.rs": {
       "dot_ok": 0,
@@ -2544,12 +2544,12 @@
     "crates/jcode-tui/src/tui/session_picker/filter.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 4
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui/src/tui/session_picker/loading.rs": {
-      "dot_ok": 27,
+      "dot_ok": 28,
       "let_underscore": 4,
-      "unwrap_or_default": 19
+      "unwrap_or_default": 18
     },
     "crates/jcode-tui/src/tui/session_picker/loading/mobile_inventory.rs": {
       "dot_ok": 3,
@@ -2566,11 +2566,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-tui/src/tui/stable_status.rs": {
-      "dot_ok": 1,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
     "crates/jcode-tui/src/tui/terminal_setup.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
@@ -2583,8 +2578,8 @@
     },
     "crates/jcode-tui/src/tui/theme_detect.rs": {
       "dot_ok": 7,
-      "let_underscore": 2,
-      "unwrap_or_default": 2
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/ui.rs": {
       "dot_ok": 5,
@@ -2612,14 +2607,14 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/ui_frame_metrics.rs": {
-      "dot_ok": 11,
+      "dot_ok": 8,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/ui_header.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui/src/tui/ui_header/account_router.rs": {
       "dot_ok": 2,
@@ -2637,9 +2632,9 @@
       "unwrap_or_default": 2
     },
     "crates/jcode-tui/src/tui/ui_input.rs": {
-      "dot_ok": 2,
+      "dot_ok": 3,
       "let_underscore": 0,
-      "unwrap_or_default": 2
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/ui_messages.rs": {
       "dot_ok": 6,
@@ -2687,9 +2682,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/ui_viewport.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 0,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/workspace_client.rs": {
       "dot_ok": 0,
@@ -2718,8 +2713,8 @@
     },
     "src/cli/acp.rs": {
       "dot_ok": 1,
-      "let_underscore": 5,
-      "unwrap_or_default": 7
+      "let_underscore": 4,
+      "unwrap_or_default": 8
     },
     "src/cli/cloud_managed.rs": {
       "dot_ok": 5,
@@ -2728,8 +2723,8 @@
     },
     "src/cli/cloud_move.rs": {
       "dot_ok": 26,
-      "let_underscore": 14,
-      "unwrap_or_default": 7
+      "let_underscore": 11,
+      "unwrap_or_default": 8
     },
     "src/cli/cloud_move/transport.rs": {
       "dot_ok": 1,

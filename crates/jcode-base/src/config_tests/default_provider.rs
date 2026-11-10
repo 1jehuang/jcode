@@ -15,8 +15,10 @@ fn external_default_edit_syncs_pool_without_reordering_on_unrelated_reload() {
         crate::config::config().provider.default_provider.as_deref(),
         Some("openai-oauth")
     );
-    let mut pool = crate::auth::account_pool::AccountPool::default();
-    pool.members = vec!["openai:work".into(), "claude:personal".into()];
+    let mut pool = crate::auth::account_pool::AccountPool {
+        members: vec!["openai:work".into(), "claude:personal".into()],
+        ..Default::default()
+    };
     pool.save().unwrap();
 
     // A raw file edit, not the preference setter, must synchronize startup.

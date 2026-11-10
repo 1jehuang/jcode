@@ -22,6 +22,10 @@ pub(super) fn rearm() {
     PENDING.store(true, Ordering::Release);
 }
 
+// The early return is the once-only guard: repeated calls must skip the
+// watcher spawn. Clippy reads the Linux-only block below as the function tail
+// and flags the return as trailing; the guard is intentional.
+#[allow(clippy::needless_return)]
 pub(super) fn ensure_started() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;

@@ -2434,8 +2434,6 @@ pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<Exte
 mod pi_sessions;
 use pi_sessions::load_external_pi_sessions;
 pub(super) use pi_sessions::load_pi_external_preview;
-#[cfg(test)]
-pub(super) use pi_sessions::load_pi_preview_from_path;
 fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return Vec::new();

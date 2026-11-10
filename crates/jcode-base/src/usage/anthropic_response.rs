@@ -272,7 +272,7 @@ mod tests {
                 let new_tokens = auth::oauth::OAuthTokens {
                     access_token: "fixture-new-access".into(),
                     refresh_token: "fixture-new-refresh".into(),
-                    expires_at: chrono::Utc::now().timestamp_millis() + 7200_000,
+                    expires_at: chrono::Utc::now().timestamp_millis() + 7_200_000,
                     ..tokens
                 };
                 auth::oauth::save_claude_tokens_for_account(&new_tokens, &label).unwrap();

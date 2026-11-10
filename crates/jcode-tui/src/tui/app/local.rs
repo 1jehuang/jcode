@@ -463,8 +463,8 @@ fn apply_terminal_event(
             let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
-            let before_release = (key.kind == KeyEventKind::Release)
-                .then(|| app.key_release_visible_state());
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if app.handle_voice_key_event(&key) {

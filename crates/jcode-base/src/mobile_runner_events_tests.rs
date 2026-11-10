@@ -6,6 +6,7 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 const HINT: &str = r#"{"type":"commands_available"}"#;
 const FALLBACK: Duration = Duration::from_secs(5);
 
+#[allow(clippy::result_large_err)]
 async fn fixture() -> (Wakeups, WebSocketStream<TcpStream>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -39,6 +40,7 @@ async fn fixture() -> (Wakeups, WebSocketStream<TcpStream>) {
 }
 
 #[tokio::test]
+#[allow(clippy::result_large_err)]
 async fn changed_source_closes_old_socket_and_authenticates_only_new_endpoint() {
     use std::sync::Mutex;
     let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -300,6 +302,8 @@ async fn error_backoff_cannot_be_bypassed_by_buffered_hint() {
 }
 
 #[tokio::test]
+#[allow(clippy::result_large_err)]
+#[allow(clippy::unused_io_amount)]
 async fn unavailable_endpoint_does_not_hot_loop_and_fallback_remains_live() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
