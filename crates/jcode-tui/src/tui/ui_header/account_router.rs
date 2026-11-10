@@ -1248,7 +1248,8 @@ mod tests {
             error: None,
         };
         let bar = remaining_bar(&usage, false).unwrap();
-        assert_eq!(bar.spans[0].content, "7d ");
+        assert_eq!(bar.spans[0].content, "    ");
+        assert_eq!(bar.spans[1].content, "7d ");
         assert!(text(vec![bar]).contains("100% left"));
         usage.seven_day_ratio = Some(1.0);
         assert!(text(vec![remaining_bar(&usage, false).unwrap()]).contains("0% left"));
@@ -1283,9 +1284,10 @@ mod tests {
         assert!(text(vec![bar.clone()]).contains('▰'));
         assert!(text(vec![bar.clone()]).contains('▱'));
         assert!(!text(vec![bar.clone()]).contains('['));
-        assert_eq!(bar.spans[0].content, "5h ");
+        assert_eq!(bar.spans[0].content, "    ");
+        assert_eq!(bar.spans[1].content, "5h ");
         let shared = crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false);
-        assert_eq!(bar.spans[1..], shared.spans[1..]);
+        assert_eq!(bar.spans[2..], shared.spans[1..]);
         assert!(text(vec![remaining_bar(&usage, true).unwrap()]).contains("48% used"));
         for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
             usage.five_hour_ratio = ratio;
