@@ -98,6 +98,39 @@ fn command_code_login_stores_a_labeled_account() {
 }
 
 #[test]
+fn command_code_login_switches_to_a_stored_account() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_key = std::env::var_os("COMMAND_CODE_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("COMMAND_CODE_API_KEY");
+    crate::provider_catalog::command_code_accounts::save_account(Some("work"), "work-key")
+        .expect("save work");
+    crate::provider_catalog::command_code_accounts::save_account(Some("personal"), "personal-key")
+        .expect("save personal");
+
+    login_openai_compatible_flow(
+        &crate::provider_catalog::COMMAND_CODE_PROFILE,
+        Some("work"),
+        &LoginOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::provider_catalog::command_code_accounts::active_label().as_deref(),
+        Some("work")
+    );
+    assert_eq!(
+        crate::provider_catalog::command_code_accounts::active_api_key().as_deref(),
+        Some("work-key")
+    );
+
+    set_or_clear_env("COMMAND_CODE_API_KEY", prev_key);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[test]
 fn scriptable_resume_command_matches_input_kind() {
     assert_eq!(
         scriptable_resume_command("openai", "callback_url", None),

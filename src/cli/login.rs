@@ -852,6 +852,13 @@ fn login_openai_compatible_flow(
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
+    if profile.id == "command-code"
+        && options.openai_compatible_api_key.is_none()
+        && command_code::select_stored_account(account_label)?
+    {
+        return Ok(());
+    }
+
     eprintln!("Setting up {}...", resolved.display_name);
     let setup_url_depends_on_key = profile.id == crate::provider_catalog::MINIMAX_PROFILE.id;
     if !setup_url_depends_on_key {

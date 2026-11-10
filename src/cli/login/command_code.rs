@@ -34,6 +34,22 @@ pub(super) fn save_profile_key(
     Ok(())
 }
 
+/// Switch to an already-stored account when the caller names one and does not
+/// provide a replacement key. Returns false when the label is new, so the
+/// normal prompt can collect a key and create it.
+pub(super) fn select_stored_account(label: Option<&str>) -> Result<bool> {
+    let Some(label) = label.map(str::trim).filter(|label| !label.is_empty()) else {
+        return Ok(false);
+    };
+    let labels = crate::provider_catalog::command_code_accounts::labels();
+    if !labels.iter().any(|existing| existing == label) {
+        return Ok(false);
+    }
+    crate::provider_catalog::command_code_accounts::set_active(label)?;
+    eprintln!("Using stored Command Code account `{label}`.");
+    Ok(true)
+}
+
 pub(super) async fn validate_saved_key() -> Result<()> {
     let profile = crate::provider_catalog::COMMAND_CODE_PROFILE;
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
