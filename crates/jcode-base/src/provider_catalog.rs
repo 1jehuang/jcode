@@ -10,6 +10,8 @@ pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENA
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
+mod command_code_fallback;
+mod conifer;
 mod profile_credentials;
 pub use profile_credentials::{
     load_openai_compatible_profile_api_key, load_runtime_api_key,
@@ -439,6 +441,7 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     };
 
     match profile.id {
+        "command-code" => return command_code_fallback::static_models(),
         "opencode" => {
             push("minimax-m2.7");
             push("kimi-k2.5");
@@ -769,7 +772,8 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
 
     match profile_id.as_str() {
         "muse-subscription" if model == "muse-wonder-1.0" => Some(1_048_576),
-        "conifer" => conifer_context_limit(&model)
+        "command-code" => return command_code_fallback::context_limit(&model),
+        "conifer" => conifer::context_limit(&model)
             .or_else(|| jcode_provider_core::models::open_weight_family_context_limit(&model)),
         // The selected upstream model may vary. Use Jcode's conservative
         // compatible-provider context budget for the Belvedir auto router.
@@ -785,29 +789,6 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
         // explicit user `context_window` override) is available.
         _ => jcode_provider_core::models::open_weight_family_context_limit(&model),
     }
-}
-
-/// Exact route-specific observations from https://api.conifer.build/v1/catalog
-/// on 2026-09-16. These fill gaps in the shared family classifier, not global
-/// model guarantees. Live/disk catalog metadata takes precedence at runtime,
-/// including for mutable `*-latest` aliases. See docs/CONIFER_PROVIDER.md.
-fn conifer_context_limit(model: &str) -> Option<usize> {
-    Some(match model {
-        "grok-4.6" | "grok-4.5" => 500_000,
-        "grok-4.3" => 1_000_000,
-        "seed-2.0-pro" | "seed-2.0-code" | "seed-2.0-mini" => 256_000,
-        "step-3.7-flash" | "step-3.7-flash-novita" => 262_144,
-        "hy3" | "hy3-tencent" | "hy3-novita" => 262_144,
-        "ling-3.0-flash" => 131_072,
-        "inkling" | "inkling-small" => 524_288,
-        "nemotron-3-ultra" | "nemotron-3-super-120b" | "nemotron-3.5-lightning" => 262_144,
-        "mistral-large-latest" | "mistral-medium-latest" | "mistral-small-latest" => 256_000,
-        "command-a-cohere" => 256_000,
-        "llama-4-maverick" => 1_048_576,
-        "llama-4-scout" => 327_680,
-        "gemma-4-31b" => 128_000,
-        _ => return None,
-    })
 }
 
 pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfile>) {
