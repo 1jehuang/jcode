@@ -137,6 +137,7 @@ mod tests {
                 assert!(data.last_error.is_none());
                 assert!(data.last_success_at.is_some());
                 assert!(data.refresh_after.unwrap() + Duration::from_millis(10) >= deadline);
+                update_anthropic_usage_credentials([("passive-recovery", "fixture")].into_iter());
                 let snapshot = cached_account_usage_snapshot(
                     MultiAccountProviderKind::Anthropic,
                     "passive-recovery",

@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn replacement_login_does_not_inherit_cached_exhaustion() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _home = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let account = crate::auth::claude::AnthropicAccount {
+        label: "claude-otter".into(),
+        access: "old-login-token".into(),
+        refresh: "old-login-refresh".into(),
+        expires: i64::MAX,
+        email: Some("old@example.com".into()),
+        subscription_type: None,
+        scopes: Vec::new(),
+    };
+    let label = crate::auth::claude::upsert_account(account).unwrap();
+    let old_key = anthropic_usage_cache_key("old-login-token", Some(&label));
+    let exhausted = UsageData {
+        seven_day: 1.0,
+        last_error: None,
+        ..last_good()
+    };
+    store_anthropic_usage(old_key, exhausted.clone());
+    let provider = super::super::MultiAccountProviderKind::Anthropic;
+    assert!(account_known_exhausted(provider, &label));
+    assert!(super::super::account_label_usage_exhausted_sync(provider, &label).is_some());
+
+    let mut auth = crate::auth::claude::load_auth_file().unwrap();
+    auth.anthropic_accounts[0].access = "replacement-token".into();
+    auth.anthropic_accounts[0].refresh = "replacement-refresh".into();
+    auth.anthropic_accounts[0].email = Some("replacement@example.com".into());
+    crate::auth::claude::save_auth_file(&auth).unwrap();
+    assert!(!account_known_exhausted(provider, &label));
+    assert!(cached_account_usage_status_snapshot(provider, &label).is_none());
+    assert!(super::super::account_label_usage_exhausted_sync(provider, &label).is_none());
+
+    let current_key = anthropic_usage_cache_key("replacement-token", Some(&label));
+    store_anthropic_usage(
+        current_key,
+        UsageData {
+            five_hour: 0.1,
+            seven_day: 0.2,
+            fetched_at: Some(Instant::now() - std::time::Duration::from_secs(1)),
+            ..exhausted
+        },
+    );
+    assert_eq!(
+        cached_anthropic_usage_for_label(&label).unwrap().five_hour,
+        0.1
+    );
+    assert!(!account_known_exhausted(provider, &label));
+
+    // Another process can replace the auth file before this daemon reads it.
+    auth.anthropic_accounts[0].access = "external-replacement-token".into();
+    crate::storage::write_json_secret(&crate::auth::claude::jcode_path().unwrap(), &auth).unwrap();
+    crate::auth::claude::load_auth_file().unwrap();
+    assert!(cached_account_usage_status_snapshot(provider, &label).is_none());
+    assert!(!account_known_exhausted(provider, &label));
+}
+
+#[test]
 fn account_snapshot_preserves_all_model_and_future_provider_windows() {
     let data = UsageData {
         model_scoped: vec![

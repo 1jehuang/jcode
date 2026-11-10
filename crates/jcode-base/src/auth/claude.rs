@@ -313,6 +313,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let path = jcode_path()?;
     if !path.exists() {
+        crate::usage::update_anthropic_usage_credentials(std::iter::empty());
         return Ok(JcodeAuthFile::default());
     }
 
@@ -346,6 +347,11 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
         save_auth_file(&auth)?;
     }
 
+    crate::usage::update_anthropic_usage_credentials(
+        auth.anthropic_accounts
+            .iter()
+            .map(|account| (account.label.as_str(), account.access.as_str())),
+    );
     Ok(auth)
 }
 
@@ -362,6 +368,12 @@ pub fn save_auth_file(auth: &JcodeAuthFile) -> Result<()> {
     };
 
     crate::storage::write_json_secret(&auth_path, &clean)?;
+    crate::usage::update_anthropic_usage_credentials(
+        clean
+            .anthropic_accounts
+            .iter()
+            .map(|account| (account.label.as_str(), account.access.as_str())),
+    );
     Ok(())
 }
 
