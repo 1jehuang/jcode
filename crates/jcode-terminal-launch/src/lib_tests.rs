@@ -263,7 +263,16 @@ fn missing_tmux_binary_falls_back_to_detected_emulator() {
         None => unsafe { std::env::remove_var("JCODE_TERMINAL") },
     }
     assert!(matches!(result, Ok(true)));
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(attempts, vec!["tmux", "kitty"]);
+    // macOS launches kitty through `open` when it is not on PATH and skips it
+    // when the app is not installed, so the program after tmux depends on the
+    // host. Only the fallback past tmux is fixed.
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(attempts.first().map(String::as_str), Some("tmux"));
+        assert_eq!(attempts.len(), 2, "attempts: {attempts:?}");
+    }
 }
 
 #[test]
