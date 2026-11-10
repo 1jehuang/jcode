@@ -244,4 +244,30 @@ mod tests {
             "corrupt store must be preserved for recovery"
         );
     }
+
+    #[test]
+    fn shared_runtime_key_resolution_uses_active_account() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = HomeGuard::new(temp.path());
+        crate::env::remove_var("COMMAND_CODE_API_KEY");
+        save_account(Some("work"), "stored-key").expect("save");
+        assert_eq!(
+            super::super::profile_credentials::load_runtime_api_key(
+                "COMMAND_CODE_API_KEY",
+                "command-code.env"
+            )
+            .as_deref(),
+            Some("stored-key")
+        );
+        crate::env::set_var("COMMAND_CODE_API_KEY", "env-key");
+        assert_eq!(
+            super::super::profile_credentials::load_runtime_api_key(
+                "COMMAND_CODE_API_KEY",
+                "command-code.env"
+            )
+            .as_deref(),
+            Some("env-key")
+        );
+        crate::env::remove_var("COMMAND_CODE_API_KEY");
+    }
 }

@@ -37,10 +37,23 @@ pub fn load_openai_compatible_profile_api_key(
 }
 
 /// Resolve the shared compatible-transport key from its configured env name and
-/// file. The Muse subscription route stores its minted key in a Jcode-managed
-/// credential file rather than an env file, so credential presence checks must
-/// consult that store too or a signed-in Muse account looks unconfigured.
+/// file. Command Code consults its labeled account store, and the Muse
+/// subscription route stores its minted key in a Jcode-managed credential file
+/// rather than an env file, so credential presence checks must consult those
+/// stores too or a signed-in account looks unconfigured.
 pub fn load_runtime_api_key(key_name: &str, env_file: &str) -> Option<String> {
+    if key_name == "COMMAND_CODE_API_KEY" && env_file == "command-code.env" {
+        if let Ok(key) = std::env::var(key_name) {
+            let key = key.trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
+        }
+        if let Some(key) = super::command_code_accounts::active_api_key() {
+            return Some(key);
+        }
+        return load_api_key_from_env_or_config(key_name, env_file);
+    }
     if let Some(key) = load_api_key_from_env_or_config(key_name, env_file) {
         return Some(key);
     }
