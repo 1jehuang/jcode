@@ -257,13 +257,9 @@ jobs:
       - name: Run secret-input pty cohort (all platforms with a pty)
         if: runner.os != 'Windows'
         shell: bash
-        # `jcode-base --lib` is never executed on Linux CI: the only jcode-base
-        # test invocation anywhere in this workflow is a Windows-only
-        # `power_inhibit::tests::windows_` filter. So the masking fix for #660 had
-        # a test that was compiled and never run, which is the same
-        # looks-green-but-never-ran shape as the warning budget and the stdin
-        # detector (#651). These tests fork a pty, so they cannot run on the
-        # Windows runner; everywhere else they take about a second.
+        # Run masking regressions explicitly: compiling the library tests with
+        # --no-run cannot catch behavioral failures. These tests fork a pty, so
+        # they cannot run on Windows; elsewhere they take about a second.
         #
         # 600s, not 300s: the budget is dominated by cold-compiling the
         # jcode-base lib test harness, which exceeded 300s on a hosted macOS
@@ -285,6 +281,14 @@ jobs:
         run: |
           cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
           cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
+
+      - name: Run Linux file-history access regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-base --lib file_history -- --test-threads=1
 
       - name: Run macOS ACL preservation regression (macOS only)
         if: runner.os == 'macOS'

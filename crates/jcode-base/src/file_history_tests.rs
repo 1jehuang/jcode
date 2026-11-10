@@ -5,7 +5,7 @@ use jcode_session_types::RewindMode;
 #[path = "file_history_assistant_tests.rs"]
 mod assistant;
 
-struct TestHome {
+pub(super) struct TestHome {
     _dir: tempfile::TempDir,
     old: Option<std::ffi::OsString>,
 }
@@ -20,7 +20,7 @@ impl Drop for TestHome {
     }
 }
 
-fn fixture() -> (TestHome, tempfile::TempDir) {
+pub(super) fn fixture() -> (TestHome, tempfile::TempDir) {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let old = std::env::var_os("JCODE_HOME");
