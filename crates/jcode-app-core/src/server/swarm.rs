@@ -1,5 +1,5 @@
 use super::persist_swarm_state_for;
-use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
+use super::state::{MAX_EVENT_HISTORY, collect_event_targets, fanout_session_event};
 use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
@@ -18,10 +18,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, broadcast};
-
-fn status_age_secs(last_status_change: Instant) -> u64 {
-    last_status_change.elapsed().as_secs()
-}
 
 /// Maximum number of live members (agents) in a single swarm. Re-exported from
 /// `jcode_swarm_core` so the server, tools, and prompts all agree on the one
@@ -897,7 +893,12 @@ async fn broadcast_swarm_status_now(
         return;
     }
 
-    let members_guard = swarm_members.read().await;
+    // Keep recipient selection, snapshotting, and publication under one guard to preserve order.
+    let mut members_guard = swarm_members.write().await;
+    let targets = collect_event_targets(&mut members_guard, session_ids.iter().map(String::as_str));
+    if targets.is_empty() {
+        return;
+    }
     let broadcast_terminal_retention = swarm_status_broadcast_terminal_retention();
     let members_list: Vec<crate::protocol::SwarmMemberStatus> = session_ids
         .iter()
@@ -926,7 +927,7 @@ async fn broadcast_swarm_status_now(
                         role: Some(m.role.clone()),
                         is_headless: Some(m.is_headless),
                         live_attachments: Some(m.event_txs.len()),
-                        status_age_secs: Some(status_age_secs(m.last_status_change)),
+                        status_age_secs: Some(m.last_status_change.elapsed().as_secs()),
                         output_tail: m.output_tail.clone(),
                         report_back_to_session_id: m.report_back_to_session_id.clone(),
                         todo_progress: m.todo_progress,
@@ -970,13 +971,11 @@ async fn broadcast_swarm_status_now(
         })
         .collect();
 
-    drop(members_guard);
     let event = ServerEvent::SwarmStatus {
         members: members_list,
     };
-    for sid in session_ids {
-        let _ = fanout_session_event(swarm_members, &sid, event.clone()).await;
-    }
+    // Publish synchronously; SwarmStatus cannot change a live projection.
+    super::state::send_event_to_targets(&targets, event);
 }
 
 /// Publish wait transitions immediately and refresh elapsed wait ages while a
