@@ -93,6 +93,10 @@ struct DaemonSession {
     /// Set by `session/cancel` while a prompt is running; scoped to that prompt.
     cancel_requested: AtomicBool,
     ui_state: Mutex<SessionUiState>,
+    /// Whether the most recently decoded `model_changed` event carried a
+    /// `reasoning_effort` key. Older daemons omit it; current daemons serialize
+    /// `null` to clear the previous value.
+    model_changed_has_effort: AtomicBool,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
     working_dir: Option<PathBuf>,
@@ -327,6 +331,7 @@ impl DaemonSession {
             prompt_running: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
             ui_state: Mutex::new(SessionUiState::default()),
+            model_changed_has_effort: AtomicBool::new(true),
             working_dir: None,
             active_skill: Mutex::new(None),
         }
@@ -373,9 +378,36 @@ impl DaemonSession {
         if n == 0 {
             anyhow::bail!("Jcode daemon disconnected");
         }
-        let event = serde_json::from_str(&line)
+        let value: Value = serde_json::from_str(&line)
+            .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
+        if let Some(has_effort) = model_changed_has_effort_field(&value) {
+            self.model_changed_has_effort
+                .store(has_effort, Ordering::Relaxed);
+        }
+        let event: ServerEvent = serde_json::from_value(value)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
         Ok(super::commands::unwrap_turn_event(event))
+    }
+
+    fn model_changed_has_effort(&self) -> bool {
+        self.model_changed_has_effort.load(Ordering::Relaxed)
+    }
+}
+
+/// Return the inner `model_changed` event's `reasoning_effort` presence.
+///
+/// Turn events wrap another event, and only the JSON key presence separates an
+/// older daemon (field omitted) from a current one (field explicitly `null`).
+fn model_changed_has_effort_field(value: &Value) -> Option<bool> {
+    let mut current = value;
+    loop {
+        match current.get("type").and_then(Value::as_str) {
+            Some("turn_event") => current = current.get("event")?,
+            Some("model_changed") => {
+                return Some(current.get("reasoning_effort").is_some());
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -1288,7 +1320,13 @@ impl AcpRuntime {
                     if error.is_none() {
                         let config_options = {
                             let mut state = session.ui_state.lock().await;
-                            apply_model_changed(&mut state, model, provider_name, reasoning_effort);
+                            apply_model_changed(
+                                &mut state,
+                                model,
+                                provider_name,
+                                reasoning_effort,
+                                session.model_changed_has_effort(),
+                            );
                             session_config_options(&state)
                         };
                         if !config_options.is_empty() {
@@ -1538,6 +1576,7 @@ fn apply_model_changed(
     model: String,
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
+    effort_field_present: bool,
 ) {
     state.model = Some(model);
     if provider_name.is_some() {
@@ -1546,18 +1585,9 @@ fn apply_model_changed(
     match reasoning_effort {
         Some(effort) => state.reasoning_effort = Some(effort),
         None => {
-            // Older daemons omit the field entirely, and the wire cannot
-            // distinguish that from an explicit clear. Keep a confirmed value
-            // unless the switch lands on a known ladder that excludes it.
-            let efforts = crate::provider::inferred_reasoning_efforts(
-                state.provider_name.as_deref(),
-                state.model.as_deref(),
-            );
-            let keep = state
-                .reasoning_effort
-                .as_deref()
-                .is_some_and(|effort| efforts.is_empty() || efforts.contains(&effort));
-            if !keep {
+            // Older daemons omit the field; keep the confirmed value. A
+            // current daemon serializes `null` to clear it.
+            if effort_field_present {
                 state.reasoning_effort = None;
             }
         }
@@ -1607,7 +1637,13 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
-                apply_model_changed(&mut state, model, provider_name, reasoning_effort);
+                apply_model_changed(
+                    &mut state,
+                    model,
+                    provider_name,
+                    reasoning_effort,
+                    session.model_changed_has_effort(),
+                );
                 return Ok(());
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {

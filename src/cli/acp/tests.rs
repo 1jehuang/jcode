@@ -681,23 +681,34 @@ fn config_options_report_openai_pro_default_within_its_ladder() {
 }
 
 #[test]
-fn model_change_clears_only_effort_the_new_ladder_rejects() {
+fn model_change_clears_explicit_null_but_preserves_omitted() {
     let mut state = SessionUiState {
         provider_name: Some("OpenAI".to_string()),
         model: Some("gpt-5.4".to_string()),
         available_models: Vec::new(),
-        reasoning_effort: Some("minimal".to_string()),
+        reasoning_effort: Some("high".to_string()),
     };
 
-    // DeepSeek's ladder has no `minimal`, so the old selection is stale.
+    // Older daemons omit the field entirely; keep the confirmed value.
     apply_model_changed(
         &mut state,
         "deepseek-v4-flash".to_string(),
         Some("DeepSeek".to_string()),
         None,
+        false,
     );
     assert_eq!(state.model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(state.provider_name.as_deref(), Some("DeepSeek"));
+    assert_eq!(state.reasoning_effort.as_deref(), Some("high"));
+
+    // A current daemon serializes `null` to clear the previous effort.
+    apply_model_changed(
+        &mut state,
+        "deepseek-v4-flash".to_string(),
+        Some("DeepSeek".to_string()),
+        None,
+        true,
+    );
     assert_eq!(state.reasoning_effort, None);
 
     // A switch that reports an effort installs the server's value.
@@ -706,26 +717,35 @@ fn model_change_clears_only_effort_the_new_ladder_rejects() {
         "gpt-5.4".to_string(),
         Some("OpenAI".to_string()),
         Some("low".to_string()),
+        true,
     );
     assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+}
 
-    // Older daemons omit the field on reselect; preserve the known value.
-    apply_model_changed(
-        &mut state,
-        "gpt-5.4".to_string(),
-        Some("OpenAI".to_string()),
-        None,
+#[test]
+fn model_changed_effort_presence_is_read_from_the_wire() {
+    assert_eq!(
+        model_changed_has_effort_field(&json!({
+            "type": "model_changed",
+            "reasoning_effort": null,
+        })),
+        Some(true)
     );
-    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
-
-    // An unknown ladder cannot prove the value stale.
-    apply_model_changed(
-        &mut state,
-        "mystery".to_string(),
-        Some("Unknown".to_string()),
-        None,
+    assert_eq!(
+        model_changed_has_effort_field(&json!({"type": "model_changed"})),
+        Some(false)
     );
-    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(
+        model_changed_has_effort_field(&json!({
+            "type": "turn_event",
+            "event": {"type": "model_changed", "reasoning_effort": "high"},
+        })),
+        Some(true)
+    );
+    assert_eq!(
+        model_changed_has_effort_field(&json!({"type": "text_delta", "text": "x"})),
+        None
+    );
 }
 
 #[test]
