@@ -29,8 +29,15 @@ async fn fetch_usage() -> Result<UsageData> {
             .await
         {
             Ok(refreshed) => refreshed.access_token,
+            Err(error) if creds.expires_at < now => {
+                return Err(anthropic_response::credential_error(error));
+            }
             Err(_) => creds.access_token,
         }
+    } else if creds.expires_at < now {
+        return Err(anthropic_response::credential_error(anyhow::anyhow!(
+            "OAuth token expired"
+        )));
     } else {
         creds.access_token
     };

@@ -2314,6 +2314,21 @@ async fn stream_response(
     }
 
     *response_accepted = true;
+    if is_oauth {
+        // Successful model requests already return real subscription limits.
+        // Recording them avoids a separate, heavily throttled usage lookup
+        // while the account is active. Never attribute API-key quotas here.
+        let headers = response.headers().clone();
+        let label = usage_label.map(str::to_owned);
+        let quota_token = token.clone();
+        tokio::task::spawn_blocking(move || {
+            jcode_base::usage::record_anthropic_response_limits(
+                &quota_token,
+                label.as_deref(),
+                &headers,
+            );
+        });
+    }
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,

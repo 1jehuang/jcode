@@ -207,7 +207,8 @@ mod tests {
                         "event: message_stop\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
                     );
                 }
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let reset = chrono::Utc::now().timestamp() + 7200;
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nanthropic-ratelimit-unified-5h-utilization: 0.37\r\nanthropic-ratelimit-unified-7d-utilization: 0.62\r\nanthropic-ratelimit-unified-5h-reset: {reset}\r\nanthropic-ratelimit-unified-7d-reset: {reset}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             });
             runtime.block_on(async {
                 let (tx, mut rx) = mpsc::channel(100);
@@ -249,6 +250,26 @@ mod tests {
                     }
                 }
                 assert_eq!(usage_events, 1);
+                if let Some(label) = label {
+                    // Exercise the real response-header hook, not just the
+                    // parser. Blocking persistence must not stall SSE delivery.
+                    let limits = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            if let Some(limits) = jcode_base::usage::cached_account_usage_snapshot(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                label,
+                            ) {
+                                break limits;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(limits.five_hour_ratio, Some(0.37));
+                    assert_eq!(limits.seven_day_ratio, Some(0.62));
+                    assert!(limits.error.is_none());
+                }
             });
             server.join().unwrap();
         }
@@ -269,6 +290,15 @@ mod tests {
         );
         assert!(!home.path().join("provider_activity.json").exists());
         assert!(!home.path().join("openai_oauth_usage.json").exists());
+        let limits: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join("anthropic_usage_cache.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            limits.as_object().unwrap().len(),
+            2,
+            "API-key responses must not record subscription quotas"
+        );
     }
 
     #[test]

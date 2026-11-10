@@ -23,7 +23,7 @@ static OPENAI_ACCOUNT_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, OpenAIUsageData>>,
 > = std::sync::OnceLock::new();
 
-fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageData>> {
+pub(super) fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageData>> {
     ANTHROPIC_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -518,7 +518,24 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
 /// Credential refresh callers must respect the shared backoff too, before
 /// attempting any network operation with an expired credential.
 pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageData> {
-    cached_anthropic_usage(cache_key).or_else(|| {
+    let cached = cached_anthropic_usage(cache_key);
+    if cached
+        .as_ref()
+        .and_then(|data| data.last_error.as_deref())
+        .is_some_and(super::anthropic_response::is_auth_failure)
+    {
+        // A login in another process clears persisted authentication failures.
+        // Do not let this daemon's RAM keep the repaired account broken for
+        // another retry period. Credential-stage failures are persisted too.
+        let shared = super::disk_cache::fresh(cache_key);
+        if let Some(data) = &shared {
+            store_anthropic_usage(cache_key.to_string(), data.clone());
+        } else if let Ok(mut cache) = anthropic_usage_cache().lock() {
+            cache.remove(cache_key);
+        }
+        return shared;
+    }
+    cached.or_else(|| {
         let data = super::disk_cache::fresh(cache_key)?;
         store_anthropic_usage(cache_key.to_string(), data.clone());
         Some(data)

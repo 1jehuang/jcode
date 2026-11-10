@@ -6,6 +6,23 @@ use futures::future::join_all;
 // consume the daemon worker deadline and discard healthy accounts' usage.
 const ACCOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
+pub(super) fn cache_anthropic_account_failure(
+    cache_key: String,
+    error: anyhow::Error,
+) -> UsageData {
+    // A first-ever HTTP failure can already carry a provider Retry-After.
+    // Credential failures happen before that cache, so persist those too.
+    let data = cached_or_shared_anthropic_usage(&cache_key).unwrap_or_else(|| {
+        disk_cache::store_error_with_hint(
+            &cache_key,
+            &anthropic_response::credential_error(error).to_string(),
+            None,
+        )
+    });
+    store_anthropic_usage(cache_key, data.clone());
+    data
+}
+
 async fn bounded_probe<F>(label: String, email: Option<String>, probe: F) -> AccountUsageSnapshot
 where
     F: std::future::Future<Output = AccountUsageSnapshot>,
@@ -62,17 +79,8 @@ pub async fn fetch_oauth_account_usage(
                             Err(error) => Err(error),
                         }
                     };
-                    let data = usage.unwrap_or_else(|error| {
-                        let data = UsageData {
-                            fetched_at: Some(Instant::now()),
-                            last_error: Some(error.to_string()),
-                            ..Default::default()
-                        };
-                        // Refresh and expired-token failures happen before the HTTP
-                        // fetcher's cache. Give them the same per-account retry floor.
-                        store_anthropic_usage(cache_key, data.clone());
-                        data
-                    });
+                    let data = usage
+                        .unwrap_or_else(|error| cache_anthropic_account_failure(cache_key, error));
                     anthropic_snapshot_from_usage(account.label, account.email, &data)
                 })
             }))
