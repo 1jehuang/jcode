@@ -288,8 +288,12 @@ pub(crate) async fn bounded_output_for(
                     libc::kill(-(pid as i32), libc::SIGKILL);
                 }
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            if let Err(error) = child.kill().await {
+                crate::logging::debug(&format!("Failed to stop cloud git child: {error}"));
+            }
+            if let Err(error) = child.wait().await {
+                crate::logging::debug(&format!("Failed to reap cloud git child: {error}"));
+            }
             None
         }
     }

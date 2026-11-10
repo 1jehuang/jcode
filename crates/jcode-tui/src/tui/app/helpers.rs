@@ -66,9 +66,19 @@ fn git_stamp(repo_root: &std::path::Path) -> Option<GitStamp> {
         paths
             .into_iter()
             .map(|path| {
-                let meta = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| Some((m.modified().ok()?, m.len())));
+                let meta = match std::fs::metadata(&path).and_then(|m| Ok((m.modified()?, m.len())))
+                {
+                    Ok(meta) => Some(meta),
+                    Err(error) => {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            crate::logging::debug(&format!(
+                                "Git metadata probe failed for {}: {error}",
+                                path.display()
+                            ));
+                        }
+                        None
+                    }
+                };
                 (path, meta)
             })
             .collect(),
@@ -1689,10 +1699,13 @@ pub(crate) fn prime_git_info(budget: Duration) {
         let _ = gather_git_info();
         let deadline = std::time::Instant::now() + budget;
         loop {
-            let pending = GIT_INFO_CACHE
-                .lock()
-                .ok()
-                .is_some_and(|guard| guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing));
+            let pending = match GIT_INFO_CACHE.lock() {
+                Ok(guard) => guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing),
+                Err(error) => {
+                    crate::logging::warn(&format!("Git warmup cache lock poisoned: {error}"));
+                    false
+                }
+            };
             if !pending || std::time::Instant::now() >= deadline {
                 return;
             }

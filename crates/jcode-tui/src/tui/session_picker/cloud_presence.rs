@@ -38,12 +38,18 @@ pub(super) fn parse(output: &str) -> HashMap<String, Option<std::time::SystemTim
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
             valid.then(|| {
-                let since = mtime
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|secs| *secs > 0)
-                    .map(|secs| std::time::UNIX_EPOCH + Duration::from_secs(secs));
+                let since = match mtime.trim().parse::<u64>() {
+                    Ok(secs) if secs > 0 => {
+                        std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs))
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Invalid cloud presence timestamp: {error}"
+                        ));
+                        None
+                    }
+                };
                 (id.to_string(), since)
             })
         })
@@ -54,17 +60,20 @@ fn poll_host(host: &str) -> Option<HashMap<String, Option<std::time::SystemTime>
     if host.is_empty() || host.starts_with('-') {
         return None;
     }
-    let config = crate::storage::jcode_dir().ok()?.join("cloud/ssh_config");
+    let config = super::preview_result(crate::storage::jcode_dir(), "cloud presence storage")?
+        .join("cloud/ssh_config");
     let command = crate::tui::cloud_git::script_command(
         Some(host),
         config.is_file().then_some(config.as_path()),
         ".",
         SCRIPT,
     );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
+    let runtime = super::preview_result(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+        "cloud presence runtime",
+    )?;
     let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output_for(
         command,
         Duration::from_secs(10),
@@ -133,7 +142,9 @@ impl SessionPicker {
                                 all.extend(found);
                             }
                         }
-                        let _ = tx.send(all);
+                        if tx.send(all).is_err() {
+                            crate::logging::debug("Cloud presence receiver closed");
+                        }
                     });
                 if spawned.is_ok() {
                     self.cloud_presence.pending = Some(rx);
@@ -187,6 +198,14 @@ mod tests {
             Some(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
         );
         assert_eq!(parsed["session_b_2"], None);
+    }
+
+    #[test]
+    fn invalid_cloud_timestamps_keep_presence_without_age() {
+        let parsed = parse("session_invalid nope\nsession_overflow 18446744073709551615\n");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["session_invalid"], None);
+        assert_eq!(parsed["session_overflow"], None);
     }
 
     #[test]

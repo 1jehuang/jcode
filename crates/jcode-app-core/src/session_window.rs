@@ -59,20 +59,31 @@ fn close_clients(_pids: &[u32]) -> usize {
     0
 }
 
-fn niri_json(args: &[&str]) -> anyhow::Result<serde_json::Value> {
+fn niri_json(args: &[&str]) -> Option<serde_json::Value> {
     let output = std::process::Command::new("niri")
         .arg("msg")
         .arg("-j")
         .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()?;
-    anyhow::ensure!(
-        output.status.success(),
-        "niri exited with {}",
-        output.status
-    );
-    Ok(serde_json::from_slice(&output.stdout)?)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            crate::logging::debug(&format!("niri query {args:?} unavailable: {error}"));
+            return None;
+        }
+    };
+    if !output.status.success() {
+        return None;
+    }
+    match serde_json::from_slice(&output.stdout) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::warn(&format!("invalid niri query {args:?} response: {error}"));
+            None
+        }
+    }
 }
 
 fn niri_action(args: &[String]) -> bool {
@@ -100,10 +111,14 @@ fn process_ancestry(pid: u32) -> Vec<u32> {
         let Some(parent) = stat
             .rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|ppid| match ppid.parse::<u32>() {
+                Ok(parent) => Some(parent),
+                Err(error) => {
+                    crate::logging::debug(&format!("invalid parent pid for {pid}: {error}"));
+                    None
+                }
+            })
         else {
-            break;
-        };
-        let Ok(parent) = parent.parse::<u32>() else {
             break;
         };
         pid = parent;
@@ -185,7 +200,7 @@ fn bring_client_window_here(client_pids: &[u32]) -> bool {
     if cfg!(test) || std::env::var_os("NIRI_SOCKET").is_none() {
         return false;
     }
-    let (Ok(windows), Ok(workspaces)) = (niri_json(&["windows"]), niri_json(&["workspaces"]))
+    let (Some(windows), Some(workspaces)) = (niri_json(&["windows"]), niri_json(&["workspaces"]))
     else {
         return false;
     };

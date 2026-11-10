@@ -317,8 +317,13 @@ fn stream_file<S: source::Sink>(path: &Path, sink: &mut S, cancel: &AtomicBool) 
             match reader.read_until(b'\n', &mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let _ = source::Walk::new(&mut *sink)
-                        .deserialize(&mut serde_json::Deserializer::from_slice(&line));
+                    if let Err(error) = source::Walk::new(&mut *sink)
+                        .deserialize(&mut serde_json::Deserializer::from_slice(&line))
+                    {
+                        crate::logging::debug(&format!(
+                            "Skipping invalid transcript search record: {error}"
+                        ));
+                    }
                 }
             }
         }
@@ -477,7 +482,9 @@ impl TranscriptSearch {
                             .iter()
                             .map(|candidate| candidate.search_index.as_str()),
                     );
-                    let _ = shared_idf.set(idf.clone());
+                    if shared_idf.set(idf.clone()).is_err() {
+                        crate::logging::debug("Transcript search weights already initialized");
+                    }
                     // Transcript reads and fuzzy scans dominate. Shard sessions
                     // across workers round-robin so every shard sees the same
                     // mix of recent and old sessions and ranks arrive evenly.

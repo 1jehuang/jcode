@@ -242,7 +242,7 @@ pub mod linux {
                 {
                     for line in status.lines() {
                         if let Some(ppid_str) = line.strip_prefix("PPid:\t")
-                            && ppid_str.trim().parse::<u32>().ok() == Some(pid)
+                            && ppid_str.trim().parse::<u32>() == Ok(pid)
                         {
                             children.push(child_pid);
                             break;

@@ -585,4 +585,21 @@ mod retry_hint_tests {
             Some("x")
         );
     }
+
+    #[test]
+    fn malformed_retry_hints_are_not_deadlines() {
+        for error in [
+            "HTTP 429 (retry at invalid)",
+            "retry at ",
+            "retry at 2026-99-99",
+        ] {
+            assert!(usage_error_retry_at(error).is_none(), "{error}");
+        }
+        assert!(usage_error_with_retry(None, Some(Instant::now())).is_none());
+        let annotated = "HTTP 429 (retry at 2026-11-10T12:00:00Z)";
+        assert_eq!(
+            usage_error_with_retry(Some(annotated.into()), Some(Instant::now())).as_deref(),
+            Some(annotated)
+        );
+    }
 }

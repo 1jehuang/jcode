@@ -341,7 +341,13 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// startup and asynchronous provider initialization can race with an install.
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    pin_launch_path(&RUNNING, || std::env::current_exe().ok())
+    pin_launch_path(&RUNNING, || match std::env::current_exe() {
+        Ok(exe) => Some(exe),
+        Err(error) => {
+            crate::logging::warn(&format!("cannot identify running server binary: {error}"));
+            None
+        }
+    })
 }
 
 fn pin_launch_path(

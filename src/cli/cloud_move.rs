@@ -274,7 +274,7 @@ fn run_router_credentials() -> Result<()> {
 /// keys and other providers are initialized when auth changes. No daemon means
 /// the next start reads the new files anyway.
 fn notify_daemon_auth_changed() {
-    let _ = std::thread::spawn(|| {
+    if std::thread::spawn(|| {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -282,15 +282,28 @@ fn notify_daemon_auth_changed() {
             return;
         };
         runtime.block_on(async {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 let mut client = crate::server::Client::connect().await?;
                 client.notify_auth_changed().await?;
                 anyhow::Ok(())
             })
-            .await;
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    crate::logging::debug(&format!("Daemon auth notification failed: {error:#}"))
+                }
+                Err(error) => {
+                    crate::logging::debug(&format!("Daemon auth notification timed out: {error}"))
+                }
+            }
         });
     })
-    .join();
+    .join()
+    .is_err()
+    {
+        crate::logging::warn("Daemon auth notification thread panicked");
+    }
 }
 
 fn cloud_accounts() -> Result<Vec<CloudAccount>> {
@@ -1002,7 +1015,11 @@ pub(crate) fn run_return(
         last_sync_head: manifest.repo.as_ref().map(|r| r.head.clone()),
         updated_at: chrono::Utc::now().to_rfc3339(),
     })?;
-    let _ = std::fs::remove_file(baseline_path(&session_id)?);
+    if let Err(error) = std::fs::remove_file(baseline_path(&session_id)?)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!("Failed to remove cloud baseline: {error}"));
+    }
     if requires_completion {
         complete_remote_return(target, &report)?;
     }
@@ -1608,7 +1625,11 @@ fn prepare_repo_snapshot(
     // Temporary index so the user's real index is untouched.
     let index = stage.join("snapshot.index");
     let git_dir = PathBuf::from(git(&root_path, &["rev-parse", "--absolute-git-dir"])?);
-    std::fs::copy(git_dir.join("index"), &index).ok();
+    if let Err(error) = std::fs::copy(git_dir.join("index"), &index)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to copy Git index for working-tree snapshot");
+    }
     let env = [("GIT_INDEX_FILE", index.as_os_str())];
     git_env(&root_path, &["add", "-A", "--", "."], &env)?;
     let tree = git_env(&root_path, &["write-tree"], &env)?;
@@ -1989,7 +2010,11 @@ fn merge_back(
 fn snapshot_worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
     let index = scratch.join("ours.index");
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?);
-    std::fs::copy(git_dir.join("index"), &index).ok();
+    if let Err(error) = std::fs::copy(git_dir.join("index"), &index)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to copy Git index for working-tree snapshot");
+    }
     let env = [("GIT_INDEX_FILE", index.as_os_str())];
     git_env(root, &["add", "-A", "--", "."], &env)?;
     git_env(root, &["write-tree"], &env)

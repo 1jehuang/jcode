@@ -1555,25 +1555,23 @@ fn pinned_todo_band_for_payload(
     let inner_width = width.saturating_sub(4);
     let mut title = String::from(" Todos ");
     let mut card_lines = if crate::config::config().display.pin_todos {
-        payload
-            .map(|payload| {
-                if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
-                    title = format!(" Todos {}/{} ", done, total);
-                }
-                // Unboxed body: the band draws its own border below. Go through
-                // the shared message-line cache so an unchanged list is not
-                // re-rendered on every frame. The distinct title keeps this
-                // entry apart from the boxed, width-capped inline card.
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string())
-                    .with_title("Todos (pinned body)");
-                super::messages::get_cached_message_lines(
-                    &msg,
-                    inner_width,
-                    diff_mode,
-                    super::messages::render_pinned_todos_message,
-                )
-            })
-            .unwrap_or_default()
+        payload.map_or_else(Vec::new, |payload| {
+            if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
+                title = format!(" Todos {}/{} ", done, total);
+            }
+            // Unboxed body: the band draws its own border below. Go through
+            // the shared message-line cache so an unchanged list is not
+            // re-rendered on every frame. The distinct title keeps this
+            // entry apart from the boxed, width-capped inline card.
+            let msg = crate::tui::DisplayMessage::todos(payload.to_string())
+                .with_title("Todos (pinned body)");
+            super::messages::get_cached_message_lines(
+                &msg,
+                inner_width,
+                diff_mode,
+                super::messages::render_pinned_todos_message,
+            )
+        })
     } else {
         Vec::new()
     };

@@ -21,22 +21,26 @@ pub(super) fn is_healthy() -> bool {
 
 /// Start the watcher for `repo_root` once per process. `on_change` runs on the
 /// watcher thread after a quiet period following any relevant event.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        unused_variables,
+        reason = "inotify watcher is only implemented on Linux"
+    )
+)]
 pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let root = repo_root.to_path_buf();
-        let spawned = std::thread::Builder::new()
-            .name("jcode-git-watch".to_string())
-            .spawn(move || imp::run(&root, on_change));
-        if spawned.is_err() {
-            HEALTHY.store(false, Ordering::Release);
+    if !STARTED.swap(true, Ordering::AcqRel) {
+        #[cfg(target_os = "linux")]
+        {
+            let root = repo_root.to_path_buf();
+            let spawned = std::thread::Builder::new()
+                .name("jcode-git-watch".to_string())
+                .spawn(move || imp::run(&root, on_change));
+            if spawned.is_err() {
+                HEALTHY.store(false, Ordering::Release);
+            }
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (repo_root, on_change);
 }
 
 /// Whether an event on `name` inside the git dir can change the widget.
@@ -110,14 +114,20 @@ mod imp {
     }
 
     fn git(root: &Path, args: &[&str]) -> Option<String> {
-        let out = std::process::Command::new("git")
+        let out = match std::process::Command::new("git")
             .current_dir(root)
             .env("GIT_OPTIONAL_LOCKS", "0")
             .args(args)
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
-            .ok()?;
+        {
+            Ok(output) => output,
+            Err(error) => {
+                crate::logging::debug(&format!("Git watcher command failed: {error}"));
+                return None;
+            }
+        };
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())

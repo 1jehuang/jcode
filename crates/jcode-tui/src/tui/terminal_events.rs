@@ -105,9 +105,11 @@ impl ColorReports {
                 return;
             }
             if self.recognized() {
-                let escape = self.held.pop().expect("held split Escape");
+                let escape = self.held.pop();
                 self.reset(false);
-                self.ready.push_back(escape);
+                if let Some(escape) = escape {
+                    self.ready.push_back(escape);
+                }
             } else {
                 self.reset(true);
             }
@@ -174,7 +176,13 @@ fn parse_background_report(body: &str) -> Option<ThemeMode> {
         {
             return None;
         }
-        let value = u32::from_str_radix(component, 16).ok()?;
+        let value = match u32::from_str_radix(component, 16) {
+            Ok(value) => value,
+            Err(error) => {
+                crate::logging::debug(&format!("Invalid terminal color component: {error}"));
+                return None;
+            }
+        };
         let max = (1u32 << (component.len() * 4)) - 1;
         channels.push((value * u32::from(u16::MAX) / max) as u16);
     }
@@ -211,7 +219,8 @@ fn background_query(passthrough: bool) -> &'static [u8] {
 fn tmux_passthrough_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let term = std::env::var("TERM").unwrap_or_default();
+        let term = std::env::var_os("TERM")
+            .map_or_else(String::new, |value| value.to_string_lossy().into_owned());
         if std::env::var_os("TMUX").is_none()
             || !(term.starts_with("tmux") || term.starts_with("screen"))
         {
@@ -241,8 +250,12 @@ fn tmux_passthrough_enabled() -> bool {
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if let Err(error) = child.kill() {
+                        crate::logging::debug(&format!("Failed to stop tmux probe: {error}"));
+                    }
+                    if let Err(error) = child.wait() {
+                        crate::logging::debug(&format!("Failed to reap tmux probe: {error}"));
+                    }
                     return false;
                 }
             }
@@ -365,7 +378,9 @@ impl Stream for EventStream {
             self.tick
                 .as_mut()
                 .reset(tokio::time::Instant::now() + PREFIX_TIMEOUT);
-            let _ = self.tick.as_mut().poll(cx);
+            if self.tick.as_mut().poll(cx).is_ready() {
+                cx.waker().wake_by_ref();
+            }
         }
         if let Some(event) = take_event(&mut state) {
             return Poll::Ready(Some(Ok(event)));
@@ -448,6 +463,21 @@ mod tests {
             filter.push(event.clone(), now);
         }
         assert_eq!(filter.ready.into_iter().collect::<Vec<_>>(), events);
+        assert_eq!(filter.mode, None);
+    }
+
+    #[test]
+    fn missing_split_escape_recovers_without_losing_next_key() {
+        let now = Instant::now();
+        let mut filter = ColorReports {
+            body: "11;rgb:".into(),
+            started: Some(now),
+            split_escape: true,
+            ..ColorReports::default()
+        };
+        let input = key('x', KeyModifiers::NONE);
+        filter.push(input.clone(), now);
+        assert_eq!(filter.ready.into_iter().collect::<Vec<_>>(), vec![input]);
         assert_eq!(filter.mode, None);
     }
 

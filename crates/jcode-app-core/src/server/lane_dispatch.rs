@@ -47,7 +47,11 @@ pub(super) struct LaneDispatchContext {
 static CONTEXT: OnceLock<LaneDispatchContext> = OnceLock::new();
 
 pub(super) fn register_context(context: LaneDispatchContext) {
-    let _ = CONTEXT.set(context);
+    if CONTEXT.set(context).is_err() {
+        crate::logging::warn(
+            "lane dispatch context already registered, retaining original context",
+        );
+    }
 }
 
 /// After a server start or reload, re-run dispatch for every root member so
@@ -225,9 +229,9 @@ fn schedule_queued_retry(session_id: &str) {
         if lanes.is_empty() {
             return;
         }
-        // dispatch re-inserts the session when the cap still holds; that
-        // insert starts a fresh retry task, so this one ends.
-        dispatch(session_id.clone(), lanes).await;
+        // Dispatch re-inserts the session when the cap still holds. That
+        // insert schedules a fresh delayed retry, so this task ends here.
+        dispatch(session_id, lanes).await;
     });
 }
 
@@ -252,7 +256,12 @@ async fn spawn_lane_worker(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
+                .unwrap_or_else(|error| {
+                    crate::logging::warn(&format!(
+                        "lane dispatch clock is before Unix epoch: {error}"
+                    ));
+                    0
+                })
         )),
         None,
         None,
