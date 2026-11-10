@@ -649,6 +649,18 @@ fn handle_termination_signal(sig: i32) -> ! {
     std::process::exit(128 + sig);
 }
 
+/// Another window took over this client's session
+/// (`display.resume_open_elsewhere`). Restore the terminal and exit cleanly:
+/// this is a handover, so the session must not be marked crashed.
+#[cfg(unix)]
+fn handle_replaced_signal() -> ! {
+    crate::tui::record_termination_started();
+    if signal_cleanup_terminal_modes_to(signal_cleanup_stream()) {
+        crate::tui::disable_keyboard_enhancement();
+    }
+    std::process::exit(0);
+}
+
 fn signal_cleanup_terminal_modes_to(mut writer: impl Write) -> bool {
     // The ownership check and the restore writes run under the kitty state
     // lock so an in-flight editor handoff cannot split them: the handoff
@@ -786,6 +798,16 @@ pub fn spawn_session_signal_watchers() {
     spawn_one(libc::SIGTERM, SignalKind::terminate());
     spawn_one(libc::SIGINT, SignalKind::interrupt());
     spawn_one(libc::SIGQUIT, SignalKind::quit());
+
+    tokio::spawn(async move {
+        let kind = SignalKind::from_raw(crate::session_window::CLIENT_REPLACED_SIGNAL);
+        if let Ok(mut stream) = signal(kind)
+            && stream.recv().await.is_some()
+        {
+            crate::logging::info("Session opened in another window; closing this client");
+            handle_replaced_signal();
+        }
+    });
 }
 
 #[cfg(not(unix))]
