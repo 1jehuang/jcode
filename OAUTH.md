@@ -163,9 +163,59 @@ a malformed value is logged and ignored rather than breaking requests.
 
 ### Banked Codex usage resets
 
+To let agents spend an earned reset and continue automatically when the OpenAI
+weekly limit is exhausted, opt in under `[provider]` in `~/.jcode/config.toml`:
+
+```toml
+[provider]
+openai_auto_banked_reset = true
+```
+
+This is disabled by default. Automatic recovery checks fresh, account-scoped
+usage and requires an enforced limit plus exhausted weekly usage, not just a
+rounded percentage or a transient 429. It redeems the soonest-expiring reset for
+that OAuth login and retries the request once when no approved pool route is ready.
+It never purchases credits or enables paid overage. Concurrent agents serialize
+automatic redemption, and uncertain redemption results have a five-minute
+cooldown to avoid spending another reset immediately. Manual resets remain
+available independently of this setting.
+
+Anthropic Fable earned resets have a separate opt-in:
+
+```toml
+[provider]
+anthropic_auto_fable_reset = true
+```
+
+This uses the Fable-specific `cedar_ember` grant, not the five-hour-only
+`juniper_tide` session reset. It requires a named saved OAuth account, fresh
+server-confirmed weekly exhaustion, and a usable earned Fable grant. A successful
+claim must be confirmed against fresh quota before the waiting request resumes.
+Uncertain claims retain a durable journal to prevent another automatic spend.
+It never purchases usage credits. See [Fable reset details](docs/anthropic-fable-resets.md).
+
+Both automatic reset options default to **route first, reset last**. When the
+existing account router can offer another ready account or provider in your
+auto-switch pool, it offers that exact route instead of spending a reset.
+Normal route approval and cross-provider countdown/manual rules still apply.
+Excluded accounts, cooling-down routes, and models that cannot fit the request
+do not postpone reset recovery. To prefer spending a reset before routing instead:
+
+```toml
+[provider]
+auto_reset_only_when_no_routes = false
+```
+
+This ordering option does not enable automatic reset spending by itself. The
+provider-specific opt-in is still required, and the reset must pass fresh
+weekly-exhaustion and earned-grant checks.
+
+Account headers report session, weekly, and each model-specific/additional usage
+window that the provider reports, rather than selecting just one window.
+
 `/reset` (or `/reset usage limits openai`) checks the active OpenAI OAuth account's banked
 resets and shows the selected reset, account, and expiry. It selects the
-soonest-expiring available reset. Nothing is spent until you run
+soonest-expiring available reset. With automatic recovery disabled, nothing is spent until you run
 `/reset usage limits openai confirm`. Use `/reset usage limits openai cancel`
 to dismiss the pending confirmation. API keys cannot redeem these resets.
 

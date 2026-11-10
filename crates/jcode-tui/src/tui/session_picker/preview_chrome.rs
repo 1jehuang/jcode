@@ -99,7 +99,10 @@ fn snapshot_account_info(
     (auth, usage)
 }
 
-fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoWidgetData {
+pub(super) fn selected_info(
+    session: &SessionInfo,
+    extras: Option<&PreviewExtras>,
+) -> InfoWidgetData {
     let mut data = extras
         .and_then(|extras| extras.info_data.clone())
         .unwrap_or_else(|| InfoWidgetData {
@@ -124,6 +127,7 @@ fn selected_info(session: &SessionInfo, extras: Option<&PreviewExtras>) -> InfoW
     data
 }
 
+#[cfg(test)]
 fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> usize {
     let visible_users = session
         .messages_preview
@@ -144,6 +148,7 @@ fn next_prompt_number(session: &SessionInfo, extras: Option<&PreviewExtras>) -> 
 
 /// Draw only the image rows intersecting the scrolling transcript. Raster
 /// images retain their original fit box when partially scrolled off screen.
+#[cfg(test)]
 pub(super) fn draw_images(
     frame: &mut Frame,
     area: Rect,
@@ -226,6 +231,7 @@ pub(super) fn draw_images(
 
 /// Reserve stationary chrome around the scrolling transcript, like the live
 /// layout. At tiny heights prefer preserving one transcript row over widgets.
+#[cfg(test)]
 pub(super) fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -276,6 +282,7 @@ pub(super) fn draw(
 
 /// The same margin measurement and placement engine as the live chat, with
 /// fresh private anchors so preview selection cannot move the live HUD.
+#[cfg(test)]
 pub(super) fn draw_widgets(
     frame: &mut Frame,
     area: Rect,

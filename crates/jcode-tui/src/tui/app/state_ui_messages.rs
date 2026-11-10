@@ -1,3 +1,4 @@
+use super::state_ui_history_marker::parse_compacted_history_marker;
 use super::state_ui_storage::{
     compact_display_message_tool_data, compact_display_messages_for_storage,
 };
@@ -7,7 +8,6 @@ use std::time::{Duration, Instant};
 
 const COMPACTED_HISTORY_CHUNK_MESSAGES: usize = 64;
 const COMPACTED_HISTORY_LOAD_SCROLL_THRESHOLD: usize = 2;
-const COMPACTED_HISTORY_MARKER_PREFIX: &str = "Earlier conversation compacted - ";
 const OVERNIGHT_CARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
@@ -727,6 +727,7 @@ impl App {
         remaining_messages: usize,
         hidden_user_prompts: usize,
     ) {
+        let recent_history = self.recent_history_window_active();
         compact_display_messages_for_storage(&mut messages);
         carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
@@ -739,6 +740,11 @@ impl App {
             hidden_user_prompts,
             pending_request_visible: None,
         };
+        if recent_history {
+            // Once the current transcript is fully visible, its original
+            // compaction marker (if any) becomes the next lazy history source.
+            self.sync_compacted_history_lazy_from_display_messages();
+        }
         self.auto_scroll_paused = true;
         // Older messages are prepended above the current view. If the reader had
         // an anchor captured (they scrolled up to trigger this load), leave the
@@ -897,6 +903,9 @@ impl App {
     }
 
     pub(super) fn maybe_queue_compacted_history_load_with_overshoot(&mut self, overshoot: usize) {
+        if self.recent_history_paging.request.is_some() {
+            return;
+        }
         if !self.auto_scroll_paused {
             return;
         }
@@ -935,7 +944,7 @@ impl App {
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);
             self.set_status_notice(format!(
-                "Loading older compacted history… {} of {}",
+                "Loading older history… {} of {}",
                 next_visible, self.compacted_history_lazy.total_messages
             ));
         } else {
@@ -944,7 +953,79 @@ impl App {
     }
 
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
+        if self
+            .recent_history_paging
+            .retry_at
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return None;
+        }
+        self.recent_history_paging.retry_at = None;
         self.compacted_history_lazy.pending_request_visible.take()
+    }
+
+    pub(super) fn recent_history_window_active(&self) -> bool {
+        self.display_messages.first().is_some_and(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with(crate::protocol::RECENT_HISTORY_MARKER_PREFIX)
+        })
+    }
+
+    /// A response computed before a live append or rewind must not discard it.
+    /// Retry against the new generation while retaining the viewport anchor.
+    pub(super) fn accept_recent_history_response(&mut self, id: u64) -> bool {
+        let Some((expected, version, visible)) = self.recent_history_paging.request else {
+            return !self.recent_history_window_active();
+        };
+        if id != expected {
+            return false;
+        }
+        self.recent_history_paging.request = None;
+        if version != self.display_messages_version {
+            if self.recent_history_window_active() {
+                self.restore_pending_compacted_history_load(visible);
+                self.recent_history_paging.retry_at =
+                    Some(Instant::now() + Duration::from_millis(250));
+            }
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn recent_history_page_contains_visible_tail(
+        &mut self,
+        messages: &mut [DisplayMessage],
+        visible: usize,
+    ) -> bool {
+        if !self.recent_history_window_active() {
+            return true;
+        }
+        compact_display_messages_for_storage(messages);
+        // A busy agent may supply a persisted snapshot. Generation fencing
+        // alone cannot detect a snapshot already stale when we sent the request.
+        // Require its real transcript tail to include the rows on screen, while
+        // ignoring local status notices which are never part of server history.
+        let meaningful = |role: &str| matches!(role, "user" | "assistant" | "tool");
+        let current: Vec<_> = self
+            .display_messages
+            .iter()
+            .filter(|m| meaningful(&m.role))
+            .collect();
+        let incoming: Vec<_> = messages.iter().filter(|m| meaningful(&m.role)).collect();
+        let matches = current.is_empty()
+            || incoming.windows(current.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(&current)
+                    .all(|(new, old)| new.role == old.role && new.content == old.content)
+            });
+        if !matches {
+            self.restore_pending_compacted_history_load(visible);
+            self.recent_history_paging.retry_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        matches
     }
 
     /// Whether there are older compacted-history messages not yet loaded into the
@@ -1064,63 +1145,4 @@ fn carry_over_tool_durations(previous: &[DisplayMessage], incoming: &mut [Displa
             message.duration_secs = Some(*seconds);
         }
     }
-}
-
-fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedHistoryLazyState> {
-    if message.role != "system" {
-        return None;
-    }
-    let rest = message
-        .content
-        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)?;
-
-    if let Some(rest) = rest.strip_prefix("showing all ") {
-        let (total, _) = parse_leading_usize(rest)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: total,
-            remaining_messages: 0,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    let (first, after_first) = parse_leading_usize(rest)?;
-    if after_first.starts_with(" older historical messages hidden. Showing ") {
-        let showing = after_first.strip_prefix(" older historical messages hidden. Showing ")?;
-        let (visible, after_visible) = parse_leading_usize(showing)?;
-        let after_visible = after_visible.strip_prefix(" of ")?;
-        let (total, _) = parse_leading_usize(after_visible)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: visible,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    if after_first.starts_with(" historical messages hidden") {
-        return Some(CompactedHistoryLazyState {
-            total_messages: first,
-            visible_messages: 0,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    None
-}
-
-fn parse_leading_usize(text: &str) -> Option<(usize, &str)> {
-    let end = text
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .last()?;
-    let Ok(value) = text[..end].parse() else {
-        return None;
-    };
-    Some((value, &text[end..]))
 }

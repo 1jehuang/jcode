@@ -23,7 +23,7 @@ static OPENAI_ACCOUNT_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, OpenAIUsageData>>,
 > = std::sync::OnceLock::new();
 
-fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageData>> {
+pub(super) fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageData>> {
     ANTHROPIC_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -322,6 +322,76 @@ mod account_snapshot_tests {
         assert!(!stale.exhausted);
         anthropic_usage_cache().lock().unwrap().remove(&key);
     }
+
+    #[test]
+    fn pool_prefers_fresh_quota_within_priority_tier() {
+        use crate::auth::account_pool::AccountPool;
+        let unknown = "claude:quota-order-unknown".to_string();
+        let healthy = "claude:quota-order-healthy".to_string();
+        let lower = "claude:quota-order-lower".to_string();
+        let mut pool = AccountPool::default();
+        pool.members = vec![unknown.clone(), healthy.clone(), lower.clone()];
+        pool.set_priority(&unknown, 0);
+        pool.set_priority(&healthy, 0);
+        pool.set_priority(&lower, 1);
+        let key = "label:quota-order-healthy".to_string();
+        let data = UsageData {
+            five_hour: 0.2,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        store_anthropic_usage(key.clone(), data.clone());
+        assert_eq!(
+            pool.ordered_members(),
+            vec![healthy.clone(), unknown.clone(), lower.clone()]
+        );
+        let accounts = pool
+            .members
+            .iter()
+            .map(|key| (key.clone(), true))
+            .collect::<Vec<_>>();
+        assert_eq!(pool.partition(&accounts).0[0], healthy);
+        assert_eq!(
+            pool.rotation(
+                "claude",
+                Some("quota-order-lower"),
+                &[
+                    "quota-order-unknown".into(),
+                    "quota-order-healthy".into(),
+                    "quota-order-lower".into()
+                ]
+            )[0],
+            "quota-order-healthy"
+        );
+        pool.set_priority(&healthy, 1);
+        assert_eq!(pool.ordered_members()[0], unknown);
+        pool.set_priority(&healthy, 0);
+        for data in [
+            UsageData {
+                last_error: Some("HTTP 429".into()),
+                ..data.clone()
+            },
+            UsageData {
+                fetched_at: Some(
+                    Instant::now()
+                        - super::super::ANTHROPIC_CACHE_DURATION
+                        - std::time::Duration::from_secs(1),
+                ),
+                ..data.clone()
+            },
+            UsageData {
+                five_hour: 1.0,
+                seven_day: 1.0,
+                ..data.clone()
+            },
+        ] {
+            store_anthropic_usage(key.clone(), data);
+            assert_eq!(pool.ordered_members()[0], unknown);
+        }
+        pool.excluded.push(healthy.clone());
+        assert!(!pool.ordered_members().contains(&healthy));
+        anthropic_usage_cache().lock().unwrap().remove(&key);
+    }
 }
 
 pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_label: Option<&str>) {
@@ -448,7 +518,25 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
 /// Credential refresh callers must respect the shared backoff too, before
 /// attempting any network operation with an expired credential.
 pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageData> {
-    cached_anthropic_usage(cache_key).or_else(|| {
+    let cached = cached_anthropic_usage(cache_key);
+    if let Some(error) = cached.as_ref().and_then(|data| data.last_error.as_deref()) {
+        // Another process may have observed fresh model-response quotas or
+        // repaired the login while this daemon still holds an old failure.
+        if let Some(data) = super::disk_cache::fresh(cache_key) {
+            store_anthropic_usage(cache_key.to_string(), data.clone());
+            return Some(data);
+        }
+        // Only a removed auth failure signifies a relogin. A missing file
+        // must not cancel the RAM copy of a provider's throttle deadline.
+        if super::anthropic_response::is_auth_failure(error) {
+            if let Ok(mut cache) = anthropic_usage_cache().lock() {
+                cache.remove(cache_key);
+            }
+            return None;
+        }
+        return cached;
+    }
+    cached.or_else(|| {
         let data = super::disk_cache::fresh(cache_key)?;
         store_anthropic_usage(cache_key.to_string(), data.clone());
         Some(data)
@@ -730,6 +818,16 @@ pub(super) fn openai_snapshot_from_usage(
     let exhausted = usage.exhausted();
 
     AccountUsageSnapshot {
+        additional_windows: usage
+            .spark
+            .iter()
+            .chain(usage.additional_windows.iter())
+            .map(|window| jcode_protocol::AccountUsageWindow {
+                label: window.name.trim_end_matches(" window").to_string(),
+                usage_ratio: window.usage_ratio,
+                resets_at: window.resets_at.clone(),
+            })
+            .collect(),
         label,
         email,
         exhausted,
@@ -783,6 +881,34 @@ pub(super) fn anthropic_snapshot_from_usage(
     let five_hour_ratio = ratio(usage.five_hour, usage.five_hour_resets_at.as_deref());
     let seven_day_ratio = ratio(usage.seven_day, usage.seven_day_resets_at.as_deref());
     AccountUsageSnapshot {
+        additional_windows: usage
+            .model_scoped
+            .iter()
+            .filter_map(|window| {
+                Some(jcode_protocol::AccountUsageWindow {
+                    label: format!("{} 7d", window.model_name),
+                    usage_ratio: ratio(window.utilization, window.resets_at.as_deref())?,
+                    resets_at: window.resets_at.clone(),
+                })
+            })
+            .chain(
+                usage
+                    .seven_day_opus
+                    .filter(|_| {
+                        !usage
+                            .model_scoped
+                            .iter()
+                            .any(|window| window.model_name.eq_ignore_ascii_case("opus"))
+                    })
+                    .and_then(|value| {
+                        Some(jcode_protocol::AccountUsageWindow {
+                            label: "Opus 7d".into(),
+                            usage_ratio: ratio(value, usage.seven_day_resets_at.as_deref())?,
+                            resets_at: usage.seven_day_resets_at.clone(),
+                        })
+                    }),
+            )
+            .collect(),
         label,
         email,
         exhausted: usage.last_error.is_none()
@@ -797,13 +923,70 @@ pub(super) fn anthropic_snapshot_from_usage(
         resets_at: five_hour_ratio
             .and(usage.five_hour_resets_at.clone())
             .or_else(|| seven_day_ratio.and(usage.seven_day_resets_at.clone())),
-        error: usage.last_error.clone(),
+        error: super::usage_error_with_retry(usage.last_error.clone(), usage.refresh_after),
     }
 }
 
 #[cfg(test)]
 mod stale_account_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn account_snapshot_preserves_all_model_and_future_provider_windows() {
+        let data = UsageData {
+            model_scoped: vec![
+                super::super::ModelScopedUsageWindow {
+                    model_name: "Fable".into(),
+                    utilization: 0.73,
+                    resets_at: None,
+                },
+                super::super::ModelScopedUsageWindow {
+                    model_name: "Future Zenith 界".into(),
+                    utilization: 0.61,
+                    resets_at: None,
+                },
+            ],
+            seven_day_opus: Some(0.28),
+            ..Default::default()
+        };
+        let snapshot = anthropic_snapshot_from_usage("models".into(), None, &data);
+        assert_eq!(snapshot.additional_windows.len(), 3);
+        assert_eq!(snapshot.additional_windows[0].label, "Fable 7d");
+        assert_eq!(snapshot.additional_windows[0].usage_ratio, 0.73);
+        assert_eq!(snapshot.additional_windows[1].label, "Future Zenith 界 7d");
+        assert_eq!(snapshot.additional_windows[1].usage_ratio, 0.61);
+        assert_eq!(snapshot.additional_windows[2].label, "Opus 7d");
+        assert!(snapshot.summary().contains("Fable 7d 73%"));
+        assert!(snapshot.summary().contains("Future Zenith 界 7d 61%"));
+
+        let limits = [
+            "5-hour",
+            "7-day",
+            "Codex Spark",
+            "Future monthly",
+            "Future daily",
+        ]
+        .into_iter()
+        .map(|name| super::super::UsageLimit {
+            name: name.into(),
+            usage_percent: 32.0,
+            resets_at: None,
+        })
+        .collect::<Vec<_>>();
+        let usage = classify_openai_limits(&limits);
+        assert_eq!(usage.additional_windows.len(), 2);
+        let snapshot = openai_snapshot_from_usage("future".into(), None, &usage);
+        assert_eq!(snapshot.additional_windows.len(), 3);
+        assert_eq!(snapshot.additional_windows[0].label, "Codex Spark");
+        assert_eq!(snapshot.additional_windows[1].label, "Future monthly");
+        assert_eq!(snapshot.additional_windows[2].label, "Future daily");
+        assert!(
+            snapshot
+                .additional_windows
+                .iter()
+                .all(|window| window.usage_ratio == 0.32)
+        );
+    }
 
     fn last_good() -> UsageData {
         UsageData {
@@ -830,6 +1013,40 @@ mod stale_account_snapshot_tests {
         assert_eq!(snapshot.seven_day_ratio, Some(0.42));
         assert_eq!(snapshot.error.as_deref(), Some("HTTP 429"));
         assert!(!snapshot.exhausted);
+    }
+
+    #[test]
+    fn additional_model_windows_filter_expiry_invalid_values_and_unproven_stale_data() {
+        let mut data = last_good();
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        data.model_scoped = vec![
+            super::super::ModelScopedUsageWindow {
+                model_name: "Fable".into(),
+                utilization: 0.8,
+                resets_at: Some(future),
+            },
+            super::super::ModelScopedUsageWindow {
+                model_name: "Expired".into(),
+                utilization: 1.0,
+                resets_at: Some(past),
+            },
+            super::super::ModelScopedUsageWindow {
+                model_name: "Invalid".into(),
+                utilization: f32::NAN,
+                resets_at: None,
+            },
+        ];
+        let snapshot = anthropic_snapshot_from_usage("test".into(), None, &data);
+        assert_eq!(snapshot.additional_windows.len(), 1);
+        assert_eq!(snapshot.additional_windows[0].label, "Fable 7d");
+        assert!(!snapshot.exhausted);
+        data.last_success_at = None;
+        assert!(
+            anthropic_snapshot_from_usage("test".into(), None, &data)
+                .additional_windows
+                .is_empty()
+        );
     }
 
     #[test]

@@ -2036,6 +2036,48 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Definitive exhaustion cannot recover by sleeping. Model-scoped
+                // recovery above still gets first refusal, including earned resets.
+                if is_oauth
+                    && !saw_output
+                    && is_account_limit_error(&error_str)
+                    && oauth_account_label.as_deref().is_some_and(|label| {
+                        jcode_base::usage::account_known_exhausted(
+                            jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                            label,
+                        )
+                    })
+                {
+                    // The API often uses the same generic 429 for exhausted plan
+                    // usage and burst throttles. Preserve verified account usage
+                    // evidence so the outer router can skip its countdown too.
+                    if tx
+                        .send(Err(anyhow::anyhow!("Usage exhausted: {e:#}")))
+                        .await
+                        .is_err()
+                    {
+                        jcode_base::logging::debug("Anthropic exhaustion event receiver closed");
+                    }
+                    return;
+                }
+                if !saw_output
+                    && jcode_provider_core::failover::is_definitive_usage_exhaustion(&error_str)
+                {
+                    if tx.send(Err(e)).await.is_err() {
+                        jcode_base::logging::debug("Anthropic exhaustion event receiver closed");
+                    }
+                    return;
+                }
+
+                let retry_recoverable_limit =
+                    error_classification::should_retry_recoverable_rate_limit(
+                        &error_str,
+                        jcode_provider_core::retry_after::retry_after_from_error(&e),
+                        jcode_base::config::Config::load()
+                            .provider
+                            .anthropic_retry_recoverable_rate_limits,
+                    );
+
                 // Account routing owns pre-output OAuth quota/auth failures when
                 // other pool members exist, even if they are cooling down. Let
                 // the router decide whether to rotate or report exhaustion.
@@ -2049,6 +2091,7 @@ async fn run_stream_with_retries(
                     && !response_accepted
                     && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
                     && jcode_base::provider::has_alternate_account_in_pool("claude")
+                    && !retry_recoverable_limit
                 {
                     let _ = tx.send(Err(e)).await;
                     return;
@@ -2303,6 +2346,22 @@ async fn stream_response(
         response.status()
     ));
 
+    if is_oauth && (response.status().is_success() || response.status().as_u16() == 429) {
+        // Model responses already return real subscription limits, including
+        // quota walls. Keep those visible even when usage lookups are throttled.
+        // Recording them avoids a separate, heavily throttled usage lookup
+        // while the account is active. Never attribute API-key quotas here.
+        let headers = response.headers().clone();
+        let label = usage_label.map(str::to_owned);
+        let quota_token = token.clone();
+        tokio::task::spawn_blocking(move || {
+            jcode_base::usage::record_anthropic_response_limits(
+                &quota_token,
+                label.as_deref(),
+                &headers,
+            );
+        });
+    }
     if !response.status().is_success() {
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
@@ -2323,6 +2382,7 @@ async fn stream_response(
     // Parse SSE stream
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
     let mut sse_state = SseStreamState {
         requested_model_base,
         ..SseStreamState::default()
@@ -2346,8 +2406,7 @@ async fn stream_response(
                 );
             }
         };
-        let chunk_str = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&chunk_str);
+        buffer.push_str(&utf8.decode(&chunk));
 
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
@@ -2690,3 +2749,29 @@ mod account_failover_tests;
 
 #[cfg(test)]
 mod account_binding_tests;
+
+#[cfg(test)]
+mod sse_utf8_chunk_tests {
+    use super::parse_sse_event;
+
+    /// Regression for #2087: a multibyte character split across transport
+    /// chunks must not decode to U+FFFD.
+    #[test]
+    fn multibyte_char_split_across_chunks_decodes_cleanly() {
+        let payload = "event: content_block_delta\ndata: {\"text\":\"你好世界\"}\n\n";
+        let bytes = payload.as_bytes();
+        let split = payload.find('你').unwrap() + 1; // inside the 3-byte char
+        let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
+        let mut buffer = String::new();
+        for chunk in [
+            &bytes[..split],
+            &bytes[split..split + 3],
+            &bytes[split + 3..],
+        ] {
+            buffer.push_str(&utf8.decode(chunk));
+        }
+        let event = parse_sse_event(&mut buffer).expect("complete event");
+        assert!(!event.data.contains('\u{FFFD}'));
+        assert!(event.data.contains("你好世界"));
+    }
+}

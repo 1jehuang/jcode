@@ -27,6 +27,7 @@ fn fit_header_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>>
                         .into();
                 }
             }
+            line = account_router::fit_account_row(line, budget);
             let mut fitted = jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, budget);
             fitted.style = line.style;
             fitted.alignment = line.alignment;
@@ -123,6 +124,7 @@ fn standalone_version_line() -> Line<'static> {
 
 /// The persisted subset of the real header. Credentials, transport and binary
 /// versions are deliberately omitted when the selected session does not own them.
+#[cfg(test)]
 pub(crate) fn build_preview_header(
     session: &crate::tui::session_picker::SessionInfo,
     width: u16,

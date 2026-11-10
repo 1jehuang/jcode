@@ -541,6 +541,15 @@ select_build_jobs() {
 # reintroduce per-build churn; the publish guard validates dirty builds via the
 # source fingerprint / mtime path instead of the embedded flag.
 export_git_build_metadata() {
+  # Hosted snapshots have no Git history. Describe against the package's base
+  # tag so build.rs can recover exactly the same commit offset remotely.
+  if [[ -z "${JCODE_BUILD_GIT_TAG+x}" ]] && command -v git >/dev/null 2>&1; then
+    local base_version description
+    base_version="$(awk '/^\[package\]/{package=1; next} /^\[/{package=0} package && /^version *=/{gsub(/"/, "", $3); print $3; exit}' "$repo_root/Cargo.toml")"
+    if [[ -n "$base_version" ]] && description="$(git -C "$repo_root" describe --tags --long --match "v${base_version}" HEAD 2>/dev/null)"; then
+      export JCODE_BUILD_GIT_TAG="$description"
+    fi
+  fi
   # Hosted source snapshots do not include .git. Forward the history alongside
   # the identity metadata so /changelog is populated in hosted self-dev builds.
   # Preserve explicit caller overrides, including an intentionally empty one.
@@ -1078,6 +1087,18 @@ while IFS= read -r -d '' arg; do
 done < <(build_cargo_argv "$@")
 
 start_rust_action_log
+
+# Self-dev builds compile the whole jcode binary, which saturates every core
+# for minutes and drains a laptop battery. When `cargo` is the justrust proxy
+# and the caller has not picked a route, force them onto hosted build
+# machines; justrust brings the optimized binary back into target/selfdev.
+# Opt out with JUSTRUST_REMOTE=off JUSTRUST_LOCAL_REASON=<why>.
+if [[ -z "${JUSTRUST_REMOTE:-}" && "${cargo_argv[0]:-}" == "build" ]] \
+  && [[ " ${cargo_argv[*]} " == *" --profile selfdev "* || " ${cargo_argv[*]} " == *" --profile=selfdev "* ]] \
+  && command -v justrust >/dev/null 2>&1; then
+  export JUSTRUST_REMOTE=force JUSTRUST_REMOTE_REQUIRED=1
+  log "selfdev build: routing to hosted justrust (JUSTRUST_REMOTE=force)"
+fi
 
 if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
   if remote_cargo_preflight; then

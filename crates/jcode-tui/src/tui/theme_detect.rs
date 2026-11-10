@@ -1,6 +1,7 @@
 //! Terminal light/dark theme detection.
 //!
-//! Resolves the theme mode once per process, before the TUI enters raw mode:
+//! Resolves the initial theme before the TUI enters raw mode. Auto mode is
+//! refreshed by `terminal_events` during the session using the existing reader:
 //!
 //! 1. `JCODE_THEME=dark|light` env override (also accepts `auto`).
 //! 2. `display.theme` config: "dark", "light", or "auto"/empty.
@@ -57,6 +58,10 @@ fn take_prewarmed_theme_mode() -> Option<ThemeMode> {
 /// the (potentially blocking, sub-second) terminal query and later calls are
 /// free. Must be called before entering raw mode / the alternate screen.
 pub fn init_theme_mode() -> ThemeMode {
+    if DETECTED.get().is_some() {
+        init_palette();
+        return jcode_tui_style::theme_mode();
+    }
     let mode = match take_prewarmed_theme_mode() {
         Some(prewarmed) => *DETECTED.get_or_init(|| prewarmed),
         None => *DETECTED.get_or_init(resolve_theme_mode),
@@ -74,6 +79,10 @@ pub fn init_theme_mode() -> ThemeMode {
 /// input. Prefer the theme captured by the previous process and otherwise resolve
 /// configuration without querying the terminal.
 pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
+    if DETECTED.get().is_some() {
+        init_palette();
+        return jcode_tui_style::theme_mode();
+    }
     let inherited_theme = inherited_theme.and_then(|value| match value {
         "dark" => Some(ThemeMode::Dark),
         "light" => Some(ThemeMode::Light),
@@ -125,13 +134,45 @@ fn resolve_theme_mode_without_terminal_query() -> ThemeMode {
     resolve_configured_theme(false)
 }
 
-fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
-    let configured = std::env::var("JCODE_THEME")
+fn configured_theme() -> String {
+    std::env::var("JCODE_THEME")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| crate::config::config().display.theme.clone());
+        .unwrap_or_else(|| crate::config::config().display.theme.clone())
+}
 
-    match configured.trim().to_ascii_lowercase().as_str() {
+fn is_auto_theme(configured: &str) -> bool {
+    !matches!(
+        configured.trim().to_ascii_lowercase().as_str(),
+        "dark" | "light"
+    )
+}
+
+pub(super) fn auto_theme_enabled() -> bool {
+    is_auto_theme(&configured_theme())
+}
+
+pub(super) fn runtime_queries_enabled() -> bool {
+    use std::io::IsTerminal;
+    auto_theme_enabled()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && terminal_background_query_supported(
+            // These optional hints must be valid UTF-8 to match known terminal names.
+            std::env::var_os("TERM")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
+            std::env::var_os("TERM_PROGRAM")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
+            std::env::var_os("LC_TERMINAL")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
+        )
+}
+
+fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
+    match configured_theme().trim().to_ascii_lowercase().as_str() {
         "dark" => return ThemeMode::Dark,
         "light" => return ThemeMode::Light,
         "" | "auto" => {}
@@ -269,10 +310,22 @@ fn cache_silent_terminal_at(path: Option<&std::path::Path>, identity: &str) {
     let Some(path) = path else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        crate::logging::debug(&format!(
+            "Failed to create terminal cache directory: {error}"
+        ));
+        return;
     }
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            crate::logging::debug(&format!("Failed to read terminal cache: {error}"));
+            return;
+        }
+    };
     if existing.lines().any(|line| line == identity) {
         return;
     }
@@ -289,7 +342,9 @@ fn cache_silent_terminal_at(path: Option<&std::path::Path>, identity: &str) {
     }
     out.push_str(identity);
     out.push('\n');
-    let _ = std::fs::write(path, out);
+    if let Err(error) = std::fs::write(path, out) {
+        crate::logging::debug(&format!("Failed to save terminal cache: {error}"));
+    }
 }
 
 /// Reject terminal classes that cannot answer OSC 11 before entering the
@@ -317,6 +372,16 @@ mod tests {
         SILENT_TERMINAL_CACHE_MAX, cache_silent_terminal_at, silent_terminal_is_cached_at,
         terminal_background_query_supported,
     };
+
+    #[test]
+    fn explicit_theme_overrides_disable_runtime_detection() {
+        for value in ["dark", "light", " LIGHT ", "Dark"] {
+            assert!(!super::is_auto_theme(value), "{value}");
+        }
+        for value in ["", "auto", " AUTO ", "unknown"] {
+            assert!(super::is_auto_theme(value), "{value}");
+        }
+    }
 
     #[test]
     fn skips_terminals_without_osc_query_support() {

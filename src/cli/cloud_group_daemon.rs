@@ -7,7 +7,7 @@ fn daemon_command(action: &str, payload: &serde_json::Value) -> Result<serde_jso
     std::thread::spawn(move || -> Result<serde_json::Value> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         runtime.block_on(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+            tokio::time::timeout(std::time::Duration::from_secs(90), async move {
                 if !crate::server_spawn::is_running().await {
                     crate::server_spawn::spawn_default_server().await
                         .context("could not start daemon for coordinated migration")?;

@@ -230,19 +230,83 @@ pub(super) async fn inject_transcript(
     )
     .await?;
 
-    let delivered = fanout_session_event(
-        swarm_members,
-        &session_id,
-        ServerEvent::Transcript { text, mode },
-    )
-    .await
-        > 0;
+    // Every attached client submits a transcript it receives, so a session
+    // open in two windows would send it twice. Deliver to the most recently
+    // active attachment only, falling back to fanout when none is known.
+    let event = ServerEvent::Transcript { text, mode };
+    let newest_connection = client_connections
+        .read()
+        .await
+        .values()
+        .filter(|info| info.session_id == session_id)
+        .max_by_key(|info| info.last_seen)
+        .map(|info| info.client_id.clone());
+    let single_target = match newest_connection {
+        Some(connection_id) => {
+            let members = swarm_members.read().await;
+            members
+                .get(&session_id)
+                .and_then(|member| member.event_txs.get(&connection_id))
+                .filter(|tx| !tx.is_closed())
+                .cloned()
+        }
+        None => None,
+    };
+    let delivered = match single_target {
+        Some(tx) if tx.send(event.clone()).is_ok() => true,
+        _ => fanout_session_event(swarm_members, &session_id, event).await > 0,
+    };
 
     if !delivered {
         anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);
     }
 
     Ok(ServerEvent::Done { id })
+}
+
+/// Forward live push-to-talk state to one session's clients. Best effort:
+/// a session without a live client simply has nothing to show.
+pub(super) async fn forward_voice_activity(
+    id: u64,
+    session_id: &str,
+    activity: crate::protocol::VoiceActivity,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> ServerEvent {
+    fanout_session_event(
+        swarm_members,
+        session_id,
+        ServerEvent::VoiceActivity { activity },
+    )
+    .await;
+    ServerEvent::Done { id }
+}
+
+/// Passive, read-only event streams. Matches the commands accepted by
+/// `maybe_handle_event_subscription_command`, which only the server namespace
+/// reaches.
+fn is_event_subscription_command(command: &str) -> bool {
+    let (namespace, command) = parse_namespaced_command(command);
+    namespace == "server"
+        && (command == "events:subscribe" || command.starts_with("events:subscribe:"))
+}
+
+#[cfg(test)]
+mod event_subscription_tests {
+    use super::is_event_subscription_command;
+
+    #[test]
+    fn passive_event_streams_do_not_reserve_activity() {
+        assert!(is_event_subscription_command("events:subscribe"));
+        assert!(is_event_subscription_command(
+            " events:subscribe:status_change,member_change"
+        ));
+        assert!(is_event_subscription_command("server:events:subscribe"));
+        assert!(!is_event_subscription_command("client:events:subscribe"));
+        assert!(!is_event_subscription_command("events:subscribed"));
+        assert!(!is_event_subscription_command("events:recent"));
+        assert!(!is_event_subscription_command("sessions"));
+        assert!(!is_event_subscription_command("group_transfer:inspect:{}"));
+    }
 }
 
 #[expect(
@@ -306,11 +370,25 @@ pub(super) async fn handle_debug_client(
         // shared request reservation here would make it reject its own request.
         let transfer_control = matches!(&request, Request::DebugCommand { command, .. }
             if command.trim().starts_with("group_transfer:") || command.trim().starts_with("server:group_transfer:"));
-        let read_only_probe = matches!(&request, Request::Ping { .. });
+        // An event subscription is a passive stream that stays open for the
+        // life of the observer (status bars, dashboards). Reserving activity
+        // for it would block every group transfer until the observer exits.
+        let read_only_probe = matches!(&request, Request::Ping { .. })
+            || matches!(&request, Request::DebugCommand { command, .. }
+                if is_event_subscription_command(command));
         let _request_activity = match if transfer_control || read_only_probe {
             Ok(None)
         } else {
-            crate::runtime_activity::global().try_enter().map(Some)
+            // Debug commands that name a session only affect that session.
+            match &request {
+                Request::DebugCommand {
+                    session_id: Some(session),
+                    ..
+                } if !session.trim().is_empty() => crate::runtime_activity::global()
+                    .try_enter_session(session)
+                    .map(Some),
+                _ => crate::runtime_activity::global().try_enter().map(Some),
+            }
         } {
             Ok(activity) => activity,
             Err(error) => {
@@ -381,6 +459,15 @@ pub(super) async fn handle_debug_client(
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
+            }
+
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = forward_voice_activity(id, &session_id, activity, &swarm_members).await;
+                writer.write_all(encode_event(&event).as_bytes()).await?;
             }
 
             Request::DebugCommand {

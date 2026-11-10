@@ -464,6 +464,138 @@ impl MultiProvider {
         account_failover::same_provider_account_candidates(provider)
     }
 
+    async fn try_auto_banked_reset(
+        &self,
+        provider: ActiveProvider,
+        reason: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+    ) -> Result<bool> {
+        if !self.provider_uses_oauth_accounts(provider) {
+            return Ok(false);
+        }
+        let config = crate::config::Config::load().provider;
+        let enabled = match provider {
+            ActiveProvider::OpenAI => config.openai_auto_banked_reset,
+            ActiveProvider::Claude => config.anthropic_auto_fable_reset,
+            _ => false,
+        };
+        if !enabled {
+            return Ok(false);
+        }
+        if let Some(prompt) = self.auto_reset_route_prompt(provider, reason, messages, tools, mode)
+        {
+            // Preserve the router's exact-route approval/countdown boundary.
+            // A reset must not spend a grant while a permitted route is ready.
+            let account = self
+                .selected_account_for_provider(provider)
+                .or_else(|| active_account_label_for_provider(provider));
+            models::record_provider_unavailable_for_account_label(
+                Self::provider_key(provider),
+                account.as_deref(),
+                reason,
+            );
+            return Err(anyhow::anyhow!(prompt.to_error_message()));
+        }
+        let account = self
+            .selected_account_for_provider(provider)
+            .or_else(|| active_account_label_for_provider(provider));
+        let reset = match provider {
+            ActiveProvider::OpenAI => crate::usage::auto_reset_weekly_usage(account).await,
+            ActiveProvider::Claude => crate::usage::auto_reset_fable_usage(account).await,
+            _ => return Ok(false),
+        };
+        Ok(match reset {
+            Ok(true) => {
+                self.startup_notices
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(format!(
+                        "{} usage is available again after earned-reset recovery. Continuing automatically.",
+                        Self::provider_label(provider)
+                    ));
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                crate::logging::warn(&format!("Automatic banked reset failed: {error:#}"));
+                false
+            }
+        })
+    }
+
+    /// Use the same capacity, cooldown, pool and context filters as normal failover.
+    fn auto_reset_route_prompt(
+        &self,
+        provider: ActiveProvider,
+        reason: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+    ) -> Option<ProviderFailoverPrompt> {
+        if !crate::config::Config::load()
+            .provider
+            .auto_reset_only_when_no_routes
+        {
+            return None;
+        }
+        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
+    }
+
+    /// Retry only before the stream is accepted, never replay partial output.
+    async fn complete_with_auto_reset(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let mut may_reset = true;
+        loop {
+            let attempt = match mode {
+                CompletionMode::Unified { system } => {
+                    self.complete_on_provider(provider, messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    self.complete_split_on_provider(
+                        provider,
+                        messages,
+                        tools,
+                        system_static,
+                        system_dynamic,
+                        resume_session_id,
+                    )
+                    .await
+                }
+            };
+            let attempt = self.await_account_stream_start(provider, attempt).await;
+            if may_reset
+                && let Err(error) = &attempt
+                && Self::classify_failover_error(error).should_mark_provider_unavailable()
+                && self
+                    .try_auto_banked_reset(
+                        provider,
+                        &Self::summarize_error(error),
+                        messages,
+                        tools,
+                        mode,
+                    )
+                    .await?
+            {
+                may_reset = false;
+                continue;
+            }
+            return attempt;
+        }
+    }
+
     async fn complete_with_failover(
         &self,
         messages: &[Message],
@@ -523,6 +655,9 @@ impl MultiProvider {
             }
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+                && !self
+                    .try_auto_banked_reset(active, &reason, messages, tools, mode)
+                    .await?
             {
                 self.try_same_provider_account_failover(
                     active,
@@ -540,27 +675,9 @@ impl MultiProvider {
                     reason
                 );
             }
-            let attempt = match mode {
-                CompletionMode::Unified { system } => {
-                    self.complete_on_provider(active, messages, tools, system, resume_session_id)
-                        .await
-                }
-                CompletionMode::Split {
-                    system_static,
-                    system_dynamic,
-                } => {
-                    self.complete_split_on_provider(
-                        active,
-                        messages,
-                        tools,
-                        system_static,
-                        system_dynamic,
-                        resume_session_id,
-                    )
-                    .await
-                }
-            };
-            let attempt = self.await_account_stream_start(active, attempt).await;
+            let attempt = self
+                .complete_with_auto_reset(active, messages, tools, mode, resume_session_id)
+                .await;
             match attempt {
                 Ok(stream) => {
                     match active {
@@ -579,6 +696,9 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    if parse_failover_prompt_message(&err.to_string()).is_some() {
+                        return Err(err);
+                    }
                     let decision = Self::classify_failover_error(&err);
                     if decision.should_failover() {
                         let reason = Self::summarize_error(&err);
@@ -654,6 +774,9 @@ impl MultiProvider {
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
+                && !self
+                    .try_auto_banked_reset(candidate, &reason, messages, tools, mode)
+                    .await?
             {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
@@ -681,27 +804,9 @@ impl MultiProvider {
                 continue;
             }
 
-            let attempt = match mode {
-                CompletionMode::Unified { system } => {
-                    self.complete_on_provider(candidate, messages, tools, system, resume_session_id)
-                        .await
-                }
-                CompletionMode::Split {
-                    system_static,
-                    system_dynamic,
-                } => {
-                    self.complete_split_on_provider(
-                        candidate,
-                        messages,
-                        tools,
-                        system_static,
-                        system_dynamic,
-                        resume_session_id,
-                    )
-                    .await
-                }
-            };
-            let attempt = self.await_account_stream_start(candidate, attempt).await;
+            let attempt = self
+                .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
+                .await;
 
             match attempt {
                 Ok(stream) => {
@@ -728,6 +833,9 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    if parse_failover_prompt_message(&err.to_string()).is_some() {
+                        return Err(err);
+                    }
                     let summary = Self::summarize_error(&err);
                     let display_summary = if self.provider_uses_oauth_accounts(candidate) {
                         maybe_annotate_limit_summary(candidate, summary.clone())

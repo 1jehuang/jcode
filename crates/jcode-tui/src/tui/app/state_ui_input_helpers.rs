@@ -221,6 +221,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Move this session and swarm to cloud, or /cloud replace to copy local code",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
+    RegisteredCommand::public(
+        "/mobile",
+        "Move to Jcode Cloud and send a push to resume on mobile",
+    ),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
     RegisteredCommand::public("/auth", "Show authentication status"),
@@ -517,6 +521,10 @@ impl App {
                     "Preview replacing cloud code with local files",
                 ),
                 ("/cloud status".into(), "Show session location"),
+                (
+                    "/cloud reload".into(),
+                    "Restart the cloud daemon onto its new runtime once idle",
+                ),
                 ("/cloud cancel".into(), "Cancel a pending cloud command"),
             ];
             // Typing the command or a trailing space must never add consent.

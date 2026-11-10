@@ -1,7 +1,9 @@
 #[test]
 fn test_cancel_pending_provider_failover_clears_countdown() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let (mut app, _active_provider) = create_switchable_test_app("claude");
         let prompt = crate::provider::ProviderFailoverPrompt {
             from_provider: "claude".to_string(),
@@ -35,7 +37,9 @@ struct FastMockProvider {
 #[test]
 fn test_local_failover_revalidates_pool_after_countdown() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let (mut app, active_provider) = create_switchable_test_app("claude");
         let prompt = crate::provider::ProviderFailoverPrompt {
             from_provider: "claude".into(),
@@ -110,7 +114,9 @@ fn test_local_quota_failure_records_only_exhausted_account_cooldown() {
 #[test]
 fn test_failover_without_exact_target_is_manual_even_in_countdown_mode() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = true\n",
+        );
         let mut app = create_test_app();
         app.handle_turn_error(failover_error_message(
             &crate::provider::ProviderFailoverPrompt {
@@ -995,7 +1001,9 @@ fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
         ("openai", "openai:openai-otter", true),
     ] {
         with_temp_jcode_home(|| {
-            write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+            write_test_config(
+                "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+            );
             let (mut app, active_provider) = create_switchable_test_app(initial_provider);
             // Deliberately stale metadata must not override runtime identity.
             app.session.route_api_method = Some("claude-oauth@stale-account".into());

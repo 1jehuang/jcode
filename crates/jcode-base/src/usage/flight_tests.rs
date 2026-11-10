@@ -31,6 +31,55 @@ fn sample() -> UsageData {
 }
 
 #[test]
+fn reset_offers_reuse_the_single_coordinated_usage_response() {
+    with_home(|runtime| {
+        runtime.block_on(async {
+            assert!(super::super::USAGE_URL.ends_with("?at_wall=1&skip_spend=1"));
+            for (index, status) in [
+                serde_json::json!({"eligible": true, "arm": "reset", "available": true}),
+                serde_json::json!({"eligible": false}),
+                serde_json::Value::Null,
+            ].into_iter().enumerate() {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}/usage?at_wall=1&skip_spend=1", listener.local_addr().unwrap());
+                let body = serde_json::json!({
+                    "five_hour": {"utilization": 20.0},
+                    "seven_day": {"utilization": 30.0},
+                    "juniper_tide": status,
+                }).to_string();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = [0; 8192];
+                    assert!(stream.read(&mut bytes).await.unwrap() > 0);
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                });
+                let label = format!("combined-reset-{index}");
+                let key = format!("label:{label}");
+                let results = futures::future::join_all((0..8).map(|_| {
+                    fetch(key.clone(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.clone(), &url))
+                })).await;
+                assert!(results.iter().all(|result| result.as_ref().unwrap().last_error.is_none()));
+                server.await.unwrap();
+                // The server is gone. Repeated offer reads must use persisted
+                // metadata, not make another request or invent availability.
+                for _ in 0..8 {
+                    let (offer, ineligible) = super::super::anthropic_reset::cached_limit_reset_offer("fixture-only", Some(&label));
+                    assert_eq!(offer.is_some(), index == 0);
+                    assert_eq!(ineligible, index == 1);
+                }
+                assert!(disk_cache::reset_status(&key).is_some());
+                disk_cache::store_error_with_hint(&key, "Usage API error (429)", Some("3600"));
+                assert!(disk_cache::reset_status(&key).is_none());
+                let (offer, ineligible) = super::super::anthropic_reset::cached_limit_reset_offer("fixture-only", Some(&label));
+                assert!(offer.is_none());
+                assert!(!ineligible);
+                fetch(key.clone(), || async { panic!("reset reads must not bypass the usage endpoint's shared 429 backoff") }).await.unwrap();
+            }
+        });
+    });
+}
+
+#[test]
 fn response_diagnostics_capture_only_bounded_printable_retry_hints() {
     let mut log = RequestLog::new("label:diagnostics-test");
     for value in ["120", "Sun, 18 Oct 2026 00:15:00 GMT"] {

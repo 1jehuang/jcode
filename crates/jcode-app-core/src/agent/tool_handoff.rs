@@ -14,6 +14,14 @@ pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> 
         && !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
 }
 
+/// Name a handed-off task after the call's `intent`, so wait rows read
+/// "Waiting for Run parser tests" instead of "Waiting for bash".
+pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> {
+    let intent = input.get("intent")?.as_str()?;
+    let intent = intent.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!intent.is_empty()).then(|| crate::util::truncate_str(&intent, 28).to_string())
+}
+
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
 pub(in crate::agent) async fn execute_with_background(
     registry: Registry,
@@ -34,6 +42,7 @@ async fn execute_with_background_budget(
     let auto_background = auto_background_allowed(&name, &input);
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
+    let display_name = handoff_display_name(&input);
     let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
         registry.execute(&tool_name, input, ctx).await
     })
@@ -42,7 +51,9 @@ async fn execute_with_background_budget(
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
-            let info = crate::background::global().adopt(&name, &session_id, work).await;
+            let info = crate::background::global()
+                .adopt_with_options(&name, display_name, &session_id, true, false, work)
+                .await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
                 name, automatic_handoff_reason(budget), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
@@ -80,8 +91,8 @@ pub(super) fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -
         .get("action")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    let is_wait_like = (tc.name == "bg" && action == "wait")
-        || (tc.name == "swarm" && matches!(action, "await_members" | "run_plan"));
+    let is_wait_like =
+        (tc.name == "bg" && action == "wait") || (tc.name == "swarm" && action == "await_members");
 
     if is_wait_like {
         let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());

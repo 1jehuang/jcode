@@ -745,15 +745,13 @@ impl Session {
             // its `None` means "unknown", not "cleared". Writing it would erase
             // the owner's summary on replay, and the next resume or split would
             // see the full uncompacted transcript and emergency-compact it.
-            if self.persist_state.transcript_stripped {
-                entry_meta.compaction = None;
-                entry_meta.compaction_unchanged = true;
-            } else if entry_meta.compaction.is_some()
-                && self
-                    .persist_state
-                    .last_meta
-                    .as_ref()
-                    .is_some_and(|prev| prev.compaction == entry_meta.compaction)
+            if self.persist_state.transcript_stripped
+                || (entry_meta.compaction.is_some()
+                    && self
+                        .persist_state
+                        .last_meta
+                        .as_ref()
+                        .is_some_and(|prev| prev.compaction == entry_meta.compaction))
             {
                 entry_meta.compaction = None;
                 entry_meta.compaction_unchanged = true;
@@ -881,6 +879,7 @@ impl Session {
             fields.push(("error", crate::util::format_error_chain(error)));
             crate::logging::event_warn("SESSION_PERSISTENCE", fields);
         } else {
+            crate::mobile_sync::notify_session_persisted(&self.id);
             if let Err(error) = crate::recent_session_index::upsert_session(self) {
                 crate::logging::warn(&format!(
                     "Failed to update recent-session metadata for {}: {error}",

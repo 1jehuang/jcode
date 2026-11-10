@@ -157,6 +157,10 @@ timeout_secs = 90
 # without Jcode Desktop. Empty disables it.
 # global_devices = []
 
+# Show live voice input inside the input box: a waveform row above the prompt
+# and the transcript streaming in as ghost text. false uses the status line.
+# composer_preview = true
+
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
@@ -266,6 +270,21 @@ prompt_entry_animation = true
 # disconnected SDK client, since the server cannot observe OS windows directly.
 # resume_recent_close_seconds = 30
 
+# What Resume does when the picked session is already open in another local
+# jcode window (default: "off"). Linux only.
+#   "off":     attach a second client, leave the other window alone
+#   "move":    bring the existing window to the current workspace and focus it
+#              (niri). Falls back to "replace" when the window cannot be moved.
+#   "replace": resume as usual and close the other window's client
+# resume_open_elsewhere = "off"
+
+# Which time Resume shows as "x ago" and sorts by (default: "message").
+#   "message":  newest message of any role (prompts, replies, tool results)
+#   "activity": newest of the last message and the last open/resume
+#   "opened":   last time the session was opened, resumed, or attached
+#   "created":  when the session was created
+# resume_time = "message"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -291,6 +310,7 @@ prompt_entry_animation = true
 # copy_badge_alt_label = ""
 
 # Color theme: "auto" (query the terminal background), "dark", or "light".
+# Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
@@ -342,7 +362,8 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
-# Optional aggregate weak-point follow-up, once per completed todo cycle.
+# Optional automatic todo quality reviews (confidence, ownership, long-session,
+# and aggregate weak-point checks). Disabled by default.
 # Requires auto-poke. Does not control the display-only completion report.
 todo_gate_digest = false
 # Show which disabled end-of-turn gates would have fired in completion reports.
@@ -515,8 +536,22 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Opt in to spending earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: false.
+# openai_auto_banked_reset = true
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
@@ -842,6 +877,29 @@ prevent_sleep_while_streaming = true
 # sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
+
+[companion]
+# `jcode companion` is a per-login helper that handles desktop effects for the
+# shared server. Toggles apply when the companion starts. Restart it
+# (`systemctl --user restart jcode-companion`, or kill it and relaunch Jcode)
+# after changing them.
+# Start it in the background when a Jcode client launches and none is running.
+autostart = true
+# Copilot-key push-to-talk (Linux). Also needs [dictation] global_devices.
+voice = true
+# Live waveform and transcript in the focused Jcode CLI while recording.
+voice_waveform = true
+# Desktop notifications for voice state. When off, recording still needs the
+# waveform to be shown in a Jcode CLI as its visible indicator.
+voice_notifications = true
+# Open URLs and files for the server. Off: clients use their own opener.
+open = true
+# Open new terminal windows for the server. Off: clients launch locally.
+spawn_terminal = true
+# Lid-close override while agents work (macOS/Windows, see [power]).
+lid = true
+# Hourly browser bridge auto-update.
+browser_updates = true
 
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to

@@ -83,6 +83,24 @@ fn http_retry_decision(
     router_case: Option<RouterCase>,
     alternate_cooling_down: bool,
 ) -> (RetryDecision, usize, bool) {
+    http_retry_decision_with_policy(
+        enabled,
+        alternate,
+        response,
+        router_case,
+        alternate_cooling_down,
+        true,
+    )
+}
+
+fn http_retry_decision_with_policy(
+    enabled: bool,
+    alternate: bool,
+    response: &str,
+    router_case: Option<RouterCase>,
+    alternate_cooling_down: bool,
+    retry_recoverable: bool,
+) -> (RetryDecision, usize, bool) {
     let through_router = router_case.is_some();
     let _lock = jcode_base::storage::lock_test_env();
     let home = tempfile::TempDir::new().unwrap();
@@ -131,6 +149,7 @@ fn http_retry_decision(
     jcode_base::provider::models::reset_model_catalog_services_for_tests();
     let mut config = jcode_base::config::Config::default();
     config.provider.same_provider_account_failover = enabled;
+    config.provider.anthropic_retry_recoverable_rate_limits = retry_recoverable;
     config.save().unwrap();
     let mut account_labels = Vec::new();
     for label in if alternate {
@@ -603,6 +622,67 @@ fn rate_limit_http_response() -> String {
         "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+#[test]
+fn oauth_short_throttle_retries_same_account_before_rotation() {
+    let response = rate_limit_http_response().replace("Retry-After: 60", "Retry-After: 3");
+    let (decision, requests, rolled_back) = oauth_http_retry_decision(true, true, &response);
+    assert_eq!(decision, RetryDecision::Retry);
+    assert_eq!(requests, 1);
+    assert!(!rolled_back);
+}
+
+#[test]
+fn oauth_short_throttle_retry_can_be_disabled() {
+    let response = rate_limit_http_response().replace("Retry-After: 60", "Retry-After: 3");
+    let (decision, requests, _) =
+        http_retry_decision_with_policy(true, true, &response, None, false, false);
+    assert!(matches!(decision, RetryDecision::Yield(_)));
+    assert_eq!(requests, 1);
+}
+
+#[test]
+fn oauth_exhausted_usage_never_waits_even_without_alternate() {
+    let body =
+        r#"{"error":{"type":"rate_limit_error","message":"You have reached your usage limit"}}"#;
+    let response = format!(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    for alternate in [false, true] {
+        let (decision, requests, _) = oauth_http_retry_decision(true, alternate, &response);
+        assert!(matches!(decision, RetryDecision::Yield(_)));
+        assert_eq!(requests, 1);
+    }
+}
+
+#[test]
+fn recoverable_throttle_policy_is_bounded_and_not_exhaustion() {
+    use std::time::Duration;
+    let error = "429 too many requests: this request would exceed your account's rate limit";
+    assert!(should_retry_recoverable_rate_limit(error, None, true));
+    assert!(should_retry_recoverable_rate_limit(
+        error,
+        Some(Duration::from_secs(3)),
+        true
+    ));
+    assert!(!should_retry_recoverable_rate_limit(
+        error,
+        Some(Duration::from_secs(60)),
+        true
+    ));
+    assert!(!should_retry_recoverable_rate_limit(error, None, false));
+    assert!(!should_retry_recoverable_rate_limit(
+        "429 usage_limit_reached",
+        None,
+        true
+    ));
+    assert!(!should_retry_recoverable_rate_limit(
+        "401 unauthorized",
+        None,
+        true
+    ));
 }
 
 #[test]

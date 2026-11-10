@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 mod tool_duration;
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
@@ -43,6 +44,7 @@ include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
+include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
@@ -62,6 +64,7 @@ include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/latex_command.rs");
+include!("tests/key_release_redraw.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");

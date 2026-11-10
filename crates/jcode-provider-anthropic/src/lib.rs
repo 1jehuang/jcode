@@ -1195,7 +1195,10 @@ mod cache_prefix_invariant_tests {
         assert_eq!(names.iter().filter(|n| **n == "bash").count(), 1);
         assert_eq!(names.iter().filter(|n| **n == "read").count(), 1);
         for legacy in ["Bash", "Read", "Agent"] {
-            assert!(!names.contains(&legacy), "legacy Claude Code name {legacy} sent");
+            assert!(
+                !names.contains(&legacy),
+                "legacy Claude Code name {legacy} sent"
+            );
         }
     }
 

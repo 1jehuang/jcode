@@ -4,15 +4,36 @@ use super::*;
 pub(super) struct SearchSelection {
     query: String,
     follow_until: Option<std::time::Instant>,
+    last_publish: Option<std::time::Instant>,
+    unpublished_results: bool,
+    /// Rows shown before the query changed, in display order. They stay on
+    /// screen until the worker reports for the new query, so typing never
+    /// blanks or reshuffles the list between keystrokes.
+    held: Option<Vec<String>>,
+    /// When the current query started, for delaying busy chrome.
+    query_changed_at: Option<std::time::Instant>,
 }
 
+/// Searches that finish sooner than this never show busy chrome, so the help
+/// line and border do not blink on every keystroke.
+const BUSY_CHROME_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
 impl SearchSelection {
-    fn update_query(&mut self, query: &str) {
+    /// `shown` lists the rows currently on screen, read only on a change.
+    fn update_query(&mut self, query: &str, shown: impl FnOnce() -> Vec<String>) {
         let query = query.trim().to_lowercase();
         if self.query != query {
+            if query.is_empty() {
+                self.held = None;
+            } else if self.held.is_none() {
+                self.held = Some(shown());
+            }
+            self.query_changed_at = Some(std::time::Instant::now());
             self.follow_until = (!query.is_empty())
                 .then(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
             self.query = query;
+            self.last_publish = Some(std::time::Instant::now());
+            self.unpublished_results = false;
         }
     }
 
@@ -23,6 +44,50 @@ impl SearchSelection {
 
     pub(super) fn stop(&mut self) {
         self.follow_until = None;
+    }
+
+    /// The list still shows the previous query's rows.
+    pub(super) fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Auto-focus was not overridden by manual navigation for this query.
+    fn wants_focus(&self) -> bool {
+        self.follow_until.is_some()
+    }
+
+    /// Whether a still-running search has lasted long enough to say so.
+    pub(super) fn busy_visible(&self) -> bool {
+        self.query_changed_at
+            .is_none_or(|at| at.elapsed() >= BUSY_CHROME_DELAY)
+    }
+
+    #[cfg(test)]
+    pub(super) fn show_busy_for_test(&mut self) {
+        self.query_changed_at = None;
+    }
+
+    /// Coalesce worker batches into at most eight list/preview updates per
+    /// second. Completion always flushes, including a channel disconnect with
+    /// no new results in that poll.
+    fn publish_results(&mut self, changed: bool, pending: bool) -> bool {
+        self.unpublished_results |= changed;
+        let ready = !pending
+            || self
+                .last_publish
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(125));
+        if self.unpublished_results && ready {
+            self.unpublished_results = false;
+            self.last_publish = Some(std::time::Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_next_poll_for_test(&mut self) {
+        self.last_publish = None;
     }
 
     #[cfg(test)]
@@ -36,34 +101,78 @@ mod search_selection_tests {
     use super::*;
 
     #[test]
+    fn progressive_batches_wait_for_publish_interval_but_completion_flushes() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("needle", Vec::new);
+        assert!(!selection.publish_results(true, true));
+        assert!(!selection.publish_results(true, true));
+        selection.last_publish =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(126));
+        assert!(selection.publish_results(false, true));
+        assert!(!selection.publish_results(false, true));
+        assert!(!selection.publish_results(true, true));
+        assert!(selection.publish_results(false, false));
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
+    fn changing_query_discards_unpublished_results() {
+        let mut selection = SearchSelection::default();
+        selection.update_query("old", Vec::new);
+        assert!(!selection.publish_results(true, true));
+        selection.update_query("new", Vec::new);
+        assert!(!selection.publish_results(false, false));
+    }
+
+    #[test]
     fn follows_for_one_second_without_extending_on_rebuild() {
         let mut selection = SearchSelection::default();
-        selection.update_query("needle");
+        selection.update_query("needle", Vec::new);
         assert!(selection.following());
         let deadline = selection.follow_until.unwrap();
-        selection.update_query("needle");
+        selection.update_query("needle", Vec::new);
         assert_eq!(selection.follow_until, Some(deadline));
         selection.follow_until = Some(std::time::Instant::now());
         assert!(!selection.following());
-        selection.update_query("needle");
+        selection.update_query("needle", Vec::new);
         assert!(
             !selection.following(),
             "same query must not restart an expired window"
         );
-        selection.update_query("another query");
+        selection.update_query("another query", Vec::new);
         assert!(selection.following());
         selection.stop();
-        selection.update_query("another query");
+        selection.update_query("another query", Vec::new);
         assert!(
             !selection.following(),
             "refresh must not undo a manual override"
         );
-        selection.update_query("");
+        selection.update_query("", Vec::new);
         assert!(!selection.following());
     }
 }
 
 impl SessionPicker {
+    /// Commit the best evidence available when queued Enter completes or its
+    /// time budget expires. This never restarts the auto-follow deadline.
+    pub(super) fn rebuild_items_following(&mut self) {
+        let selected = self.selected_session().map(|session| session.id.clone());
+        let scroll = self.scroll_offset;
+        let auto_scroll = self.auto_scroll_preview;
+        self.cached_search_query.clear();
+        self.cached_search_refs.clear();
+        self.rebuild_items();
+        self.list_state
+            .select(self.item_to_session.iter().position(Option::is_some));
+        if self.selected_session().map(|session| &session.id) == selected.as_ref() {
+            self.scroll_offset = scroll;
+            self.auto_scroll_preview = auto_scroll;
+        } else {
+            self.scroll_offset = 0;
+            self.auto_scroll_preview = true;
+        }
+    }
+
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
     }
@@ -107,35 +216,66 @@ impl SessionPicker {
             return self.all_session_refs();
         }
 
-        // Keep literal matches immediate. Expensive typo-tolerant matching is
-        // scheduled immediately on the worker alongside transcript search,
-        // never on the UI thread. Reconsider all sessions for new worker results.
+        // Only consume worker evidence here. Metadata and structured identity
+        // matching run on the worker, regardless of history size.
         let candidates = self.all_session_refs();
-        let tokens = loading::search_query_tokens(&normalized);
-
         let matches = candidates
             .into_iter()
             .filter(|session_ref| {
-                self.session_by_ref(*session_ref).is_some_and(|session| {
-                    identity_search::rank(session, &tokens).0
-                        || (!self.transcript_search.defers_metadata()
-                            && tokens
-                                .iter()
-                                .all(|token| session.search_index.contains(token)))
-                        || self.transcript_search.contains(&session.id)
-                })
+                self.session_by_ref(*session_ref)
+                    .is_some_and(|session| self.transcript_search.contains(&session.id))
             })
             .collect::<Vec<_>>();
+
+        // Until the worker reports for this query, keep the rows already on
+        // screen instead of blanking the list or showing a partial one.
+        let hold = self.search_selection.holding()
+            && self.transcript_search.pending()
+            && !self.transcript_search.has_results()
+            && (self.transcript_search.defers_metadata() || matches.is_empty());
+        let matches = match self.search_selection.held.take() {
+            Some(held) if hold => {
+                let by_id: std::collections::HashMap<&str, SessionRef> = self
+                    .all_session_refs()
+                    .into_iter()
+                    .filter_map(|session_ref| {
+                        Some((self.session_by_ref(session_ref)?.id.as_str(), session_ref))
+                    })
+                    .collect();
+                let refs = held
+                    .iter()
+                    .filter_map(|id| by_id.get(id.as_str()).copied())
+                    .collect();
+                self.search_selection.held = Some(held);
+                refs
+            }
+            _ => matches,
+        };
 
         self.cached_search_query = normalized;
         self.cached_search_refs = matches.clone();
         matches
     }
 
+    /// A running search has lasted long enough to be worth announcing.
+    pub(super) fn search_busy_visible(&self) -> bool {
+        self.transcript_search.pending() && self.search_selection.busy_visible()
+    }
+
     /// Called once per rendered frame, so completed scans update results even
     /// when the user is not typing. Never wait for the worker on the UI thread.
     pub(super) fn poll_transcript_search(&mut self) {
-        if self.transcript_search.poll() {
+        if std::mem::take(&mut self.search_edit_pending) {
+            self.rebuild_items();
+        }
+        let changed = self.transcript_search.poll();
+        // A search that ends without any result must still release held rows.
+        let release = self.search_selection.holding() && !self.transcript_search.pending();
+        if self
+            .search_selection
+            .publish_results(changed, self.transcript_search.pending())
+            || release
+        {
             let selected = self.selected_session().map(|session| session.id.clone());
             let preview_scroll = self.scroll_offset;
             let auto_scroll = self.auto_scroll_preview;
@@ -165,51 +305,26 @@ impl SessionPicker {
                 })
             })
             .collect::<Vec<_>>();
+        if self.search_selection.holding() {
+            // Held rows keep the order they were last displayed in.
+            return filtered;
+        }
 
-        filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        filtered.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
-        // Cache once per candidate, never run matching from the comparator.
-        // Stable sorting keeps recency as the deterministic final tie-break.
+        // Sort only numeric evidence computed by the worker. Stable sorting
+        // keeps recency as the deterministic final tie-break.
         if !self.search_query.trim().is_empty() {
-            let normalized = Self::normalized_search_query(&self.search_query);
-            let tokens = loading::search_query_tokens(&normalized);
             filtered.sort_by_cached_key(|session_ref| {
                 std::cmp::Reverse(self.session_by_ref(*session_ref).map(|session| {
-                    let rank = if self.transcript_search.contains(&session.id) {
-                        self.transcript_search.rank(&session.id)
-                    } else if self.transcript_search.defers_metadata() {
-                        transcript_search::SearchRank::default()
-                    } else {
-                        transcript_search::literal_metadata_rank(&session.search_index, &tokens)
-                            .with_exact_field(transcript_search::exact_metadata_field(
-                                session,
-                                &normalized,
-                            ))
-                    };
-                    // A renamed conversation's opening request is stronger
-                    // intent evidence than incidental matches in tool output.
-                    let fields = [
-                        session.title.as_str(),
-                        session.save_label.as_deref().unwrap_or(""),
-                        session.first_user_prompt.as_deref().unwrap_or(""),
-                    ];
-                    let fields = fields.map(transcript_search::lowercase_field);
-                    let intent_terms = tokens
-                        .iter()
-                        .filter(|token| fields.iter().any(|field| field.contains(token.as_str())))
-                        .count();
                     (
-                        identity_search::rank(session, &tokens),
-                        rank.with_intent_terms(intent_terms),
+                        self.transcript_search.identity_rank(&session.id),
+                        self.transcript_search.rank(&session.id),
                     )
                 }))
             });
@@ -317,14 +432,42 @@ impl SessionPicker {
 
     /// Rebuild the items list based on current filters.
     pub(super) fn rebuild_items(&mut self) {
+        self.search_edit_pending = false;
+        let selected = self.selected_session().map(|session| session.id.clone());
+        let (scroll, auto_scroll) = (self.scroll_offset, self.auto_scroll_preview);
+        self.rebuild_items_inner();
+        // Held rows keep their preview position too, so the pane does not
+        // jump while the next results are still being computed.
+        if self.search_selection.holding()
+            && self.selected_session().map(|session| &session.id) == selected.as_ref()
+        {
+            self.scroll_offset = scroll;
+            self.auto_scroll_preview = auto_scroll;
+        }
+    }
+
+    fn rebuild_items_inner(&mut self) {
         let current_selected_id = self.selected_session().map(|session| session.id.clone());
         let show_test = self.show_test_sessions;
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
-        self.search_selection.update_query(&search_query);
-        let current_selected_id =
-            current_selected_id.filter(|_| !self.search_selection.following());
+        let mut selection = std::mem::take(&mut self.search_selection);
+        selection.update_query(&search_query, || {
+            self.visible_sessions
+                .iter()
+                .filter_map(|session_ref| Some(self.session_by_ref(*session_ref)?.id.clone()))
+                .collect()
+        });
+        self.search_selection = selection;
+        let was_holding = self.search_selection.holding();
         let search_matches = self.search_matched_session_refs(&search_query);
+        // Focus the best match while following the query, and when held rows
+        // give way to real results. Held rows themselves keep the selection.
+        let holding = self.search_selection.holding();
+        let focus_best = !holding
+            && (self.search_selection.following()
+                || (was_holding && self.search_selection.wants_focus()));
+        let current_selected_id = current_selected_id.filter(|_| !focus_best);
         let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 
         self.items.clear();
@@ -384,16 +527,12 @@ impl SessionPicker {
             }
         }
 
-        saved_sessions.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+        saved_sessions.sort_by_cached_key(|session_ref| {
+            std::cmp::Reverse(
+                self.session_by_ref(*session_ref)
+                    .map(super::session_resume_time)
+                    .unwrap_or_default(),
+            )
         });
 
         if !saved_sessions.is_empty() {

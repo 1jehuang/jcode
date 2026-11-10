@@ -1765,7 +1765,14 @@ impl Agent {
                     ));
 
                     let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
+                        .adopt_with_options(
+                            &tc.name,
+                            tool_handoff::handoff_display_name(&tc.input),
+                            &self.session.id,
+                            true,
+                            false,
+                            tool_handle,
+                        )
                         .await;
 
                     let reason = if automatic_background {

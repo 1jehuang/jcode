@@ -286,7 +286,14 @@ pub(super) async fn handle_lightweight_control_request(
         return Ok(());
     }
 
-    let _request_activity = crate::runtime_activity::global().try_enter()?;
+    // Comm requests name their owning session. Scope admission to it so a
+    // long-lived request (await_members can hold for an hour) only blocks
+    // transfers of that session, not every /cloud move on the runtime.
+    let gate = crate::runtime_activity::global();
+    let _request_activity = match comm_request_session_id(&request) {
+        Some(session) if !session.trim().is_empty() => gate.try_enter_session(session)?,
+        _ => gate.try_enter()?,
+    };
     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -333,6 +340,19 @@ pub(super) async fn handle_lightweight_control_request(
             super::provider_control::handle_invalidate_anthropic_usage(
                 id,
                 account_label,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::NotifyAuthChanged {
+            id, provider, auth, ..
+        } => {
+            super::provider_control::handle_unbound_notify_auth_changed(
+                id,
+                provider,
+                auth,
+                provider_template,
+                sessions,
                 &client_event_tx,
             )
             .await;

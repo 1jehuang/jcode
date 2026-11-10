@@ -377,6 +377,8 @@ fn no_todos_stays_armed_and_quiet() {
 #[test]
 fn completed_work_skips_digest_and_runs_validation_then_final_response_once() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    policy.gate_digest_delivered = true;
     let mut state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Plausible)],
         plan: TodoPlan {
@@ -409,6 +411,35 @@ fn completed_work_skips_digest_and_runs_validation_then_final_response_once() {
         kind(&policy.decide(&state)),
         Some(FollowUpKind::IncompleteTodos)
     );
+}
+
+#[test]
+fn default_policy_skips_all_quality_reviews_but_keeps_open_work_pokes() {
+    let mut spiked = done("ship", ConfidenceState::Verified);
+    spiked.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
+    for item in [spiked, done("ship", ConfidenceState::Speculative)] {
+        let state = TodoSnapshot {
+            todos: vec![item],
+            goals: vec![TodoGoal {
+                delivery_state: Some(DeliveryState::ChangeMade),
+                ..Default::default()
+            }],
+            long_session_review_due: true,
+            ..Default::default()
+        };
+        let mut policy = FollowUpPolicy::new(true);
+        assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+        assert_eq!(policy.decide(&state), Decision::default());
+        let open = TodoSnapshot {
+            todos: vec![todo("continue", "pending")],
+            long_session_review_due: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
 }
 
 #[test]
@@ -496,13 +527,14 @@ fn opted_in_digest_runs_once_and_preserves_validation() {
     policy.reset_cycle();
     assert_eq!(
         kind(&policy.decide(&state)),
-        Some(FollowUpKind::CompletionValidation)
+        Some(FollowUpKind::FinalResponse)
     );
 }
 
 #[test]
 fn ownership_gate_asks_once_per_distinct_gap() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Verified)],
         goals: vec![TodoGoal {
@@ -519,6 +551,7 @@ fn ownership_gate_asks_once_per_distinct_gap() {
 #[test]
 fn confidence_spike_is_challenged_once() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let mut spiked = done("ship", ConfidenceState::Verified);
     spiked.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
     let state = snapshot(vec![spiked]);
@@ -535,6 +568,7 @@ fn confidence_spike_is_challenged_once() {
 #[test]
 fn long_session_review_precedes_poke_and_is_marked() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let state = TodoSnapshot {
         todos: vec![todo("a", "in_progress")],
         long_session_review_due: true,
@@ -548,6 +582,7 @@ fn long_session_review_precedes_poke_and_is_marked() {
 #[test]
 fn exhausted_gate_budget_disarms_with_notice_and_rearms_for_new_work() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let mut sent = 0;
     let mut stopped = false;
     for round in 0..(MAX_GATE_ATTEMPTS as usize + 3) {
@@ -703,6 +738,7 @@ fn delivered_final_does_not_bypass_work_or_quality_gates() {
 fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
     let state = snapshot(vec![done("ship", ConfidenceState::Speculative)]);
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     for _ in 0..MAX_GATE_ATTEMPTS {
         assert_eq!(
             kind(&policy.decide_after_turn(&state, true)),

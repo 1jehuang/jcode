@@ -276,7 +276,8 @@ fn test_usage_report_shows_no_connected_providers_when_results_empty() {
 
     let msg = app.display_messages().last().expect("missing usage card");
     assert_eq!(msg.role, "usage");
-    assert!(msg.content.contains("No connected providers"));
+    assert!(msg.content.starts_with("*none\tnot connected"));
+    assert!(msg.content.contains("No providers are connected yet"));
     assert!(msg.content.contains("/login claude"));
     assert!(msg.content.contains("/login openai"));
 }

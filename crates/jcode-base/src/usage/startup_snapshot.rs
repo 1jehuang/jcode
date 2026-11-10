@@ -202,18 +202,25 @@ fn snapshot_age(
 /// stays unknown. Callers must skip this entirely for SSH-forwarded sockets.
 /// Returns true only when an actual (possibly empty) snapshot was imported.
 pub fn hydrate_remote_account_usage(socket: &Path) -> bool {
+    let generation = super::remote_accounts::remote_account_usage_generation();
+    hydrate_remote_account_usage_for_generation(socket, generation)
+}
+
+/// Read a startup hint off the async connection path. A live daemon reply or
+/// another connection reset invalidates the generation while disk I/O runs.
+pub fn hydrate_remote_account_usage_for_generation(socket: &Path, generation: u64) -> bool {
     let Some(socket) = normalized_socket(socket) else {
         return false;
     };
     let Some((snapshot, age)) = read_snapshot(&socket, &cache_path(&socket)) else {
         return false;
     };
-    super::remote_accounts::set_remote_account_usage_with_age(
+    super::remote_accounts::import_remote_account_usage(
+        generation,
         snapshot.anthropic,
         snapshot.openai,
         age,
-    );
-    true
+    )
 }
 
 fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
@@ -232,6 +239,21 @@ fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
 
 fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
     for account in accounts {
+        account.additional_windows.retain(|window| {
+            !window
+                .resets_at
+                .as_deref()
+                .and_then(|reset| match chrono::DateTime::parse_from_rfc3339(reset) {
+                    Ok(reset) => Some(reset),
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Keeping usage window with invalid reset timestamp: {error}"
+                        ));
+                        None
+                    }
+                })
+                .is_some_and(|reset| i128::from(reset.timestamp_millis()) <= i128::from(now_ms))
+        });
         let expired = account
             .resets_at
             .as_deref()
@@ -309,6 +331,7 @@ mod tests {
         // Keep test artifacts inside the temporary directory, not global cache.
         publisher.path = dir.path().join("usage.json");
         let account = AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: Some("private@example.test".into()),
             exhausted: false,
@@ -318,6 +341,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         };
         publisher.publish(&[], &[account]).unwrap();
         let bytes = read_private(&publisher.path).unwrap();
@@ -359,6 +385,28 @@ mod tests {
     #[test]
     fn reset_boundary_discards_exhaustion_but_preserves_error() {
         let mut accounts = vec![AccountUsageSnapshot {
+            additional_windows: vec![
+                jcode_protocol::AccountUsageWindow {
+                    label: "Fable".into(),
+                    usage_ratio: 0.9,
+                    resets_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Future".into(),
+                    usage_ratio: 0.3,
+                    resets_at: Some("2099-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Invalid reset".into(),
+                    usage_ratio: 0.7,
+                    resets_at: Some("not-a-timestamp".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Unknown reset".into(),
+                    usage_ratio: 0.8,
+                    resets_at: None,
+                },
+            ],
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -368,13 +416,21 @@ mod tests {
             seven_day_ratio: Some(0.5),
             resets_at: Some("2026-01-01T00:00:00Z".into()),
             error: Some("Usage unavailable".into()),
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         }];
         let reset = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
             .timestamp_millis() as u64;
         discard_expired_windows(&mut accounts, reset - 1);
+        assert_eq!(accounts[0].additional_windows.len(), 4);
         assert!(accounts[0].exhausted);
         discard_expired_windows(&mut accounts, reset);
+        assert_eq!(accounts[0].additional_windows.len(), 3);
+        assert_eq!(accounts[0].additional_windows[1].label, "Invalid reset");
+        assert_eq!(accounts[0].additional_windows[2].label, "Unknown reset");
+        assert_eq!(accounts[0].additional_windows[0].label, "Future");
         assert!(!accounts[0].exhausted);
         assert!(accounts[0].five_hour_ratio.is_none());
         assert!(accounts[0].seven_day_ratio.is_none());

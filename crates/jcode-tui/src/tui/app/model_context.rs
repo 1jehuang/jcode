@@ -376,10 +376,8 @@ impl App {
             prompt.from_label, reason, prompt.to_label,
         );
 
-        match crate::config::Config::load()
-            .provider
-            .cross_provider_failover
-        {
+        let config = crate::config::Config::load().provider;
+        match config.cross_provider_failover {
             crate::config::CrossProviderFailoverMode::Manual => {
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
@@ -393,9 +391,11 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
+                let immediate = config.exhausted_usage_immediate_failover
+                    && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
-                    deadline: Instant::now() + Duration::from_secs(3),
+                    deadline: Instant::now() + Duration::from_secs(if immediate { 0 } else { 3 }),
                     remote_resend,
                 });
                 // One line for the cause, one line for the switch. Nothing else.
@@ -409,6 +409,18 @@ impl App {
                         "{}: {}",
                         prompt.from_label, reason
                     )));
+                }
+                if immediate {
+                    // Reuse the normal switch path, including target/pool revalidation
+                    // and remote route acknowledgement before resending the payload.
+                    self.maybe_progress_provider_failover_countdown();
+                    if self.pending_automatic_failover_route.is_some() {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "↪ Switching to {}. Retrying after route confirmation.",
+                            prompt.to_label
+                        )));
+                    }
+                    return;
                 }
                 self.push_display_message(DisplayMessage::system(
                     Self::failover_countdown_message(&prompt.to_label),
@@ -591,8 +603,11 @@ impl App {
         error: &str,
         remote_resend: Option<super::FallbackResendPayload>,
     ) -> bool {
-        // Never compete with the automatic countdown switcher.
-        if self.pending_provider_failover.is_some() {
+        // Never compete with the automatic countdown switcher. A migration
+        // lease block is not a provider failure: switching model cannot help.
+        if self.pending_provider_failover.is_some()
+            || error.contains("Session is not runnable here")
+        {
             return false;
         }
         let routes = self.fallback_candidate_routes();
@@ -675,7 +690,7 @@ impl App {
             &current_provider,
             &current_api_method,
             options,
-            &pool.members,
+            &pool.ordered_members(),
         );
         if automatic {
             // Never let an excluded preferred route hide an approved later one.
@@ -1667,11 +1682,17 @@ impl App {
     /// Replace the most recent run of consecutive usage cards in place, so a
     /// refresh updates its own cards instead of stacking duplicates.
     fn replace_usage_cards(&mut self, cards: Vec<(String, String)>) {
-        let Some(end) = self
-            .display_messages
-            .iter()
-            .rposition(|message| message.role == "usage")
-        else {
+        // Other cards share the "usage" role (e.g. `/cache` stats), so match
+        // report cards by title or by the provider-card row protocol.
+        let is_report = |message: &DisplayMessage| {
+            message.role == "usage"
+                && (message.content.starts_with('*')
+                    || message
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| title == "Usage" || title.starts_with("Usage · ")))
+        };
+        let Some(end) = self.display_messages.iter().rposition(is_report) else {
             for (title, content) in cards {
                 let mut message = DisplayMessage::usage(content);
                 message.title = Some(title);
@@ -1681,7 +1702,7 @@ impl App {
         };
         let start = self.display_messages[..end]
             .iter()
-            .rposition(|message| message.role != "usage")
+            .rposition(|message| !is_report(message))
             .map_or(0, |idx| idx + 1);
         let unchanged = end + 1 - start == cards.len()
             && self.display_messages[start..=end].iter().zip(&cards).all(
@@ -1736,23 +1757,23 @@ impl App {
         let title = self.usage_status_title();
         let mut cards = Vec::new();
         if refreshing {
-            let heading = if total > 0 {
-                format!("# Refreshing usage ({}/{})", completed.min(total), total)
-            } else if from_cache {
-                "# Showing cached usage while refreshing".to_string()
+            let status = if total > 0 {
+                format!("refreshing {}/{}", completed.min(total), total)
             } else {
-                "# Refreshing usage".to_string()
+                "refreshing".to_string()
             };
-            cards.push((
-                title,
-                format!("{heading}\nChecking connected provider limits..."),
-            ));
+            let note = if from_cache {
+                "Showing cached usage while live limits load…"
+            } else {
+                "Checking connected provider limits…"
+            };
+            cards.push((title, format!("*busy\t{status}\n- {note}")));
         } else if shown.is_empty() {
             let content = match &self.usage_provider_filter {
                 Some(filter) => format!(
-                    "# No connected provider matches \"{filter}\"\nRun `/usage` to see every connected provider."
+                    "*none\tno match\n- No connected provider matches \"{filter}\".\n- Run `/usage` to see every connected provider."
                 ),
-                None => "# No connected providers\nUse `/login claude` or `/login openai`, then run `/usage` again.".to_string(),
+                None => "*none\tnot connected\n- No providers are connected yet.\n- Run `/login claude` or `/login openai`, then `/usage` again.".to_string(),
             };
             return vec![(title, content)];
         }
@@ -1765,18 +1786,21 @@ impl App {
         cards
     }
 
-    /// Card body for one provider. Rows use a small text protocol that
-    /// `ui_messages::usage` styles: a `*level\\tstatus` row, `=` gauge rows
-    /// (`label\tpercent\treset`), and indented detail rows.
+    /// Card body for one provider, in the row protocol that
+    /// `ui_messages::usage::ProviderCard` renders: a `*level\tstatus` header
+    /// (`*%\tpeak` for utilization), `= label\tpct\treset` gauges,
+    /// `: key\tvalue` details (`+` highlights the value), `! alert`, `- note`,
+    /// and blank spacer rows.
     fn format_usage_provider_card(provider: &crate::usage::ProviderUsage) -> String {
+        let one_line = |text: &str| text.replace(['\t', '\n'], " ");
         let mut lines = vec![Self::format_usage_provider_summary(provider)];
 
         if let Some(error) = &provider.error {
-            lines.push(format!("  error: {}", error));
+            lines.push(format!("! {}", one_line(error)));
             return lines.join("\n");
         }
         if provider.hard_limit_reached {
-            lines.push("  hard limit reached".to_string());
+            lines.push("! Hard limit reached".to_string());
         }
 
         for limit in &provider.limits {
@@ -1787,15 +1811,21 @@ impl App {
                 .unwrap_or_default();
             lines.push(format!(
                 "= {}\t{:.0}%\t{}",
-                limit.name.replace('\t', " "),
+                one_line(&limit.name),
                 limit.usage_percent.clamp(0.0, 100.0),
                 reset
             ));
         }
 
+        let mut details = Vec::new();
         if let Some(credits) = &provider.openai_reset_credits {
-            lines.push(format!(
-                "  Banked resets: {} available",
+            let marker = if credits.available_count > 0 {
+                '+'
+            } else {
+                ':'
+            };
+            details.push(format!(
+                "{marker} Banked resets\t{} available",
                 credits.available_count
             ));
         }
@@ -1807,17 +1837,28 @@ impl App {
                 .map(crate::usage::format_reset_time)
                 .map(|time| format!(" · next in {}", time))
                 .unwrap_or_default();
-            lines.push(format!(
-                "  Session resets: {} available{}",
+            let marker = if offer.available { '+' } else { ':' };
+            details.push(format!(
+                "{marker} Session resets\t{} available{}",
                 u64::from(offer.available),
                 next
             ));
         }
         for (key, value) in &provider.extra_info {
-            lines.push(format!("  {}: {}", key, value));
+            let mut key = one_line(key);
+            if let Some(first) = key.get(..1) {
+                key = first.to_uppercase() + &key[1..];
+            }
+            details.push(format!(": {}\t{}", key, one_line(value)));
         }
-        if lines.len() == 1 && provider.limits.is_empty() {
-            lines.push("  no usage data available".to_string());
+        if !details.is_empty() {
+            if !provider.limits.is_empty() {
+                lines.push(String::new());
+            }
+            lines.extend(details);
+        }
+        if lines.len() == 1 {
+            lines.push("- No usage data reported for this account.".to_string());
         }
         lines.join("\n")
     }
@@ -1829,25 +1870,20 @@ impl App {
         if provider.hard_limit_reached {
             return "*crit\thard limit".to_string();
         }
-        let max_percent = provider
+        if let Some(peak) = provider
             .limits
             .iter()
             .map(|limit| limit.usage_percent)
-            .fold(0.0_f32, f32::max);
-        if provider.limits.is_empty()
-            && provider.extra_info.is_empty()
+            .reduce(f32::max)
+        {
+            format!("*%\t{:.0}", peak.clamp(0.0, 100.0))
+        } else if provider.extra_info.is_empty()
             && provider.openai_reset_credits.is_none()
             && provider.anthropic_limit_reset.is_none()
         {
             "*none\tno data".to_string()
-        } else if max_percent >= 90.0 {
-            format!("*crit\t{:.0}% used", max_percent)
-        } else if max_percent >= 70.0 {
-            format!("*warn\t{:.0}% used", max_percent)
-        } else if max_percent > 0.0 {
-            format!("*ok\t{:.0}% used", max_percent)
         } else {
-            "*ok\tavailable".to_string()
+            "*ok\tconnected".to_string()
         }
     }
 
