@@ -391,13 +391,19 @@ fn wait_for_search(picker: &mut SessionPicker) {
 fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
     let query = "repair the broken search";
     let candidate = |id: &str, intent: &str, opening: &str| Candidate {
-        id: id.into(),
-        paths: Vec::new(),
-        search_index: query.into(),
+        entry: Arc::new(Entry {
+            id: id.into(),
+            paths: Vec::new(),
+            search_index: query.into(),
+            title: String::new(),
+            short_name: String::new(),
+            save_label: None,
+            has_prompt: !opening.is_empty(),
+            opening_prompt: opening.into(),
+            intent_text: intent.into(),
+        }),
         missing_tokens: Vec::new(),
         exact_field: false,
-        opening_prompt: opening.into(),
-        intent_text: intent.into(),
         prior: Vec::new(),
     };
     let candidates = vec![
@@ -547,7 +553,7 @@ fn picker_finds_unsampled_middle_without_loading_preview() {
     picker.search_query = "MIDDLEONLYPLATYPUS title".into();
     picker.rebuild_items();
     assert!(
-        picker.visible_sessions.is_empty(),
+        picker.search_selection.holding() && !picker.transcript_search.has_results(),
         "sample must not already contain the needle"
     );
     assert!(picker.pending_preview_load.is_none());
@@ -603,7 +609,9 @@ fn fuzzy_metadata_matching_runs_on_worker_not_on_keystroke() {
     let mut picker = SessionPicker::new(vec![session]);
     picker.search_query = "conifg".into();
     picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    // The row on screen is the held pre-query list, not a match.
+    assert!(picker.search_selection.holding());
+    assert!(!picker.transcript_search.has_results());
     assert!(picker.transcript_search.receiver.is_none());
     assert_eq!(picker.transcript_search.candidates.len(), 1);
     assert_eq!(
@@ -665,11 +673,10 @@ fn large_history_defers_even_literal_metadata_matching() {
     picker.search_query = "modal cli".into();
     picker.rebuild_items();
     assert!(picker.transcript_search.defers_metadata());
-    assert!(picker.visible_sessions.is_empty());
-    assert_eq!(
-        picker.transcript_search.candidates[0].missing_tokens,
-        ["modal", "cli"]
-    );
+    assert!(picker.search_selection.holding());
+    // Candidate selection reads every index, so it is left to the worker.
+    assert!(picker.transcript_search.candidates.is_empty());
+    assert!(picker.transcript_search.pending());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, "large");
     assert!(picker.transcript_search.contains_literal("large"));
@@ -785,7 +792,7 @@ fn native_picker_finds_middle_omitted_from_real_list_index() {
     let mut picker = SessionPicker::new(vec![info]);
     picker.search_query = "NATIVESEARCHMIDDLEPLATYPUS".into();
     picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    assert!(picker.search_selection.holding());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, id);
 }
@@ -894,6 +901,7 @@ fn pending_search_visually_distinguishes_auto_focus_from_user_control() {
     picker.transcript_search.receiver = Some(receiver);
     let backend = ratatui::backend::TestBackend::new(100, 12);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    picker.search_selection.show_busy_for_test();
     let mut render = |picker: &mut SessionPicker| {
         terminal
             .draw(|frame| picker.render_session_list_impl(frame, frame.area(), true))
@@ -915,4 +923,50 @@ fn pending_search_visually_distinguishes_auto_focus_from_user_control() {
     let completed = render(&mut picker);
     assert!(!completed.contains("finding best match"));
     assert!(!completed.contains("searching in background"));
+}
+
+#[test]
+fn typing_keeps_previous_rows_until_results_arrive_then_releases_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut keep = external_session("keep", &temp.path().join("absent-a.jsonl"));
+    keep.search_index = "needle".into();
+    let mut drop_me = external_session("drop", &temp.path().join("absent-b.jsonl"));
+    drop_me.search_index = "other".into();
+    let mut picker = SessionPicker::new(vec![keep, drop_me]);
+    let before = picker.visible_sessions.len();
+    // A typo has no literal match yet: the list must not blank meanwhile.
+    picker.search_query = "nedle".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), before);
+    assert!(picker.search_selection.holding());
+    // Enter must not resume a row that belongs to the previous query.
+    assert!(picker.queue_search_submission(KeyModifiers::NONE));
+    picker.pending_search_submission = None;
+    wait_for_search(&mut picker);
+    assert!(!picker.search_selection.holding());
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(picker.selected_session().unwrap().id, "keep");
+    // A query nothing matches ends with an empty list, not stale rows.
+    picker.search_query = "zzzzqqqq".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+    wait_for_search(&mut picker);
+    assert!(picker.visible_sessions.is_empty());
+    assert!(!picker.search_selection.holding());
+}
+
+#[test]
+fn unchanged_sessions_share_their_index_across_keystrokes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = external_session("big", &temp.path().join("absent.jsonl"));
+    session.search_index = format!("{} modal", "x".repeat(IMMEDIATE_METADATA_BYTES + 1));
+    let mut search = TranscriptSearch::default();
+    search.reset("m", std::iter::once(&session));
+    let first = search.corpus[0].clone();
+    search.reset("mo", std::iter::once(&session));
+    assert!(Arc::ptr_eq(&first, &search.corpus[0]));
+    assert!(search.candidates.is_empty(), "candidates are worker work");
+    session.search_index.push_str(" refreshed");
+    search.reset("mod", std::iter::once(&session));
+    assert!(!Arc::ptr_eq(&first, &search.corpus[0]));
 }

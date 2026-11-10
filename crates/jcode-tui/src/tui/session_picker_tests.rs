@@ -766,6 +766,7 @@ fn test_filter_matches_recent_message_content() {
 
     picker.search_query = "not-in-preview".to_string();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert!(picker.visible_sessions.is_empty());
 }
 
