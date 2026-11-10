@@ -313,10 +313,8 @@ impl<'a> Span<'a> {
         // Unicode segmentation state machine.
         if crate::fast::is_printable_ascii(content) {
             itertools::Either::Left((0..content.len()).map(move |i| StyledGrapheme {
-                #[expect(
-                    clippy::string_slice,
-                    reason = "the fast path validates printable ASCII before indexing by byte"
-                )]
+                // The branch above guarantees every byte is a UTF-8 boundary.
+                #[allow(clippy::string_slice)]
                 symbol: &content[i..=i],
                 style,
             }))
@@ -344,6 +342,7 @@ impl<'a> Span<'a> {
         Line::from(self).left_aligned()
     }
 
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_left_aligned_line()` instead"]
     pub fn to_left_aligned_line(self) -> Line<'a> {
         self.into_left_aligned_line()
@@ -363,6 +362,7 @@ impl<'a> Span<'a> {
         Line::from(self).centered()
     }
 
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_centered_line()` instead"]
     pub fn to_centered_line(self) -> Line<'a> {
         self.into_centered_line()
@@ -382,6 +382,7 @@ impl<'a> Span<'a> {
         Line::from(self).right_aligned()
     }
 
+    #[allow(clippy::wrong_self_convention)]
     #[deprecated = "use `into_right_aligned_line()` instead"]
     pub fn to_right_aligned_line(self) -> Line<'a> {
         self.into_right_aligned_line()
