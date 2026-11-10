@@ -109,7 +109,11 @@ pub struct DisplayConfig {
     /// configured: the named roles are substituted directly, and ad hoc shades
     /// used by widgets follow the role they belong to. Run `/colors` to list
     /// roles and `/colors harmony` to score the result.
-    #[serde(default)]
+    ///
+    /// An empty map is not written: a bare `[display.colors]` header invites a
+    /// second one to be appended by hand, and TOML rejects the duplicate, which
+    /// makes the whole file unreadable.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub colors: std::collections::BTreeMap<String, String>,
     /// Opt-in active sessions manager: pressing Left arrow on an empty input
     /// opens a picker scoped to live (open) sessions, showing which are still

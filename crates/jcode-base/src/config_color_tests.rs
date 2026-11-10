@@ -158,3 +158,27 @@ fn reported_display_config_survives_a_real_config_file_round_trip() {
     }
     Config::invalidate_cache();
 }
+
+/// Saving a config with no color overrides must not leave a bare
+/// `[display.colors]` header behind. Users paste a palette under their own
+/// header, and a second header is a TOML error that takes the whole file with
+/// it, breaking every other reader including Desktop.
+#[test]
+fn saved_config_omits_an_empty_colors_table_but_keeps_overrides() {
+    let mut config = Config::default();
+    let empty = toml::to_string_pretty(&config).expect("serialize default config");
+    assert!(
+        !empty.contains("[display.colors]"),
+        "an empty palette must not be written: {empty}"
+    );
+    let pasted = format!("{empty}\n[display.colors]\nai = \"#ffaa00\"\n");
+    let reloaded: Config = toml::from_str(&pasted).expect("pasted palette must parse");
+    assert_eq!(reloaded.display.colors.len(), 1);
+
+    config
+        .display
+        .colors
+        .insert("ai".to_string(), "#ffaa00".to_string());
+    let saved = toml::to_string_pretty(&config).expect("serialize config with colors");
+    assert!(saved.contains("[display.colors]\nai = \"#ffaa00\""));
+}
