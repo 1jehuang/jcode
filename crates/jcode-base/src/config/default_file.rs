@@ -280,6 +280,14 @@ prompt_entry_animation = true
 # disconnected SDK client, since the server cannot observe OS windows directly.
 # resume_recent_close_seconds = 30
 
+# What Resume does when the picked session is already open in another local
+# jcode window (default: "off"). Linux only.
+#   "off":     attach a second client, leave the other window alone
+#   "move":    bring the existing window to the current workspace and focus it
+#              (niri). Falls back to "replace" when the window cannot be moved.
+#   "replace": resume as usual and close the other window's client
+# resume_open_elsewhere = "off"
+
 # Which time Resume shows as "x ago" and sorts by (default: "message").
 #   "message":  newest message of any role (prompts, replies, tool results)
 #   "activity": newest of the last message and the last open/resume

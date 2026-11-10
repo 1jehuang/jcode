@@ -21,8 +21,8 @@ mod preview_request;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
     catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
-    save_agent_model_override,
+    model_picker_provider_hint_from_model_spec, openrouter_route_model_id, picker_route_model_spec,
+    picker_route_selection, save_agent_model_override,
 };
 
 pub(super) fn subagent_picker_model_spec(entry: &PickerEntry) -> String {
@@ -858,34 +858,6 @@ fn model_picker_route_is_recommended(model_name: &str, route: &PickerOption) -> 
             &route.api_method,
             route.available,
         )
-}
-
-fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
-    let (provider_hint, bare_model) = model_spec.split_once(':')?;
-    let provider_hint = provider_hint.trim();
-    let bare_model = bare_model.trim();
-    if provider_hint.is_empty() || bare_model.is_empty() {
-        return None;
-    }
-
-    let normalized = provider_hint.to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "claude"
-            | "anthropic"
-            | "openai"
-            | "copilot"
-            | "cursor"
-            | "antigravity"
-            | "bedrock"
-            | "openrouter"
-            | "gemini"
-    ) || crate::provider_catalog::openai_compatible_profile_by_id(provider_hint).is_some()
-    {
-        Some((provider_hint, bare_model))
-    } else {
-        None
-    }
 }
 
 fn model_picker_route_provider_matches_key(
@@ -3250,6 +3222,15 @@ impl App {
                 }
             };
 
+            if let ResumeTarget::JcodeSession { session_id } = &resolved_target
+                && crate::session_window::apply_resume_open_elsewhere(session_id)
+                    == crate::session_window::OpenElsewhereOutcome::Moved
+            {
+                spawned += 1;
+                names.push(name);
+                continue;
+            }
+
             match spawn_resume_target_in_new_terminal(&resolved_target, &cwd, socket.as_deref()) {
                 Ok(true) => {
                     spawned += 1;
@@ -3416,6 +3397,15 @@ impl App {
             self.session_picker_overlay = None;
             self.session_picker_mode = SessionPickerMode::Resume;
             self.set_status_notice("Already in this session");
+            return;
+        }
+
+        if crate::session_window::apply_resume_open_elsewhere(&session_id)
+            == crate::session_window::OpenElsewhereOutcome::Moved
+        {
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.set_status_notice(format!("Brought {} here", name));
             return;
         }
 

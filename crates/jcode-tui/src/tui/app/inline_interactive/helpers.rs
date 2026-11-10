@@ -101,6 +101,34 @@ pub(super) fn openrouter_route_model_id(model: &str) -> String {
     crate::provider::openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string())
 }
 
+pub(super) fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
+    let (provider_hint, bare_model) = model_spec.split_once(':')?;
+    let provider_hint = provider_hint.trim();
+    let bare_model = bare_model.trim();
+    if provider_hint.is_empty() || bare_model.is_empty() {
+        return None;
+    }
+
+    let normalized = provider_hint.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "claude"
+            | "anthropic"
+            | "openai"
+            | "copilot"
+            | "cursor"
+            | "antigravity"
+            | "bedrock"
+            | "openrouter"
+            | "gemini"
+    ) || crate::provider_catalog::openai_compatible_profile_by_id(provider_hint).is_some()
+    {
+        Some((provider_hint, bare_model))
+    } else {
+        None
+    }
+}
+
 pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {
     if jcode_provider_core::oauth_account_label(&route.api_method).is_some() {
         return picker_route_selection(entry, route).routed_model_spec();

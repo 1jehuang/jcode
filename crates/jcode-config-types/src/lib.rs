@@ -13,7 +13,7 @@ mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
 pub use {
-    display::{DisplayConfig, InfoWidgetLayout, ResumeTimeMode},
+    display::{DisplayConfig, InfoWidgetLayout, ResumeOpenElsewhere, ResumeTimeMode},
     menubar::MenubarConfig,
     power::PowerConfig,
 };
