@@ -519,21 +519,22 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
 /// attempting any network operation with an expired credential.
 pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     let cached = cached_anthropic_usage(cache_key);
-    if cached
-        .as_ref()
-        .and_then(|data| data.last_error.as_deref())
-        .is_some_and(super::anthropic_response::is_auth_failure)
-    {
-        // A login in another process clears persisted authentication failures.
-        // Do not let this daemon's RAM keep the repaired account broken for
-        // another retry period. Credential-stage failures are persisted too.
-        let shared = super::disk_cache::fresh(cache_key);
-        if let Some(data) = &shared {
+    if let Some(error) = cached.as_ref().and_then(|data| data.last_error.as_deref()) {
+        // Another process may have observed fresh model-response quotas or
+        // repaired the login while this daemon still holds an old failure.
+        if let Some(data) = super::disk_cache::fresh(cache_key) {
             store_anthropic_usage(cache_key.to_string(), data.clone());
-        } else if let Ok(mut cache) = anthropic_usage_cache().lock() {
-            cache.remove(cache_key);
+            return Some(data);
         }
-        return shared;
+        // Only a removed auth failure signifies a relogin. A missing file
+        // must not cancel the RAM copy of a provider's throttle deadline.
+        if super::anthropic_response::is_auth_failure(error) {
+            if let Ok(mut cache) = anthropic_usage_cache().lock() {
+                cache.remove(cache_key);
+            }
+            return None;
+        }
+        return cached;
     }
     cached.or_else(|| {
         let data = super::disk_cache::fresh(cache_key)?;

@@ -2303,19 +2303,9 @@ async fn stream_response(
         response.status()
     ));
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
-        let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(jcode_provider_core::retry_after::error_with_retry_after(
-            format!("Anthropic API error ({}): {}", status, error_text),
-            retry_after,
-        ));
-    }
-
-    *response_accepted = true;
-    if is_oauth {
-        // Successful model requests already return real subscription limits.
+    if is_oauth && (response.status().is_success() || response.status().as_u16() == 429) {
+        // Model responses already return real subscription limits, including
+        // quota walls. Keep those visible even when usage lookups are throttled.
         // Recording them avoids a separate, heavily throttled usage lookup
         // while the account is active. Never attribute API-key quotas here.
         let headers = response.headers().clone();
@@ -2329,6 +2319,17 @@ async fn stream_response(
             );
         });
     }
+    if !response.status().is_success() {
+        let status = response.status();
+        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
+        return Err(jcode_provider_core::retry_after::error_with_retry_after(
+            format!("Anthropic API error ({}): {}", status, error_text),
+            retry_after,
+        ));
+    }
+
+    *response_accepted = true;
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,
