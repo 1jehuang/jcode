@@ -549,6 +549,9 @@ anthropic_retry_recoverable_rate_limits = true
 # openai_auto_banked_reset = true
 # Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
 # anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

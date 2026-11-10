@@ -1266,6 +1266,9 @@ pub struct ProviderConfig {
     /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
     /// OAuth usage. Never purchases credits. Disabled by default.
     pub anthropic_auto_fable_reset: bool,
+    /// Preserve earned resets while the account pool router has another ready route.
+    /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
+    pub auto_reset_only_when_no_routes: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1323,6 +1326,7 @@ impl Default for ProviderConfig {
             same_provider_account_failover: true,
             openai_auto_banked_reset: false,
             anthropic_auto_fable_reset: false,
+            auto_reset_only_when_no_routes: true,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
