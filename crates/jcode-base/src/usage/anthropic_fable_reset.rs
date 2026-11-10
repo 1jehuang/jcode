@@ -168,6 +168,7 @@ async fn redeem(
     // A concurrent claimant cleared the quota. Retry is safe without spending
     // anything or erasing its possibly uncertain durable journal.
     if waited && !before.at_limit && before.exhausted.is_empty() {
+        super::anthropic_reset::invalidate_anthropic_usage_reset_state(Some(label));
         return Ok(true);
     }
     let marker = root.join(format!("{key}.pending"));
