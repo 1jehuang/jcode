@@ -609,7 +609,7 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     model,
                     source: anyhow::anyhow!(
                         "simple completion stopped by provider guardrail (stop_reason={})",
-                        stop_reason.as_deref().unwrap_or_default()
+                        stop_reason.as_deref().unwrap_or("")
                     ),
                 }
                 .into());

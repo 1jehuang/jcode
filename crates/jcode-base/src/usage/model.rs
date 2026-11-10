@@ -513,7 +513,11 @@ pub fn usage_error_with_retry(error: Option<String>, retry: Option<Instant>) -> 
         return Some(error);
     }
     let wait = retry.saturating_duration_since(Instant::now());
-    let at = chrono::Utc::now() + chrono::Duration::from_std(wait).ok()?;
+    let Ok(wait) = chrono::Duration::from_std(wait) else {
+        // A deadline outside chrono's range must not erase the original error.
+        return Some(error);
+    };
+    let at = chrono::Utc::now() + wait;
     Some(format!(
         "{error} ({RETRY_AT_MARKER}{})",
         at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -526,7 +530,10 @@ pub fn usage_error_retry_at(error: &str) -> Option<&str> {
     let rest = &error[start..];
     let end = rest.find(')').unwrap_or(rest.len());
     let at = &rest[..end];
-    chrono::DateTime::parse_from_rfc3339(at).ok().map(|_| at)
+    match chrono::DateTime::parse_from_rfc3339(at) {
+        Ok(_) => Some(at),
+        Err(_) => None, // Malformed annotations are not usable retry deadlines.
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +555,23 @@ mod retry_hint_tests {
         assert_eq!(
             usage_error_with_retry(Some("x".into()), None).as_deref(),
             Some("x")
+        );
+    }
+
+    #[test]
+    fn malformed_retry_hints_are_not_deadlines() {
+        for error in [
+            "HTTP 429 (retry at invalid)",
+            "retry at ",
+            "retry at 2026-99-99",
+        ] {
+            assert!(usage_error_retry_at(error).is_none(), "{error}");
+        }
+        assert!(usage_error_with_retry(None, Some(Instant::now())).is_none());
+        let annotated = "HTTP 429 (retry at 2026-11-10T12:00:00Z)";
+        assert_eq!(
+            usage_error_with_retry(Some(annotated.into()), Some(Instant::now())).as_deref(),
+            Some(annotated)
         );
     }
 }

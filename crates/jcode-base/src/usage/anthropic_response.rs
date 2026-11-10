@@ -4,21 +4,22 @@ use super::*;
 
 fn window(headers: &reqwest::header::HeaderMap, name: &str) -> Option<(f32, String)> {
     let prefix = format!("anthropic-ratelimit-unified-{name}");
-    let ratio = headers
-        .get(format!("{prefix}-utilization"))?
-        .to_str()
-        .ok()?
-        .parse::<f32>()
-        .ok()?;
+    // Optional telemetry can be absent or malformed. Neither means zero usage.
+    let Ok(text) = headers.get(format!("{prefix}-utilization"))?.to_str() else {
+        return None;
+    };
+    let Ok(ratio) = text.parse::<f32>() else {
+        return None;
+    };
     if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
         return None;
     }
-    let epoch = headers
-        .get(format!("{prefix}-reset"))?
-        .to_str()
-        .ok()?
-        .parse::<i64>()
-        .ok()?;
+    let Ok(text) = headers.get(format!("{prefix}-reset"))?.to_str() else {
+        return None;
+    };
+    let Ok(epoch) = text.parse::<i64>() else {
+        return None;
+    };
     let reset = chrono::DateTime::from_timestamp(epoch, 0)?;
     (reset > chrono::Utc::now()).then(|| (ratio, reset.to_rfc3339()))
 }
