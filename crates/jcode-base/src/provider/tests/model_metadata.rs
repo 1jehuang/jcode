@@ -189,22 +189,29 @@ fn test_context_limit_dynamic_cache() {
 // --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
 // --- routing/identity with a real OpenRouter runtime via the registry.
 
-#[test]
-fn strata_configured_context_survives_catalog_publication() {
-    let model = "qwen3.8-flash-next-ud-q4_k_xl-abliterated";
+fn strata_config(model: &str, context_window: Option<usize>) -> crate::config::Config {
     let mut cfg = crate::config::Config::default();
     cfg.providers.insert(
         "strata".into(),
         crate::config::NamedProviderConfig {
             models: vec![crate::config::NamedProviderModelConfig {
                 id: model.into(),
-                context_window: Some(196_608),
+                context_window,
                 ..Default::default()
             }],
             ..Default::default()
         },
     );
-    populate_context_limits_from_config_value(&cfg);
+    cfg
+}
+
+#[test]
+fn strata_configured_context_survives_catalog_publication() {
+    let model = "qwen3.8-flash-next-ud-q4_k_xl-abliterated";
+    let _seeding = crate::provider::models::CONFIG_SEED_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::provider::models::seed_context_limits_from_config(&strata_config(model, Some(196_608)));
     populate_context_limits(std::collections::HashMap::from([
         (model.into(), 262_144),
         (format!("strata:{model}"), 262_144),
@@ -218,6 +225,33 @@ fn strata_configured_context_survives_catalog_publication() {
             );
         }
     }
+}
+
+#[test]
+fn removed_context_window_override_stops_applying_after_reload() {
+    let model = "qwen3.8-flash-issue2115-removed";
+    let _seeding = crate::provider::models::CONFIG_SEED_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::provider::models::seed_context_limits_from_config(&strata_config(model, Some(196_608)));
+    assert_eq!(
+        context_limit_for_model_with_provider(model, Some("strata")),
+        Some(196_608)
+    );
+    // The override is removed from config, then the endpoint publishes its own limit.
+    crate::provider::models::seed_context_limits_from_config(&strata_config(model, None));
+    populate_context_limits(std::collections::HashMap::from([(
+        format!("strata:{model}"),
+        131_072,
+    )]));
+    assert_eq!(
+        crate::provider::models::configured_context_limit_for_model(&format!("strata:{model}")),
+        None
+    );
+    assert_eq!(
+        context_limit_for_model_with_provider(model, Some("strata")),
+        Some(131_072)
+    );
 }
 
 #[test]

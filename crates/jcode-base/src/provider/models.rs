@@ -654,6 +654,20 @@ pub fn populate_context_limits_from_config() {
 ///   because session-restored models keep the `<profile>:` routing prefix and
 ///   non-slash qualified specs are looked up verbatim.
 pub fn populate_context_limits_from_config_value(cfg: &crate::config::Config) {
+    #[cfg(test)]
+    let _seeding = CONFIG_SEED_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    seed_context_limits_from_config(cfg);
+}
+
+/// Serialises config seeding with the tests that assert on seeded values.
+/// Seeding replaces the configured map, so without this a `config()` reload in
+/// another test thread could swap it out between a test's seed and its asserts.
+#[cfg(test)]
+pub(crate) static CONFIG_SEED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn seed_context_limits_from_config(cfg: &crate::config::Config) {
     let mut limits = HashMap::new();
     for (profile_id, provider_cfg) in cfg.providers.iter() {
         for model in &provider_cfg.models {
@@ -665,8 +679,11 @@ pub fn populate_context_limits_from_config_value(cfg: &crate::config::Config) {
             }
         }
     }
+    // Replace rather than extend: the config is the whole truth for explicit
+    // overrides, so a `context_window` removed from it must stop applying on
+    // reload instead of outranking live data until restart.
     if let Ok(mut cache) = CONFIG_CONTEXT_LIMIT_CACHE.write() {
-        cache.extend(limits.clone());
+        *cache = limits.clone();
     }
     populate_context_limits(limits);
 }
