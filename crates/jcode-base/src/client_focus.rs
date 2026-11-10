@@ -128,6 +128,75 @@ pub fn registered_client_session(pid: u32) -> Option<String> {
     (!session_id.is_empty()).then_some(session_id)
 }
 
+/// PIDs of other live local TUI clients whose registered session is
+/// `session_id`. Linux only: liveness and identity are read from `/proc`.
+pub fn clients_showing_session(session_id: &str) -> Vec<u32> {
+    match client_sessions_dir() {
+        Ok(dir) => {
+            clients_showing_session_in(&dir, session_id, std::process::id(), is_live_jcode_client)
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn clients_showing_session_in(
+    dir: &std::path::Path,
+    session_id: &str,
+    own_pid: u32,
+    is_live: impl Fn(u32) -> bool,
+) -> Vec<u32> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let shown = std::fs::read_to_string(entry.path()).ok()?;
+            (pid != own_pid && shown.trim() == session_id && is_live(pid)).then_some(pid)
+        })
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// A marker PID can be reused after its client exits, so require the process
+/// to still be a jcode binary before anyone moves or closes its window.
+fn is_live_jcode_client(pid: u32) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|exe| {
+            exe.file_name()
+                .map(|name| name.to_string_lossy().starts_with("jcode"))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clients_showing_session_in;
+
+    #[test]
+    fn finds_other_live_clients_showing_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        for (pid, session) in [(10, "a"), (11, "a\n"), (12, "b"), (13, "a"), (14, "a")] {
+            std::fs::write(dir.path().join(pid.to_string()), session).unwrap();
+        }
+        std::fs::write(dir.path().join("junk"), "a").unwrap();
+        // 13 is this process, 14 has exited.
+        let found = clients_showing_session_in(dir.path(), "a", 13, |pid| pid != 14);
+        assert_eq!(found, vec![10, 11]);
+        assert!(clients_showing_session_in(dir.path(), " ", 13, |_| true).is_empty());
+    }
+}
+
 fn last_focused_session_path() -> Result<std::path::PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("last_focused_client_session"))
 }
