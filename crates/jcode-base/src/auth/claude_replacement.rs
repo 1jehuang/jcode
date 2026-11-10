@@ -1,6 +1,25 @@
 use super::{AnthropicAccount, JcodeAuthFile, account_identity, load_auth_file, save_auth_file};
 use anyhow::Result;
 
+/// Stored tokens for the refresh coordinator's current account snapshot.
+pub(in crate::auth) fn stored_claude_tokens(
+    label: &str,
+) -> Option<crate::auth::oauth::OAuthTokens> {
+    let Ok(accounts) = super::list_accounts() else {
+        return None;
+    };
+    let account = accounts
+        .into_iter()
+        .find(|account| account.label == label)?;
+    Some(crate::auth::oauth::OAuthTokens {
+        access_token: account.access,
+        refresh_token: account.refresh,
+        expires_at: account.expires,
+        id_token: None,
+        scopes: account.scopes,
+    })
+}
+
 /// Replace exactly one existing saved login, without adding a label or moving defaults.
 pub fn replace_account_if_unchanged(
     label: &str,

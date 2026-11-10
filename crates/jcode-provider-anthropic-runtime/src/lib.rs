@@ -17,6 +17,7 @@
 
 mod reasoning_request;
 mod usage_recording;
+use usage_recording::format_reset_duration;
 
 mod catalog;
 
@@ -512,18 +513,6 @@ fn unified_limit_reset_in(headers: &HeaderMap, now_secs: i64) -> Option<u64> {
         .parse::<i64>()
         .ok()?;
     Some(reset.saturating_sub(now_secs).max(0) as u64)
-}
-
-/// "3h 17m" style duration that the TUI rate-limit hold parser understands.
-fn format_reset_duration(secs: u64) -> String {
-    let days = secs / 86_400;
-    let hours = (secs % 86_400) / 3600;
-    let minutes = (secs % 3600).div_ceil(60).min(59);
-    match (days, hours) {
-        (0, 0) => format!("{}m", minutes.max(1)),
-        (0, h) => format!("{h}h {minutes}m"),
-        (d, h) => format!("{d}d {h}h {minutes}m"),
-    }
 }
 
 /// Build the error for a failed Messages response. A 429 whose usage limit
@@ -2671,6 +2660,7 @@ async fn stream_response(
     }
 
     *response_accepted = true;
+    usage_recording::response_limits(is_oauth, &token, usage_label, response.headers());
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,

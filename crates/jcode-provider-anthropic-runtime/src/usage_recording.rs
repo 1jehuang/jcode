@@ -2,6 +2,36 @@
 use super::*;
 use crate::sse_types::UsageInfo;
 
+/// "3h 17m" style duration that the TUI rate-limit hold parser understands.
+pub(super) fn format_reset_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let minutes = (secs % 3600).div_ceil(60).min(59);
+    match (days, hours) {
+        (0, 0) => format!("{}m", minutes.max(1)),
+        (0, h) => format!("{h}h {minutes}m"),
+        (d, h) => format!("{d}d {h}h {minutes}m"),
+    }
+}
+
+pub(super) fn response_limits(
+    is_oauth: bool,
+    token: &str,
+    label: Option<&str>,
+    headers: &reqwest::header::HeaderMap,
+) {
+    let Some(label) = label.filter(|_| is_oauth) else {
+        return;
+    };
+    // Persist successful subscription telemetry off the streaming worker.
+    let headers = headers.clone();
+    let label = label.to_owned();
+    let token = token.to_owned();
+    tokio::task::spawn_blocking(move || {
+        jcode_base::usage::record_anthropic_response_limits(&token, Some(&label), &headers);
+    });
+}
+
 pub(super) fn update_usage(state: &mut SseStreamState, usage: UsageInfo) {
     state.output_tokens = usage.output_tokens.map(u64::from).or(state.output_tokens);
     state.input_tokens = usage.input_tokens.map(u64::from).or(state.input_tokens);
@@ -207,7 +237,8 @@ mod tests {
                         "event: message_stop\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
                     );
                 }
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let reset = chrono::Utc::now().timestamp() + 7200;
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nanthropic-ratelimit-unified-5h-utilization: 0.37\r\nanthropic-ratelimit-unified-7d-utilization: 0.62\r\nanthropic-ratelimit-unified-5h-reset: {reset}\r\nanthropic-ratelimit-unified-7d-reset: {reset}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             });
             runtime.block_on(async {
                 let (tx, mut rx) = mpsc::channel(100);
@@ -249,6 +280,26 @@ mod tests {
                     }
                 }
                 assert_eq!(usage_events, 1);
+                if let Some(label) = label {
+                    // Exercise the real response-header hook, not just the
+                    // parser. Blocking persistence must not stall SSE delivery.
+                    let limits = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            if let Some(limits) = jcode_base::usage::cached_account_usage_snapshot(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                label,
+                            ) {
+                                break limits;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(limits.five_hour_ratio, Some(0.37));
+                    assert_eq!(limits.seven_day_ratio, Some(0.62));
+                    assert!(limits.error.is_none());
+                }
             });
             server.join().unwrap();
         }
@@ -269,6 +320,15 @@ mod tests {
         );
         assert!(!home.path().join("provider_activity.json").exists());
         assert!(!home.path().join("openai_oauth_usage.json").exists());
+        let limits: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join("anthropic_usage_cache.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            limits.as_object().unwrap().len(),
+            2,
+            "API-key responses must not record subscription quotas"
+        );
     }
 
     #[test]

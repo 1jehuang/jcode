@@ -482,7 +482,9 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
 mod replacement;
 #[cfg(test)]
 use replacement::replace_saved_login;
-pub(in crate::auth) use replacement::{capture_refresh_account, commit_captured_refresh};
+pub(in crate::auth) use replacement::{
+    capture_refresh_account, commit_captured_refresh, stored_claude_tokens,
+};
 pub use replacement::{rename_account, replace_account_if_unchanged};
 
 #[cfg(test)]
