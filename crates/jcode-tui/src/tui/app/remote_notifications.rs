@@ -441,6 +441,19 @@ fn present_swarm_notification_inner(
     }
 }
 
+/// True when a recent transcript row has the same swarm title and full body.
+pub(super) fn recent_swarm_card_matches(
+    app: &super::App,
+    candidate: &super::DisplayMessage,
+) -> bool {
+    let body = swarm_display_full_body(&candidate.content);
+    app.display_messages().iter().rev().take(40).any(|message| {
+        message.role == "swarm"
+            && message.title == candidate.title
+            && swarm_display_full_body(&message.content) == body
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{compact_plan_message_body, present_swarm_notification};

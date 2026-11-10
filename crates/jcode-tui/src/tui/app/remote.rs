@@ -1169,6 +1169,8 @@ pub(super) fn handle_disconnect(
     // queued prompt for reconnect, but release the transient model-setup gate so
     // it cannot remain blocked forever waiting for an event that was lost.
     app.finish_auth_catalog_refresh();
+    // The cancel answer cannot arrive on a dead connection. Ask again later.
+    app.soft_interrupt_recovery = None;
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =
@@ -1484,6 +1486,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     let _ = recover_stranded_soft_interrupts(app, remote).await;
+    if app.soft_interrupt_recovery_in_flight() {
+        return;
+    }
 
     if app.pending_queued_dispatch {
         note_startup_submit_deferred(app, "pending_queued_dispatch in progress");

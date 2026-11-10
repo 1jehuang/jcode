@@ -91,3 +91,102 @@ fn idle_soft_interrupt_cancel_settles_pre_stream_turn_without_replaying_prompt()
         }
     });
 }
+
+/// A soft interrupt sent just as the turn ended reaches an idle server, which
+/// starts it as its own turn. The client must not also requeue and resend it.
+#[test]
+fn stranded_soft_interrupt_recovery_requeues_only_what_server_still_queued() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::soft_interrupt_client_id;
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for server_accepted in [true, false] {
+            let mut app = create_test_app();
+            app.is_remote = true;
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            app.track_pending_soft_interrupt(42, "next prompt".into());
+            app.handle_server_event(ServerEvent::Ack { id: 42 }, &mut remote);
+
+            rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+            let (cancel_id, _) = app
+                .soft_interrupt_recovery
+                .expect("recovery must ask the server before requeueing");
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.is_processing, "nothing may be sent while waiting");
+            assert_eq!(app.pending_soft_interrupts, ["next prompt"]);
+
+            let client_id = soft_interrupt_client_id(42);
+            let (cancelled, not_queued) = if server_accepted {
+                (vec![], vec![client_id])
+            } else {
+                (vec![client_id], vec![])
+            };
+            if server_accepted {
+                app.handle_server_event(
+                    ServerEvent::SoftInterruptInjected {
+                        content: "next prompt".into(),
+                        display_role: None,
+                        point: "turn_start".into(),
+                        tools_skipped: None,
+                        client_ids: vec![],
+                    },
+                    &mut remote,
+                );
+            }
+            app.handle_server_event(
+                ServerEvent::SoftInterruptsCancelled {
+                    id: cancel_id,
+                    cancelled,
+                    not_queued,
+                },
+                &mut remote,
+            );
+            assert!(app.soft_interrupt_recovery.is_none());
+            assert!(app.pending_soft_interrupts.is_empty());
+            assert!(app.sent_soft_interrupts.is_empty());
+            if server_accepted {
+                assert!(
+                    app.queued_messages.is_empty(),
+                    "an accepted interrupt must not be resent"
+                );
+                let shown = app
+                    .display_messages
+                    .iter()
+                    .filter(|message| message.content == "next prompt")
+                    .count();
+                assert_eq!(shown, 1);
+            } else {
+                assert_eq!(app.queued_messages, ["next prompt"]);
+            }
+        }
+    });
+}
+
+#[test]
+fn stranded_soft_interrupt_not_acked_and_not_queued_is_requeued() {
+    use crate::protocol::ServerEvent;
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        app.track_pending_soft_interrupt(7, "lost prompt".into());
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        app.handle_server_event(
+            ServerEvent::SoftInterruptsCancelled {
+                id: cancel_id,
+                cancelled: vec![],
+                not_queued: vec![crate::tui::backend::soft_interrupt_client_id(7)],
+            },
+            &mut remote,
+        );
+        assert_eq!(app.queued_messages, ["lost prompt"]);
+        assert!(app.pending_soft_interrupts.is_empty());
+        assert!(app.pending_soft_interrupt_requests.is_empty());
+    });
+}

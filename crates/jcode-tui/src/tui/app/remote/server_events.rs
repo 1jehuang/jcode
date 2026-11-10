@@ -1,3 +1,4 @@
+use super::super::remote_notifications::recent_swarm_card_matches;
 use super::*;
 
 #[cfg(test)]
@@ -1124,6 +1125,11 @@ fn handle_server_event_inner(
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
         }
+        ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        } => app.finish_soft_interrupt_recovery(id, &cancelled, &not_queued),
         ServerEvent::Interrupted => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
@@ -3689,18 +3695,6 @@ fn handle_server_event_inner(
         }
         _ => false,
     }
-}
-
-/// True when one of the recent transcript rows is already the swarm card for
-/// the same delivered message (same title and full body).
-fn recent_swarm_card_matches(app: &App, candidate: &DisplayMessage) -> bool {
-    use super::super::remote_notifications::swarm_display_full_body;
-    let body = swarm_display_full_body(&candidate.content);
-    app.display_messages().iter().rev().take(40).any(|message| {
-        message.role == "swarm"
-            && message.title == candidate.title
-            && swarm_display_full_body(&message.content) == body
-    })
 }
 
 #[path = "server_events/activity_notice.rs"]
