@@ -6,6 +6,7 @@ Last updated: 2026-11-10
 
 - Upstream: `https://github.com/1jehuang/jcode`
 - Upstream base SHA examined: `e43279cdd`
+- Docs commit: `ab9f847e2`
 - Feature branch: `command-code-native-provider`
 - Working tree: clean after each milestone commit
 - No upstream branch was modified, forced-pushed, or merged.
@@ -348,8 +349,21 @@ credentials, and shared daemon were not modified.
    supported third-party contract.
 4. The upstream code-size baseline is stale on master. The Command Code changes
    do not regress any tracked file, but `scripts/check_code_size_budget.py`
-   cannot be used as a green gate without a separate baseline cleanup.
+   cannot be used as a green gate without a separate baseline cleanup. In
+   particular, `crates/jcode-provider-anthropic-runtime/src/lib.rs` was 2777
+   lines at the parent commit and 2746 lines after moving its direct-URL helpers
+   into `compatible.rs`; the script still compares it to an older 2692-line
+   baseline. This branch shrinks the file by 31 lines.
 5. Full mock-server and concurrency coverage is not yet implemented.
+
+## Upstream coordination
+
+- PR #1271 comment: https://github.com/1jehuang/jcode/pull/1271#issuecomment-6772238116
+- Issue #741 comment: https://github.com/1jehuang/jcode/issues/741#issuecomment-6772242095
+- Contribution branch: https://github.com/ddawnlll/jcode/tree/command-code-native-provider
+- No upstream pull request was opened. The branch is offered for comparison and
+  for a contribution PR targeting the existing author branch if the maintainer
+  or author prefers that route.
 
 ## Next independently verifiable task
 
