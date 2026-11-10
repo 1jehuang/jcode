@@ -18,13 +18,16 @@ pub(super) fn response_limits(
     is_oauth: bool,
     token: &str,
     label: Option<&str>,
-    headers: &reqwest::header::HeaderMap,
+    response: &reqwest::Response,
 ) {
+    if !response.status().is_success() && response.status().as_u16() != 429 {
+        return;
+    }
     let Some(label) = label.filter(|_| is_oauth) else {
         return;
     };
-    // Persist successful subscription telemetry off the streaming worker.
-    let headers = headers.clone();
+    // Persist subscription telemetry off the streaming worker, including quota walls.
+    let headers = response.headers().clone();
     let label = label.to_owned();
     let token = token.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -194,10 +197,11 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        for (label, terminal) in [
-            (Some("captured"), true),
-            (None, true),
-            (Some("incomplete"), false),
+        for (label, terminal, limited) in [
+            (Some("captured"), true, false),
+            (None, true, false),
+            (Some("incomplete"), false, false),
+            (Some("quota-limited"), false, true),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let endpoint = format!("http://{}/messages", listener.local_addr().unwrap());
@@ -238,7 +242,13 @@ mod tests {
                     );
                 }
                 let reset = chrono::Utc::now().timestamp() + 7200;
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nanthropic-ratelimit-unified-5h-utilization: 0.37\r\nanthropic-ratelimit-unified-7d-utilization: 0.62\r\nanthropic-ratelimit-unified-5h-reset: {reset}\r\nanthropic-ratelimit-unified-7d-reset: {reset}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let status = if limited {
+                    "429 Too Many Requests"
+                } else {
+                    "200 OK"
+                };
+                let five = if limited { "1.0" } else { "0.37" };
+                write!(socket, "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nanthropic-ratelimit-unified-5h-utilization: {five}\r\nanthropic-ratelimit-unified-7d-utilization: 0.62\r\nanthropic-ratelimit-unified-5h-reset: {reset}\r\nanthropic-ratelimit-unified-7d-reset: {reset}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             });
             runtime.block_on(async {
                 let (tx, mut rx) = mpsc::channel(100);
@@ -259,7 +269,7 @@ mod tests {
                     service_tier: None,
                     stream: true,
                 };
-                stream_response(
+                let result = stream_response(
                     Client::builder().no_proxy().build().unwrap(),
                     "token".into(),
                     label.is_some(),
@@ -271,15 +281,19 @@ mod tests {
                     &mut false,
                     label,
                 )
-                .await
-                .unwrap();
+                .await;
+                if limited {
+                    assert!(result.unwrap_err().to_string().contains("429"));
+                } else {
+                    result.unwrap();
+                }
                 let mut usage_events = 0;
                 while let Some(event) = rx.recv().await {
                     if matches!(event.unwrap(), StreamEvent::TokenUsage { .. }) {
                         usage_events += 1;
                     }
                 }
-                assert_eq!(usage_events, 1);
+                assert_eq!(usage_events, if limited { 0 } else { 1 });
                 if let Some(label) = label {
                     // Exercise the real response-header hook, not just the
                     // parser. Blocking persistence must not stall SSE delivery.
@@ -296,9 +310,13 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                    assert_eq!(limits.five_hour_ratio, Some(0.37));
+                    assert_eq!(
+                        limits.five_hour_ratio,
+                        Some(if limited { 1.0 } else { 0.37 })
+                    );
                     assert_eq!(limits.seven_day_ratio, Some(0.62));
                     assert!(limits.error.is_none());
+                    assert_eq!(limits.exhausted, limited);
                 }
             });
             server.join().unwrap();
@@ -326,7 +344,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             limits.as_object().unwrap().len(),
-            2,
+            3,
             "API-key responses must not record subscription quotas"
         );
     }

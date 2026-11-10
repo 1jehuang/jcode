@@ -2651,6 +2651,7 @@ async fn stream_response(
         response.status()
     ));
 
+    usage_recording::response_limits(is_oauth, &token, usage_label, &response);
     if !response.status().is_success() {
         let status = response.status();
         let headers = response.headers().clone();
@@ -2660,7 +2661,7 @@ async fn stream_response(
     }
 
     *response_accepted = true;
-    usage_recording::response_limits(is_oauth, &token, usage_label, response.headers());
+
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,
