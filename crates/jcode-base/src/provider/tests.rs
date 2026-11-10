@@ -1274,3 +1274,51 @@ fn stale_credential_route_fallback_follows_runtime_pin_or_drops_to_auto() {
         assert!(stale_credential_route_fallback("openrouter:z-ai/glm-5.2@Novita").is_none());
     });
 }
+
+struct DefaultEffortProvider;
+
+#[async_trait::async_trait]
+impl Provider for DefaultEffortProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn default_reasoning_effort(&self) -> Option<String> {
+        Some("none".to_string())
+    }
+
+    fn name(&self) -> &str {
+        "default-effort-stub"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(DefaultEffortProvider)
+    }
+}
+
+#[test]
+fn multi_provider_forwards_effective_default_effort() {
+    with_clean_provider_test_env(|| {
+        let provider = MultiProvider::new();
+        *provider
+            .openrouter
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(DefaultEffortProvider));
+        *provider
+            .active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::OpenRouter;
+        assert_eq!(
+            provider.default_reasoning_effort(),
+            Some("none".to_string()),
+            "the daemon default must survive the MultiProvider wrapper"
+        );
+    });
+}

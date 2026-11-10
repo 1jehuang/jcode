@@ -2412,6 +2412,24 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn default_reasoning_effort(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .and_then(|provider| provider.default_reasoning_effort()),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .and_then(|provider| provider.default_reasoning_effort()),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .and_then(|provider| provider.default_reasoning_effort()),
+            ActiveProvider::OpenRouter => self
+                .active_openrouter_execution_provider()
+                .and_then(|provider| provider.default_reasoning_effort()),
+            _ => None,
+        }
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         match self.active_provider() {
             ActiveProvider::Claude => self
