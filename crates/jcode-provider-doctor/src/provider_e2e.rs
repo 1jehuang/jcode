@@ -418,12 +418,7 @@ pub async fn run_provider_e2e(
         Some(_) => checks.push(DoctorCheck::passed(
             checkpoints::AUTH_CREDENTIAL_LOADED,
             label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
-            if resolved.id == "command-code" {
-                "Loaded Command Code credential from the environment or active account store"
-                    .to_string()
-            } else {
-                format!("Loaded credential from {}", resolved.api_key_env)
-            },
+            crate::credential_source::loaded_detail(&resolved),
         )),
         None => checks.push(DoctorCheck::skipped(
             checkpoints::AUTH_CREDENTIAL_LOADED,

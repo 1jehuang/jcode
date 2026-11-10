@@ -50,6 +50,33 @@ pub(super) fn select_stored_account(label: Option<&str>) -> Result<bool> {
     Ok(true)
 }
 
+pub(super) fn select_stored_account_for_login(
+    profile: &crate::provider_catalog::OpenAiCompatibleProfile,
+    label: Option<&str>,
+    options: &super::LoginOptions,
+) -> Result<bool> {
+    if profile.id != "command-code" || options.openai_compatible_api_key.is_some() {
+        return Ok(false);
+    }
+    select_stored_account(label)
+}
+
+pub(super) fn report_storage_location(
+    profile: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
+) -> Result<()> {
+    if profile.id == "command-code" {
+        eprintln!("Stored in JCode's Command Code account store.");
+    } else {
+        eprintln!(
+            "Stored at {}",
+            crate::storage::app_config_dir()?
+                .join(&profile.env_file)
+                .display()
+        );
+    }
+    Ok(())
+}
+
 pub(super) async fn validate_saved_key() -> Result<()> {
     let profile = crate::provider_catalog::COMMAND_CODE_PROFILE;
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);

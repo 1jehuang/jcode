@@ -852,10 +852,7 @@ fn login_openai_compatible_flow(
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
-    if profile.id == "command-code"
-        && options.openai_compatible_api_key.is_none()
-        && command_code::select_stored_account(account_label)?
-    {
+    if command_code::select_stored_account_for_login(profile, account_label, options)? {
         return Ok(());
     }
 
@@ -1018,16 +1015,7 @@ fn login_openai_compatible_flow(
         eprintln!("{}", next_step::local_endpoint_hint(&resolved.id));
     }
 
-    if resolved.id == "command-code" {
-        eprintln!("Stored in JCode's Command Code account store.");
-    } else {
-        eprintln!(
-            "Stored at {}",
-            crate::storage::app_config_dir()?
-                .join(&resolved.env_file)
-                .display()
-        );
-    }
+    command_code::report_storage_location(&resolved)?;
     if let Some(default_model) = resolved.default_model {
         eprintln!("Default model hint: {}", default_model);
     }
