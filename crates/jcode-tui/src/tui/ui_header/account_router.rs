@@ -485,46 +485,67 @@ fn remaining_bar(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
 ) -> Option<Line<'static>> {
-    let (used, window) = match usage.five_hour_ratio {
-        Some(used) => (used, usage.primary_label.as_deref().unwrap_or("5h")),
-        None => (
-            usage.seven_day_ratio?,
+    let windows = [
+        (
+            usage.five_hour_ratio,
+            usage.primary_label.as_deref().unwrap_or("5h"),
+        ),
+        (
+            usage.seven_day_ratio,
             usage.secondary_label.as_deref().unwrap_or("7d"),
         ),
-    };
-    if !used.is_finite() || !(0.0..=1.0).contains(&used) {
+    ]
+    .into_iter()
+    .filter_map(|(ratio, label)| ratio.map(|ratio| (ratio, label)))
+    .chain(
+        usage
+            .additional_windows
+            .iter()
+            .map(|window| (window.usage_ratio, window.label.as_str())),
+    );
+    let mut spans = Vec::new();
+    for (used, window) in windows {
+        if !used.is_finite() || !(0.0..=1.0).contains(&used) {
+            continue;
+        }
+        let label = match window {
+            "5-hour" | "5-hour window" => "5h",
+            "7-day" | "7-day window" => "7d",
+            label => label,
+        };
+        let used_pct = (used * 100.0).round() as u8;
+        let mut bar = crate::tui::info_widget::render_usage_limit_bar(
+            label,
+            used_pct,
+            100u8.saturating_sub(used_pct),
+            None,
+            22,
+            display_used,
+        );
+        // Inline quotas do not need the info widget's fixed-width label column.
+        if let Some(label_span) = bar.spans.first_mut() {
+            label_span.content = format!(
+                "{}{} ",
+                label,
+                if usage.error.is_some() { " stale" } else { "" }
+            )
+            .into();
+        }
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        }
+        spans.extend(bar.spans);
+    }
+    if spans.is_empty() {
         return None;
     }
-    let label = match window {
-        "5-hour" | "5-hour window" => "5h",
-        "7-day" | "7-day window" => "7d",
-        label => label,
-    };
-    let used_pct = (used * 100.0).round() as u8;
-    let mut bar = crate::tui::info_widget::render_usage_limit_bar(
-        label,
-        used_pct,
-        100u8.saturating_sub(used_pct),
-        None,
-        22,
-        display_used,
-    );
-    // Inline quotas do not need the info widget's fixed-width label column.
-    if let Some(label) = bar.spans.first_mut() {
-        label.content = format!(
-            "{}{} ",
-            label.content.trim_end(),
-            if usage.error.is_some() { " stale" } else { "" },
-        )
-        .into();
-    }
     if usage.error.is_some() {
-        bar.spans.push(Span::styled(
+        spans.push(Span::styled(
             format!(" · {}", usage_status_label(Some(usage))),
             Style::default().fg(dim_color()),
         ));
     }
-    Some(bar)
+    Some(Line::from(spans))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -580,6 +601,12 @@ fn oauth_credential_status(
     if [usage.five_hour_ratio, usage.seven_day_ratio]
         .into_iter()
         .flatten()
+        .chain(
+            usage
+                .additional_windows
+                .iter()
+                .map(|window| window.usage_ratio),
+        )
         .any(|ratio| ratio.is_finite() && (0.0..=1.0).contains(&ratio))
     {
         CredentialStatus::Available
@@ -626,6 +653,7 @@ mod tests {
     #[test]
     fn remote_rows_mask_email_and_show_quota() {
         let account = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "work".into(),
             email: Some("jeremy@example.com".into()),
             exhausted: false,
@@ -646,6 +674,74 @@ mod tests {
         assert!(out.contains("j***y@example.com"), "{out}");
         assert!(!out.contains("jeremy@"), "{out}");
         assert!(out.contains("85%"), "{out}");
+    }
+
+    #[test]
+    fn account_headers_render_all_usage_windows_and_fit_unicode_widths() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("界界@example.com".into()),
+            exhausted: false,
+            primary_label: Some("session".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.42),
+            additional_windows: vec![
+                jcode_protocol::AccountUsageWindow {
+                    label: "Fable 7d".into(),
+                    usage_ratio: 0.73,
+                    resets_at: None,
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Spark 界".into(),
+                    usage_ratio: 0.91,
+                    resets_at: None,
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "future model / month".into(),
+                    usage_ratio: 0.32,
+                    resets_at: None,
+                },
+            ],
+            resets_at: None,
+            error: None,
+        };
+        for display_used in [false, true] {
+            let rendered = text(vec![remaining_bar(&usage, display_used).unwrap()]);
+            for label in [
+                "session",
+                "7d",
+                "Fable 7d",
+                "Spark 界",
+                "future model / month",
+            ] {
+                assert!(rendered.contains(label), "{rendered}");
+            }
+            for percent in if display_used {
+                [15, 42, 73, 91, 32]
+            } else {
+                [85, 58, 27, 9, 68]
+            } {
+                assert!(rendered.contains(&format!("{percent}%")), "{rendered}");
+            }
+        }
+        let rows = remote_inventory_lines(&[], &[usage.clone()], "openai", Some("work"));
+        assert_eq!(rows.len(), 1);
+        for width in [0, 1, 2, 8, 24, 40, 80, 120, 240] {
+            let fitted = fit_header_lines(rows.clone(), width);
+            assert_eq!(fitted.len(), rows.len());
+            assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
+            if width >= 8 && rows[0].width() > usize::from(width.saturating_sub(1)) {
+                assert!(text(fitted).ends_with('…'));
+            }
+        }
+        // One malformed window must not hide the valid windows that follow it.
+        usage.five_hour_ratio = Some(f32::NAN);
+        usage.seven_day_ratio = None;
+        let rendered = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(!rendered.contains("session"));
+        assert!(rendered.contains("Fable 7d"));
+        assert!(rendered.contains("future model / month"));
     }
 
     fn auth() -> AuthStatus {
@@ -827,6 +923,7 @@ mod tests {
     #[test]
     fn router_priorities_only_dim_original_identity_colors_and_fit_narrow_headers() {
         let usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -870,6 +967,7 @@ mod tests {
     #[test]
     fn router_inventory_usability_requires_account_scoped_evidence() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -999,6 +1097,7 @@ mod tests {
     fn router_inventory_missing_usage_has_explicit_safe_status() {
         assert_eq!(usage_status_label(None), "limits pending");
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: false,
@@ -1099,6 +1198,7 @@ mod tests {
     #[test]
     fn router_inventory_weekly_only_usage_shows_reported_window() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "weekly-only".into(),
             email: None,
             exhausted: false,
@@ -1129,6 +1229,7 @@ mod tests {
     #[test]
     fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,

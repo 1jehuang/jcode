@@ -30,6 +30,7 @@ where
     tokio::time::timeout(ACCOUNT_PROBE_TIMEOUT, probe)
         .await
         .unwrap_or_else(|_| AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label,
             email,
             exhausted: false,

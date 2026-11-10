@@ -456,6 +456,7 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
                 &usage,
             )),
             Err(err) => snapshots.push(AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: account.label.clone(),
                 email: account.email.clone(),
                 exhausted: false,
@@ -511,6 +512,7 @@ fn openai_account_usage_probe_sync() -> Option<AccountUsageProbe> {
         match usage {
             Ok(snapshot) => snapshots.push(snapshot),
             Err(err) => snapshots.push(AccountUsageSnapshot {
+                additional_windows: Vec::new(),
                 label: account.label.clone(),
                 email: account.email.clone(),
                 exhausted: false,
