@@ -55,7 +55,9 @@ use tokio_stream::wrappers::ReceiverStream;
 mod catalog_fetch;
 use catalog_fetch::fetch_models_from_api;
 
+mod command_code_session;
 mod openai_compatible_runtime;
+mod openrouter_api_key_runtime;
 
 mod request_headers;
 use request_headers::*;
@@ -823,6 +825,9 @@ pub struct OpenRouterProvider {
     reasoning_effort: Arc<RwLock<Option<String>>>,
     api_base: String,
     auth: AuthResolver,
+    /// Saved API-key account pinned to this instance, so a global account
+    /// switch cannot rebind an existing session.
+    session_account: Arc<Mutex<Option<String>>>,
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
@@ -1333,7 +1338,8 @@ impl OpenRouterProvider {
         !self.supports_provider_features
             && self.api_base.trim_end_matches('/')
                 == jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.trim_end_matches('/')
-            && (self.auth)()
+            && self
+                .resolve_auth()
                 .map(|auth| {
                     auth.label()
                         .eq_ignore_ascii_case(jcode_base::subscription_catalog::JCODE_API_KEY_ENV)
@@ -1452,6 +1458,7 @@ impl OpenRouterProvider {
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
+            session_account: Self::initial_session_account(Some(profile_name)),
             supports_provider_features: matches!(
                 profile.provider_type,
                 jcode_base::config::NamedProviderType::OpenRouter
@@ -1605,7 +1612,7 @@ impl OpenRouterProvider {
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let auth: AuthResolver = Arc::new(Self::resolve_auth);
+        let auth: AuthResolver = Arc::new(Self::resolve_configured_auth);
         let auth_start = std::time::Instant::now();
         auth()?;
         jcode_base::logging::info(&format!(
@@ -1709,6 +1716,7 @@ impl OpenRouterProvider {
             })),
             api_base,
             auth,
+            session_account: Self::initial_session_account(profile_id.as_deref()),
             supports_provider_features,
             supports_model_catalog,
             profile_id,
@@ -1764,6 +1772,7 @@ impl OpenRouterProvider {
                     label: GROK_BUILD_AUTH_LABEL.to_string(),
                 })
             }),
+            session_account: Self::initial_session_account(None),
             supports_provider_features: false,
             // The official CLI discovers releases through GET /v1/models.
             // Static models remain only an offline/pre-discovery fallback.
@@ -1787,55 +1796,6 @@ impl OpenRouterProvider {
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         }
-    }
-
-    pub fn new_openrouter_api_key_runtime() -> Result<Self> {
-        let auth: AuthResolver = Arc::new(|| {
-            let api_key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
-                .ok_or_else(|| {
-                let path = jcode_base::storage::app_config_dir()
-                    .map(|dir| dir.join(DEFAULT_ENV_FILE).display().to_string())
-                    .unwrap_or_else(|_| DEFAULT_ENV_FILE.to_string());
-                anyhow::anyhow!(
-                    "{} not found in environment or {}",
-                    DEFAULT_API_KEY_NAME,
-                    path
-                )
-            })?;
-            Ok(ProviderAuth::AuthorizationBearer {
-                token: api_key,
-                label: DEFAULT_API_KEY_NAME.to_string(),
-            })
-        });
-        auth()?;
-
-        Ok(Self {
-            client: jcode_provider_core::shared_http_client(),
-            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-            reasoning_effort: Arc::new(RwLock::new(None)),
-            api_base: DEFAULT_API_BASE.to_string(),
-            auth,
-            supports_provider_features: true,
-            supports_model_catalog: true,
-            profile_id: None,
-            builtin_azure: false,
-            reasoning_effort_support: None,
-            disable_reasoning_heuristics: false,
-            static_reasoning_config: HashMap::new(),
-            max_tokens: Self::configured_max_tokens(None),
-            extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
-            static_models: Vec::new(),
-            static_context_limits: HashMap::new(),
-            static_image_input_support: HashMap::new(),
-            send_openrouter_headers: true,
-            conversation_id: new_conversation_id(),
-            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
-            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
-            provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
-            provider_pin: Arc::new(Mutex::new(None)),
-            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
-            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
     }
 
     fn should_background_refresh_model_catalog(&self, cache_age_secs: u64) -> bool {
@@ -2022,6 +1982,7 @@ impl OpenRouterProvider {
                 reasoning_effort: Arc::new(RwLock::new(None)),
                 api_base,
                 auth,
+                session_account: Arc::new(Mutex::new(None)),
                 supports_provider_features: true,
                 supports_model_catalog: true,
                 profile_id: None,
@@ -2095,7 +2056,7 @@ impl OpenRouterProvider {
 
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let Ok(auth) = (self.auth)() else {
+        let Ok(auth) = self.resolve_auth() else {
             Self::finish_background_model_catalog_refresh(&self.model_catalog_refresh);
             return;
         };
@@ -2474,7 +2435,7 @@ impl OpenRouterProvider {
         Self::get_api_key().is_some()
     }
 
-    fn resolve_auth() -> Result<ProviderAuth> {
+    fn resolve_configured_auth() -> Result<ProviderAuth> {
         if let Some(provider) = configured_dynamic_bearer_provider() {
             return match provider.as_str() {
                 "azure" => {
@@ -2607,7 +2568,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            (self.auth)()?,
+            self.resolve_auth()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2623,7 +2584,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            (self.auth)()?,
+            self.resolve_auth()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2661,7 +2622,8 @@ impl OpenRouterProvider {
 
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)()?
+        let response = self
+            .resolve_auth()?
             .apply(self.client.get(&url))
             .await?
             .send()
@@ -2715,7 +2677,8 @@ impl OpenRouterProvider {
             .unwrap_or(0);
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)()?
+        let response = self
+            .resolve_auth()?
             .apply(self.client.get(&url))
             .await?
             .send()

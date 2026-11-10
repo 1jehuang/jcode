@@ -1306,6 +1306,7 @@ fn make_provider() -> OpenRouterProvider {
                 label: DEFAULT_API_KEY_NAME.to_string(),
             })
         }),
+        session_account: Arc::new(Mutex::new(None)),
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
@@ -1341,6 +1342,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
                 label: "OPENAI_COMPAT_API_KEY".to_string(),
             })
         }),
+        session_account: Arc::new(Mutex::new(None)),
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,

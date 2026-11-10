@@ -35,6 +35,14 @@ impl Provider for OpenRouterProvider {
         )
     }
 
+    fn bind_session_account(&self, account: Option<&str>) -> Result<Option<String>> {
+        self.bind_session_account_inner(account)
+    }
+
+    fn session_account_label(&self) -> Option<String> {
+        OpenRouterProvider::session_account_label(self)
+    }
+
     async fn complete(
         &self,
         messages: &[Message],
@@ -57,7 +65,7 @@ impl Provider for OpenRouterProvider {
             .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
             && model.trim().to_ascii_lowercase().starts_with("claude-")
         {
-            let auth = (self.auth)()?;
+            let auth = self.resolve_auth()?;
             let crate::ProviderAuth::AuthorizationBearer { token, .. } = auth else {
                 anyhow::bail!("Command Code Messages requires bearer API-key authentication");
             };
@@ -343,7 +351,7 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let auth = (self.auth)()?;
+        let auth = self.resolve_auth()?;
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
@@ -883,6 +891,7 @@ impl Provider for OpenRouterProvider {
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
             auth: self.auth.clone(),
+            session_account: Arc::new(Mutex::new(self.session_account_label())),
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
@@ -974,7 +983,7 @@ impl OpenRouterProvider {
             Some(api_tools.len()),
             &[],
         );
-        let auth = (self.auth)()?;
+        let auth = self.resolve_auth()?;
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
@@ -1139,6 +1148,7 @@ impl OpenRouterProvider {
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
+            session_account: Self::initial_session_account(None),
             supports_provider_features: false,
             supports_model_catalog: false,
             profile_id: Some("command-code".to_string()),

@@ -74,6 +74,18 @@ pub fn active_label() -> Option<String> {
     load_from(&path).ok()?.active
 }
 
+/// Key for one exact label. Does not fall back to another account.
+pub fn api_key_for_label(label: &str) -> Option<String> {
+    let path = store_path().ok()?;
+    let store = load_from(&path).ok()?;
+    let account = store
+        .accounts
+        .iter()
+        .find(|account| account.label == label)?;
+    let key = account.api_key.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
 /// Add or replace one labeled account and make it active. An unnamed login gets
 /// the next unused generated label. A named login replaces exactly that label.
 pub fn save_account(label: Option<&str>, api_key: &str) -> Result<String> {
@@ -93,6 +105,10 @@ pub fn save_account(label: Option<&str>, api_key: &str) -> Result<String> {
                 store.accounts.iter().map(|account| account.label.as_str()),
             )
         });
+    anyhow::ensure!(
+        !label.contains([':', '@']) && !label.chars().any(char::is_control),
+        "Command Code account label cannot contain ':', '@', or control characters"
+    );
     if let Some(existing) = store
         .accounts
         .iter_mut()
@@ -189,6 +205,9 @@ mod tests {
         assert_eq!(active_api_key().as_deref(), Some("key-personal"));
         set_active("work").expect("switch");
         assert_eq!(active_api_key().as_deref(), Some("key-work"));
+        assert_eq!(api_key_for_label("work").as_deref(), Some("key-work"));
+        assert_eq!(api_key_for_label("missing"), None);
+        assert!(save_account(Some("bad@label"), "key").is_err());
         let mut labels = labels();
         labels.sort();
         assert_eq!(labels.len(), 2);

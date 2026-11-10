@@ -72,6 +72,7 @@ impl OpenRouterProvider {
             ))),
             api_base,
             auth,
+            session_account: Self::initial_session_account(Some(&resolved.id)),
             supports_provider_features: false,
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),

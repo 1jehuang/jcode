@@ -266,8 +266,10 @@ impl Agent {
     /// session's route metadata is rewritten to match, so swarm workers and
     /// later resumes inherit the route this session actually runs on.
     pub(crate) fn restore_session_model_from_session(&mut self) {
+        self.bind_persisted_session_account();
         let Some(model) = self.session.model.clone() else {
             self.session.model = Some(self.provider_model());
+            self.sync_session_account_route();
             return;
         };
         match crate::provider::restore_session_model(
@@ -290,6 +292,8 @@ impl Agent {
                     self.session.route_api_method = healed.route_api_method;
                 }
                 self.reconcile_explicit_provider_pin_route();
+                self.bind_persisted_session_account();
+                self.sync_session_account_route();
             }
             Err(e) => {
                 logging::error(&format!(

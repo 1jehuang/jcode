@@ -70,6 +70,40 @@ struct HangingServer {
     base: String,
 }
 
+struct HomeGuard {
+    _temp: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+    previous_key: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().expect("temp home");
+        let previous = std::env::var_os("JCODE_HOME");
+        let previous_key = std::env::var_os("COMMAND_CODE_API_KEY");
+        jcode_base::env::set_var("JCODE_HOME", temp.path());
+        jcode_base::env::remove_var("COMMAND_CODE_API_KEY");
+        Self {
+            _temp: temp,
+            previous,
+            previous_key,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => jcode_base::env::set_var("JCODE_HOME", value),
+            None => jcode_base::env::remove_var("JCODE_HOME"),
+        }
+        match self.previous_key.take() {
+            Some(value) => jcode_base::env::set_var("COMMAND_CODE_API_KEY", value),
+            None => jcode_base::env::remove_var("COMMAND_CODE_API_KEY"),
+        }
+    }
+}
+
 impl MockServer {
     fn start(responses: Vec<MockResponse>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
@@ -206,12 +240,16 @@ fn bash_tool() -> ToolDefinition {
 }
 
 fn tool_followup() -> Vec<Message> {
+    tool_followup_with_id("call_1")
+}
+
+fn tool_followup_with_id(id: &str) -> Vec<Message> {
     vec![
         Message::user("run it"),
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
+                id: id.to_string(),
                 name: "bash".to_string(),
                 input: json!({"command":"echo hi"}),
                 thought_signature: None,
@@ -219,7 +257,7 @@ fn tool_followup() -> Vec<Message> {
             timestamp: None,
             tool_duration_ms: None,
         },
-        Message::tool_result("call_1", "hi", false),
+        Message::tool_result(id, "hi", false),
     ]
 }
 
@@ -280,6 +318,30 @@ fn messages_text_stream() -> String {
         "\n\n",
         "event: message_delta\n",
         r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+        "\n\n",
+        "event: message_stop\n",
+        r#"data: {"type":"message_stop"}"#,
+        "\n\n",
+    )
+    .to_string()
+}
+
+fn messages_tool_stream() -> String {
+    concat!(
+        "event: message_start\n",
+        r#"data: {"type":"message_start","message":{"id":"msg_tool","model":"claude-sonnet-5","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        "\n\n",
+        "event: content_block_start\n",
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{}}}"#,
+        "\n\n",
+        "event: content_block_delta\n",
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"echo hi\"}"}}"#,
+        "\n\n",
+        "event: content_block_stop\n",
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        "\n\n",
+        "event: message_delta\n",
+        r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}"#,
         "\n\n",
         "event: message_stop\n",
         r#"data: {"type":"message_stop"}"#,
@@ -436,6 +498,65 @@ fn messages_text_stream_uses_anthropic_wire() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("\"model\":\"claude-sonnet-5\""));
     assert!(requests[0].contains("\"stream\":true"));
+}
+
+#[test]
+fn messages_tool_call_and_result_are_replayed() {
+    let _env = TestEnv::new();
+    let server = MockServer::start(vec![
+        MockResponse {
+            status: 200,
+            body: messages_tool_stream(),
+        },
+        MockResponse {
+            status: 200,
+            body: messages_text_stream(),
+        },
+    ]);
+    let provider = OpenRouterProvider::new_command_code_test(
+        server.base.clone(),
+        "test-key".into(),
+        "claude-sonnet-5",
+    );
+    let runtime = runtime();
+    let events = collect(
+        &runtime,
+        &provider,
+        &[Message::user("run it")],
+        &[bash_tool()],
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolUseStart { name, .. } if name == "bash"))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. }
+    )));
+
+    let events = collect(
+        &runtime,
+        &provider,
+        &tool_followup_with_id("toolu_1"),
+        &[bash_tool()],
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "DONE"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::MessageEnd { .. }))
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].contains("\"type\":\"tool_result\""));
+    assert!(requests[1].contains("\"tool_use_id\":\"toolu_1\""));
+    assert!(requests[1].contains("hi"));
 }
 
 #[test]
@@ -686,4 +807,72 @@ fn concurrent_streams_do_not_cross_talk() {
         );
     }
     assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
+fn saved_account_pin_survives_global_active_switch() {
+    let _env = TestEnv::new();
+    let _home = HomeGuard::new();
+    use jcode_base::provider_catalog::command_code_accounts;
+    command_code_accounts::save_account(Some("alpha"), "alpha-key").expect("save alpha");
+    command_code_accounts::save_account(Some("beta"), "beta-key").expect("save beta");
+    command_code_accounts::set_active("alpha").expect("select alpha");
+
+    let server = MockServer::start(vec![
+        MockResponse {
+            status: 200,
+            body: chat_text_stream(),
+        },
+        MockResponse {
+            status: 200,
+            body: chat_text_stream(),
+        },
+        MockResponse {
+            status: 200,
+            body: chat_text_stream(),
+        },
+    ]);
+    let provider = OpenRouterProvider::new_command_code_test(
+        server.base.clone(),
+        "fallback-key".into(),
+        "deepseek/deepseek-v4-flash",
+    );
+    assert_eq!(
+        provider.bind_session_account(None).expect("pin alpha"),
+        Some("alpha".to_string())
+    );
+
+    command_code_accounts::set_active("beta").expect("switch global active");
+    let runtime = runtime();
+    for prompt in ["first", "second"] {
+        collect(&runtime, &provider, &[Message::user(prompt)], &[]);
+    }
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer alpha-key"),
+            "pinned session lost alpha: {request}"
+        );
+        assert!(!lower.contains("beta-key"), "session rebound to beta");
+    }
+
+    let new_provider = OpenRouterProvider::new_command_code_test(
+        server.base.clone(),
+        "fallback-key".into(),
+        "deepseek/deepseek-v4-flash",
+    );
+    assert_eq!(
+        new_provider.bind_session_account(None).expect("pin beta"),
+        Some("beta".to_string())
+    );
+    collect(&runtime, &new_provider, &[Message::user("new")], &[]);
+    let last = server.requests().pop().expect("third request");
+    assert!(
+        last.to_ascii_lowercase()
+            .contains("authorization: bearer beta-key"),
+        "new session must use the current active account: {last}"
+    );
 }
