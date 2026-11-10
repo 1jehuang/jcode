@@ -74,6 +74,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
             extra_body: Self::resolve_extra_body(None, &resolved.env_file),
             static_models,
+            configured_context_limits: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,

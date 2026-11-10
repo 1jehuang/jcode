@@ -100,6 +100,10 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+// Keep explicit config separate so later catalog publications cannot replace it.
+static CONFIG_CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
     reason: String,
@@ -591,7 +595,20 @@ pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &Anthropi
 
 /// Look up a cached context limit for a model.
 pub fn cached_context_limit_for_model(model: &str) -> Option<usize> {
-    let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
+    // Precedence: explicit per-model config > live /models data > family/name
+    // tables > default. The shared resolver retains authoritative Claude/Copilot
+    // exceptions before consulting this cache.
+    configured_context_limit_for_model(model).or_else(|| {
+        let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
+        cache.get(model).copied()
+    })
+}
+
+/// Look up only an explicit per-model context window from named provider config.
+pub fn configured_context_limit_for_model(model: &str) -> Option<usize> {
+    let Ok(cache) = CONFIG_CONTEXT_LIMIT_CACHE.read() else {
+        return None;
+    };
     cache.get(model).copied()
 }
 
@@ -648,9 +665,10 @@ pub fn populate_context_limits_from_config_value(cfg: &crate::config::Config) {
             }
         }
     }
-    if !limits.is_empty() {
-        populate_context_limits(limits);
+    if let Ok(mut cache) = CONFIG_CONTEXT_LIMIT_CACHE.write() {
+        cache.extend(limits.clone());
     }
+    populate_context_limits(limits);
 }
 
 /// Cache keys under which a configured per-model `context_window` must be
@@ -1181,11 +1199,14 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    context_limit_for_model_with_provider_and_cache(
-        model,
-        provider_hint,
-        cached_context_limit_for_model,
-    )
+    context_limit_for_model_with_provider_and_cache(model, provider_hint, |model| {
+        provider_hint
+            .and_then(|provider| {
+                let provider = provider.trim().to_ascii_lowercase();
+                cached_context_limit_for_model(&format!("{provider}:{model}"))
+            })
+            .or_else(|| cached_context_limit_for_model(model))
+    })
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {

@@ -841,6 +841,7 @@ pub struct OpenRouterProvider {
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
     static_models: Vec<String>,
+    configured_context_limits: HashMap<String, usize>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
     /// Missing entries mean unspecified and preserve the provider-level fallback.
@@ -1403,7 +1404,7 @@ impl OpenRouterProvider {
             .filter(|id| !id.is_empty())
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        let static_context_limits = profile
+        let configured_context_limits = profile
             .models
             .iter()
             .filter_map(|model| {
@@ -1477,7 +1478,8 @@ impl OpenRouterProvider {
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
             static_models,
-            static_context_limits,
+            configured_context_limits,
+            static_context_limits: HashMap::new(),
             static_image_input_support,
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
@@ -1719,6 +1721,7 @@ impl OpenRouterProvider {
             max_tokens,
             extra_body,
             static_models,
+            configured_context_limits: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
@@ -1776,6 +1779,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: None,
             static_models,
+            configured_context_limits: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
@@ -1825,6 +1829,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
             static_models: Vec::new(),
+            configured_context_limits: HashMap::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
@@ -2032,6 +2037,7 @@ impl OpenRouterProvider {
                 max_tokens: None,
                 extra_body: None,
                 static_models: Vec::new(),
+                configured_context_limits: HashMap::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
@@ -2888,3 +2894,6 @@ mod muse_native_tests;
 #[cfg(test)]
 #[path = "placeholder_default_tests.rs"]
 mod placeholder_default_tests;
+
+#[cfg(test)]
+mod context_window_tests;
