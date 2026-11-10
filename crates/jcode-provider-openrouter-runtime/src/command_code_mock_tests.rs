@@ -16,8 +16,6 @@ use serde_json::json;
 
 use super::OpenRouterProvider;
 
-static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 struct TestEnv {
     _guard: std::sync::MutexGuard<'static, ()>,
     previous_max_retries: Option<std::ffi::OsString>,
@@ -30,9 +28,7 @@ impl TestEnv {
     }
 
     fn with_retries(max_retries: u32) -> Self {
-        let guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = crate::tests::ENV_LOCK.lock();
         let previous_max_retries = std::env::var_os("JCODE_MAX_RETRIES");
         let previous_backoff_cap = std::env::var_os("JCODE_RETRY_BACKOFF_CAP_SECS");
         jcode_base::env::set_var("JCODE_MAX_RETRIES", max_retries.to_string());
