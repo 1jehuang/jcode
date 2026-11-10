@@ -1079,22 +1079,29 @@ impl App {
         // entry with context_length 1000000, and the panel showed 200000 because
         // the number never crossed the wire.
         let limit = match server_context_window {
-            Some(window) => window as usize,
+            Some(window) => {
+                let limit = window as usize;
+                if self.is_remote {
+                    self.remote_server_context = Some((model.to_string(), limit));
+                }
+                limit
+            }
             None if self.is_remote => {
-                // The static catalog resolves the models it knows, so keep using
-                // it. What must not happen is the final fallback: for a model
-                // chosen server-side it is not in the catalog, and the client's
-                // own provider is an inert placeholder whose context_window()
-                // is the generic 200_000 default. Substituting that over a value
-                // the server already reported correctly is how a 1M route went
-                // back to displaying 200000. The server is the source of truth
-                // for an unknown model, so leave the last reported value alone
-                // instead of overwriting it with the default.
-                crate::provider::context_limit_for_model_with_provider(
-                    model,
-                    self.remote_provider_name.as_deref(),
-                )
-                .unwrap_or(self.context_limit as usize)
+                if let Some((_, limit)) = self
+                    .remote_server_context
+                    .as_ref()
+                    .filter(|(name, _)| name == model)
+                {
+                    *limit
+                } else {
+                    // Clear the saved window when the model changes and use the existing fallback.
+                    self.remote_server_context = None;
+                    crate::provider::context_limit_for_model_with_provider(
+                        model,
+                        self.remote_provider_name.as_deref(),
+                    )
+                    .unwrap_or(self.context_limit as usize)
+                }
             }
             None => self.provider.context_window(),
         };
