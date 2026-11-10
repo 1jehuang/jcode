@@ -1079,6 +1079,18 @@ done < <(build_cargo_argv "$@")
 
 start_rust_action_log
 
+# Self-dev builds compile the whole jcode binary, which saturates every core
+# for minutes and drains a laptop battery. When `cargo` is the justrust proxy
+# and the caller has not picked a route, force them onto hosted build
+# machines; justrust brings the optimized binary back into target/selfdev.
+# Opt out with JUSTRUST_REMOTE=off JUSTRUST_LOCAL_REASON=<why>.
+if [[ -z "${JUSTRUST_REMOTE:-}" && "${cargo_argv[0]:-}" == "build" ]] \
+  && [[ " ${cargo_argv[*]} " == *" --profile selfdev "* || " ${cargo_argv[*]} " == *" --profile=selfdev "* ]] \
+  && command -v justrust >/dev/null 2>&1; then
+  export JUSTRUST_REMOTE=force JUSTRUST_REMOTE_REQUIRED=1
+  log "selfdev build: routing to hosted justrust (JUSTRUST_REMOTE=force)"
+fi
+
 if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
   if remote_cargo_preflight; then
     log "using remote cargo via scripts/remote_build.sh"
