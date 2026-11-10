@@ -96,7 +96,7 @@
     "crates/jcode-tui/src/tui/app/remote.rs": 2366,
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": 2091,
     "crates/jcode-tui/src/tui/app/remote/server_events.rs": 3706,
-    "crates/jcode-tui/src/tui/app/run_shell.rs": 1256,
+    "crates/jcode-tui/src/tui/app/run_shell.rs": 1263,
     "crates/jcode-tui/src/tui/app/state_ui.rs": 2358,
     "crates/jcode-tui/src/tui/app/state_ui_input_helpers.rs": 1852,
     "crates/jcode-tui/src/tui/app/tui_lifecycle.rs": 1918,
