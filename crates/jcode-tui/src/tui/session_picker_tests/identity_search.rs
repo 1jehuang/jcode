@@ -31,6 +31,7 @@ fn resume_identity_search_prioritizes_cloud_swan_over_mentions_before_and_after_
     ] {
         picker.search_query = query.into();
         picker.rebuild_items();
+        wait_for_picker_search(&mut picker);
         assert_eq!(
             picker
                 .session_by_ref(picker.visible_sessions[0])

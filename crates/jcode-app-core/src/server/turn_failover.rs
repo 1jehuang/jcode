@@ -94,7 +94,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         crate::provider::FallbackPickOptions {
             credential_failure: true,
         },
-        &pool.members,
+        &pool.ordered_members(),
     );
     ranked
         .into_iter()

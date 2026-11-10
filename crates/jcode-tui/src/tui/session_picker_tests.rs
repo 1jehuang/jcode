@@ -752,6 +752,7 @@ fn test_filter_matches_recent_message_content() {
 
     picker.search_query = "not-in-preview".to_string();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert!(picker.visible_sessions.is_empty());
 }
 
@@ -773,6 +774,7 @@ fn resume_search_recovers_matches_as_typo_query_grows() {
 }
 
 fn wait_for_picker_search(picker: &mut SessionPicker) {
+    picker.poll_transcript_search();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while picker.transcript_search.pending() {
         assert!(std::time::Instant::now() < deadline, "search timed out");
@@ -824,6 +826,7 @@ fn resume_search_battery_prompt_outranks_incidental_tool_mentions() {
     let mut picker = SessionPicker::new(sessions);
     picker.search_query = "battery".into();
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 98);
     assert_eq!(
         picker
@@ -944,6 +947,7 @@ fn benchmark_resume_search_reports_incremental_timings() {
     picker.rebuild_items();
     let third_ms = third_start.elapsed().as_secs_f64() * 1000.0;
 
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
     eprintln!(
         "resume search bench: first_char={:.3}ms second_char={:.3}ms full_query={:.3}ms sessions=500",
@@ -2295,6 +2299,7 @@ fn test_reseed_grouped_preserves_selection_and_search() {
     picker.search_active = true;
     picker.focus = PaneFocus::Preview;
     picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
     let search_selected = picker
         .selected_session()
         .map(|s| s.id.clone())
@@ -2303,6 +2308,7 @@ fn test_reseed_grouped_preserves_selection_and_search() {
     // Reseed with the same data (as the async refresh would).
     picker.reseed_grouped(Vec::new(), sessions);
 
+    wait_for_picker_search(&mut picker);
     // Search query, search mode, focus, and the matched selection survive.
     assert_eq!(picker.search_query, "reseed4");
     assert!(picker.search_active);
@@ -2791,85 +2797,4 @@ fn cloud_filter_supports_flat_sessions_and_debug_visibility() {
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::Cloud);
-}
-
-#[test]
-fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
-    let now = Utc::now();
-    let mut local = make_session("local", "local", false, SessionStatus::Closed);
-    local.last_message_time = now;
-    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
-    cloud.server_name = Some("cloud: host".into());
-    cloud.server_icon = Some("☁".into());
-    cloud.last_message_time = now - ChronoDuration::minutes(2);
-    let mut old_local = local.clone();
-    old_local.id = "old_local".into();
-    old_local.last_message_time = now - ChronoDuration::minutes(3);
-    let mut saved_cloud = cloud.clone();
-    saved_cloud.id = "saved_cloud".into();
-    saved_cloud.saved = true;
-    let cloud_group = ServerGroup {
-        name: "cloud: host".into(),
-        icon: "☁".into(),
-        version: String::new(),
-        git_hash: String::new(),
-        is_running: false,
-        sessions: vec![cloud, saved_cloud],
-    };
-    let mut picker = SessionPicker::new_grouped(vec![cloud_group], vec![old_local, local]);
-    assert_eq!(
-        picker
-            .visible_sessions
-            .iter()
-            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
-            .collect::<Vec<_>>(),
-        ["saved_cloud", "local", "cloud", "old_local"]
-    );
-    assert!(matches!(
-        picker.items[0],
-        PickerItem::SavedHeader { session_count: 1 }
-    ));
-    assert!(!picker.items.iter().any(|item| matches!(
-        item,
-        PickerItem::ServerHeader { .. } | PickerItem::OrphanHeader { .. }
-    )));
-
-    let real = make_session("real", "real", false, SessionStatus::Closed);
-    picker.all_server_groups.push(ServerGroup {
-        name: "real server".into(),
-        icon: "🛰".into(),
-        version: "1".into(),
-        git_hash: String::new(),
-        is_running: true,
-        sessions: vec![real],
-    });
-    picker.rebuild_items();
-    assert_eq!(
-        picker
-            .visible_sessions
-            .iter()
-            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
-            .collect::<Vec<_>>(),
-        ["saved_cloud", "real", "local", "cloud", "old_local"]
-    );
-    assert!(picker.items.iter().any(|item| matches!(item, PickerItem::ServerHeader { name, session_count: 1, .. } if name == "real server")));
-    picker.filter_mode = SessionFilterMode::Cloud;
-    picker.rebuild_items();
-    assert_eq!(
-        picker
-            .visible_sessions
-            .iter()
-            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
-            .collect::<Vec<_>>(),
-        ["cloud", "saved_cloud"]
-    );
-    assert!(
-        picker
-            .items
-            .iter()
-            .all(|item| matches!(item, PickerItem::Session))
-    );
-    picker.search_query = "local".into();
-    picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
 }

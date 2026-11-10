@@ -187,6 +187,7 @@ fn test_type_to_search_non_shortcut_letter_starts_search() {
     assert!(matches!(action, OverlayAction::Continue));
     assert!(picker.search_active);
     assert_eq!(picker.search_query, "z");
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker), vec!["session_zebra".to_string()]);
 }
 
@@ -198,6 +199,7 @@ fn test_type_to_search_digit_starts_search() {
         .unwrap();
     assert!(picker.search_active);
     assert_eq!(picker.search_query, "7");
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker), vec!["session_build7".to_string()]);
 }
 
@@ -340,6 +342,7 @@ fn test_search_esc_with_query_clears_and_stays_in_search() {
             .handle_overlay_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker), vec!["session_otter".to_string()]);
     let action = picker
         .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
@@ -347,6 +350,7 @@ fn test_search_esc_with_query_clears_and_stays_in_search() {
     assert!(matches!(action, OverlayAction::Continue));
     assert!(picker.search_query.is_empty());
     assert!(picker.search_active);
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker).len(), 3);
 
     // A second Esc on the now-empty query closes.
@@ -370,6 +374,7 @@ fn test_search_tab_leaves_search_keeping_filter_then_q_closes() {
         .unwrap();
     assert!(!picker.search_active, "Tab leaves search mode");
     assert_eq!(picker.search_query, "otter", "query stays as the filter");
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker), vec!["session_otter".to_string()]);
 
     // Tab in list mode keeps toggling list <-> preview focus.
@@ -516,6 +521,7 @@ fn test_search_typing_while_loading_survives_reseed_and_filters() {
     assert!(picker.loading_message.is_none());
     assert_eq!(picker.search_query, "quota");
     assert!(picker.search_active);
+    wait_for_picker_search(&mut picker);
     assert_eq!(visible_ids(&picker), vec!["session_quota".to_string()]);
 }
 
@@ -580,6 +586,7 @@ fn loading_search_keeps_word_delete_and_clear_shortcuts() {
             )],
         );
         assert_eq!(picker.search_query, expected);
+        wait_for_picker_search(&mut picker);
         assert_eq!(visible_ids(&picker), vec!["session_hello"]);
     }
 }
@@ -817,6 +824,7 @@ fn test_loading_list_typing_restarts_search_before_cached_and_fresh_updates() {
             picker.apply_session_list_update(update).unwrap();
             assert!(picker.search_input_focused());
             assert_eq!(picker.search_query, "x");
+            wait_for_picker_search(&mut picker);
             assert_eq!(visible_ids(&picker), vec!["session_x".to_string()]);
         }
     }
@@ -889,6 +897,7 @@ fn test_search_query_and_filter_survive_cached_and_fresh_session_updates() {
         assert!(picker.search_input_focused());
         assert_eq!(picker.search_query, "quota");
         assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+        wait_for_picker_search(&mut picker);
         assert_eq!(visible_ids(&picker), vec!["session_quota".to_string()]);
     }
 }

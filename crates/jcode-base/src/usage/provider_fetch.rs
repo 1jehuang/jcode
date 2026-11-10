@@ -72,11 +72,10 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     .unwrap_or_default()
                     .iter()
                     .any(|account| account.label == account_label);
-                let (offer, ineligible) = super::anthropic_reset::fetch_limit_reset_offer(
+                let (offer, ineligible) = super::anthropic_reset::cached_limit_reset_offer(
                     &access_token,
                     stored.then_some(account_label.as_str()),
-                )
-                .await;
+                );
                 super::banked::record_anthropic_offer(&account_label, offer.as_ref());
                 report.anthropic_limit_reset = offer;
                 if ineligible {

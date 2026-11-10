@@ -1,6 +1,9 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+#[path = "session_lease.rs"]
+mod session_lease;
+
 impl Agent {
     pub(crate) async fn resume_turn_streaming_mpsc(
         &mut self,
@@ -41,24 +44,6 @@ impl Agent {
             Ok(false) => {}
             Err(error) => logging::warn(&format!("Unable to refresh plugin MCP sources: {error}")),
         }
-    }
-
-    /// Refuse to run a model turn when this session moved to another machine
-    /// or this in-memory copy is older than the transcript on disk.
-    pub(crate) fn ensure_session_lease(&self) -> Result<()> {
-        crate::session_accounts::ensure_bound_account_route(self.provider.as_ref(), &self.session)?;
-        match self.session.migration_lease_block() {
-            Some(block) => Err(anyhow::anyhow!("Session is not runnable here: {block}")),
-            None => Ok(()),
-        }
-    }
-
-    /// True when a newer migrated transcript replaced this copy on disk.
-    pub(crate) fn session_copy_is_stale(&self) -> bool {
-        matches!(
-            self.session.migration_lease_block(),
-            Some(crate::storage::SessionLeaseBlock::StaleCopy { .. })
-        )
     }
 
     /// Run a single turn with the given user message

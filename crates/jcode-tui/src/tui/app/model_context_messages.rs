@@ -123,3 +123,27 @@ pub(in crate::tui::app) fn unavailable_model_route_message(
 
     lines.join("\n")
 }
+
+/// Match `/usage <provider>` queries against report names such as
+/// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
+pub(in crate::tui::app) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let name = normalize(provider_name);
+    let query = normalize(query);
+    if query.is_empty() {
+        return true;
+    }
+    let alias = match query.as_str() {
+        "claude" | "anthropic" => "anthropic",
+        "openai" | "chatgpt" | "codex" | "gpt" => "openai",
+        "gemini" | "google" => "gemini",
+        "copilot" | "github" => "copilot",
+        _ => query.as_str(),
+    };
+    name.contains(&query) || name.contains(alias)
+}

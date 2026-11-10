@@ -13,7 +13,11 @@ fn session(id: &str, opening: Option<&str>) -> SessionInfo {
         user_message_count: 1,
         assistant_message_count: 0,
         created_at: now,
-        last_message_time: now,
+        last_message_time: if id == "queued-stale" {
+            now + chrono::Duration::seconds(1)
+        } else {
+            now
+        },
         last_active_at: None,
         working_dir: None,
         model: None,
@@ -58,8 +62,8 @@ fn picker_tick_submits_best_search_result_without_second_key() {
     app.handle_session_picker_key(KeyCode::Char('/'), KeyModifiers::NONE)
         .unwrap();
     // Opening-request rank intentionally applies only to >=4-word requests.
-    // This starts with an incidental metadata hit and discovers the exact
-    // opening request only when the worker runs after Enter is queued.
+    // Typing preserves the pre-query row. The worker discovers the exact
+    // opening request only after Enter is queued.
     for ch in "needle deployment configuration rollback".chars() {
         app.handle_session_picker_key(KeyCode::Char(ch), KeyModifiers::NONE)
             .unwrap();

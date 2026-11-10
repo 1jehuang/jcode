@@ -721,9 +721,9 @@ impl SessionPicker {
             " type to filter · loading… · Esc clear · Ctrl+C cancel ".to_string()
         } else if self.loading_message.is_some() {
             " / search · s/S filter · Esc cancel ".to_string()
-        } else if self.transcript_search.pending() && self.search_selection.following() {
+        } else if self.search_busy_visible() && self.search_selection.following() {
             " finding best match… · auto-focus ≤1s · ↑↓ take control · Enter confirm ".to_string()
-        } else if self.transcript_search.pending() {
+        } else if self.search_busy_visible() {
             " searching in background… · selection held · ↑↓ nav · Enter confirm ".to_string()
         } else if self.search_active {
             " type to search · ↑↓ nav · Enter resume · Ctrl+S filter · Tab shortcuts · Esc clear/close "
@@ -746,8 +746,7 @@ impl SessionPicker {
 
         let border_dim: Color = rgb(70, 70, 70);
         let border_focus: Color = rgb(130, 130, 160);
-        let border_color = if self.transcript_search.pending() && self.search_selection.following()
-        {
+        let border_color = if self.search_busy_visible() && self.search_selection.following() {
             rgb(220, 180, 100)
         } else if self.focus == PaneFocus::Sessions {
             border_focus

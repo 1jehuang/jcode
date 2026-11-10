@@ -7,6 +7,65 @@
 use super::*;
 
 impl SessionPicker {
+    pub fn activate_search(&mut self) {
+        self.search_active = true;
+    }
+
+    pub fn search_submission_pending(&self) -> bool {
+        self.pending_search_submission.is_some()
+    }
+
+    /// Advance queued Enter without waiting on transcript I/O. Repeated Enter
+    /// cannot extend the existing query-following deadline.
+    pub fn poll_search_submission(&mut self) -> Option<OverlayAction> {
+        let modifiers = self.pending_search_submission?;
+        self.poll_transcript_search();
+        if self.transcript_search.pending() && self.search_selection.following() {
+            return None;
+        }
+        self.pending_search_submission = None;
+        if self.transcript_search.pending() && self.search_selection.holding() {
+            // Nothing matched within the wait. The rows on screen belong to
+            // the previous query, so keep editing instead of resuming one.
+            return None;
+        }
+        self.rebuild_items_following();
+        let targets = self.selection_or_current_targets();
+        if targets.is_empty() {
+            // Keep a no-match query editable. Later results must not auto-submit.
+            self.search_active = true;
+            return None;
+        }
+        self.search_active = false;
+        Some(OverlayAction::Selected(
+            self.selection_result_for_enter(targets, modifiers),
+        ))
+    }
+
+    pub(super) fn queue_search_submission(&mut self, modifiers: KeyModifiers) -> bool {
+        if self.search_edit_pending
+            || (!self.search_query.trim().is_empty()
+            // Held rows belong to the previous query: never resume one of them.
+            && (self.search_selection.following() || self.search_selection.holding())
+            && self.transcript_search.pending())
+        {
+            self.pending_search_submission = Some(modifiers);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Standalone picker input follows the main TUI's press/repeat policy.
+    /// Release events must not trigger navigation, editing, or selection.
+    pub(super) fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return Ok(OverlayAction::Continue);
+        }
+        let key = jcode_tui_core::korean_input::normalize_key_event(key);
+        self.handle_overlay_key(key.code, key.modifiers)
+    }
+
     /// Delete the word immediately before the (implicit) end-of-line cursor in
     /// the search query. Used for Ctrl+W / Ctrl+Backspace inside the search bar.
     pub(super) fn delete_search_word_back(&mut self) {
@@ -50,7 +109,7 @@ impl SessionPicker {
                     return Ok(OverlayAction::Close);
                 }
                 self.search_query.clear();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Tab leaves the search box for the list, keeping the query as the
             // active filter, so the single-letter shortcuts work.
@@ -66,7 +125,11 @@ impl SessionPicker {
                     )));
                 }
                 self.search_query.push(c);
-                self.rebuild_items();
+                self.search_edit_pending = true;
+            }
+            KeyCode::Enter if self.loading_message.is_some() => {}
+            KeyCode::Enter if self.search_edit_pending => {
+                self.pending_search_submission = Some(modifiers);
             }
             KeyCode::Enter => {
                 // Enter waits for the current query's best match to settle.
@@ -76,7 +139,7 @@ impl SessionPicker {
                 self.search_active = false;
                 if self.visible_sessions.is_empty() {
                     self.search_query.clear();
-                    self.rebuild_items();
+                    self.search_edit_pending = true;
                 } else {
                     let targets = self.selection_or_current_targets();
                     if !targets.is_empty() {
@@ -90,30 +153,30 @@ impl SessionPicker {
             // send for Ctrl+Backspace) delete the previous word in the query.
             KeyCode::Backspace if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Char('\u{8}') => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Backspace on an empty query is a no-op: holding Backspace must
             // not drop the user into list mode where the next 'q' closes.
             KeyCode::Backspace if self.search_query.is_empty() => {}
             KeyCode::Backspace => {
                 self.search_query.pop();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Ctrl+U clears the whole query (like readline's kill-to-start).
             KeyCode::Char('u') if ctrl => {
                 self.search_query.clear();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Vim-style / readline navigation that keeps working while typing.
             KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
             KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
             KeyCode::Char('w') if ctrl => {
                 self.delete_search_word_back();
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             // Plain `s` is query text here, so Ctrl+S / Ctrl+Shift+S cycle the
             // filter without leaving the search box.
@@ -134,7 +197,7 @@ impl SessionPicker {
                     return Ok(OverlayAction::Continue);
                 }
                 self.search_query.push(c);
-                self.rebuild_items();
+                self.search_edit_pending = true;
             }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.previous(),
@@ -238,7 +301,7 @@ impl SessionPicker {
         }
         self.search_active = true;
         self.search_query.push(c);
-        self.rebuild_items();
+        self.search_edit_pending = true;
         true
     }
 

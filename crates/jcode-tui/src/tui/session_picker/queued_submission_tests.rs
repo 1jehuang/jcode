@@ -43,6 +43,44 @@ fn session(id: &str) -> SessionInfo {
     }
 }
 
+#[test]
+fn enter_after_tab_waits_for_the_edited_query() {
+    let mut old = session("old");
+    old.last_message_time += chrono::Duration::seconds(1);
+    let mut picker = SessionPicker::new(vec![old, session("needle")]);
+    assert_eq!(picker.selected_session().unwrap().id, "old");
+    picker.activate_search();
+    for c in "needle".chars() {
+        picker
+            .handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE)
+            .unwrap();
+    }
+    assert!(picker.search_edit_pending);
+    picker
+        .handle_overlay_key(KeyCode::Tab, KeyModifiers::NONE)
+        .unwrap();
+    assert!(!picker.search_active);
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Continue
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let action = loop {
+        if let Some(action) = picker.poll_search_submission() {
+            break action;
+        }
+        assert!(Instant::now() < deadline, "query submission timed out");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(matches!(action, OverlayAction::Selected(
+        PickerResult::SelectedInCurrentTerminal(targets)
+        | PickerResult::SelectedInNewTerminal(targets)
+    ) if matches!(targets.as_slice(), [ResumeTarget::CodexSession { session_id, .. }]
+        if session_id == "needle")));
+}
+
 fn pending_picker() -> (SessionPicker, mpsc::Sender<(String, SearchRank)>) {
     let mut picker = SessionPicker::new(vec![session("stale"), session("best")]);
     picker.search_active = true;
@@ -51,6 +89,12 @@ fn pending_picker() -> (SessionPicker, mpsc::Sender<(String, SearchRank)>) {
             .handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE)
             .unwrap();
     }
+    picker.rebuild_items();
+    picker.transcript_search.ranks.insert(
+        "stale".into(),
+        literal_metadata_rank("needle", &["needle".into()]),
+    );
+    picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "stale");
     let (sender, receiver) = mpsc::channel();
     picker.transcript_search.started_at = None;
@@ -180,6 +224,7 @@ fn manual_selection_submits_immediately_without_following_background_results() {
 fn no_matches_at_deadline_keeps_query_and_does_not_submit_later() {
     let (mut picker, sender) = pending_picker();
     picker.all_sessions[0].search_index = "unrelated".into();
+    picker.transcript_search.ranks.clear();
     picker.rebuild_items();
     assert!(picker.visible_sessions.is_empty());
     enter(&mut picker);

@@ -1,6 +1,6 @@
 //! Incremental fuzzy and full-transcript search without typing delays.
-//! Only cheap literal metadata and resident-cache hints run on the UI thread,
-//! never fuzzy DP or transcript file reads.
+//! All matching, including literal metadata and identity fields, runs on
+//! cancellable workers. The UI only consumes bounded batches of rank evidence.
 use super::loading::search_query_tokens;
 use super::{ResumeTarget, SessionInfo};
 use serde::de::DeserializeSeed;
@@ -23,7 +23,10 @@ pub(super) mod source;
 mod token_cache;
 mod warmup;
 use source::Source;
+mod entry;
+use entry::{Candidate, Entry, build_candidates};
 
+#[cfg(test)]
 const IMMEDIATE_METADATA_BYTES: usize = 1024 * 1024;
 
 /// A close contiguous opening request outranks incidental transcript evidence.
@@ -84,16 +87,6 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
     }
 }
 
-pub(super) fn exact_metadata_field(session: &SessionInfo, query: &str) -> bool {
-    [&session.title, &session.short_name, &session.id]
-        .iter()
-        .any(|field| normalized_equals(field, query))
-        || session
-            .save_label
-            .as_ref()
-            .is_some_and(|label| normalized_equals(label, query))
-}
-
 fn normalized_equals(field: &str, query: &str) -> bool {
     let field = field.trim();
     if field.is_ascii() && query.is_ascii() {
@@ -112,11 +105,6 @@ pub(super) fn lowercase_field(field: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl SearchRank {
-    pub(super) fn with_intent_terms(mut self, terms: usize) -> Self {
-        self.intent_terms = terms;
-        self
-    }
-
     pub(super) fn with_source_weight(mut self, weight: u32) -> Self {
         self.source_weight = weight;
         self
@@ -146,29 +134,6 @@ fn fuzzy_metadata_rank_with_scores(
         .filter_map(|token| scores.best_score(token, index, false).map(i64::from))
         .sum();
     rank
-}
-
-struct Candidate {
-    id: String,
-    paths: Vec<PathBuf>,
-    search_index: String,
-    missing_tokens: Vec<String>,
-    exact_field: bool,
-    opening_prompt: String,
-    intent_text: String,
-    /// Per-token origin evidence from metadata, before transcript reads.
-    prior: Vec<Option<Source>>,
-}
-
-/// Per-token metadata origins for the UI-thread ranking of sessions the worker
-/// has not ranked yet. Uses the already lowercased intent fields.
-pub(super) fn metadata_source_weight(
-    intent_fields: &[&str],
-    index: &str,
-    tokens: &[String],
-    idf: &[u32],
-) -> u32 {
-    source::weighted_source_weight(&source::metadata_sources(intent_fields, index, tokens), idf)
 }
 
 /// Transcript evidence: the first-match fuzzy score plus per-token origins.
@@ -366,9 +331,13 @@ fn stream_file<S: source::Sink>(path: &Path, sink: &mut S, cancel: &AtomicBool) 
     {}
 }
 
+type IdentityRanks = HashMap<String, (bool, bool, bool)>;
+
 #[derive(Default)]
 pub(super) struct TranscriptSearch {
     query: String,
+    /// One shared entry per session, reused across queries.
+    corpus: Vec<Arc<Entry>>,
     candidates: Vec<Candidate>,
     started_at: Option<Instant>,
     receiver: Option<mpsc::Receiver<(String, SearchRank)>>,
@@ -377,6 +346,7 @@ pub(super) struct TranscriptSearch {
     defer_metadata: bool,
     /// Per-token rarity weights, computed by the worker before any rank.
     idf: Arc<std::sync::OnceLock<Vec<u32>>>,
+    identities: Arc<std::sync::OnceLock<IdentityRanks>>,
 }
 
 impl Drop for TranscriptSearch {
@@ -394,76 +364,26 @@ impl TranscriptSearch {
         if self.query == query {
             return;
         }
+        // Reuse every unchanged entry. Only a new or refreshed session copies
+        // its metadata index, so typing costs no per-keystroke megabytes.
+        let mut previous = std::mem::take(&mut self.corpus).into_iter();
+        let corpus: Vec<Arc<Entry>> = sessions
+            .map(|session| match previous.next() {
+                Some(entry) if entry.describes(session) => entry,
+                _ => Arc::new(Entry::new(session)),
+            })
+            .collect();
         *self = Self::default();
+        self.corpus = corpus;
         self.query = query.to_string();
         if query.is_empty() {
             return;
         }
-        let tokens = search_query_tokens(query);
-        let sessions: Vec<_> = sessions.collect();
-        self.defer_metadata = sessions
-            .iter()
-            .map(|session| session.search_index.len())
-            .sum::<usize>()
-            > IMMEDIATE_METADATA_BYTES;
-        for session in sessions {
-            let missing_tokens: Vec<_> = tokens
-                .iter()
-                .filter(|token| {
-                    self.defer_metadata || !session.search_index.contains(token.as_str())
-                })
-                .cloned()
-                .collect();
-            // Literal metadata matches still go to the worker, which upgrades
-            // their rank once it knows where in the transcript each word came from,
-            // unless every word already comes from a user-intent field.
-            if missing_tokens.is_empty()
-                && (tokens.len() < 4 || session.first_user_prompt.is_none())
-            {
-                let intent = [
-                    session.title.to_lowercase(),
-                    session.save_label.as_deref().unwrap_or("").to_lowercase(),
-                    session
-                        .first_user_prompt
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase(),
-                ];
-                if tokens
-                    .iter()
-                    .all(|token| intent.iter().any(|field| field.contains(token.as_str())))
-                {
-                    continue;
-                }
-            }
-            let paths = transcript_paths(session);
-            self.candidates.push(Candidate {
-                id: session.id.clone(),
-                paths,
-                search_index: session.search_index.clone(),
-                missing_tokens,
-                exact_field: exact_metadata_field(session, query),
-                opening_prompt: session
-                    .first_user_prompt
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_owned(),
-                intent_text: format!(
-                    "{}\n{}\n{}",
-                    session.title,
-                    session.save_label.as_deref().unwrap_or(""),
-                    session.first_user_prompt.as_deref().unwrap_or(""),
-                ),
-                prior: Vec::new(),
-            });
-        }
-        if !self.candidates.is_empty() {
+        self.defer_metadata = true;
+        // Candidate selection touches every index and always belongs to the
+        // worker, including tiny histories.
+        if !self.corpus.is_empty() {
             self.started_at = Some(Instant::now());
-            warmup::schedule(
-                self.candidates
-                    .iter()
-                    .flat_map(|candidate| candidate.paths.iter()),
-            );
         }
     }
 
@@ -482,9 +402,16 @@ impl TranscriptSearch {
             .map_or_else(SearchRank::default, |rank| *rank)
     }
 
-    /// Rarity weights for the current query, once the worker computed them.
-    pub(super) fn idf(&self) -> &[u32] {
-        self.idf.get().map_or(&[], Vec::as_slice)
+    pub(super) fn identity_rank(&self, id: &str) -> (bool, bool, bool) {
+        self.identities
+            .get()
+            .and_then(|identities| identities.get(id).copied())
+            .unwrap_or((false, false, false))
+    }
+
+    /// The worker reported at least one match for the current query.
+    pub(super) fn has_results(&self) -> bool {
+        !self.ranks.is_empty()
     }
 
     pub(super) fn defers_metadata(&self) -> bool {
@@ -500,14 +427,48 @@ impl TranscriptSearch {
     pub(super) fn poll(&mut self) -> bool {
         if self.started_at.take().is_some() {
             let candidates = std::mem::take(&mut self.candidates);
+            let deferred = self.defer_metadata.then(|| self.corpus.clone());
             let cancel = self.cancel.clone();
             let tokens = search_query_tokens(&self.query);
             let query = self.query.clone();
             let shared_idf = self.idf.clone();
+            let shared_identities = self.identities.clone();
             let (sender, receiver) = mpsc::channel();
             match std::thread::Builder::new()
                 .name("jcode-transcript-search".into())
                 .spawn(move || {
+                    let candidates = match deferred {
+                        Some(corpus) => {
+                            let candidates = build_candidates(&corpus, &query, &tokens, true);
+                            warmup::schedule(
+                                candidates
+                                    .iter()
+                                    .flat_map(|candidate| candidate.paths.iter()),
+                            );
+                            candidates
+                        }
+                        None => candidates,
+                    };
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let identities: IdentityRanks = candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            let rank = candidate.identity_rank(&tokens);
+                            rank.0.then(|| (candidate.id.clone(), rank))
+                        })
+                        .collect();
+                    let identity_ids: Vec<_> = identities.keys().cloned().collect();
+                    if shared_identities.set(identities).is_err() {
+                        crate::logging::debug("Transcript search identities already published");
+                        return;
+                    }
+                    for id in identity_ids {
+                        if sender.send((id, SearchRank::default())).is_err() {
+                            return;
+                        }
+                    }
                     // Document frequency over every candidate's metadata index.
                     // Off the render thread: this touches every session.
                     let idf = source::idf_weights(
@@ -541,10 +502,9 @@ impl TranscriptSearch {
                             }
                         }
                     }
-                    let candidates = ranked.into_iter().map(|(candidate, _)| candidate);
-                    let mut shards: Vec<Vec<Candidate>> =
+                    let mut shards: Vec<Vec<(Candidate, SearchRank)>> =
                         (0..workers).map(|_| Vec::new()).collect();
-                    for (index, candidate) in candidates.enumerate() {
+                    for (index, candidate) in ranked.into_iter().enumerate() {
                         shards[index % workers].push(candidate);
                     }
                     std::thread::scope(|scope| {
@@ -603,7 +563,7 @@ fn search_workers(candidates: usize) -> usize {
 
 /// Rank one shard of candidates, cheapest evidence first.
 fn search_shard(
-    candidates: Vec<Candidate>,
+    candidates: Vec<(Candidate, SearchRank)>,
     query: &str,
     tokens: &[String],
     idf: &[u32],
@@ -622,8 +582,7 @@ fn search_shard(
     // Sessions whose later user prompts may contain the query
     // as a retyped phrase, checked after cheaper evidence.
     let mut phrase_jobs = Vec::new();
-    for (mut candidate, priority) in prioritize_candidates(candidates, &phrase, tokens, idf, cancel)
-    {
+    for (mut candidate, priority) in candidates {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -642,7 +601,7 @@ fn search_shard(
         }
         candidate
             .missing_tokens
-            .retain(|token| !candidate.search_index.contains(token.as_str()));
+            .retain(|token| !candidate.entry.search_index.contains(token.as_str()));
         if candidate.missing_tokens.is_empty() {
             let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
                 .with_exact_field(candidate.exact_field)
@@ -665,7 +624,7 @@ fn search_shard(
         fuzzy_candidates.push((candidate, priority));
     }
     let mut transcripts = Vec::new();
-    for (mut candidate, priority) in fuzzy_candidates {
+    for (candidate, priority) in fuzzy_candidates {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -677,7 +636,6 @@ fn search_shard(
         rank.intent_terms = priority.intent_terms;
         rank.source_weight = priority.source_weight;
         fuzzy_missing.retain(|token| !scores.matches_text(token, &candidate.search_index));
-        candidate.search_index = String::new();
         if fuzzy_missing.is_empty() && sender.send((candidate.id.clone(), rank)).is_err() {
             return;
         }
@@ -707,7 +665,7 @@ fn search_shard(
             Some(Some(evidence)) => {
                 if sender
                     .send((
-                        candidate.id,
+                        candidate.id.clone(),
                         SearchRank {
                             literal: true,
                             source_weight: source::weighted_source_weight(&evidence.sources, idf),
@@ -737,7 +695,7 @@ fn search_shard(
             Some(Some(evidence)) => {
                 if sender
                     .send((
-                        candidate.id,
+                        candidate.id.clone(),
                         SearchRank {
                             score: rank.score + evidence.score,
                             source_weight: source::weighted_source_weight(&evidence.sources, idf),
@@ -768,7 +726,7 @@ fn search_shard(
         ) {
             if sender
                 .send((
-                    candidate.id,
+                    candidate.id.clone(),
                     SearchRank {
                         literal: true,
                         source_weight: source::weighted_source_weight(&evidence.sources, idf),
@@ -801,7 +759,7 @@ fn search_shard(
             let weight = source::weighted_source_weight(&evidence.sources, idf);
             if weight > rank.source_weight
                 && sender
-                    .send((candidate.id, rank.with_source_weight(weight)))
+                    .send((candidate.id.clone(), rank.with_source_weight(weight)))
                     .is_err()
             {
                 return;
@@ -828,7 +786,7 @@ fn search_shard(
                 source_weight: source::weighted_source_weight(&evidence.sources, idf),
                 ..rank
             };
-            if sender.send((candidate.id, rank)).is_err() {
+            if sender.send((candidate.id.clone(), rank)).is_err() {
                 return;
             }
         }
