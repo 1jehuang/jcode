@@ -64,6 +64,7 @@ fn subscribe(target: &str) -> Request {
         crash_on_disconnect: false,
         continue_on_disconnect: false,
         terminal_env: vec![],
+        client_name: None,
     }
 }
 

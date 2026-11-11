@@ -210,7 +210,11 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                 cached
             };
             let has_access = !account.access.is_empty();
-            let has_refresh = !account.refresh.is_empty();
+            let has_refresh = !account.refresh.is_empty()
+                && !crate::auth::refresh_state::refresh_token_is_known_rejected(
+                    "claude",
+                    &account.refresh,
+                );
             let expired = account.expires <= now;
             let models =
                 cached_models.unwrap_or_else(|| super::known_anthropic_model_ids_for_scope(&scope));

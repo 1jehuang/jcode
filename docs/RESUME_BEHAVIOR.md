@@ -34,6 +34,26 @@ When opening in a new terminal:
 - If terminal launch is unavailable, the UI prints manual `jcode --resume <id>` commands.
 - The picker remains open after launching and clears the current multi-selection so more sessions can be opened.
 
+## Session already open in another window
+
+`display.resume_open_elsewhere` decides what happens when the picked session is
+already shown by another local jcode window (Linux only):
+
+```toml
+[display]
+resume_open_elsewhere = "move"   # "off" (default), "move", or "replace"
+```
+
+- `off`: attach a second client and leave the other window alone.
+- `move`: bring the existing window to the focused workspace and focus it, and
+  do not attach again. A standalone picker window (`jcode --resume`) then exits.
+  Requires niri. When the window cannot be identified unambiguously (no niri,
+  or one terminal process hosting several windows) it behaves like `replace`.
+- `replace`: resume as usual and close the other window's client. The closed
+  client exits cleanly, so the session is not marked crashed.
+
+Env override: `JCODE_RESUME_OPEN_ELSEWHERE`.
+
 ## Saved sessions
 
 `/save [label]` bookmarks the current session so it appears in the saved section of the picker. `/unsave` removes that bookmark.

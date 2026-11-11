@@ -399,7 +399,7 @@ impl DeadMemberSalvage {
             ));
         }
         parts.push(
-            "Queued tasks will be picked up by assign_next/run_plan; check plan_status for details."
+            "Queued worker lanes start automatically as dependencies and capacity allow; check plan_status for details."
                 .to_string(),
         );
         parts.join(" ")
@@ -766,7 +766,26 @@ async fn broadcast_swarm_status_now(
         return;
     }
 
-    let members_guard = swarm_members.read().await;
+    // Resolve recipients and publish under one guard. Besides avoiding a lock
+    // and full payload clone per session, this keeps an older snapshot from
+    // being queued after a concurrent newer snapshot on the same channel.
+    let mut members_guard = swarm_members.write().await;
+    let mut targets = Vec::new();
+    for sid in &session_ids {
+        let Some(member) = members_guard.get_mut(sid) else {
+            continue;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        if let Some((_, tx)) = member.event_txs.iter().next() {
+            member.event_tx = tx.clone();
+            targets.extend(member.event_txs.values().cloned());
+        } else if !member.event_tx.is_closed() {
+            targets.push(member.event_tx.clone());
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
     let broadcast_terminal_retention = swarm_status_broadcast_terminal_retention();
     let members_list: Vec<crate::protocol::SwarmMemberStatus> = session_ids
         .iter()
@@ -839,13 +858,12 @@ async fn broadcast_swarm_status_now(
         })
         .collect();
 
-    drop(members_guard);
     let event = ServerEvent::SwarmStatus {
         members: members_list,
     };
-    for sid in session_ids {
-        let _ = fanout_session_event(swarm_members, &sid, event.clone()).await;
-    }
+    // Unbounded queue sends never await. Do not route through the generic
+    // event projector: SwarmStatus itself cannot change a live projection.
+    super::state::send_event_to_targets(&targets, event);
 }
 
 /// Publish wait transitions immediately and refresh elapsed wait ages while a
@@ -856,7 +874,10 @@ pub(super) async fn monitor_wait_status(
 ) {
     let mut changes = crate::wait_registry::subscribe_changes();
     let mut live_changes = super::live_status::subscribe_changes();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    // Transitions are pushed by the watch channels above. The tick only ages
+    // displayed wait/elapsed counters, and each tick fans a full swarm status
+    // out to every attached client, so keep it coarse to let clients sleep.
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut previous = HashSet::<String>::new();
     loop {
@@ -1172,6 +1193,7 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
+    crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",
         vec![

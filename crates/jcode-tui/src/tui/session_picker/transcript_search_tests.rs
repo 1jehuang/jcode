@@ -69,7 +69,7 @@ fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
     let path = dir.path().join("oversized.jsonl");
     // Too large for warmup or decoded-text caching, so this must use cold IO.
     let mut text = format!("{}\n", r#"{"text":"needle"}"#);
-    text.push_str(&" ".repeat(2 * 1024 * 1024));
+    text.push_str(&" ".repeat(17 * 1024 * 1024));
     std::fs::write(&path, text).unwrap();
     let session = external_session("cold", &path);
     let mut search = TranscriptSearch::default();
@@ -130,14 +130,8 @@ fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
         ("absent", false),
     ] {
         let tokens = search_query_tokens(query);
-        let mut reference = Scan {
-            tokens: &tokens,
-            found: vec![false; tokens.len()],
-            cancel: &cancel,
-            fuzzy,
-            score: 0,
-            scores: &mut WordScores::default(),
-        };
+        let mut scores = WordScores::default();
+        let mut reference = Scan::new(&tokens, &[], &cancel, mode(fuzzy), &mut scores);
         for path in &paths {
             scan_file_streaming(path, &mut reference);
             if reference.complete() {
@@ -146,7 +140,7 @@ fn cached_path_scores_preserve_first_path_and_cross_file_tokens() {
         }
         assert_eq!(
             cached_paths_scan(&paths, &tokens, &cancel, fuzzy),
-            Some(reference.complete().then_some(reference.score))
+            Some(reference.all_found().then_some(reference.score))
         );
     }
 }
@@ -184,16 +178,9 @@ fn incremental_token_sequences_match_fresh_streaming_results_and_scores() {
             for second in words {
                 let tokens = vec![first.to_string(), second.to_string()];
                 let mut scores = WordScores::default();
-                let mut reference = Scan {
-                    tokens: &tokens,
-                    found: vec![false; tokens.len()],
-                    cancel: &cancel,
-                    fuzzy,
-                    score: 0,
-                    scores: &mut scores,
-                };
+                let mut reference = Scan::new(&tokens, &[], &cancel, mode(fuzzy), &mut scores);
                 scan_file_streaming(&path, &mut reference);
-                let expected = reference.complete().then_some(reference.score);
+                let expected = reference.all_found().then_some(reference.score);
                 assert_eq!(
                     cached_paths_scan(std::slice::from_ref(&path), &tokens, &cancel, fuzzy),
                     Some(expected),
@@ -404,13 +391,23 @@ fn wait_for_search(picker: &mut SessionPicker) {
 fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
     let query = "repair the broken search";
     let candidate = |id: &str, intent: &str, opening: &str| Candidate {
-        id: id.into(),
-        paths: Vec::new(),
-        search_index: query.into(),
+        entry: Arc::new(Entry {
+            id: id.into(),
+            paths: Vec::new(),
+            search_index: query.into(),
+            title: String::new(),
+            short_name: String::new(),
+            save_label: None,
+            has_prompt: !opening.is_empty(),
+            opening_prompt: opening.into(),
+            intent_text: intent.into(),
+            working_dir: None,
+            server_name: None,
+            cloud: false,
+        }),
         missing_tokens: Vec::new(),
         exact_field: false,
-        opening_prompt: opening.into(),
-        intent_text: intent.into(),
+        prior: Vec::new(),
     };
     let candidates = vec![
         candidate("weak-first", "unrelated", ""),
@@ -420,8 +417,9 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
     ];
     let ranked = prioritize_candidates(
         candidates,
-        query,
+        &PhraseQuery::new(query),
         &search_query_tokens(query),
+        &[],
         &AtomicBool::new(false),
     );
     assert_eq!(
@@ -558,7 +556,7 @@ fn picker_finds_unsampled_middle_without_loading_preview() {
     picker.search_query = "MIDDLEONLYPLATYPUS title".into();
     picker.rebuild_items();
     assert!(
-        picker.visible_sessions.is_empty(),
+        picker.search_selection.holding() && !picker.transcript_search.has_results(),
         "sample must not already contain the needle"
     );
     assert!(picker.pending_preview_load.is_none());
@@ -591,7 +589,7 @@ fn changed_query_cancels_old_worker_and_ignores_its_results() {
 }
 
 #[test]
-fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
+fn typing_starts_cold_work_on_first_poll_and_metadata_is_async() {
     let temp = tempfile::tempdir().unwrap();
     let session = external_session("one", &temp.path().join("absent.jsonl"));
     let mut picker = SessionPicker::new(vec![session]);
@@ -602,6 +600,8 @@ fn typing_starts_cold_work_on_first_poll_and_metadata_stays_immediate() {
     assert!(picker.transcript_search.candidates.is_empty());
     picker.search_query = "TITLE metadata".into();
     picker.rebuild_items();
+    assert!(picker.transcript_search.pending());
+    wait_for_search(&mut picker);
     assert_eq!(picker.visible_sessions.len(), 1);
     assert!(!picker.transcript_search.pending());
 }
@@ -614,13 +614,11 @@ fn fuzzy_metadata_matching_runs_on_worker_not_on_keystroke() {
     let mut picker = SessionPicker::new(vec![session]);
     picker.search_query = "conifg".into();
     picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    // The row on screen is the held pre-query list, not a match.
+    assert!(picker.search_selection.holding());
+    assert!(!picker.transcript_search.has_results());
     assert!(picker.transcript_search.receiver.is_none());
-    assert_eq!(picker.transcript_search.candidates.len(), 1);
-    assert_eq!(
-        picker.transcript_search.candidates[0].missing_tokens,
-        ["conifg"]
-    );
+    assert!(picker.transcript_search.candidates.is_empty());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, "one");
     assert!(!picker.transcript_search.contains_literal("one"));
@@ -676,11 +674,10 @@ fn large_history_defers_even_literal_metadata_matching() {
     picker.search_query = "modal cli".into();
     picker.rebuild_items();
     assert!(picker.transcript_search.defers_metadata());
-    assert!(picker.visible_sessions.is_empty());
-    assert_eq!(
-        picker.transcript_search.candidates[0].missing_tokens,
-        ["modal", "cli"]
-    );
+    assert!(picker.search_selection.holding());
+    // Candidate selection reads every index, so it is left to the worker.
+    assert!(picker.transcript_search.candidates.is_empty());
+    assert!(picker.transcript_search.pending());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, "large");
     assert!(picker.transcript_search.contains_literal("large"));
@@ -796,7 +793,7 @@ fn native_picker_finds_middle_omitted_from_real_list_index() {
     let mut picker = SessionPicker::new(vec![info]);
     picker.search_query = "NATIVESEARCHMIDDLEPLATYPUS".into();
     picker.rebuild_items();
-    assert!(picker.visible_sessions.is_empty());
+    assert!(picker.search_selection.holding());
     wait_for_search(&mut picker);
     assert_eq!(picker.selected_session().unwrap().id, id);
 }
@@ -811,6 +808,11 @@ fn progressive_results_preserve_selected_preview_scroll() {
     let discovered = external_session("discovered", &path);
     let mut picker = SessionPicker::new(vec![direct, discovered]);
     picker.search_query = "needle".into();
+    picker.rebuild_items();
+    picker
+        .transcript_search
+        .ranks
+        .insert("direct".into(), SearchRank::default());
     picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "direct");
     picker.scroll_offset = 17;
@@ -828,6 +830,11 @@ fn picker_with_pending_better_match() -> SessionPicker {
     let discovered = external_session("discovered", Path::new("unused"));
     let mut picker = SessionPicker::new(vec![direct, discovered]);
     picker.search_query = "needle".into();
+    picker.rebuild_items();
+    picker
+        .transcript_search
+        .ranks
+        .insert("direct".into(), SearchRank::default());
     picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "direct");
     let (sender, receiver) = mpsc::channel();
@@ -896,4 +903,81 @@ fn manual_navigation_or_preview_scroll_stops_early_best_match_following() {
             "discovered"
         );
     }
+}
+
+#[test]
+fn pending_search_visually_distinguishes_auto_focus_from_user_control() {
+    let mut picker = picker_with_pending_better_match();
+    let (sender, receiver) = mpsc::channel();
+    picker.transcript_search.receiver = Some(receiver);
+    let backend = ratatui::backend::TestBackend::new(100, 12);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    picker.search_selection.show_busy_for_test();
+    let mut render = |picker: &mut SessionPicker| {
+        terminal
+            .draw(|frame| picker.render_session_list_impl(frame, frame.area(), true))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    assert!(render(&mut picker).contains("finding best match"));
+    picker.pending_search_submission = Some(crossterm::event::KeyModifiers::empty());
+    assert!(render(&mut picker).contains("confirming best match"));
+    picker.previous();
+    assert!(render(&mut picker).contains("selection held"));
+    drop(sender);
+    let completed = render(&mut picker);
+    assert!(!completed.contains("finding best match"));
+    assert!(!completed.contains("searching in background"));
+}
+
+#[test]
+fn typing_keeps_previous_rows_until_results_arrive_then_releases_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut keep = external_session("keep", &temp.path().join("absent-a.jsonl"));
+    keep.search_index = "needle".into();
+    let mut drop_me = external_session("drop", &temp.path().join("absent-b.jsonl"));
+    drop_me.search_index = "other".into();
+    let mut picker = SessionPicker::new(vec![keep, drop_me]);
+    let before = picker.visible_sessions.len();
+    // A typo has no literal match yet: the list must not blank meanwhile.
+    picker.search_query = "nedle".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), before);
+    assert!(picker.search_selection.holding());
+    // Enter must not resume a row that belongs to the previous query.
+    assert!(picker.queue_search_submission(KeyModifiers::NONE));
+    picker.pending_search_submission = None;
+    wait_for_search(&mut picker);
+    assert!(!picker.search_selection.holding());
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(picker.selected_session().unwrap().id, "keep");
+    // A query nothing matches ends with an empty list, not stale rows.
+    picker.search_query = "zzzzqqqq".into();
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+    wait_for_search(&mut picker);
+    assert!(picker.visible_sessions.is_empty());
+    assert!(!picker.search_selection.holding());
+}
+
+#[test]
+fn unchanged_sessions_share_their_index_across_keystrokes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = external_session("big", &temp.path().join("absent.jsonl"));
+    session.search_index = format!("{} modal", "x".repeat(IMMEDIATE_METADATA_BYTES + 1));
+    let mut search = TranscriptSearch::default();
+    search.reset("m", std::iter::once(&session));
+    let first = search.corpus[0].clone();
+    search.reset("mo", std::iter::once(&session));
+    assert!(Arc::ptr_eq(&first, &search.corpus[0]));
+    assert!(search.candidates.is_empty(), "candidates are worker work");
+    session.search_index.push_str(" refreshed");
+    search.reset("mod", std::iter::once(&session));
+    assert!(!Arc::ptr_eq(&first, &search.corpus[0]));
 }

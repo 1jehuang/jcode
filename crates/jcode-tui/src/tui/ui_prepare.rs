@@ -290,6 +290,19 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
+fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
+    // Connection-phase and nested-tool events can replace RunningTool while
+    // the parent call is still live. ToolDone removes it from this list, so
+    // pending tool calls, not the transient status label, own its lifetime.
+    if !app.is_processing() {
+        return None;
+    }
+    app.streaming_tool_calls()
+        .into_iter()
+        .rev()
+        .find(|tool| tools_ui::canonical_tool_name(&tool.name) == "codemode")
+}
+
 fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
     match app.status() {
         ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
@@ -298,6 +311,14 @@ fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress
 }
 
 pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    if let Some(tool) = active_codemode(app) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.id.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
+        tool.intent.hash(&mut hasher);
+        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+        return hasher.finish();
+    }
     let Some(progress) = active_batch_progress(app) else {
         return 0;
     };
@@ -389,6 +410,46 @@ fn prepare_active_batch_progress(
     width: u16,
     prefix_blank: bool,
 ) -> PreparedMessages {
+    if let Some(tool) = active_codemode(app) {
+        let block_width = if app.centered_mode() {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
+        let mut lines = Vec::new();
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        let mut header = vec![
+            Span::styled(
+                format!("  {spinner} "),
+                Style::default().fg(rgb(255, 193, 94)),
+            ),
+            Span::styled("codemode", Style::default().fg(tool_color())),
+        ];
+        if let Some(intent) = tool
+            .intent
+            .as_deref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            header.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            header.push(Span::styled(
+                intent.to_owned(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(header),
+            row_width,
+        ));
+        lines.extend(tools_ui::codemode_preview(&tool, row_width));
+        if app.centered_mode() {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[]);
+    }
     let Some(progress) = active_batch_progress(app) else {
         return empty_prepared_messages();
     };
@@ -477,7 +538,7 @@ pub(super) fn prepare_messages(
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
     super::note_prep_restage(restage_start.elapsed());
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
 
@@ -531,7 +592,7 @@ pub(super) fn prepare_messages(
             }
         };
         let mut cache = cache;
-        if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+        if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
             // A completed deferred mermaid render does not bump
             // `messages_version`/`streaming_text_hash`, so an exact hit can
             // still bake in a stale "rendering..." placeholder. Fall through
@@ -541,7 +602,7 @@ pub(super) fn prepare_messages(
                 .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
             if !stale {
                 super::note_full_prep_cache_lookup(cache_lookup_start.elapsed());
-                super::note_full_prep_cache_hit(kind, prepared.as_ref());
+                super::note_full_prep_cache_hit(kind, prepared.as_ref(), prepared_bytes);
                 return prepared;
             }
         }
@@ -552,11 +613,13 @@ pub(super) fn prepare_messages(
 
     let build_start = Instant::now();
     let prepared = Arc::new(prepare_messages_inner(app, width, height));
-    super::note_full_prep_built(prepared.as_ref(), build_start.elapsed());
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_chat_frame_bytes(&prepared);
+    super::note_full_prep_built(prepared.as_ref(), prepared_bytes, build_elapsed);
 
     {
         if let Ok(mut cache) = full_prep_cache().lock() {
-            cache.insert(key, prepared.clone());
+            cache.insert_with_bytes(key, prepared.clone(), prepared_bytes);
         }
     }
 
@@ -632,7 +695,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
@@ -865,6 +928,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -936,7 +1006,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return build();
     }
 
@@ -962,7 +1032,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_body(app, width, false));
     }
 
@@ -1001,7 +1071,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     };
 
     let mut cache = cache;
-    if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+    if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
         // A deferred mermaid render completing does not bump
         // `messages_version`, so an exact hit can still be stale: it bakes in
         // a "rendering..." placeholder whose background render has since
@@ -1012,7 +1082,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
             .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
         if !stale {
             super::note_body_cache_lookup(cache_lookup_start.elapsed());
-            super::note_body_cache_hit(kind, prepared.as_ref());
+            super::note_body_cache_hit(kind, prepared.as_ref(), prepared_bytes);
             return prepared;
         }
     }
@@ -1024,6 +1094,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
 
     drop(cache);
 
+    if let Some((base, _, _)) = incremental_base.as_ref() {
+        super::release_frame_refs_to_body(base);
+    }
+
     let build_start = Instant::now();
     let (prepared, build_path) = match incremental_base {
         Some((prev, prev_count, prev_prompt_offset)) => {
@@ -1032,15 +1106,18 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         None => (Arc::new(prepare_body(app, width, false)), "full"),
     };
 
-    super::note_body_built(prepared.as_ref(), build_start.elapsed(), build_path);
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_messages_bytes(&prepared);
+    super::note_body_built(prepared.as_ref(), prepared_bytes, build_elapsed, build_path);
 
     let mut cache = match body_cache().lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.insert(
+    cache.insert_with_bytes(
         key,
         prepared.clone(),
+        prepared_bytes,
         msg_count,
         app.compacted_hidden_user_prompts(),
     );
@@ -1168,6 +1245,7 @@ struct BodyRenderCtx<'a> {
 /// Render saved history through the live dispatcher and wrapping pipeline.
 /// No active App is borrowed: expansion state, images and in-flight swarm work
 /// from the session behind the picker must never leak into this transcript.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1178,12 +1256,14 @@ pub(crate) fn prepare_history_preview(
         .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
 
+#[cfg(test)]
 #[path = "ui_prepare/preview_fallback.rs"]
 mod preview_fallback;
 
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
 /// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview_for_viewport(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1213,6 +1293,7 @@ pub(crate) fn prepare_history_preview_for_viewport(
     )
 }
 
+#[cfg(test)]
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -2522,6 +2603,7 @@ fn wrap_lines(
     }
 
     let image_regions = compute_image_regions(&wrapped_lines);
+    shrink_wrapped_lines(&mut wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -2541,6 +2623,16 @@ fn wrap_lines(
         message_boundaries: Vec::new(),
         mermaid_pending_epoch: None,
     }
+}
+
+/// Drop spare span and line capacity before a body is cached. Wrapping builds
+/// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
+/// and these bodies live in the body cache for the session's lifetime.
+fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
+    for line in wrapped_lines.iter_mut() {
+        line.spans.shrink_to_fit();
+    }
+    wrapped_lines.shrink_to_fit();
 }
 
 #[expect(
@@ -2683,6 +2775,7 @@ fn wrap_lines_with_map(
         });
     }
 
+    shrink_wrapped_lines(&mut wrapped_lines);
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
     // Translate the per-message unwrapped-line boundaries into wrapped-line
@@ -2727,3 +2820,29 @@ fn wrap_lines_with_map(
 #[cfg(test)]
 #[path = "ui_prepare/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    // Thread-local so a probe that opts into the caches does not make tests
+    // running in parallel share (and clobber) its cache entries and metrics.
+    static ENABLE_PREP_CACHE_IN_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests bypass the prep caches by default for determinism. Perf probes opt in
+/// so they measure the production cached path.
+#[cfg(test)]
+pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
+    ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.set(enabled));
+}
+
+#[inline]
+fn prep_cache_bypassed() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}

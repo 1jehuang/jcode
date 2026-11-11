@@ -46,6 +46,7 @@ fn message(role: &str, content: &str) -> PreviewMessage {
         tool_calls: vec![],
         tool_data: None,
         duration_secs: None,
+        tool_duration_ms: None,
         title: None,
         timestamp: None,
     }

@@ -212,6 +212,7 @@ impl App {
             return false;
         }
         self.client_focused = focused;
+        crate::tui::cloud_git::note_client_focus(focused);
         if focused {
             // Schedule an immediate differential frame so a newly-focused window
             // catches up and resumes animation timing from "now".

@@ -474,6 +474,29 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
 }
 
 #[test]
+fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
+    let mut state = BridgeState::default();
+    for request in [
+        json!({"req": "create_session", "id": 1}),
+        json!({"req": "attach_session", "id": 2, "session_id": "s1"}),
+        json!({"req": "attach_session", "id": 3, "session_id": "s1"}),
+    ] {
+        let outbound = state.api_request_to_legacy(&request);
+        let subscription = outbound
+            .iter()
+            .find_map(|outbound| match outbound {
+                Outbound::Legacy(value) if value["type"] == "subscribe" => Some(value),
+                _ => None,
+            })
+            .expect("every attachment must subscribe to the daemon");
+        assert_eq!(
+            subscription["supports_server_failover"], true,
+            "API clients must route exhausted accounts rather than retry the same account: {request}"
+        );
+    }
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
@@ -630,6 +653,25 @@ fn attach_session_unknown_target_error_is_correlated_and_clears_pending_attach()
         "req": "clear_session", "id": 44, "session_id": "missing",
     })));
     assert!(matches!(event, ApiEvent::Error { .. }));
+}
+
+#[test]
+fn subscribe_forwards_hello_client_name() {
+    let mut state = BridgeState::default();
+    state.client_name = Some("jcode-ios/0.3.0".into());
+    let out =
+        state.api_request_to_legacy(&json!({"req": "attach_session", "id": 1, "session_id": "s1"}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["client_name"], "jcode-ios/0.3.0");
+
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(value.get("client_name").is_none());
 }
 
 #[test]
@@ -2371,6 +2413,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         reasoning_effort,
         auth_method,
         routes,
+        ..
     } = event
     else {
         panic!("expected runtime info, got {event:?}");
@@ -3230,6 +3273,12 @@ fn history_image_boundaries_survive_loss_of_tool_data() {
     };
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1].role, "tool");
+    let tool = messages[1]
+        .tool
+        .as_ref()
+        .expect("tool rows carry their call");
+    assert_eq!((tool.id.as_str(), tool.name.as_str()), ("read-1", "read"));
+    assert!(messages[0].tool.is_none());
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].history_message_index, Some(2));
     assert_eq!(
@@ -4020,4 +4069,34 @@ fn context_cap_requests_reply_broadcast_and_validate() {
             ..
         }
     ));
+}
+
+/// The account router's choice reaches remote clients so they can show which
+/// OAuth account a session bills against. A later event that omits the key
+/// keeps the known label, and an explicit null clears it.
+#[test]
+fn account_label_follows_the_daemons_routed_account() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "m",
+        "provider_oauth_account_label": "work",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+    assert!(
+        matches!(state.runtime_info(), ApiEvent::RuntimeInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "model_changed", "id": 99, "model": "m2"}));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { account_label, .. }
+        if account_label.as_deref() == Some("work"))
+    );
+
+    state.note_models(&json!({"provider_oauth_account_label": null}));
+    assert!(state.current_account.is_none());
 }

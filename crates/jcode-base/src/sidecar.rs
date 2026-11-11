@@ -27,7 +27,8 @@ const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_RESPONSES_PATH: &str = "responses";
-const OPENAI_ORIGINATOR: &str = "codex_cli_rs";
+/// See `ORIGINATOR` in jcode-provider-openai-runtime: Jcode identifies itself.
+const OPENAI_ORIGINATOR: &str = "jcode";
 
 /// Claude Messages API endpoint (with beta=true for OAuth)
 const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
@@ -35,12 +36,15 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// Claude Messages API endpoint for direct API-key access (no OAuth beta flag).
 const CLAUDE_API_KEY_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// Beta headers required for OAuth
-const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
+/// Beta headers required for OAuth. No `claude-code-*` beta, see
+/// `ANTHROPIC_OAUTH_BETA_HEADERS` in jcode-provider-core.
+const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20";
 
-/// Claude Code identity block required for OAuth direct API access
-const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-const CLAUDE_CODE_JCODE_NOTICE: &str = "You are jcode, powered by Claude Code. You are a third-party CLI, not the official Claude Code CLI.";
+/// Billing attribution block that Claude subscription (OAuth) requests need.
+/// Anthropic strips it before the model sees it. No identity sentence is sent,
+/// see `OAUTH_BILLING_HEADER` in jcode-provider-anthropic.
+const CLAUDE_OAUTH_BILLING_BLOCK: &str =
+    "x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -1151,11 +1155,7 @@ fn build_claude_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
     let mut blocks = Vec::new();
     blocks.push(ClaudeApiSystemBlock {
         block_type: "text",
-        text: CLAUDE_CODE_IDENTITY,
-    });
-    blocks.push(ClaudeApiSystemBlock {
-        block_type: "text",
-        text: CLAUDE_CODE_JCODE_NOTICE,
+        text: CLAUDE_OAUTH_BILLING_BLOCK,
     });
     if !system.is_empty() {
         blocks.push(ClaudeApiSystemBlock {
@@ -1168,9 +1168,8 @@ fn build_claude_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
 
 /// Build the system param for the direct API-key path.
 ///
-/// The "You are Claude Code" identity spoof and jcode notice are only valid
-/// for the OAuth/subscription endpoint; a direct API key talks to the standard
-/// Messages API and must not impersonate the official CLI. So this only carries
+/// The OAuth billing block is only valid for the subscription endpoint; a
+/// direct API key talks to the standard Messages API. So this only carries
 /// the caller's own system prompt (if any).
 fn build_claude_api_key_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
     if system.is_empty() {
@@ -1712,7 +1711,7 @@ mod tests {
 
     #[test]
     fn test_build_claude_api_key_system_param_omits_identity_spoof() {
-        // API-key path must NOT impersonate the official Claude Code CLI.
+        // API-key path carries no OAuth billing block.
         let none = build_claude_api_key_system_param("");
         assert!(none.is_none(), "empty system => no system param");
 
@@ -1721,12 +1720,17 @@ mod tests {
         assert_eq!(blocks.len(), 1, "only the caller's system prompt is sent");
         assert_eq!(blocks[0].text, "be terse");
 
-        // The OAuth builder, by contrast, injects the Claude Code identity spoof.
+        // The OAuth builder adds only the billing block, no identity sentence.
         let ClaudeApiSystem::Blocks(oauth_blocks) =
             build_claude_system_param("be terse").expect("oauth system present");
+        assert_eq!(oauth_blocks.len(), 2);
+        assert_eq!(oauth_blocks[0].text, CLAUDE_OAUTH_BILLING_BLOCK);
+        assert_eq!(oauth_blocks[1].text, "be terse");
         assert!(
-            oauth_blocks.iter().any(|b| b.text == CLAUDE_CODE_IDENTITY),
-            "oauth path keeps the identity block"
+            !oauth_blocks
+                .iter()
+                .any(|b| b.text.contains("You are Claude Code") || b.text.contains("Agent SDK")),
+            "oauth path must not inject a Claude identity sentence"
         );
     }
 

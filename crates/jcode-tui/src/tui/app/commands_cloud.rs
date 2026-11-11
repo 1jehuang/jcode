@@ -41,16 +41,32 @@ pub(super) enum CloudCommand {
     Prepare {
         host: Option<String>,
     },
+    /// Restart the managed cloud daemon onto its selected runtime once idle.
+    Reload {
+        force: bool,
+    },
 }
 
 pub(super) fn parse_cloud_command(trimmed: &str) -> Option<CloudCommand> {
     let mut words = trimmed.split_whitespace();
     match words.next()? {
+        "/mobile" => Some(match words.next() {
+            None => CloudCommand::Move {
+                host: Some("jcode-cloud".into()),
+            },
+            Some("cancel") if words.next().is_none() => CloudCommand::Cancel,
+            _ => CloudCommand::MoveUsage,
+        }),
         "/cloud" => match words.next() {
             None => Some(CloudCommand::Move { host: None }),
             Some("cancel") => Some(CloudCommand::Cancel),
             Some("status") | Some("where") => Some(CloudCommand::Where),
             Some("back") | Some("return") => Some(CloudCommand::Return),
+            Some("reload") => match (words.next(), words.next()) {
+                (None, _) => Some(CloudCommand::Reload { force: false }),
+                (Some("--force"), None) => Some(CloudCommand::Reload { force: true }),
+                _ => Some(CloudCommand::MoveUsage),
+            },
             Some("replace") => {
                 let (mut host, mut yes, mut dry_run) = (None, false, false);
                 while let Some(word) = words.next() {
@@ -144,12 +160,32 @@ pub(super) fn check_cloud_handoff_input(app: &mut App, trimmed: &str) -> bool {
 
 /// Run a `/cloud` family command. Returns true when handled.
 pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &str) -> bool {
-    let Some(command) = parse_cloud_command(trimmed) else {
+    let Some(mut command) = parse_cloud_command(trimmed) else {
         return false;
     };
+    if trimmed == "/mobile" {
+        if crate::subscription_catalog::configured_api_key().is_none() {
+            app.push_display_message(DisplayMessage::error(
+                "Sign in first with `jcode account login`, then retry /mobile.",
+            ));
+            return true;
+        }
+        // A cloud-attached TUI runs locally, so also inspect its SSH target.
+        if crate::mobile_sync::session_source() == "cloud"
+            || std::env::var("JCODE_SSH_REMOTE").as_deref() == Ok("jcode-cloud")
+            || crate::storage::read_session_lease(session_id)
+                .is_some_and(|lease| lease.away_host.as_deref() == Some("jcode-cloud"))
+        {
+            command = CloudCommand::Where;
+        }
+    }
     if command == CloudCommand::MoveUsage {
         app.push_display_message(DisplayMessage::system(
-            "Usage: /cloud [host] [--include-session <id> ...] [--dry-run]. Your swarm moves together and shares one environment setup. Independent sessions require --include-session. Use --session-only to opt out of swarm migration.",
+            if trimmed.starts_with("/mobile") {
+                "Usage: /mobile or /mobile cancel. Moves this session and its swarm to Jcode Cloud, then sends a notification to your app."
+            } else {
+                "Usage: /cloud [host] [--include-session <id> ...] [--dry-run]. Your swarm moves together and shares one environment setup. Independent sessions require --include-session. Use --session-only to opt out of swarm migration."
+            },
         ));
         return true;
     }
@@ -195,12 +231,12 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     if command == CloudCommand::Where && app.pending_cloud_handoff.is_some() {
         let pending = app.pending_cloud_handoff.as_ref().unwrap();
         app.push_display_message(DisplayMessage::system(format!(
-            "Pending handoff: {} (session {}). Waiting for an idle turn boundary. Use /cloud cancel to cancel.",
+            "Pending handoff: {} (session {}). Starts as soon as the host is ready. Use /cloud cancel to cancel.",
             pending.trimmed, pending.session_id
         )));
         return true;
     }
-    if !matches!(command, CloudCommand::Where) {
+    if !matches!(command, CloudCommand::Where | CloudCommand::Reload { .. }) {
         if !check_cloud_handoff_input(app, trimmed) {
             return true;
         }
@@ -222,7 +258,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         ) {
             "Cloud repository replacement queued for the next idle turn boundary. This session stays here. Use /cloud cancel to cancel."
         } else {
-            "Cloud handoff queued for the next idle turn boundary. The current turn continues here. Use /cloud cancel to cancel."
+            "Cloud handoff queued. The current turn continues while the host gets ready, then the transfer starts right away. Use /cloud cancel to cancel."
         };
         app.push_display_message(DisplayMessage::system(message));
         // A queued-command dispatcher may still be restoring the composer draft.
@@ -308,9 +344,18 @@ fn start_cloud_command(
         }
         CloudCommand::Replace { host, yes, dry_run } => {
             let cwd = super::commands::active_working_dir(app).or_else(|| {
-                (!app.is_remote)
-                    .then(|| std::env::current_dir().ok())
-                    .flatten()
+                if app.is_remote {
+                    return None;
+                }
+                match std::env::current_dir() {
+                    Ok(cwd) => Some(cwd),
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot resolve local directory for cloud replacement: {error}"
+                        ));
+                        None
+                    }
+                }
             });
             let Some(cwd) = cwd.filter(|path| path.is_dir()) else {
                 app.push_display_message(DisplayMessage::error(
@@ -326,6 +371,12 @@ fn start_cloud_command(
         CloudCommand::Cancel => unreachable!("cancel does not spawn"),
         CloudCommand::Where => {
             cmd.args(["where", "--session", session_id]);
+        }
+        CloudCommand::Reload { force } => {
+            cmd.args(["runtime", "reload"]);
+            if *force {
+                cmd.arg("--force");
+            }
         }
     }
     if app.cloud_job.is_some() {
@@ -374,14 +425,47 @@ fn start_cloud_command(
         }
         let _ = progress_tx.send(CloudEvent::Stderr(collected));
     });
+    let mobile_resume = (trimmed == "/mobile" && !matches!(command, CloudCommand::Prepare { .. }))
+        .then(|| {
+            (
+                session_id.to_string(),
+                app.session.display_title().map(str::to_string),
+            )
+        });
+    let mobile_requires_move_report = matches!(command, CloudCommand::Move { .. });
     std::thread::spawn(move || {
         let output = child.wait_with_output();
         let _ = stderr_reader.join();
+        if let Some((session_id, title)) = mobile_resume
+            && let Ok(output) = &output
+            && output.status.success()
+            && (!mobile_requires_move_report
+                || serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .is_ok_and(|report| report["host"].as_str() == Some("jcode-cloud")))
+        {
+            // Wait before handing off/exec: otherwise the old process can exit
+            // before an asynchronous push request reaches the control plane.
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(crate::mobile_push::request_mobile_resume(
+                        &session_id,
+                        title.as_deref(),
+                    ))
+                });
+            let result = result.map_err(|error| format!(
+                    "Session is on cloud, but mobile push failed: {error}. Open the app and select this session, or retry /mobile."
+                ));
+            let _ = tx.send(CloudEvent::MobilePushResult(result));
+        }
         let _ = tx.send(CloudEvent::Done(output.map_err(|e| e.to_string())));
     });
     let carried = carried.filter(|(index, _)| *index < app.display_messages.len());
     let (progress_message, steps) = match carried {
         Some((index, steps)) => {
+            let index = app.move_display_message_to_end(index);
             app.replace_display_message_content(index, render_cloud_steps(&steps, 0, None));
             (index, steps)
         }
@@ -435,6 +519,7 @@ fn configure_replacement(
 pub(super) enum CloudEvent {
     Progress(String),
     Stderr(String),
+    MobilePushResult(Result<String, String>),
     Done(Result<std::process::Output, String>),
 }
 
@@ -569,6 +654,54 @@ impl App {
         self.pending_cloud_handoff.take()
     }
 
+    /// A move waits for the host to be prepared while the turn keeps running.
+    /// Once the host is ready, stop the turn so the transfer starts right away.
+    /// The moved session gets a continue message, so the agent resumes the
+    /// interrupted task on the cloud host. Interrupts at most once per request.
+    fn interrupt_turn_for_ready_handoff(&mut self) {
+        let Some(pending) = self.pending_cloud_handoff.as_ref() else {
+            return;
+        };
+        // Only cloud moves get a continue message on arrival. `/local` keeps
+        // waiting for the turn so an interrupted task is not silently dropped.
+        let ready = matches!(
+            pending.command,
+            CloudCommand::Move { .. } | CloudCommand::MoveSelected { .. }
+        ) && pending.prepared;
+        if !ready
+            || !self.is_processing
+            || self.cloud_job.is_some()
+            || self.cloud_interrupt_sent_for == Some(pending.request_id)
+        {
+            return;
+        }
+        self.cloud_interrupt_sent_for = Some(pending.request_id);
+        self.cancel_requested = true;
+        self.cloud_remote_interrupt_pending = true;
+        self.interleave_message = None;
+        self.interleave_images.clear();
+        self.pending_soft_interrupts.clear();
+        self.pending_soft_interrupt_requests.clear();
+        self.set_status_notice("Interrupting turn to start cloud transfer...");
+    }
+
+    #[cfg(test)]
+    pub(super) fn poll_cloud_job_interrupt_only_for_test(&mut self) {
+        self.interrupt_turn_for_ready_handoff();
+    }
+
+    /// Remote mode: the running turn lives in the daemon, so the interrupt
+    /// must be sent over the socket. Returns true once per interrupt.
+    pub(super) fn take_cloud_remote_interrupt(&mut self) -> bool {
+        let take = std::mem::take(&mut self.cloud_remote_interrupt_pending);
+        if take {
+            // The daemon owns the turn here, so the local flag must not linger
+            // and cancel a later turn.
+            self.cancel_requested = false;
+        }
+        take
+    }
+
     fn cloud_handoff_can_dispatch(&self) -> bool {
         !self.is_processing
             && self.hidden_queued_system_messages.is_empty()
@@ -601,6 +734,7 @@ impl App {
             self.pending_queued_dispatch = true;
             return true;
         }
+        self.interrupt_turn_for_ready_handoff();
         let had_pending = self.pending_cloud_handoff.is_some();
         if let Some(pending) = self.take_ready_cloud_handoff() {
             return start_cloud_command(
@@ -616,6 +750,7 @@ impl App {
         };
         let mut redraw = false;
         let mut done = None;
+        let mut mobile_push_result = None;
         while let Ok(event) = job.rx.try_recv() {
             match event {
                 CloudEvent::Progress(text) => {
@@ -623,6 +758,10 @@ impl App {
                     redraw = true;
                 }
                 CloudEvent::Stderr(text) => job.stderr = text,
+                CloudEvent::MobilePushResult(result) => {
+                    mobile_push_result = Some(result);
+                    redraw = true;
+                }
                 CloudEvent::Done(result) => {
                     done = Some(result);
                     break;
@@ -635,10 +774,28 @@ impl App {
         let finished = done
             .as_ref()
             .map(|result| result.as_ref().is_ok_and(|output| output.status.success()));
-        let index = job.progress_message;
         let content = render_cloud_steps(&job.steps, frame, finished);
         if redraw || done.is_some() {
+            // Keep the live checklist next to the composer instead of leaving
+            // it stranded above output that arrived while the turn continued.
+            let old_index = job.progress_message;
+            let index = self.move_display_message_to_end(old_index);
+            if let Some(job) = self.cloud_job.as_mut() {
+                job.progress_message = index;
+            }
+        }
+        let Some(job) = self.cloud_job.as_ref() else {
+            return redraw;
+        };
+        let index = job.progress_message;
+        if redraw || done.is_some() {
             self.replace_display_message_content(index, content);
+        }
+        if let Some(result) = mobile_push_result {
+            self.push_display_message(match result {
+                Ok(message) => DisplayMessage::system(message),
+                Err(error) => DisplayMessage::error(error),
+            });
         }
         let Some(result) = done else {
             return redraw;
@@ -894,7 +1051,7 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
             let mut steps = job.steps.clone();
             push_cloud_step(
                 &mut steps,
-                "cloud host ready, transfer starts at the next idle turn".to_string(),
+                "cloud host ready, starting transfer".to_string(),
             );
             app.replace_display_message_content(
                 job.progress_message,
@@ -1042,6 +1199,11 @@ fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::process::Outp
         | CloudCommand::ReplaceUsage
         | CloudCommand::MoveUsage => {
             unreachable!("handled before transfer completion")
+        }
+        CloudCommand::Reload { .. } => {
+            app.push_display_message(DisplayMessage::system(
+                "Cloud daemon reloaded onto its selected runtime. Cloud sessions resume when their clients reconnect.",
+            ));
         }
         CloudCommand::Where => {
             let text = if stdout.trim().is_empty() {

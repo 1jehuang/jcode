@@ -97,7 +97,10 @@ impl SessionPicker {
     /// Poll promptly only while asynchronous work can change the displayed
     /// preview. Idle pickers retain their existing low-frequency wakeup rate.
     pub(crate) fn has_pending_preview_work(&self) -> bool {
-        self.pending_preview_load.is_some() || self.pending_workspace_load.is_some()
+        self.search_edit_pending
+            || self.transcript_search.pending()
+            || self.pending_preview_load.is_some()
+            || self.pending_workspace_load.is_some()
     }
 
     pub(super) fn preview_poll_interval(&self) -> Duration {

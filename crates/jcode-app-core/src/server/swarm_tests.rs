@@ -107,6 +107,141 @@ fn swarm_member(
     )
 }
 
+#[test]
+fn event_fanout_moves_payload_to_final_live_receiver() {
+    let (first, mut first_rx) = mpsc::unbounded_channel();
+    let (closed, closed_rx) = mpsc::unbounded_channel();
+    let (last, mut last_rx) = mpsc::unbounded_channel();
+    drop(closed_rx);
+    let detail = "a large event payload".repeat(1000);
+    let original = detail.as_ptr();
+    assert_eq!(
+        super::super::state::send_event_to_targets(
+            [&first, &closed, &last],
+            ServerEvent::StatusDetail { detail },
+        ),
+        2
+    );
+    let ServerEvent::StatusDetail { detail: first } = first_rx.try_recv().unwrap() else {
+        panic!("first receiver got wrong event");
+    };
+    let ServerEvent::StatusDetail { detail: last } = last_rx.try_recv().unwrap() else {
+        panic!("last receiver got wrong event");
+    };
+    assert_eq!(first, last);
+    assert_ne!(first.as_ptr(), original);
+    assert_eq!(last.as_ptr(), original, "last receiver must not clone");
+    assert!(first_rx.try_recv().is_err());
+    assert!(last_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn swarm_status_reaches_attachments_and_headless_fallback_once() {
+    let (mut attached, mut stale_rx) = swarm_member("attached", "agent", false);
+    stale_rx.close();
+    let (one, mut one_rx) = mpsc::unbounded_channel();
+    let (two, mut two_rx) = mpsc::unbounded_channel();
+    let (closed, closed_rx) = mpsc::unbounded_channel();
+    drop(closed_rx);
+    attached.event_txs = HashMap::from([
+        ("one".into(), one),
+        ("two".into(), two),
+        ("closed".into(), closed),
+    ]);
+    let (headless, mut headless_rx) = swarm_member("headless", "agent", true);
+    let (dead, dead_rx) = swarm_member("dead", "agent", true);
+    drop(dead_rx);
+    let members = Arc::new(RwLock::new(HashMap::from([
+        ("attached".into(), attached),
+        ("headless".into(), headless),
+        ("dead".into(), dead),
+    ])));
+    super::broadcast_swarm_status_now(
+        vec!["attached".into(), "headless".into(), "dead".into()],
+        &members,
+    )
+    .await;
+    for rx in [&mut one_rx, &mut two_rx, &mut headless_rx] {
+        let ServerEvent::SwarmStatus { members } = rx.try_recv().unwrap() else {
+            panic!("expected swarm status");
+        };
+        assert_eq!(members.len(), 3, "disconnected members stay in snapshot");
+        let attached = members.iter().find(|m| m.session_id == "attached").unwrap();
+        assert_eq!(attached.live_attachments, Some(2));
+        assert!(rx.try_recv().is_err(), "exactly one event per queue");
+    }
+    assert!(stale_rx.try_recv().is_err());
+    assert_eq!(members.read().await["attached"].event_txs.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "comparative swarm payload benchmark, run with --ignored --nocapture"]
+async fn benchmark_swarm_payload_fanout() {
+    use std::hint::black_box;
+    let (mut member, mut rx) = swarm_member("payload", "agent", true);
+    member.output_tail = Some("recent streamed output\n".repeat(180));
+    let mut fixture = HashMap::new();
+    for index in 0..32 {
+        let mut member = member.clone();
+        member.session_id = format!("payload-{index}");
+        fixture.insert(member.session_id.clone(), member);
+    }
+    let ids = fixture.keys().cloned().collect();
+    let fixture = Arc::new(RwLock::new(fixture));
+    super::broadcast_swarm_status_now(ids, &fixture).await;
+    let payload = rx.recv().await.unwrap();
+    // Every fixture member shares this queue, so discard the other copies.
+    while rx.try_recv().is_ok() {}
+    let bytes = serde_json::to_vec(&payload).unwrap().len();
+    for live in [1, 4] {
+        let mut targets = Vec::new();
+        let mut receivers = Vec::new();
+        for index in 0..64 {
+            let (tx, rx) = mpsc::unbounded_channel();
+            targets.push(tx);
+            if index < live {
+                receivers.push(rx);
+            }
+        }
+        let mut times = Vec::new();
+        for optimized in [false, true] {
+            let start = Instant::now();
+            for _ in 0..100 {
+                // Both paths pay the same cost to supply an owned input.
+                let event = payload.clone();
+                let delivered = if optimized {
+                    super::super::state::send_event_to_targets(&targets, event)
+                } else {
+                    let mut delivered = 0;
+                    for tx in &targets {
+                        // Previous broadcast cloned once per session, then
+                        // generic fanout cloned again into its single queue.
+                        let session_event = event.clone();
+                        delivered += usize::from(tx.send(session_event.clone()).is_ok());
+                    }
+                    delivered
+                };
+                assert_eq!(delivered, live);
+                for rx in &mut receivers {
+                    let event = rx.try_recv().unwrap();
+                    assert!(
+                        matches!(&event, ServerEvent::SwarmStatus { members } if members.len() == 32)
+                    );
+                    black_box(event);
+                    assert!(rx.try_recv().is_err());
+                }
+            }
+            times.push(start.elapsed());
+        }
+        eprintln!(
+            "swarm delivery: payload_bytes={bytes} sessions=64 live={live} iterations=100 baseline={:?} optimized={:?} speedup={:.2}x (queue/payload work only)",
+            times[0],
+            times[1],
+            times[0].as_secs_f64() / times[1].as_secs_f64()
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn live_status_fanout_projects_worker_events_into_broadcast() {
     let sid = "live-status-projection-worker";
@@ -628,38 +763,11 @@ async fn swarm_plan_broadcast_versions_can_invert_on_one_member_channel() {
     );
 }
 
-/// Deterministic demonstration of the SwarmStatus immediate-path
-/// snapshot-vs-send inversion (wiring-audit.status-proposal-ordering).
-///
-/// `broadcast_swarm_status_now` snapshots member statuses under
-/// `swarm_members.read()`, drops the guard, then awaits
-/// `fanout_session_event` (a `swarm_members.write()` acquisition) before
-/// sending. Swarms below `JCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD`
-/// (default 2) take this immediate, non-debounced path on every status
-/// change, so two concurrent broadcasts can deliver an old snapshot after
-/// a newer one on the same ordered mpsc channel. A last-write-wins
-/// consumer (the TUI SwarmStatus handler) is then left showing the stale
-/// status until the next unrelated broadcast.
-///
-/// Unlike the SwarmPlan inversion test above, there is no second lock we
-/// can gate on: the status path snapshots from the same `swarm_members`
-/// lock it later writes, so holding any guard also blocks the mutator.
-/// Instead this test uses tokio's cooperative budget (128 units per task
-/// poll on a current-thread runtime; every RwLock acquisition consumes
-/// exactly one). Draining 126 units leaves broadcast A exactly enough for
-/// `swarms_by_id.read()` and the `swarm_members.read()` snapshot, forcing
-/// a yield at the (uncontended) `swarm_members.write()` inside
-/// `fanout_session_event`, i.e. precisely inside the race window between
-/// snapshot and send.
-///
-/// If this test starts failing with `["running", "running"]` or
-/// `["ready", "running"]`, the race has been fixed (e.g. by holding the
-/// read lock through the send, or by stamping a monotonic sequence on
-/// SwarmStatus and dropping stale ones consumer-side); update the wiring
-/// audit. If it fails because broadcast A parks somewhere else, the tokio
-/// coop budget constants changed: re-derive the `128 - 2` drain count.
+/// Drain the cooperative budget at the old snapshot/send race boundary.
+/// Publication now holds one member guard through synchronous queue delivery,
+/// so a concurrent update cannot put an older snapshot behind the new one.
 #[tokio::test]
-async fn swarm_status_immediate_broadcasts_can_invert_on_one_member_channel() {
+async fn swarm_status_immediate_broadcasts_preserve_snapshot_order() {
     let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
@@ -667,38 +775,29 @@ async fn swarm_status_immediate_broadcasts_can_invert_on_one_member_channel() {
         HashSet::from(["worker".to_string()]),
     )])));
 
-    // Broadcast A: snapshots status "ready", then is forced to yield at
-    // the fanout write acquisition, before sending.
+    // Broadcast A must enqueue its snapshot before releasing the member lock.
     let a = tokio::spawn({
         let swarm_members = Arc::clone(&swarm_members);
         let swarms_by_id = Arc::clone(&swarms_by_id);
         async move {
-            // Initial task budget is 128. Leave exactly 2 units so the two
-            // read acquisitions (session-id list + status snapshot)
-            // succeed and the fanout write acquisition forces a yield.
+            // Leave two acquisitions: the session list and atomic publication.
             for _ in 0..126 {
                 tokio::task::coop::consume_budget().await;
             }
             broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
         }
     });
-    // Single yield on the current-thread runtime: A runs its entire first
-    // poll (budget drain + both reads) and parks after snapshotting
-    // "ready". Its coop yield happens *before* joining the lock queue, so
-    // every acquisition below is uncontended and the mutator finishes
-    // within one poll, before A is re-polled.
+    // Let A run at the old race boundary before changing the member.
     tokio::task::yield_now().await;
 
-    // Concurrent mutator: flips the status and completes its own
-    // immediate broadcast while A is parked between snapshot and send.
+    // A concurrent mutation is serialized with snapshot publication.
     {
         let mut members = swarm_members.write().await;
         members.get_mut("worker").expect("worker member").status = "running".to_string();
     }
     broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
 
-    // Release A: it resumes with a fresh budget and sends its stale
-    // "ready" snapshot after "running" on the same ordered channel.
+    // Both publications must leave the consumer showing the newest status.
     a.await.expect("broadcast task");
 
     let mut statuses = Vec::new();
@@ -711,10 +810,8 @@ async fn swarm_status_immediate_broadcasts_can_invert_on_one_member_channel() {
     }
     assert_eq!(
         statuses,
-        vec!["running".to_string(), "ready".to_string()],
-        "expected status inversion (new-then-old) on one member channel; \
-         if this fails with the correct order, the snapshot-vs-send race \
-         may have been fixed (update the wiring audit)"
+        vec!["ready".to_string(), "running".to_string()],
+        "snapshot publication must not invert newer and older statuses"
     );
 }
 

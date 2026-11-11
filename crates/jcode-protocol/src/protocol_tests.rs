@@ -96,3 +96,13 @@ fn swarm_live_status_defaults_and_roundtrips() {
         runtime
     );
 }
+
+#[test]
+fn sdk_login_notify_is_accepted_without_subscribe() {
+    // The SDK login flow sends exactly this frame on a fresh connection.
+    // Requiring Subscribe first dropped it, so Desktop never saw new models.
+    let request: Request =
+        serde_json::from_str(r#"{"type":"notify_auth_changed","id":1,"provider":"claude"}"#)
+            .unwrap();
+    assert!(request.is_lightweight_control_request());
+}

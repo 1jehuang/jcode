@@ -1079,6 +1079,10 @@ impl crate::tui::TuiState for App {
         self.mouse_scroll_queue != 0
     }
 
+    fn stream_reveal_pending(&self) -> bool {
+        !self.stream_buffer.is_empty()
+    }
+
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         // In remote mode, use tokens from server
         // Independent mode doesn't currently track total tokens
@@ -1185,6 +1189,10 @@ impl crate::tui::TuiState for App {
 
     fn voice_input_status(&self) -> Option<(bool, String)> {
         self.voice_input_status_line()
+    }
+
+    fn voice_composer_preview(&self) -> Option<crate::tui::VoiceComposerPreview> {
+        self.voice_composer_preview_state()
     }
 
     fn reset_hint_visible(&self, key: &str) -> bool {
@@ -2465,7 +2473,7 @@ impl App {
         let mut opened = 0;
         let mut failures = Vec::new();
         for session_id in order {
-            match open_swarm_agent_window(&session_id) {
+            match open_swarm_agent_window(&session_id, crate::tui::is_ssh_remote()) {
                 Ok(true) => opened += 1,
                 Ok(false) => failures.push(format!("{session_id}: no terminal emulator found")),
                 Err(error) => failures.push(format!("{session_id}: {error}")),
@@ -2492,6 +2500,20 @@ impl App {
     /// Open the currently selected swarm agent's session in a new terminal
     /// window (pop-out), reusing the resume-in-new-terminal launcher.
     pub(crate) fn pop_out_selected_swarm_agent(&mut self) {
+        self.pop_out_selected_swarm_agent_with_launcher(|exe, session_id, cwd, context| {
+            spawn_swarm_agent_window(exe, session_id, cwd, context, crate::tui::is_ssh_remote())
+        });
+    }
+
+    fn pop_out_selected_swarm_agent_with_launcher(
+        &mut self,
+        launcher: impl FnMut(
+            &std::path::Path,
+            &str,
+            &std::path::Path,
+            &jcode_app_core::session_launch::SessionSpawnContext,
+        ) -> anyhow::Result<bool>,
+    ) {
         let members = self.inline_swarm_members();
         if members.is_empty() {
             self.set_status_notice("No swarm agents to open");
@@ -2509,7 +2531,11 @@ impl App {
             .and_then(|m| m.friendly_name.clone())
             .unwrap_or_else(|| session_id.chars().take(8).collect());
 
-        match open_swarm_agent_window(&session_id) {
+        match open_swarm_agent_window_with_launcher(
+            &session_id,
+            crate::tui::is_ssh_remote(),
+            launcher,
+        ) {
             Ok(true) => self.set_status_notice(format!("Opened {label} in a new window")),
             Ok(false) => self.set_status_notice(format!(
                 "Could not open a terminal for {label} (no emulator found)"
@@ -2519,7 +2545,26 @@ impl App {
     }
 }
 
-fn open_swarm_agent_window(session_id: &str) -> anyhow::Result<bool> {
+fn open_swarm_agent_window(session_id: &str, is_ssh_remote: bool) -> anyhow::Result<bool> {
+    open_swarm_agent_window_with_launcher(
+        session_id,
+        is_ssh_remote,
+        |exe, session_id, cwd, context| {
+            spawn_swarm_agent_window(exe, session_id, cwd, context, is_ssh_remote)
+        },
+    )
+}
+
+fn open_swarm_agent_window_with_launcher(
+    session_id: &str,
+    is_ssh_remote: bool,
+    mut launcher: impl FnMut(
+        &std::path::Path,
+        &str,
+        &std::path::Path,
+        &jcode_app_core::session_launch::SessionSpawnContext,
+    ) -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
     let exe = super::launch_client_executable();
     let cwd = crate::session::Session::load_startup_stub(session_id)
         .ok()
@@ -2527,8 +2572,81 @@ fn open_swarm_agent_window(session_id: &str) -> anyhow::Result<bool> {
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_dir())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-    let socket = std::env::var("JCODE_SOCKET").ok();
-    super::spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref())
+    let context = swarm_popout_launch_context(is_ssh_remote, &crate::server::socket_path());
+    launcher(&exe, session_id, &cwd, &context)
+}
+
+fn spawn_swarm_agent_window(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    context: &jcode_app_core::session_launch::SessionSpawnContext,
+    is_ssh_remote: bool,
+) -> anyhow::Result<bool> {
+    spawn_swarm_agent_window_with_launchers(
+        exe,
+        session_id,
+        cwd,
+        context,
+        is_ssh_remote,
+        jcode_app_core::terminal_launch::spawn_command_in_new_terminal,
+        |exe, session_id, cwd| {
+            let socket = std::env::var("JCODE_SOCKET").ok();
+            super::spawn_in_new_terminal(exe, session_id, cwd, socket.as_deref())
+        },
+    )
+}
+
+fn swarm_agent_terminal_command(
+    exe: &std::path::Path,
+    session_id: &str,
+    context: &jcode_app_core::session_launch::SessionSpawnContext,
+) -> jcode_app_core::terminal_launch::TerminalCommand {
+    let title = jcode_app_core::session_launch::resumed_window_title(session_id);
+    let mut args = vec!["--fresh-spawn".into(), "--resume".into(), session_id.into()];
+    if let Some(socket) = context
+        .runtime_env
+        .iter()
+        .find(|(key, _)| key == "JCODE_SOCKET")
+        .map(|(_, value)| value)
+    {
+        args.extend(["--socket".into(), socket.clone()]);
+    }
+    let mut command = jcode_app_core::terminal_launch::TerminalCommand::new(exe, args)
+        .title(title)
+        .fresh_spawn()
+        .kind("resume")
+        .session_id(session_id);
+    for (key, value) in &context.extra_env {
+        command = command.spawn_env(key.clone(), value.clone());
+    }
+    if !context.runtime_env.is_empty() {
+        command = command.runtime_env(context.runtime_env.clone());
+    }
+    if !context.client_terminal_env.is_empty() {
+        command = command.client_terminal_env(context.client_terminal_env.clone());
+    }
+    command
+}
+
+fn spawn_swarm_agent_window_with_launchers(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    context: &jcode_app_core::session_launch::SessionSpawnContext,
+    is_ssh_remote: bool,
+    mut local_launcher: impl FnMut(
+        &jcode_app_core::terminal_launch::TerminalCommand,
+        &std::path::Path,
+    ) -> anyhow::Result<bool>,
+    mut ssh_launcher: impl FnMut(&std::path::Path, &str, &std::path::Path) -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    if is_ssh_remote {
+        ssh_launcher(exe, session_id, cwd)
+    } else {
+        let command = swarm_agent_terminal_command(exe, session_id, context);
+        local_launcher(&command, cwd)
+    }
 }
 
 /// Decode direct agent badges without capturing plain digits or other chords.
@@ -2544,6 +2662,24 @@ pub(crate) fn swarm_agent_shortcut_index(
         KeyCode::Char('0') => Some(9),
         KeyCode::Char(c @ '1'..='9') => Some((c as u8 - b'1') as usize),
         _ => None,
+    }
+}
+
+/// Runtime context for opening a swarm agent's window: local daemon clients
+/// carry their effective runtime so the new terminal connects back to the same
+/// one; SSH clients keep the historical context-free behavior.
+fn swarm_popout_launch_context(
+    is_ssh_remote: bool,
+    socket: &std::path::Path,
+) -> jcode_app_core::session_launch::SessionSpawnContext {
+    if is_ssh_remote {
+        jcode_app_core::session_launch::SessionSpawnContext::default()
+    } else {
+        jcode_app_core::session_launch::SessionSpawnContext::default()
+            .with_local_runtime(socket)
+            .with_client_terminal_env(
+                jcode_app_core::terminal_launch::snapshot_client_terminal_env(),
+            )
     }
 }
 

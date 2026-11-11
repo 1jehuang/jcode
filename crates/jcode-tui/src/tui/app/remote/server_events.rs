@@ -164,6 +164,14 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Route mutation errors are control responses, not failed conversation
+    // turns. Handle them before the scoped-turn terminal fence.
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.pending_automatic_failover_request_id == Some(*id)
+    {
+        super::fail_pending_automatic_failover(app, message);
+        return true;
+    }
     let (event, identity) = match event {
         ServerEvent::TurnState {
             session_id,
@@ -1027,6 +1035,11 @@ fn handle_server_event_inner(
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
         }
+        ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        } => app.finish_soft_interrupt_recovery(id, &cancelled, &not_queued),
         ServerEvent::Interrupted => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
@@ -1266,6 +1279,19 @@ fn handle_server_event_inner(
                 app.set_status_notice("Agent model update failed");
                 return false;
             }
+            // Exhaustion can be reported again while the route switch is staged
+            // or awaiting acknowledgement. It belongs to the failed route, not
+            // a new turn: do not print it again or replace the held payload.
+            if (app.pending_provider_failover.is_some()
+                || app.pending_automatic_failover_route.is_some()
+                || app.pending_automatic_failover_request_id.is_some()
+                || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
+                && (crate::provider::parse_failover_prompt_message(&message).is_some()
+                    || jcode_provider_core::classify_failover_error_message(&message)
+                        .should_mark_provider_unavailable())
+            {
+                return false;
+            }
             app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
@@ -1368,6 +1394,7 @@ fn handle_server_event_inner(
                     images: pending.images.clone(),
                     is_system: pending.is_system,
                     auto_retry: pending.auto_retry,
+                    retry_attempts: pending.retry_attempts,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: app.last_submitted_input.clone(),
                 }
@@ -1415,7 +1442,10 @@ fn handle_server_event_inner(
                 app.clear_pending_remote_retry();
                 crate::tui::app::commands::disable_auto_poke(app);
                 app.overnight_auto_poke = None;
-                if app.pending_provider_failover.is_none() {
+                if app.pending_provider_failover.is_none()
+                    && app.pending_automatic_failover_route.is_none()
+                    && app.pending_automatic_failover_request_id.is_none()
+                {
                     app.restore_failed_input_to_box();
                 }
                 return false;
@@ -1866,6 +1896,19 @@ fn handle_server_event_inner(
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
             if session_changed {
+                // Drop the previous session's snapshot and polling deadlines.
+                // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
+                // A resume sends its authoritative todo snapshot before the
+                // large History frame. Keep that snapshot, never the old one.
+                if app
+                    .remote_todos_payload
+                    .as_ref()
+                    .is_some_and(|(id, _)| id != &session_id)
+                {
+                    app.remote_todos_payload = None;
+                }
+                app.remote_todos_requested_at = None;
+                app.pinned_todos_checked_at = None;
                 app.remote_available_service_tiers = None;
                 app.usage_reset.openai_quota_rejected = false;
             }
@@ -1942,6 +1985,9 @@ fn handle_server_event_inner(
                 app.swarm_plan_version = None;
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
+            }
+            if session_changed {
+                app.refresh_pinned_todos_now();
             }
             // Facts seeded from the last launch are only a first-frame guess.
             // When History reports a different model, drop them so the snapshot
@@ -2403,6 +2449,7 @@ fn handle_server_event_inner(
             true
         }
         ServerEvent::CompactedHistory {
+            id,
             session_id,
             messages,
             images,
@@ -2419,7 +2466,10 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            let restored_messages = messages
+            if !app.accept_recent_history_response(id) {
+                return false;
+            }
+            let mut restored_messages: Vec<_> = messages
                 .into_iter()
                 .map(|msg| DisplayMessage {
                     role: msg.role,
@@ -2431,6 +2481,12 @@ fn handle_server_event_inner(
                     tool_duration_ms: None,
                 })
                 .collect();
+            if !app.recent_history_page_contains_visible_tail(
+                &mut restored_messages,
+                compacted_visible,
+            ) {
+                return false;
+            }
             app.apply_compacted_history_window(
                 restored_messages,
                 images,
@@ -2602,6 +2658,15 @@ fn handle_server_event_inner(
             context_window,
             ..
         } => {
+            // A resume/catalog acknowledgement can arrive before the staged
+            // route request has even been sent. It cannot authorize a resend.
+            if app.pending_automatic_failover_request_id.is_none()
+                && (app.pending_automatic_failover_route.is_some()
+                    || (app.pending_route_selection.is_some()
+                        && app.pending_fallback_resend.is_some()))
+            {
+                return false;
+            }
             if app
                 .pending_automatic_failover_request_id
                 .is_some_and(|expected| expected != id)
@@ -2609,8 +2674,38 @@ fn handle_server_event_inner(
                 return false;
             }
             app.pending_automatic_failover_request_id = None;
+            app.pending_automatic_failover_started = None;
             app.remote_model_switch_in_flight = false;
             let automatic_route = app.pending_automatic_failover_route.take();
+            let error = error.or_else(|| {
+                let selection = automatic_route.as_ref()?;
+                use jcode_provider_core::{ResolvedCredential, RuntimeKey};
+                let expected_credential = match selection.runtime_key {
+                    RuntimeKey::ClaudeOAuth | RuntimeKey::OpenAIOAuth => {
+                        Some(ResolvedCredential::Oauth)
+                    }
+                    RuntimeKey::AnthropicApiKey | RuntimeKey::OpenAIApiKey => {
+                        Some(ResolvedCredential::ApiKey)
+                    }
+                    _ => None,
+                };
+                let expected_provider =
+                    jcode_provider_core::parse_provider_hint(&selection.provider_label);
+                let actual_provider = provider_name
+                    .as_deref()
+                    .and_then(jcode_provider_core::parse_provider_hint);
+                let matches = selection.model == model
+                    && selection.account_label().is_none_or(|label| {
+                        provider_oauth_account_label.as_deref() == Some(label)
+                    })
+                    && expected_credential.is_none_or(|credential| {
+                        resolved_credential == Some(credential)
+                    })
+                    && expected_provider.is_none_or(|provider| actual_provider == Some(provider));
+                (!matches).then(|| {
+                    "The server did not confirm the requested failover model/account. Automatic resend stopped. Use /model to choose a route and resend.".to_string()
+                })
+            });
             if let Some(err) = error {
                 let account_switch_failed = app.pending_account_switch_target.take().is_some();
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
@@ -2665,6 +2760,7 @@ fn handle_server_event_inner(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                let automatic_failover = automatic_route.is_some();
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
@@ -2725,9 +2821,17 @@ fn handle_server_event_inner(
                             .filter(|_| is_oauth)
                             .map(|email| email.as_str()),
                     );
+                    // One line for an automatic failover: the confirmed route
+                    // replaces the in-flight "Switching to" line.
+                    let retrying = if automatic_failover {
+                        app.remove_failover_switching_message();
+                        ". Retrying."
+                    } else {
+                        ""
+                    };
                     app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}",
-                        model, suffix
+                        "✓ Switched to model: {}{}{}",
+                        model, suffix, retrying
                     )));
                 }
                 if model_actually_changed {
@@ -3211,10 +3315,15 @@ fn handle_server_event_inner(
                 ));
                 return false;
             }
-            app.push_display_message(DisplayMessage::swarm(
-                presentation.title.clone(),
-                presentation.message.clone(),
-            ));
+            let now = std::time::Instant::now();
+            let since_last = app
+                .swarm_last_message_at
+                .insert(sender.clone(), now)
+                .map(|prev| now.duration_since(prev).as_secs_f32());
+            let mut swarm_message =
+                DisplayMessage::swarm(presentation.title.clone(), presentation.message.clone());
+            swarm_message.duration_secs = since_last;
+            app.push_display_message(swarm_message);
             persist_replay_display_message(
                 app,
                 "swarm",
@@ -3226,6 +3335,10 @@ fn handle_server_event_inner(
         }
         ServerEvent::Transcript { text, mode } => {
             apply_transcript_event(app, text, mode);
+            false
+        }
+        ServerEvent::VoiceActivity { activity } => {
+            app.apply_external_voice_activity(activity);
             false
         }
         ServerEvent::InputShellResult { result } => {

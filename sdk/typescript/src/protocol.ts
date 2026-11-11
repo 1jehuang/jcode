@@ -389,6 +389,8 @@ export type ApiEvent =
       model?: string;
       reasoning_effort?: string;
       auth_method?: string;
+      /** OAuth account the daemon's account router selected. */
+      account_label?: string;
     }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
@@ -398,6 +400,8 @@ export type ApiEvent =
       model?: string;
       reasoning_effort?: string;
       auth_method?: string;
+      /** OAuth account the daemon's account router selected. */
+      account_label?: string;
       routes: ModelRouteInfo[];
     }
   | { ev: "credential_updated"; provider: string; configured: boolean }

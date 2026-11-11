@@ -125,6 +125,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
                 model: Some("claude".to_string()),
                 reasoning_effort: Some("high".to_string()),
                 auth_method: Some("oauth".to_string()),
+                account_label: Some("work".to_string()),
                 routes: reply_routes.clone(),
             },
             ApiRequest::SetApiKey { provider, .. } => ApiEvent::CredentialUpdated {

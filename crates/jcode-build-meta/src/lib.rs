@@ -123,6 +123,21 @@ mod tests {
     use super::parse_release_semver;
 
     #[test]
+    fn forwarded_tag_distance_matches_compiled_dev_version() {
+        if option_env!("JCODE_BUILD_SEMVER").is_some() {
+            return;
+        }
+        let base = super::build_inputs::semver_core(super::BASE_SEMVER).unwrap();
+        if let Some(offset) = super::build_inputs::base_tag_offset(super::GIT_TAG, base) {
+            assert_eq!(
+                super::SEMVER,
+                format!("{}.{}.{}", base.0, base.1, base.2.saturating_add(offset))
+            );
+            assert_eq!(super::UPDATE_SEMVER, super::BASE_SEMVER);
+        }
+    }
+
+    #[test]
     fn release_build_display_preserves_comparison_identity() {
         if option_env!("JCODE_RELEASE_BUILD").is_some() {
             assert!(super::VERSION.starts_with(&format!("v{} (", super::SEMVER)));

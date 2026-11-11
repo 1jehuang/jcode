@@ -25,8 +25,7 @@ pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
     anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
-    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
-    anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_strip_1m_suffix,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -35,7 +34,7 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    parse_failover_prompt_message,
+    is_definitive_usage_exhaustion, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
@@ -287,6 +286,17 @@ pub trait Provider: Send + Sync {
     /// Get all model routes for the unified picker.
     fn model_routes(&self) -> Vec<ModelRoute> {
         Vec::new()
+    }
+
+    /// Capture the owned catalog at a single provider boundary. Providers with
+    /// shared catalog storage can override this to reuse one memo lookup.
+    fn model_catalog_snapshot(&self) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            self.available_models_display(),
+            self.model_routes(),
+        )
     }
 
     /// Prefetch any dynamic model lists (default: no-op).
@@ -598,6 +608,23 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 );
             }
             Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::MessageEnd { stop_reason })
+                if is_guardrail_stop_reason(stop_reason.as_deref()) =>
+            {
+                // A refusal or content-filter stop is not a usable answer. Callers
+                // such as compaction would otherwise persist the refusal text as
+                // if it were real output (issue #2089).
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(
+                        "simple completion stopped by provider guardrail (stop_reason={})",
+                        stop_reason.as_deref().unwrap_or("")
+                    ),
+                }
+                .into());
+            }
             Ok(StreamEvent::Error { message, .. }) => {
                 return Err(SimpleCompletionError {
                     usage,
@@ -621,6 +648,18 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     }
 
     Ok((result, usage))
+}
+
+/// True when a provider stop reason is a model-side refusal, safety, or
+/// content-filter stop rather than a normal end of turn or truncation.
+pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
+    let Some(reason) = stop_reason else {
+        return false;
+    };
+    let reason = reason.trim().to_ascii_lowercase();
+    matches!(reason.as_str(), "refusal" | "content_filter" | "safety")
+        || reason.contains("guardrail")
+        || reason.contains("policy_violation")
 }
 
 /// Failed simple completion with the usage already observed before failure.
@@ -1427,15 +1466,7 @@ impl ModelCatalogSnapshot {
     }
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
-        // Note: on multi-providers both calls below build the same route
-        // catalog; MultiProvider memoizes it (short TTL) so this stays one
-        // build instead of two.
-        Self::new(
-            Some(provider.display_name()),
-            Some(provider.model()),
-            provider.available_models_display(),
-            provider.model_routes(),
-        )
+        provider.model_catalog_snapshot()
     }
 
     pub fn has_routes(&self) -> bool {
@@ -1623,3 +1654,6 @@ mod saved_account_route_tests;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod catalog_snapshot_tests;

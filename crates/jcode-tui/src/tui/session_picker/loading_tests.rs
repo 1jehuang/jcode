@@ -395,6 +395,7 @@ fn grouped_refresh_bypasses_fresh_in_process_session_cache() {
 #[test]
 fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     let _env_lock = crate::storage::lock_test_env();
+    let _account = EnvVarGuard::set_str("JCODE_API_KEY", "");
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _runtime = EnvVarGuard::set_path("JCODE_RUNTIME_DIR", temp.path());
@@ -430,8 +431,8 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
     );
     session::record_window_closed(id);
     let (sender, receiver) = std::sync::mpsc::channel();
-    send_session_list_updates(sender);
-    for _ in 0..2 {
+    send_session_list_updates_with_discovery(sender, true, || Ok(true));
+    for _ in 0..3 {
         let super::super::SessionListUpdate::Cached((groups, orphans)) = receiver.recv().unwrap()
         else {
             panic!("recent recovery and cache must precede the history refresh");
@@ -455,6 +456,68 @@ fn recently_closed_session_is_sent_before_cache_and_not_rolled_back() {
             .any(|s| s.id == id),
         "bounded history scan must retain recovered session"
     );
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn failed_cloud_refresh_warns_without_discarding_local_or_last_good_cloud_rows() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let local_id = "session_cloud_failure_local";
+    let mut session = Session::create_with_id(local_id.into(), None, Some("Local work".into()));
+    session.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Keep this local session usable".into(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let cloud_id = "session_cloud_failure_cached";
+    let lease = storage::SessionLease {
+        session_id: cloud_id.into(),
+        epoch: 5,
+        away_host: Some("jcode-cloud".into()),
+        repo_root: Some("/cloud/cached".into()),
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: "2026-11-08T05:00:00Z".into(),
+    };
+    storage::write_session_lease(&lease).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    send_session_list_updates_with_discovery(sender, true, || {
+        anyhow::bail!("synthetic account failure")
+    });
+    let mut warning_seen = false;
+    let mut fresh_seen = false;
+    for update in receiver {
+        match update {
+            super::super::SessionListUpdate::CloudUnavailable(warning) => {
+                assert!(warning.contains("Reopen /resume"));
+                warning_seen = true;
+            }
+            super::super::SessionListUpdate::Fresh(result) => {
+                assert!(
+                    warning_seen,
+                    "explain incomplete discovery before ending refresh"
+                );
+                let (groups, orphans) = result.unwrap();
+                let ids: HashSet<_> = groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter())
+                    .chain(orphans.iter())
+                    .map(|s| s.id.as_str())
+                    .collect();
+                assert!(ids.contains(local_id));
+                assert!(ids.contains(cloud_id));
+                fresh_seen = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(warning_seen && fresh_seen);
+    assert_eq!(storage::read_session_lease(cloud_id), Some(lease));
     invalidate_session_list_cache();
 }
 
@@ -870,6 +933,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         session_id,
         &[crate::todo::TodoItem {
             lane_after: None,
+            lane_owner: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -959,6 +1023,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
         session_id,
         &[crate::todo::TodoItem {
             lane_after: None,
+            lane_owner: None,
             content: "Wire todo title into picker".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -1531,3 +1596,91 @@ fn benchmark_resume_loading_reports_timings() {
 
 #[path = "loading_scope_tests.rs"]
 mod loading_scope;
+
+#[test]
+fn summary_tracks_newest_message_timestamp_across_roles() {
+    let data: SessionMessageSummaryData = serde_json::from_str(
+        r#"[
+            {"role":"user","content":"hi","timestamp":"2026-01-01T00:00:00Z"},
+            {"role":"assistant","content":"later tool reply","timestamp":"2026-01-01T03:00:00Z"},
+            {"role":"user","content":"no ts"}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        data.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-01T03:00:00+00:00".to_string())
+    );
+
+    let mut base: SessionMessageSummaryData = serde_json::from_str(
+        r#"[{"role":"user","content":"a","timestamp":"2026-01-01T00:00:00Z"}]"#,
+    )
+    .unwrap();
+    base.merge(
+        serde_json::from_str(
+            r#"[{"role":"assistant","content":"b","timestamp":"2026-01-02T00:00:00Z"}]"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        base.last_message_at.map(|t| t.to_rfc3339()),
+        Some("2026-01-02T00:00:00+00:00".to_string())
+    );
+}
+
+#[test]
+fn external_previews_index_tool_blocks_at_their_own_weight() {
+    use crate::tui::session_picker::transcript_search::source::{Source, metadata_sources};
+    let temp = tempfile::tempdir().expect("temp dir");
+    let claude = temp.path().join("claude.jsonl");
+    std::fs::write(
+        &claude,
+        concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"please fix kiwiflake\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"bash\",\"input\":{\"command\":\"grep mangoroot\",\"intent\":\"find papayaplan\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"zebradump output\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_claude_code_external_preview(&claude).expect("preview");
+    let index = build_classified_search_index("claude:x", "x", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "papayaplan", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::Intent),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+
+    let codex = temp.path().join("codex.jsonl");
+    std::fs::write(
+        &codex,
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"c\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"kiwiflake please\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"mangoroot\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"zebradump\"}}\n",
+        ),
+    )
+    .unwrap();
+    let preview = load_codex_external_preview(&codex).expect("preview");
+    let index = build_classified_search_index("codex:c", "c", "t", None, None, &preview.search);
+    let tokens: Vec<String> = ["kiwiflake", "mangoroot", "zebradump"]
+        .map(String::from)
+        .into();
+    assert_eq!(
+        metadata_sources(&[], &index, &tokens),
+        [
+            Some(Source::User),
+            Some(Source::ToolInput),
+            Some(Source::ToolOutput),
+        ],
+        "{index:?}"
+    );
+}

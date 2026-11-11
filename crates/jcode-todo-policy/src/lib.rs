@@ -34,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal, TodoGoalChange,
-    TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    IterationMaturity, LANE_OWNER_WORKER, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.

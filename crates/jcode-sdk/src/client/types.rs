@@ -28,6 +28,8 @@ pub struct RuntimeInfo {
     pub reasoning_effort: Option<String>,
     /// Credential the session bills against (`oauth` or `api_key`).
     pub auth_method: Option<String>,
+    /// OAuth account label the daemon's account router selected, if any.
+    pub account_label: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
 }

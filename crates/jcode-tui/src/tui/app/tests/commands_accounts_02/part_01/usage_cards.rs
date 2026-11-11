@@ -15,8 +15,12 @@ fn test_usage_card_reset_balances() {
             ..Default::default()
         }]);
         let content = &app.display_messages().last().unwrap().content;
-        assert!(content.contains(&format!("Banked resets: {count} available")));
-        assert!(!content.contains("no usage data available"));
+        let marker = if count > 0 { '+' } else { ':' };
+        assert!(
+            content.contains(&format!("{marker} Banked resets\t{count} available")),
+            "{content}"
+        );
+        assert!(!content.contains("no data"));
     }
     for available in [false, true] {
         app.handle_usage_report(vec![crate::usage::ProviderUsage {
@@ -30,11 +34,11 @@ fn test_usage_card_reset_balances() {
             ..Default::default()
         }]);
         let content = &app.display_messages().last().unwrap().content;
-        assert!(content.contains(&format!(
-            "Session resets: {} available",
-            u64::from(available)
-        )));
-        assert_eq!(content.contains("next in"), !available);
+        assert!(
+            content.contains(&format!("Session resets\t{} available", u64::from(available))),
+            "{content}"
+        );
+        assert_eq!(content.contains("next in"), !available, "{content}");
     }
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
         provider_name: "OpenAI (failed)".into(),
@@ -52,7 +56,7 @@ fn test_usage_card_reset_balances() {
             .last()
             .unwrap()
             .content
-            .contains("Banked resets:")
+            .contains("Banked resets")
     );
     for error in [None, Some("fetch failed".into())] {
         app.handle_usage_report(vec![crate::usage::ProviderUsage {
@@ -61,8 +65,8 @@ fn test_usage_card_reset_balances() {
             ..Default::default()
         }]);
         let content = &app.display_messages().last().unwrap().content;
-        assert!(!content.contains("Banked resets:"));
-        assert!(!content.contains("Session resets:"));
+        assert!(!content.contains("Banked resets"));
+        assert!(!content.contains("Session resets"));
     }
 }
 
@@ -97,15 +101,28 @@ fn test_usage_card_responsive_terminal_layout() {
             .filter(|ch| !ch.is_whitespace() && *ch != '│')
             .collect();
         assert!(
-            normalized.contains("Bankedresets:3available"),
+            normalized.contains("Bankedresets3available"),
             "{width} cols:\n{text}"
         );
-        assert!(text.contains("OpenAI (personal)"), "{width} cols:\n{text}");
-        assert!(text.contains("42%"), "{width} cols:\n{text}");
+        assert!(text.contains("OpenAI"), "{width} cols:\n{text}");
+        assert!(text.contains("58% left"), "{width} cols:\n{text}");
+        assert!(text.contains("▰"), "{width} cols:\n{text}");
         let border = text
             .lines()
-            .find(|line| line.contains('╭') && line.contains("Usage"))
+            .find(|line| line.contains('╭') && line.contains("OpenAI"))
             .unwrap_or_else(|| panic!("missing usage border at {width}:\n{text}"));
+        // Chrome never wraps: every card row is exactly one terminal row
+        // framed by matching borders.
+        let card_rows: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !std::ptr::eq(*line, border))
+            .take_while(|line| !line.contains('╰'))
+            .skip(1)
+            .collect();
+        assert!(!card_rows.is_empty(), "{width} cols:\n{text}");
+        for row in &card_rows {
+            assert!(row.matches('│').count() >= 2, "{width} cols:\n{text}");
+        }
         let start = border.find('╭').unwrap();
         let end = border.find('╮').unwrap();
         let card_width =
@@ -137,7 +154,7 @@ fn test_usage_card_renders_when_loading() {
         "usage card should render as rounded box, got:\n{text}"
     );
     assert!(
-        text.contains("Refreshing usage"),
+        text.contains("Usage") && text.contains("◌ refreshing"),
         "usage card should be visible while loading, got:\n{text}"
     );
     assert!(
@@ -187,11 +204,10 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(app.usage_overlay.is_none());
     let msg = app.display_messages().last().expect("missing usage card");
     assert_eq!(msg.role, "usage");
-    assert!(msg.content.contains("OpenAI (ChatGPT)"));
-    assert!(msg.content.contains("5h"));
-    assert!(msg.content.contains("82%"));
-    assert!(msg.content.contains("plan: pro"));
-    assert!(!msg.content.contains("resets: "));
+    assert_eq!(msg.title.as_deref(), Some("OpenAI (ChatGPT)"));
+    assert!(msg.content.contains("= 5h\t82%\t"), "{}", msg.content);
+    assert!(msg.content.contains(": Plan\tpro"), "{}", msg.content);
+    assert!(msg.content.starts_with("*%\t82"), "{}", msg.content);
     let leaked = app.materialized_provider_messages();
     assert_eq!(
         leaked.len(),
@@ -231,8 +247,10 @@ fn test_usage_progress_updates_card_incrementally() {
         app.display_messages()
             .iter()
             .filter(|message| message.role == "usage")
-            .count(),
-        1
+            .filter_map(|message| message.title.as_deref())
+            .collect::<Vec<_>>(),
+        ["Usage", "Anthropic (Claude)"],
+        "refresh status card followed by one card per provider"
     );
     let detail = &app
         .display_messages()

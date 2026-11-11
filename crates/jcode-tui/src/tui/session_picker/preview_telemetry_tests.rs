@@ -18,6 +18,7 @@ fn fixture() -> (Session, SessionTelemetry) {
         credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
         account_label: Some("account-a".into()),
         account_usage: Some(crate::protocol::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "account-a".into(),
             email: None,
             exhausted: false,
@@ -27,6 +28,9 @@ fn fixture() -> (Session, SessionTelemetry) {
             seven_day_ratio: Some(0.5),
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         }),
         ..Default::default()
     };

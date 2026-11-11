@@ -505,6 +505,7 @@ mod tests {
             priority: "medium".to_string(),
             group: None,
             lane_after: None,
+            lane_owner: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),

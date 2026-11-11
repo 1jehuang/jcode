@@ -2772,6 +2772,13 @@ impl App {
             );
 
         match recv_result {
+            Ok(session_picker::SessionListUpdate::CloudUnavailable(warning)) => {
+                if picker_active && let Some(picker) = self.session_picker_overlay.as_ref() {
+                    picker.borrow_mut().set_cloud_warning(warning);
+                    return true;
+                }
+                false
+            }
             Ok(session_picker::SessionListUpdate::Cached((server_groups, orphan_sessions))) => {
                 if picker_active {
                     let changed = self.apply_loaded_session_picker(server_groups, orphan_sessions);
@@ -2942,6 +2949,15 @@ impl App {
                 }
             };
 
+            if let ResumeTarget::JcodeSession { session_id } = &resolved_target
+                && crate::session_window::apply_resume_open_elsewhere(session_id)
+                    == crate::session_window::OpenElsewhereOutcome::Moved
+            {
+                spawned += 1;
+                names.push(name);
+                continue;
+            }
+
             match spawn_resume_target_in_new_terminal(&resolved_target, &cwd, socket.as_deref()) {
                 Ok(true) => {
                     spawned += 1;
@@ -3111,6 +3127,15 @@ impl App {
             return;
         }
 
+        if crate::session_window::apply_resume_open_elsewhere(&session_id)
+            == crate::session_window::OpenElsewhereOutcome::Moved
+        {
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.set_status_notice(format!("Brought {} here", name));
+            return;
+        }
+
         if targets.len() > 1 {
             self.push_display_message(DisplayMessage::system(format!(
                 "Selected {} sessions; resuming {} in this terminal.",
@@ -3267,6 +3292,29 @@ impl App {
             let mut picker = picker_cell.borrow_mut();
             picker.handle_overlay_key(code, modifiers)?
         };
+        self.handle_session_picker_action(action);
+        Ok(())
+    }
+
+    pub(super) fn poll_session_picker_search_submission(&mut self) -> bool {
+        let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
+            return false;
+        };
+        let (pending, action) = {
+            let mut picker = picker_cell.borrow_mut();
+            (
+                picker.search_submission_pending(),
+                picker.poll_search_submission(),
+            )
+        };
+        let Some(action) = action else {
+            return pending;
+        };
+        self.handle_session_picker_action(action);
+        true
+    }
+
+    fn handle_session_picker_action(&mut self, action: OverlayAction) {
         match action {
             OverlayAction::Continue => {}
             OverlayAction::Close => {
@@ -3290,7 +3338,7 @@ impl App {
                         if self.handle_live_claude_takeover(&target) {
                             self.onboarding_finish();
                         }
-                        return Ok(());
+                        return;
                     }
                     PickerResult::RestoreCrashedGroup(_) => Vec::new(),
                     PickerResult::StartNewSession => {
@@ -3299,13 +3347,13 @@ impl App {
                         self.session_picker_overlay = None;
                         self.session_picker_mode = SessionPickerMode::Resume;
                         self.onboarding_show_suggestions();
-                        return Ok(());
+                        return;
                     }
                     PickerResult::ReviewRecentProject => {
                         self.session_picker_overlay = None;
                         self.session_picker_mode = SessionPickerMode::Resume;
                         self.onboarding_start_recent_project_review();
-                        return Ok(());
+                        return;
                     }
                 };
                 self.session_picker_overlay = None;
@@ -3355,7 +3403,6 @@ impl App {
                 self.session_picker_mode = SessionPickerMode::Resume;
             }
         }
-        Ok(())
     }
 
     fn toggle_selected_model_favorite(&mut self) {
@@ -4188,6 +4235,10 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "queued_picker_submission_tests.rs"]
+mod queued_picker_submission_tests;
 
 #[cfg(test)]
 #[path = "inline_interactive_tests.rs"]

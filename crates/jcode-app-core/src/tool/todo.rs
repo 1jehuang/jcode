@@ -31,8 +31,9 @@ mod external_blocker_tests;
 #[path = "todo_lane_dependency_tests.rs"]
 mod lane_dependency_tests;
 
-/// A prerequisite edit naming one member applies atomically to its entire lane.
-fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+/// A lane-wide field edit naming one member applies atomically to its entire
+/// lane (`lane_after`, `lane_owner`).
+fn patch_lane_field(todos: &mut [Value], id: &str, field: &str, value: Value) -> Result<()> {
     let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
     let target = typed
         .iter()
@@ -41,10 +42,14 @@ fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
     let lane = crate::todo::stages::lane_id(target);
     for (raw, todo) in todos.iter_mut().zip(&typed) {
         if crate::todo::stages::lane_id(todo) == lane {
-            raw["lane_after"] = value.clone();
+            raw[field] = value.clone();
         }
     }
     Ok(())
+}
+
+fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+    patch_lane_field(todos, id, "lane_after", value)
 }
 
 fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
@@ -352,6 +357,9 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         if let Some(value) = fields.get("lane_after") {
             patch_lane_after(&mut todos, id, value.clone())?;
         }
+        if let Some(value) = fields.get("lane_owner") {
+            patch_lane_field(&mut todos, id, "lane_owner", value.clone())?;
+        }
     }
 
     for mut add in adds {
@@ -550,7 +558,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
             if lane
                 .keys()
-                .any(|key| !["lane", "items", "after"].contains(&key.as_str()))
+                .any(|key| !["lane", "items", "after", "owner"].contains(&key.as_str()))
             {
                 bail!("unexpected lane field");
             }
@@ -573,9 +581,17 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     .as_object()
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
-                if ["phase", "lane", "stage", "group", "wave", "lane_after"]
-                    .iter()
-                    .any(|key| item.contains_key(*key))
+                if [
+                    "phase",
+                    "lane",
+                    "stage",
+                    "group",
+                    "wave",
+                    "lane_after",
+                    "lane_owner",
+                ]
+                .iter()
+                .any(|key| item.contains_key(*key))
                 {
                     bail!("hierarchical items must not own phase/lane/stage/group membership");
                 }
@@ -593,6 +609,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 item.insert("group".into(), json!(name));
                 if let Some(after) = lane.get("after") {
                     item.insert("lane_after".into(), after.clone());
+                }
+                if let Some(owner) = lane.get("owner").filter(|owner| !owner.is_null()) {
+                    item.insert("lane_owner".into(), owner.clone());
                 }
                 todos.push(Value::Object(item));
             }
@@ -1435,6 +1454,10 @@ impl Tool for TodoTool {
             "items": {"type": "string", "minLength": 1},
             "description": "Earlier-phase prerequisite task names. Updates whole lane; null restores phase barrier."
         });
+        schema["properties"]["todos"]["items"]["properties"]["lane_owner"] = json!({
+            "type": "string", "enum": ["self", "worker"],
+            "description": "Who runs the lane. worker: a swarm worker auto-spawns when the lane is ready. Updates whole lane."
+        });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
@@ -1465,6 +1488,7 @@ impl Tool for TodoTool {
             properties.remove("phase");
             properties.remove("lane");
             properties.remove("lane_dependencies");
+            properties.remove("lane_owner");
         }
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
@@ -1477,6 +1501,9 @@ impl Tool for TodoTool {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
                             "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
+                        }, "owner": {
+                            "type": "string", "enum": ["self", "worker"],
+                            "description": "Who runs the lane. Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
@@ -1499,6 +1526,7 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            crate::todo::stages::normalize_lane_owners(&mut todos);
             crate::todo::store::validate_session_lane_dependencies(
                 &crate::storage::jcode_dir()?,
                 &ctx.session_id,

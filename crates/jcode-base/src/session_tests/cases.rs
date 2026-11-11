@@ -717,6 +717,71 @@ fn test_save_persists_compaction_state() -> Result<()> {
     Ok(())
 }
 
+/// A metadata-only stub (no transcript, no compaction loaded) that is saved
+/// through the journal must not erase the owner's compaction summary. Doing so
+/// made the next resume/split see the whole transcript and emergency-compact it.
+#[test]
+fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-stub-compaction-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_stub_compaction_test";
+    let mut owner = Session::create_with_id(id.to_string(), None, Some("owner".to_string()));
+    for i in 0..4 {
+        owner.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("message {i}"),
+                cache_control: None,
+            }],
+        );
+    }
+    owner.save()?;
+    // Compaction lands in the journal, as it does for a live large session.
+    owner.compaction = Some(StoredCompactionState {
+        summary_text: "owner summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 3,
+        original_turn_count: 3,
+        compacted_count: 3,
+    });
+    owner.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "after compaction".into(),
+            cache_control: None,
+        }],
+    );
+    owner.save()?;
+    // A later append marks compaction unchanged, so the stub, which reads only
+    // the latest journal metadata, never sees the summary.
+    owner.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "reply".into(),
+            cache_control: None,
+        }],
+    );
+    owner.save()?;
+
+    let mut stub = Session::load_startup_stub(id)?;
+    stub.compaction = None;
+    stub.last_pid = Some(1);
+    stub.save()?;
+    let mut stub = Session::load_startup_stub(id)?;
+    assert!(stub.messages.is_empty());
+    stub.save()?;
+
+    let loaded = Session::load(id)?;
+    assert_eq!(loaded.compaction, owner.compaction);
+    assert_eq!(loaded.messages.len(), 6);
+    Ok(())
+}
+
 #[test]
 fn test_save_persists_provider_key() -> Result<()> {
     let _env_lock = lock_env();

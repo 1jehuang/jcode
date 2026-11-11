@@ -168,6 +168,60 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
 }
 
 #[test]
+fn save_claude_tokens_updates_fox_without_touching_otter() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    for (label, email) in [
+        ("claude-otter", "otter@example.invalid"),
+        ("claude-fox", "fox@example.invalid"),
+    ] {
+        let assigned =
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: label.to_string(),
+                access: format!("synthetic-old-access-{label}"),
+                refresh: format!("synthetic-old-refresh-{label}"),
+                expires: 1,
+                email: Some(email.to_string()),
+                subscription_type: Some("pro".to_string()),
+                scopes: vec!["user:inference".to_string()],
+            })?;
+        assert_eq!(assigned, label);
+    }
+    let mut initial = crate::auth::claude::load_auth_file()?;
+    initial.active_anthropic_account = Some("claude-fox".to_string());
+    crate::auth::claude::save_auth_file(&initial)?;
+    let otter_before = serde_json::to_value(&initial.anthropic_accounts[0])?;
+    let refreshed = OAuthTokens {
+        access_token: "synthetic-new-fox-access".to_string(),
+        refresh_token: "synthetic-new-fox-refresh".to_string(),
+        expires_at: 2,
+        id_token: None,
+        scopes: Vec::new(),
+    };
+    save_claude_tokens_for_account(&refreshed, "claude-fox")?;
+    let saved = crate::auth::claude::load_auth_file()?;
+    assert_eq!(saved.anthropic_accounts.len(), 2);
+    assert_eq!(
+        saved.active_anthropic_account.as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.anthropic_accounts[0])?,
+        otter_before
+    );
+    let fox = &saved.anthropic_accounts[1];
+    assert_eq!(fox.label, "claude-fox");
+    assert_eq!(fox.access, refreshed.access_token);
+    assert_eq!(fox.refresh, refreshed.refresh_token);
+    assert_eq!(fox.expires, refreshed.expires_at);
+    assert_eq!(fox.email.as_deref(), Some("fox@example.invalid"));
+    assert_eq!(fox.subscription_type.as_deref(), Some("pro"));
+    assert_eq!(fox.scopes, vec!["user:inference".to_string()]);
+    Ok(())
+}
+
+#[test]
 fn claude_oauth_constants() {
     assert!(!claude::CLIENT_ID.is_empty());
     assert_eq!(

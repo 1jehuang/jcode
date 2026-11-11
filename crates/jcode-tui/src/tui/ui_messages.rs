@@ -3,6 +3,9 @@ mod gmail_drafts;
 use gmail_drafts::*;
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
+#[cfg(test)]
+#[path = "ui_messages/todo_payload_cache_tests.rs"]
+mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -808,7 +811,47 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
+// Cache data only: time-sensitive blocker policy and width/style rendering
+// remain live on every draw. One bounded entry retains no transcript history.
+const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct TodoPayloadCache {
+    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
+}
+
+impl TodoPayloadCache {
+    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+        if let Some((source, parsed)) = &self.entry
+            && source == content
+        {
+            return parsed.clone();
+        }
+        let parsed = serde_json::from_str::<TodoCardPayload>(content)
+            .ok()
+            .map(std::sync::Arc::new);
+        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
+            .then(|| (content.to_owned(), parsed.clone()));
+        parsed
+    }
+}
+
+thread_local! {
+    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
+        std::cell::RefCell::new(TodoPayloadCache::default());
+}
+
+fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
+}
+
 impl TodoCardPayload {
+    fn todos(&self) -> &[crate::todo::TodoItem] {
+        match self {
+            Self::Current { todos, .. } | Self::Legacy(todos) => todos,
+        }
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -968,14 +1011,61 @@ pub(crate) fn render_todos_message(
     render_todos_message_with_cap(msg, width, diff_mode, true)
 }
 
+/// Dedicated composer chrome, one non-wrapping row per live blocker.
+pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    todo_blocker_footer_at(payload, width, chrono::Utc::now())
+}
+
+fn todo_blocker_footer_at(
+    payload: Option<&str>,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    let Some(payload) = payload.and_then(cached_todo_payload) else {
+        return Vec::new();
+    };
+    render_todo_blocker_footer(&payload, width, now)
+}
+
+fn render_todo_blocker_footer(
+    payload: &TodoCardPayload,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    payload
+        .todos()
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .filter_map(|todo| {
+            let reason = if crate::todo::todo_completely_blocked(todo) {
+                todo.completely_blocked.as_ref().map(|b| b.reason.clone())
+            } else if crate::todo::todo_has_external_blocker_at(todo, now) {
+                todo.external_blocker.as_ref().map(|b| b.reason.clone())
+            } else if !todo.blocked_by.is_empty() {
+                Some(format!("waiting on {}", todo.blocked_by.join(", ")))
+            } else {
+                None
+            }?;
+            let text = format!("Blocked · {}: {}", todo.content, reason)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(super::truncate_line_with_ellipsis_to_width(
+                &Line::styled(text, Style::default().fg(todo_warning_color())),
+                usize::from(width),
+            ))
+        })
+        .collect()
+}
+
 /// Full blocker prose belongs below the response, outside the pinned chrome.
 pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(payload) = payload
-        && let Ok(payload) = serde_json::from_str::<TodoCardPayload>(payload)
+        && let Some(payload) = cached_todo_payload(payload)
     {
-        let (todos, ..) = payload.into_parts();
-        for todo in todos
+        for todo in payload
+            .todos()
             .iter()
             .filter(|todo| crate::todo::todo_completely_blocked(todo))
         {
@@ -1499,7 +1589,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
-    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
+    todo_stages::push_lane_status_lines_below_rows(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -2052,11 +2142,29 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
+    let wait_note = todo_stages::todo_wait_note(todo, agents);
     if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
-        return render_todo_item_line(todo, agents, base_indent, inner_width);
+        let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
+        if let Some(note) = wait_note {
+            line.spans.push(Span::styled(
+                format!("  ◷ {note}"),
+                Style::default().fg(todo_warning_color()),
+            ));
+            line = super::truncate_line_with_ellipsis_to_width(
+                &line,
+                inner_width.saturating_add(base_indent.width()),
+            );
+        }
+        return line;
     }
     let mut spans = todo_card_item_spans(todo, false);
     spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    if let Some(note) = wait_note {
+        spans.push(Span::styled(
+            format!("  {note}"),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
     let progress = todo_dependency_progress(
         &dependencies,
@@ -3107,8 +3215,8 @@ fn swarm_notification_style(title: Option<&str>) -> (&'static str, Color, Color)
 
 /// Trailing badge text appended to a collapsed swarm tldr line. Kept as
 /// constants so click hit-testing and rendering stay in sync.
-pub(crate) const SWARM_EXPAND_BADGE: &str = "▸ expand";
-pub(crate) const SWARM_COLLAPSE_BADGE: &str = "▾ collapse";
+pub(crate) const SWARM_EXPAND_BADGE: &str = "⊞";
+pub(crate) const SWARM_COLLAPSE_BADGE: &str = "⊟";
 pub(crate) const SWARM_DIFF_EXPAND_BADGE: &str = "▸ diff";
 pub(crate) const SWARM_DIFF_COLLAPSE_BADGE: &str = "▾ hide";
 pub(crate) const SWARM_AGENT_SNAPSHOT_TITLE: &str = "swarm-agent-snapshot";
@@ -3222,6 +3330,7 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
 fn render_compact_agent_notification(
     title: &str,
     content: &str,
+    since_last_secs: Option<f32>,
     width: u16,
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
@@ -3289,9 +3398,20 @@ fn render_compact_agent_notification(
         };
         // Keep the full click target only when it fits. At very narrow widths
         // the preview wins rather than letting a badge force a second row.
+        // Short plain notes stay clean: usage only appears on collapsible
+        // messages or when the time since this agent's last message is known.
+        let usage_text = (badge.is_some() || since_last_secs.is_some())
+            .then(|| swarm_notification_usage_label(content, since_last_secs))
+            .flatten()
+            .map(|usage| format!("  {usage}"))
+            .filter(|usage| usage.width() + 8 < max_width);
+        let usage_width = usage_text
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
         let badge_text = badge
             .map(|badge| format!("  {badge}"))
-            .filter(|badge| badge.width() < max_width);
+            .filter(|badge| badge.width() + usage_width < max_width);
         let badge_width = badge_text
             .as_deref()
             .map(UnicodeWidthStr::width)
@@ -3299,8 +3419,12 @@ fn render_compact_agent_notification(
         prefix.push(Span::styled(preview, body_style));
         let mut line = super::truncate_line_with_ellipsis_to_width(
             &Line::from(prefix),
-            max_width.saturating_sub(badge_width).max(1),
+            max_width.saturating_sub(badge_width + usage_width).max(1),
         );
+        if let Some(usage_text) = usage_text {
+            line.spans
+                .push(Span::styled(usage_text, Style::default().fg(dim_color())));
+        }
         if let Some(badge_text) = badge_text {
             line.spans.push(Span::styled(
                 badge_text,
@@ -3362,6 +3486,28 @@ fn render_compact_agent_notification(
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     Some(lines)
+}
+
+/// "time since this agent's previous message, approx tokens" for a swarm
+/// notification. Time is omitted when unknown (first message, replay).
+fn swarm_notification_usage_label(content: &str, since_last_secs: Option<f32>) -> Option<String> {
+    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
+        .map(|parsed| format!("{} {}", parsed.tldr, parsed.body))
+        .unwrap_or_else(|| content.to_string());
+    let tokens = crate::util::estimate_tokens(body.trim());
+    if tokens == 0 {
+        return None;
+    }
+    let tokens = crate::util::format_approx_token_count(tokens);
+    Some(
+        match since_last_secs.filter(|secs| secs.is_finite() && *secs >= 0.0) {
+            Some(secs) => format!(
+                "{}, {tokens}",
+                crate::message::Message::format_duration((secs as f64 * 1000.0).round() as u64)
+            ),
+            None => tokens,
+        },
+    )
 }
 
 fn render_compact_swarm_await(
@@ -3458,7 +3604,9 @@ pub(crate) fn render_swarm_message(
 
     let centered = markdown::center_code_blocks();
     let title = msg.title.as_deref().unwrap_or("Swarm").trim();
-    if let Some(lines) = render_compact_agent_notification(title, &msg.content, width) {
+    if let Some(lines) =
+        render_compact_agent_notification(title, &msg.content, msg.duration_secs, width)
+    {
         return lines;
     }
     if let Some(lines) = render_compact_swarm_await(title, &msg.content, width) {
@@ -4109,6 +4257,7 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    lines.extend(tools_ui::codemode_preview(tc, row_width));
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
         lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
         if centered {

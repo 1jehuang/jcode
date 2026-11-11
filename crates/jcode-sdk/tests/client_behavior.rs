@@ -18,6 +18,11 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
+#[path = "client_behavior/protocol_disconnect.rs"]
+mod protocol_disconnect;
+#[path = "client_behavior/protocol_partial_disconnect.rs"]
+mod protocol_partial_disconnect;
+
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
 struct PairTransport(UnixStream);
@@ -465,6 +470,7 @@ fn a_lost_connection_fails_requests_in_flight() {
         .ping()
         .expect_err("a dropped harness must fail the request");
     assert_eq!(error.code(), "disconnected");
+    assert_eq!(client.disconnect_reason().unwrap().code(), "disconnected");
 }
 
 #[test]
@@ -490,6 +496,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 model: Some("new-model".into()),
                 reasoning_effort: None,
                 auth_method: None,
+                account_label: None,
             },
             writer,
         );
@@ -501,6 +508,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 model: Some("new-model".into()),
                 reasoning_effort: None,
                 auth_method: None,
+                account_label: None,
                 routes: vec![ModelRouteInfo {
                     usage: None,
                     model: "new-model".into(),

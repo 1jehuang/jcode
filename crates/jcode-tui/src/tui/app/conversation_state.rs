@@ -316,7 +316,11 @@ impl App {
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
         self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
-        if let Err(err) = self.session.save() {
+        // Remote clients hold a transcript-stripped stub; the server owns the
+        // session file and already persisted the compaction.
+        if !self.is_remote
+            && let Err(err) = self.session.save()
+        {
             crate::logging::warn(&format!(
                 "Failed to persist provider session reset after compaction for session {}: {}",
                 self.session.id, err

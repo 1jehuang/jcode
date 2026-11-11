@@ -21,13 +21,18 @@ pub fn api_base_uses_localhost(raw: &str) -> bool {
         return false;
     };
 
-    matches!(
-        parsed
-            .host_str()
-            .map(|host| host.to_ascii_lowercase())
-            .as_deref(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1")
-    )
+    let Some(host) = parsed.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+
+    // A bare IP names one machine, like loopback: a self-hosted inference
+    // server reached by address needs no key by default, whether that address
+    // is private or public.
+    ip_addr_from_host(&host).is_some()
 }
 
 pub fn resolve_openai_compatible_profile(
@@ -96,7 +101,7 @@ fn resolve_openai_compatible_profile_endpoint(
             resolved.api_base = normalized;
         } else {
             eprintln!(
-                "Warning: ignoring invalid JCODE_OPENAI_COMPAT_API_BASE '{}'. Use https://... (or http://localhost).",
+                "Warning: ignoring invalid JCODE_OPENAI_COMPAT_API_BASE '{}'. Use https://..., or http:// with a localhost/.local name or a bare IP address.",
                 base
             );
         }
@@ -941,7 +946,7 @@ pub fn apply_named_provider_profile_env_from_config(
 
     let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
         anyhow::anyhow!(
-            "Provider profile '{}' has invalid base_url '{}'. Use https://... or http://localhost.",
+            "Provider profile '{}' has invalid base_url '{}'. Use https://..., or http:// with a localhost/.local name or a bare IP address.",
             profile_name,
             profile.base_url
         )

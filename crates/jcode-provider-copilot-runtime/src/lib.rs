@@ -699,6 +699,7 @@ impl CopilotApiProvider {
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
+        let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_args = String::new();
@@ -727,7 +728,7 @@ impl CopilotApiProvider {
             };
             saw_any_data = true;
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push_str(&utf8.decode(&chunk));
 
             // Process complete SSE lines
             while let Some(line_end) = buffer.find('\n') {

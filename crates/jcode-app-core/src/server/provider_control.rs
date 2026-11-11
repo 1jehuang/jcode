@@ -930,6 +930,7 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
             // previous credential's cached runtime failure.
@@ -1141,6 +1142,53 @@ pub(super) async fn handle_notify_auth_changed(
         send_catalog_activity(&client_event_tx_clone, &catalog_message);
         finish_auth_refresh(&session_id, auth_refresh_generation);
     });
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+/// A one-shot client (the SDK login flow, `jcode login` from another shell)
+/// reports new credentials without subscribing to a session. Refresh every
+/// live session's provider so subscribed clients, including Desktop chats and
+/// drafts that never asked for a session-local switch, receive the new catalog
+/// through `ModelsUpdated`. The post-login model switch stays session-local.
+pub(super) async fn handle_unbound_notify_auth_changed(
+    id: u64,
+    provider_hint: Option<String>,
+    auth: Option<AuthChanged>,
+    provider_template: &Arc<dyn Provider>,
+    sessions: &SessionAgents,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    crate::auth::AuthStatus::invalidate_cache();
+    let activation = crate::auth::lifecycle::activate_auth_change(&AuthActivationRequest::new(
+        provider_hint,
+        auth,
+    ));
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
+    if let Some(provider_id) = activation.provider_id.as_deref() {
+        crate::provider::clear_provider_unavailable_for_account(provider_id);
+    }
+    provider_template.on_auth_changed();
+    let agents: Vec<Arc<Mutex<Agent>>> = sessions.read().await.values().cloned().collect();
+    let mut idle = Vec::new();
+    let mut busy = Vec::new();
+    for agent in agents {
+        let handle = agent.try_lock().map(|guard| guard.provider_handle());
+        match handle {
+            Ok(provider) => idle.push(provider),
+            Err(_) => busy.push(agent),
+        }
+    }
+    let mut seen: Vec<Arc<dyn Provider>> = vec![Arc::clone(provider_template)];
+    for provider in idle {
+        if !seen.iter().any(|existing| Arc::ptr_eq(existing, &provider)) {
+            provider.on_auth_changed_preserve_current_provider();
+            seen.push(provider);
+        }
+    }
+    spawn_deferred_auth_refreshes(busy);
+    crate::bus::Bus::global().publish_models_updated();
+    // Catalogs that refresh in the background announce themselves again with
+    // their own ModelsUpdated once the network fetch completes.
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 

@@ -1815,12 +1815,54 @@ async fn generate_compaction_artifact(
     );
 
     Ok(CompactionResult {
-        summary_text: summary,
+        summary_text: validate_compaction_summary(summary)?,
         openai_encrypted_content: None,
         covers_up_to_turn: messages.len(),
         duration_ms: start.elapsed().as_millis() as u64,
         summarized_messages: messages.len(),
     })
+}
+
+/// Reject summaries that cannot stand in for the messages they replace, such
+/// as empty output or a provider refusal (issue #2089). Returning an error makes
+/// compaction keep the original messages instead of dropping them.
+fn validate_compaction_summary(summary: String) -> Result<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("compaction summary rejected: provider returned empty text");
+    }
+    if looks_like_refusal(trimmed) {
+        let preview: String = trimmed.chars().take(120).collect();
+        anyhow::bail!(
+            "compaction summary rejected: provider refusal: {:?}",
+            preview
+        );
+    }
+    Ok(summary)
+}
+
+fn looks_like_refusal(text: &str) -> bool {
+    // Only inspect the opening so a real summary that mentions an earlier
+    // refusal later on is still accepted.
+    let head: String = text.chars().take(160).collect::<String>().to_lowercase();
+    let head = head.replace('\u{2019}', "'");
+    const PATTERNS: [&str; 8] = [
+        "i'm sorry, but i can",
+        "i am sorry, but i can",
+        "sorry, but i can't",
+        "sorry, i can't",
+        "i cannot assist with",
+        "i can't assist with",
+        "i can't help with",
+        "i'm unable to help with",
+    ];
+    // Short replies are refusals if they contain a pattern anywhere. Longer
+    // ones only if they open with it.
+    if text.chars().count() < 300 {
+        PATTERNS.iter().any(|pattern| head.contains(pattern))
+    } else {
+        PATTERNS.iter().any(|pattern| head.starts_with(pattern))
+    }
 }
 
 #[path = "compaction_transfer.rs"]

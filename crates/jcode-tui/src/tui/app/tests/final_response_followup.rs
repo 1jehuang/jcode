@@ -224,6 +224,7 @@ fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
 fn final_response_followup_preserves_incomplete_and_validation_gates() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let rt = tokio::runtime::Runtime::new().unwrap();
         for incomplete in [false, true] {
             let mut app = completed_response_test_app();

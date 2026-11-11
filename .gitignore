@@ -1,7 +1,6 @@
 /target
 Cargo.lock
 __pycache__/
-ios_simulator_screenshot.png
 /.wrangler/
 /tmp/
 # Local onboarding sandbox + auth fixtures. May contain REAL OAuth tokens copied
@@ -16,9 +15,8 @@ target-ttest*/
 captures/
 
 # Stray experiment/debug artifacts at the repo root. Real assets live under
-# assets/, docs/, ios/, and tests/ and are committed explicitly.
+# assets/, docs/, and tests/ and are committed explicitly.
 /*.log
 /*.avif
 /*.mp4
 /*.png
-ios/build/

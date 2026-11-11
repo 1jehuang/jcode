@@ -64,6 +64,36 @@ pub(super) fn schedule<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
     }
 }
 
+/// Decode the given transcripts on one background thread, in order, so the
+/// first search after opening the picker finds them already cached. Each call
+/// supersedes the previous one. Query workers share decodes via the claim in
+/// `text_cache`, so a file being prefetched is never decoded twice.
+pub(super) fn prefetch(paths: Vec<PathBuf>) {
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    use std::sync::atomic::Ordering;
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let spawned = std::thread::Builder::new()
+        .name("jcode-search-prefetch".into())
+        .spawn(move || {
+            let cancel = AtomicBool::new(false);
+            for path in paths {
+                if GENERATION.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                if !text_cache::is_cached_hint(&path)
+                    && text_cache::segments(&path, &cancel).is_none()
+                {
+                    crate::logging::debug("Transcript prefetch deferred to streaming search");
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        crate::logging::debug(&format!(
+            "Transcript search prefetch startup failed: {error}"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,7 +115,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let text = text_cache::cached_segments(&path, &AtomicBool::new(false)).unwrap();
-        assert_eq!(&*text, &["prepared while typing"]);
+        assert_eq!(&text.text, &["prepared while typing"]);
         assert!(text_cache::cached_segments(&path, &query_cancel).is_none());
     }
 

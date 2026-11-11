@@ -230,6 +230,7 @@ fn scoped(mut input: BrowserInput, parent: &BrowserInput) -> Result<BrowserInput
     input.window_id = parent.window_id;
     input.frame_id = Some(parent.frame_id.unwrap_or(0));
     input.all_frames = Some(false);
+    input.browser = parent.browser.clone();
     // Raw provider params replace common targeting in bridge_request. Restrict commands and
     // keys, reject alternate/nested scope knobs, then inject our authoritative scope.
     if input.action == "provider_command" {
@@ -609,10 +610,10 @@ pub(super) async fn run(
         candidates(input,&Value::Null)?;
         let timeout=Duration::from_millis(input.timeout_ms.unwrap_or(20_000).clamp(1,60_000));
         let deadline=tokio::time::Instant::now()+Duration::from_secs(600);
-        let status=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.status(ctx)).await?;
+        let status=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.status_for(input.browser.as_deref(),ctx)).await?;
         anyhow::ensure!(status.metadata.as_ref().is_some_and(|m|m["ready"]==true),"Browser not ready; check status and use setup only if needed");
         if let Some(window)=input.window_id {
-            let listing=BrowserInput{action:"list_tabs".into(),tab_id:input.tab_id,frame_id:Some(0),all_frames:Some(false),..Default::default()};
+            let listing=BrowserInput{action:"list_tabs".into(),browser:input.browser.clone(),tab_id:input.tab_id,frame_id:Some(0),all_frames:Some(false),..Default::default()};
             let tabs=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute("list_tabs",&listing,ctx)).await?;
             let metadata=tabs.metadata.context("Cannot verify tab/window membership")?;
             let matched=metadata["windows"].as_array().is_some_and(|windows| windows.iter().any(|w|w["windowId"].as_i64()==Some(window)

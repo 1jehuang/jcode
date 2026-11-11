@@ -238,10 +238,17 @@ fn is_prompt_echo(text: &str) -> bool {
 /// Conservative bound on the recognition context sent per session.
 const MAX_PROMPT_CHARS: usize = 1000;
 
-/// Recognition context: built-in names plus `[dictation] vocabulary`,
+/// Recognition context: built-in names plus desktop `[dictation] vocabulary`,
 /// deduplicated case-insensitively and bounded without splitting a term.
 pub fn recognition_prompt() -> String {
-    build_prompt(&jcode_base::config::config().dictation.vocabulary)
+    #[cfg(feature = "desktop-config")]
+    {
+        build_prompt(&jcode_base::config::config().dictation.vocabulary)
+    }
+    #[cfg(not(feature = "desktop-config"))]
+    {
+        build_prompt(&[])
+    }
 }
 
 fn build_prompt(extra: &[String]) -> String {
@@ -275,7 +282,7 @@ fn build_prompt(extra: &[String]) -> String {
 }
 
 pub fn nari_api_key() -> Option<String> {
-    jcode_base::provider_catalog::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
+    jcode_provider_env::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
         .filter(|key| !key.trim().is_empty())
 }
 
@@ -287,6 +294,7 @@ pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) 
 
 /// Microphone-owned channel. Holds 100 ms chunks for longer than the setup
 /// timeout so audio captured during the handshake is buffered, never dropped.
+#[cfg(feature = "desktop-config")]
 pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
     mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
 }
@@ -301,12 +309,47 @@ pub(super) async fn cancelled(cancel: &AtomicBool) {
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+fn bundled_root_store() -> rustls::RootCertStore {
+    rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    }
+}
+
+/// iOS is Unix but has no OpenSSL CA bundle. rustls-native-certs 0.8 uses
+/// its Unix filesystem loader there, not the Apple trust store. An explicit
+/// connector also avoids Cargo feature unification selecting native roots or
+/// another TLS backend. Keep rustls's default chain, time and hostname checks.
+fn tls_connector() -> tokio_tungstenite::Connector {
+    tokio_tungstenite::Connector::Rustls(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(bundled_root_store())
+            .with_no_client_auth(),
+    ))
+}
+
 pub struct NariSession {
     socket: Socket,
     cancel: Arc<AtomicBool>,
 }
 
 impl NariSession {
+    /// Connect to a Jcode cloud relay using a Jcode bearer, never a Nari key.
+    /// The endpoint must be `wss://.../voice/realtime`, without credentials,
+    /// query, or fragment. Plain WebSockets are permitted only in unit tests
+    /// and only to literal loopback IP addresses.
+    pub async fn connect_relay(
+        url: &str,
+        bearer: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(VoiceError::Cancelled);
+        }
+        validate_relay_url(url)?;
+        Self::connect_socket(url, bearer, 4096, &recognition_prompt(), cancel).await
+    }
+
     /// Resolves only after the server acknowledges session.configure. No microphone access.
     pub async fn connect(key: &str, cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
         Self::connect_to(URL, key, cancel).await
@@ -324,10 +367,23 @@ impl NariSession {
         prompt: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
+        Self::connect_socket(url, key, 1024, prompt, cancel).await
+    }
+
+    async fn connect_socket(
+        url: &str,
+        key: &str,
+        max_bearer_bytes: usize,
+        prompt: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
-        if key.is_empty() || key.len() > 1024 || !key.bytes().all(|b| (33..=126).contains(&b)) {
+        if key.is_empty()
+            || key.len() > max_bearer_bytes
+            || !key.bytes().all(|b| (33..=126).contains(&b))
+        {
             return Err(VoiceError::NariNotConfigured);
         }
         let setup = async {
@@ -352,10 +408,14 @@ impl NariSession {
                 max_frame_size: Some(MAX_RESPONSE_BYTES),
                 ..Default::default()
             };
-            let (mut socket, _) =
-                tokio_tungstenite::connect_async_with_config(request, Some(config), false)
-                    .await
-                    .map_err(handshake_error)?;
+            let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                Some(config),
+                false,
+                Some(tls_connector()),
+            )
+            .await
+            .map_err(handshake_error)?;
             super::timing::mark("nari websocket connected");
             send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
@@ -462,6 +522,37 @@ impl NariSession {
             }
         }
     }
+}
+fn validate_relay_url(url: &str) -> Result<(), VoiceError> {
+    use tokio_tungstenite::tungstenite::http::Uri;
+    if url.bytes().any(|b| b <= 32 || b >= 127) || url.contains(['@', '?', '#', '\\', '%']) {
+        return Err(VoiceError::Network);
+    }
+    let uri: Uri = url.parse().map_err(|_| VoiceError::Network)?;
+    let host = uri.host().ok_or(VoiceError::Network)?;
+    // A Jcode bearer must never be sent to the direct provider endpoint.
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower.trim_end_matches('.') == "narilabs.com"
+        || host_lower.trim_end_matches('.').ends_with(".narilabs.com")
+        || !uri.path().ends_with("/voice/realtime")
+        || uri.authority().is_none()
+    {
+        return Err(VoiceError::Network);
+    }
+    if uri.scheme_str() == Some("wss") {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if uri.scheme_str() == Some("ws")
+        && host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Ok(());
+    }
+    Err(VoiceError::Network)
 }
 fn handshake_error(error: tokio_tungstenite::tungstenite::Error) -> VoiceError {
     if let tokio_tungstenite::tungstenite::Error::Http(response) = error {
@@ -599,6 +690,191 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_tls_roots_are_complete_without_native_store() {
+        // No native loader or environment override participates in this store.
+        // Run with SSL_CERT_FILE/SSL_CERT_DIR pointing to missing paths as well.
+        let roots = bundled_root_store();
+        assert!(!roots.is_empty());
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        for (actual, expected) in roots.roots.iter().zip(webpki_roots::TLS_SERVER_ROOTS) {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn bundled_tls_connector_uses_rustls_even_with_unified_features() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let tokio_tungstenite::Connector::Rustls(config) = tls_connector() else {
+            panic!("voice must use the explicit bundled-root rustls connector");
+        };
+        assert!(config.enable_sni);
+        assert!(!config.client_auth_cert_resolver.has_certs());
+        let connection = rustls::ClientConnection::new(
+            config,
+            rustls::pki_types::ServerName::try_from("relay.example").unwrap(),
+        );
+        assert!(connection.is_ok());
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_unsafe_urls_and_invalid_bearers_before_network() {
+        for url in [
+            "https://relay.example/voice/realtime",
+            "ws://relay.example/voice/realtime",
+            "wss://user:pass@relay.example/voice/realtime",
+            "wss://relay.example/voice/realtime?token=secret",
+            "wss://relay.example/voice/realtime#fragment",
+            "wss://relay.example/wrong",
+            "wss://api.narilabs.com/voice/realtime",
+            "wss://API.NARILABS.COM./voice/realtime",
+            "wss://relay.example/%2e/voice/realtime",
+            "wss:///voice/realtime",
+        ] {
+            assert!(
+                matches!(
+                    NariSession::connect_relay(url, "test", Arc::new(AtomicBool::new(false))).await,
+                    Err(VoiceError::Network)
+                ),
+                "unsafe URL accepted: {url}"
+            );
+        }
+        assert!(validate_relay_url("wss://relay.example/api/voice/realtime").is_ok());
+        for bearer in [
+            String::new(),
+            "x".repeat(4097),
+            "bad\r\nheader".into(),
+            "bad bearer".into(),
+        ] {
+            assert!(matches!(
+                NariSession::connect_relay(
+                    "wss://relay.invalid/voice/realtime",
+                    &bearer,
+                    Arc::new(AtomicBool::new(false))
+                )
+                .await,
+                Err(VoiceError::NariNotConfigured)
+            ));
+        }
+        assert!(matches!(
+            NariSession::connect(&"x".repeat(1025), Arc::new(AtomicBool::new(false))).await,
+            Err(VoiceError::NariNotConfigured)
+        ));
+    }
+
+    async fn relay_server(bearer: String, stream: bool) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/voice/realtime", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(
+                tcp,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    assert_eq!(request.uri().path(), "/voice/realtime");
+                    assert_eq!(
+                        request.headers()["authorization"],
+                        format!("Bearer {bearer}")
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let config = receive(&mut ws).await.unwrap();
+            assert_eq!(
+                config,
+                json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":recognition_prompt()}})
+            );
+            send(&mut ws, json!({"type":"session.configured"}))
+                .await
+                .unwrap();
+            if !stream {
+                while let Some(Ok(_)) = ws.next().await {}
+                return;
+            }
+            let audio = receive(&mut ws).await.unwrap();
+            assert_eq!(audio["type"], "input_audio_buffer.append");
+            assert_eq!(
+                STANDARD.decode(audio["audio"].as_str().unwrap()).unwrap(),
+                [1, 0, 255, 255]
+            );
+            let commit = receive(&mut ws).await.unwrap();
+            assert_eq!(commit["event_id"], END);
+            for value in [
+                json!({"type":"transcript.partial", "item_id":"a", "transcript":"Hel"}),
+                json!({"type":"input_audio_buffer.committed", "item_id":"a", "client_event_id":END}),
+                json!({"type":"transcript.completed", "item_id":"a", "transcript":"Hello"}),
+            ] {
+                send(&mut ws, value).await.unwrap();
+            }
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn relay_auth_configure_partial_and_final_reuse_protocol() {
+        let bearer = "x".repeat(4096);
+        let (url, server) = relay_server(bearer.clone(), true).await;
+        let session = NariSession::connect_relay(&url, &bearer, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+        let (tx, rx) = nari_pcm_channel();
+        tx.send(vec![1, -1]).await.unwrap();
+        drop(tx);
+        let mut events = Vec::new();
+        assert_eq!(
+            session.run(rx, |event| events.push(event)).await.unwrap(),
+            "Hello"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, NariEvent::Transcript(text) if text == "Hel"))
+        );
+        assert!(matches!(events.last(), Some(NariEvent::Finished(Ok(text))) if text == "Hello"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_cancellation_interrupts_setup_and_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+        assert!(matches!(
+            NariSession::connect_relay(
+                &format!("ws://{}/voice/realtime", listener.local_addr().unwrap()),
+                "test",
+                cancel
+            )
+            .await,
+            Err(VoiceError::Cancelled)
+        ));
+        trigger.await.unwrap();
+        let (url, server) = relay_server("test".into(), false).await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let session = NariSession::connect_relay(&url, "test", cancel.clone())
+            .await
+            .unwrap();
+        let (_tx, rx) = nari_pcm_channel();
+        cancel.store(true, Ordering::SeqCst);
+        let mut events = Vec::new();
+        assert_eq!(
+            session.run(rx, |event| events.push(event)).await,
+            Err(VoiceError::Cancelled)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(NariEvent::Finished(Err(VoiceError::Cancelled)))
+        ));
+        server.await.unwrap();
+    }
+
     #[test]
     fn silent_prompt_leaks_are_dropped_but_real_speech_is_kept() {
         for leak in [
@@ -664,6 +940,13 @@ mod tests {
     fn transcription_cost_uses_published_hourly_rate() {
         assert_eq!(estimated_transcription_usd(Duration::from_secs(3600)), 0.12);
         assert!((estimated_transcription_usd(Duration::from_secs(30)) - 0.001).abs() < 1e-12);
+    }
+
+    #[cfg(not(feature = "desktop-config"))]
+    #[test]
+    fn lightweight_prompt_uses_builtin_vocabulary() {
+        assert_eq!(recognition_prompt(), build_prompt(&[]));
+        assert!(recognition_prompt().contains("Jcode"));
     }
 
     #[test]

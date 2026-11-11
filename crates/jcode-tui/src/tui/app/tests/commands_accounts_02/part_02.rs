@@ -140,6 +140,7 @@ fn test_refactor_status_summarizes_current_todos() {
             &[
                 crate::todo::TodoItem {
                     lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -158,6 +159,7 @@ fn test_refactor_status_summarizes_current_todos() {
                 },
                 crate::todo::TodoItem {
                     lane_after: None,
+                    lane_owner: None,
                     stage: None,
                     details: None,
                     group: None,
@@ -206,6 +208,7 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,

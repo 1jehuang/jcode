@@ -2,23 +2,71 @@
 use super::*;
 
 mod cache;
+#[cfg(test)]
+#[path = "cloud_preview/projection_tests.rs"]
+mod projection_tests;
 
 type CloudSnapshot = (Session, Option<crate::session_telemetry::SessionTelemetry>);
 
-const SCRIPT: &str = r#"
-case "$1" in ''|*[!a-zA-Z0-9_-]*) exit 1 ;; esac
-base="${JCODE_HOME:-$HOME/.jcode}/sessions/$1"
-cat -- "$base.json" || exit 1
-printf '\000'
-if [ -f "$base.journal.jsonl" ]; then cat -- "$base.journal.jsonl" || exit 1; fi
-printf '\000'
-state="${JCODE_HOME:-$HOME/.jcode}/state"
-if [ -n "$JCODE_RUNTIME_DIR" ]; then state="$JCODE_RUNTIME_DIR/durable-state"; fi
-telemetry="$state/session-telemetry/$1.json"
-if [ -f "$telemetry" ]; then cat -- "$telemetry" || :; fi
-"#;
+/// Static labels only: never attach hostnames, session IDs, paths or errors.
+pub(super) struct StageTimer {
+    stage: &'static str,
+    outcome: &'static str,
+    started: std::time::Instant,
+}
+
+impl StageTimer {
+    pub(super) fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            outcome: "error",
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(super) fn outcome(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static STAGE_TIMINGS: std::cell::RefCell<Vec<(&'static str, std::time::Duration)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        STAGE_TIMINGS.with_borrow_mut(|events| events.push((self.stage, self.started.elapsed())));
+        crate::logging::info(&format!(
+            "[CLOUD_TIMING] stage={} outcome={} duration_ms={}",
+            self.stage,
+            self.outcome,
+            self.started.elapsed().as_millis()
+        ));
+    }
+}
+
+fn stage_result<T, E>(operation: impl FnOnce() -> Result<T, E>, stage: &'static str) -> Option<T> {
+    let mut timer = StageTimer::new(stage);
+    match operation() {
+        Ok(value) => {
+            timer.outcome("success");
+            Some(value)
+        }
+        Err(_) => None,
+    }
+}
+
+pub(in crate::tui::session_picker) const REMOTE_PROJECTOR: &str =
+    include_str!("cloud_preview/remote.py");
+
+pub(in crate::tui::session_picker) fn projection_script(mode: &str) -> String {
+    format!("python3 - {mode} \"$1\" <<'JCODE_REMOTE_PY'\n{REMOTE_PROJECTOR}\nJCODE_REMOTE_PY\n")
+}
 
 pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
+    let mut timer = StageTimer::new("load");
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -26,6 +74,7 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
         || host.is_empty()
         || host.starts_with('-')
     {
+        timer.outcome("skipped_invalid_target");
         return None;
     }
     let epoch = crate::storage::read_session_lease(session_id)
@@ -34,7 +83,11 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
     let path = cache::path(session_id, host, epoch);
     let id = session_id.to_owned();
     let host = host.to_owned();
-    load_cached_or_fetch(session_id, path, move || fetch_bytes(&id, &host))
+    let result = load_cached_or_fetch(session_id, path, move || fetch_bytes(&id, &host));
+    if result.is_some() {
+        timer.outcome("success");
+    }
+    result
 }
 
 /// A cloud cache is a preview replica, never a canonical local session. Even a
@@ -45,16 +98,14 @@ fn load_cached_or_fetch(
     path: Option<std::path::PathBuf>,
     fetch: impl FnOnce() -> Option<Vec<u8>> + Send + 'static,
 ) -> Option<CloudSnapshot> {
-    let started = std::time::Instant::now();
+    let mut timer = StageTimer::new("cache_lookup");
     if let Some(path) = path.as_deref()
         && let Some(bytes) = cache::read(path)
         && let Some(snapshot) = parse_for_session(&bytes, session_id)
     {
-        crate::logging::info(&format!(
-            "CLOUD_PREVIEW cache=hit session={session_id} bytes={} elapsed_ms={}",
-            bytes.len(),
-            started.elapsed().as_millis(),
-        ));
+        timer.outcome("hit");
+        let mut refresh_timer = StageTimer::new("refresh_schedule");
+        refresh_timer.outcome("skipped_fresh_or_in_flight");
         if !cache::fresh(path)
             && let Some(guard) = cache::begin_refresh(path)
         {
@@ -66,10 +117,12 @@ fn load_cached_or_fetch(
                     let _guard = guard;
                     fetch_and_cache(&id, Some(&path), fetch);
                 });
-            preview_result(refresh, "cloud refresh worker");
+            refresh_timer.outcome(if refresh.is_ok() { "success" } else { "error" });
         }
         return Some(snapshot);
     }
+    timer.outcome("miss");
+    drop(timer);
     fetch_and_cache(session_id, path.as_deref(), fetch)
 }
 
@@ -78,64 +131,65 @@ fn fetch_and_cache(
     path: Option<&std::path::Path>,
     fetch: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<CloudSnapshot> {
-    let started = std::time::Instant::now();
+    let mut timer = StageTimer::new("refresh");
+    let mut network = StageTimer::new("fetch");
     let bytes = fetch()?;
-    let fetched = started.elapsed();
+    network.outcome("success");
+    drop(network);
     // Validate the full snapshot + journal before replacing the last good copy.
     let snapshot = parse_for_session(&bytes, session_id)?;
-    if let Some(path) = path
-        && let Err(error) = cache::write(path, &bytes)
-    {
-        crate::logging::debug(&format!("Cloud preview cache write unavailable: {error}"));
+    if let Some(path) = path {
+        if cache::write(path, &bytes).is_err() {
+            timer.outcome("success_cache_unavailable");
+            return Some(snapshot);
+        }
+    } else {
+        let mut skipped = StageTimer::new("cache_write");
+        skipped.outcome("skipped_unavailable");
     }
-    crate::logging::info(&format!(
-        "CLOUD_PREVIEW cache=refresh session={session_id} bytes={} fetch_ms={} total_ms={}",
-        bytes.len(),
-        fetched.as_millis(),
-        started.elapsed().as_millis(),
-    ));
+    timer.outcome("success");
     Some(snapshot)
 }
 
 fn parse_for_session(bytes: &[u8], session_id: &str) -> Option<CloudSnapshot> {
+    let mut timer = StageTimer::new("parse");
     let snapshot = parse_preview(bytes)?;
-    (snapshot.0.id == session_id).then_some(snapshot)
+    if snapshot.0.id != session_id {
+        timer.outcome("identity_mismatch");
+        return None;
+    }
+    timer.outcome("success");
+    Some(snapshot)
 }
 
 fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
-    let config = crate::storage::jcode_dir()
-        .map_or_else(
-            |error| {
-                crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-                None
-            },
-            Some,
-        )?
-        .join("cloud/ssh_config");
+    let mut timer = StageTimer::new("ssh");
+    let config = stage_result(crate::storage::jcode_dir, "ssh_config")?.join("cloud/ssh_config");
     let command = crate::tui::cloud_git::compressed_script_command(
         Some(host),
         config.is_file().then_some(config.as_path()),
         session_id,
-        SCRIPT,
+        &projection_script("preview"),
     );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_or_else(
-            |error| {
-                crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-                None
-            },
-            Some,
-        )?;
-    let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output(
+    let runtime = stage_result(
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        },
+        "ssh_runtime",
+    )?;
+    let (status, bytes) = runtime.block_on(crate::tui::cloud_git::bounded_output_for(
         command,
         Duration::from_secs(15),
         cache::MAX_BYTES,
+        crate::tui::cloud_git::WorkspaceOperation::Preview,
     ))?;
     if !status.success() {
+        timer.outcome("exit_failure");
         return None;
     }
+    timer.outcome("success");
     Some(bytes)
 }
 
@@ -151,11 +205,17 @@ fn parse_preview(
         .map(|offset| first + 1 + offset);
     let session = parse_transcript(&bytes[..second.unwrap_or(bytes.len())])?;
     let telemetry = second.and_then(|split| {
+        let mut timer = StageTimer::new("telemetry_parse");
         let bytes = &bytes[split + 1..];
         if bytes.is_empty() {
+            timer.outcome("skipped_absent");
             None
         } else {
-            preview_result(serde_json::from_slice(bytes), "remote telemetry decoding")
+            let result = stage_result(|| serde_json::from_slice(bytes), "telemetry_decode");
+            if result.is_some() {
+                timer.outcome("success");
+            }
+            result
         }
     });
     Some((session, telemetry))
@@ -163,44 +223,48 @@ fn parse_preview(
 
 fn parse_transcript(bytes: &[u8]) -> Option<Session> {
     let split = bytes.iter().position(|b| *b == 0)?;
-    let dir = tempfile::tempdir().map_or_else(
-        |error| {
-            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-            None
-        },
-        Some,
-    )?;
+    let dir = stage_result(tempfile::tempdir, "parse_tempdir")?;
     let path = dir.path().join("preview.json");
-    std::fs::write(&path, &bytes[..split]).map_or_else(
-        |error| {
-            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-            None
-        },
-        Some,
+    stage_result(
+        || std::fs::write(&path, &bytes[..split]),
+        "parse_snapshot_write",
     )?;
-    std::fs::write(
-        crate::session::session_journal_path_from_snapshot(&path),
-        &bytes[split + 1..],
-    )
-    .map_or_else(
-        |error| {
-            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-            None
+    stage_result(
+        || {
+            std::fs::write(
+                crate::session::session_journal_path_from_snapshot(&path),
+                &bytes[split + 1..],
+            )
         },
-        Some,
+        "parse_journal_write",
     )?;
-    Session::load_from_path(&path).map_or_else(
-        |error| {
-            crate::logging::debug(&format!("Cloud preview unavailable: {error}"));
-            None
-        },
-        Some,
-    )
+    stage_result(|| Session::load_from_path(&path), "parse_hydrate")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_result_times_the_operation_not_only_result_conversion() {
+        STAGE_TIMINGS.with_borrow_mut(Vec::clear);
+        let value = stage_result(
+            || {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok::<_, ()>(42)
+            },
+            "test_operation",
+        );
+        assert_eq!(value, Some(42));
+        STAGE_TIMINGS.with_borrow(|events| {
+            assert!(
+                events
+                    .iter()
+                    .any(|(stage, elapsed)| *stage == "test_operation"
+                        && *elapsed >= Duration::from_millis(10))
+            );
+        });
+    }
 
     fn wire(id: &str, title: &str) -> Vec<u8> {
         let session = Session::create_with_id(id.into(), None, Some(title.into()));

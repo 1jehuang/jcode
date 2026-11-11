@@ -10,6 +10,7 @@ struct MockBrowser {
     fail_action: bool,
     action_error: Option<String>,
     action_result: Option<Value>,
+    expected_browser: Option<&'static str>,
 }
 impl MockBrowser {
     fn new(observations: Vec<Value>) -> Self {
@@ -20,6 +21,7 @@ impl MockBrowser {
             fail_action: false,
             action_error: None,
             action_result: None,
+            expected_browser: None,
         }
     }
 }
@@ -32,8 +34,20 @@ impl BrowserProvider for MockBrowser {
         &["auto"]
     }
     async fn status(&self, _: &ToolContext) -> Result<ToolOutput> {
+        assert!(
+            self.expected_browser.is_none(),
+            "readiness lost browser scope"
+        );
         self.calls.lock().unwrap().push("status".into());
         Ok(ToolOutput::new("").with_metadata(json!({"ready":self.ready})))
+    }
+    async fn status_for(&self, browser: Option<&str>, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(expected) = self.expected_browser {
+            assert_eq!(browser, Some(expected), "readiness changed browser");
+            self.calls.lock().unwrap().push("status".into());
+            return Ok(ToolOutput::new("").with_metadata(json!({"ready":self.ready})));
+        }
+        self.status(ctx).await
     }
     async fn setup(&self) -> Result<ToolOutput> {
         panic!("must not setup")
@@ -50,7 +64,19 @@ impl BrowserProvider for MockBrowser {
         assert_eq!(input.tab_id, Some(7));
         assert_eq!(input.frame_id, Some(0));
         assert_eq!(input.all_frames, Some(false));
+        if let Some(expected) = self.expected_browser {
+            assert_eq!(
+                input.browser.as_deref(),
+                Some(expected),
+                "{action} changed browser"
+            );
+        }
         self.calls.lock().unwrap().push(action.into());
+        if action == "list_tabs" && self.expected_browser.is_some() {
+            return Ok(ToolOutput::new("").with_metadata(json!({
+                "windows": [{"windowId":9,"tabs":[{"tabId":7}]}]
+            })));
+        }
         if action == "eval" && input.script.as_deref() == Some(OBSERVE_SCRIPT) {
             let value = {
                 let mut values = self.observations.lock().unwrap();
@@ -610,6 +636,70 @@ fn whole_tab_actions_cannot_escape_explicit_subframe() {
                 .contains("Whole-tab")
         );
     }
+}
+
+#[test]
+fn scoped_inputs_inherit_requested_browser() {
+    let mut parent = input();
+    parent.browser = Some("edge".into());
+    let observe = scoped(
+        BrowserInput {
+            action: "eval".into(),
+            script: Some(OBSERVE_SCRIPT.into()),
+            ..Default::default()
+        },
+        &parent,
+    )
+    .unwrap();
+    assert_eq!(observe.browser.as_deref(), Some("edge"));
+    let click = scoped(
+        serde_json::from_value(json!({"action":"click","selector":"#go"})).unwrap(),
+        &parent,
+    )
+    .unwrap();
+    assert_eq!(click.browser.as_deref(), Some("edge"));
+    assert!(
+        scoped(
+            serde_json::from_value(json!({"action":"click","selector":"#go","browser":"firefox"}))
+                .unwrap(),
+            &parent,
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn requested_browser_is_preserved_through_entire_handoff() {
+    let mut browser = MockBrowser::new(vec![page("before"), page("before"), page("after")]);
+    browser.expected_browser = Some("edge");
+    let mut input = input();
+    input.browser = Some("edge".into());
+    input.window_id = Some(9);
+    input.candidates.push(ExactCandidate {
+        label: "Click next".into(),
+        input: json!({"action":"click","selector":"#next"}),
+    });
+    let value = result(
+        &browser,
+        &MockTransport::new(&[("a0", 0.99), ("done", 0.99)]),
+        &input,
+    )
+    .await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"][0]["action"], "click");
+    assert_eq!(
+        *browser.calls.lock().unwrap(),
+        vec![
+            "status",
+            "list_tabs",
+            "eval",
+            "eval",
+            "click",
+            "eval",
+            "eval",
+            "eval"
+        ]
+    );
 }
 
 #[tokio::test]

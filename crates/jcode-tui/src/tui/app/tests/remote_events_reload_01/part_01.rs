@@ -1384,6 +1384,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1697,4 +1698,37 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
         card_count, 1,
         "startup notice should be re-applied exactly once after bootstrap"
     );
+}
+
+#[test]
+fn test_reload_recovery_turn_runs_before_user_queued_followups() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    // A user follow-up was queued before a mid-turn reload, and History
+    // reports the turn was interrupted, so a recovery continuation is queued.
+    app.queued_messages.push("queued before reload".to_string());
+    let directive = crate::tool::selfdev::ReloadRecoveryDirective {
+        reconnect_notice: None,
+        continuation_message: "continue interrupted turn".to_string(),
+    };
+    assert!(remote::queue_reload_continuation_once(
+        &mut app,
+        "session_reload_queue_order",
+        directive,
+        "Reload complete - continuing."
+    ));
+
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert!(app.is_processing, "recovery continuation should start a turn");
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert_eq!(
+        app.queued_messages(),
+        &["queued before reload"],
+        "user follow-up must wait for the recovery turn to finish"
+    );
+    assert!(!app.reload_recovery_blocks_queue());
 }

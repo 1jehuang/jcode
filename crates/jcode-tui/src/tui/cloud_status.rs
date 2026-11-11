@@ -265,7 +265,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                 let mut previous = None;
                 loop {
                     let start = std::time::Instant::now();
-                    let response = super::cloud_git::bounded_output(
+                    let response = super::cloud_git::bounded_output_for(
                         super::cloud_git::script_command(
                             Some(&host),
                             config.as_deref(),
@@ -274,6 +274,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                         ),
                         Duration::from_secs(12),
                         256 * 1024,
+                        super::cloud_git::WorkspaceOperation::CloudStatus,
                     )
                     .await;
                     let parsed = response
@@ -293,7 +294,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
-                    let directory_response = super::cloud_git::bounded_output(
+                    let directory_response = super::cloud_git::bounded_output_for(
                         super::cloud_git::script_command(
                             Some(&host),
                             config.as_deref(),
@@ -302,6 +303,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                         ),
                         Duration::from_secs(8),
                         1024 * 1024,
+                        super::cloud_git::WorkspaceOperation::CloudStatusDirectories,
                     )
                     .await;
                     let directories = directory_response
@@ -312,7 +314,7 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
                         directories,
                     );
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    super::cloud_git::wait_for_next_probe().await;
                 }
             });
         });
@@ -325,6 +327,10 @@ pub(crate) fn gather(session_id: Option<String>) -> Option<CloudStatusInfo> {
 pub(crate) fn gather(_session_id: Option<String>) -> Option<CloudStatusInfo> {
     None
 }
+
+#[cfg(test)]
+#[path = "cloud_directories_probe_tests.rs"]
+mod directories_probe_tests;
 
 #[cfg(test)]
 mod tests {
