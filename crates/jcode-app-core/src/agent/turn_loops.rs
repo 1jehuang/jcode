@@ -280,6 +280,9 @@ impl Agent {
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
+            // Keeps streamed reasoning on one soft-wrapped line; must be closed
+            // before anything else is printed to stdout.
+            let mut reasoning_line = super::cli_reasoning::CliReasoningLine::default();
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
@@ -355,7 +358,7 @@ impl Agent {
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Display reasoning content only if enabled
                         if print_output && crate::config::config().display.show_thinking {
-                            crate::terminal_println!("💭 {}", thinking_text);
+                            reasoning_line.push_stdout(&thinking_text)?;
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
@@ -367,16 +370,19 @@ impl Agent {
                         }
                     }
                     StreamEvent::ThinkingEnd => {
-                        // Don't print here - ThinkingDone has accurate timing
+                        // Don't print timing here - ThinkingDone has accurate timing
+                        reasoning_line.close_stdout()?;
                         _thinking_start = None;
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Bridge provides accurate wall-clock timing
+                        reasoning_line.close_stdout()?;
                         if print_output {
                             println!("Thought for {:.1}s\n", duration_secs);
                         }
                     }
                     StreamEvent::TextDelta(text) => {
+                        reasoning_line.close_stdout()?;
                         if print_output {
                             crate::terminal_print!("{}", text);
                             io::stdout().flush()?;
@@ -384,6 +390,7 @@ impl Agent {
                         text_content.push_str(&text);
                     }
                     StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        reasoning_line.close_stdout()?;
                         if provider_native_items.replace_text_suffix(
                             &mut text_content,
                             &old_text,
@@ -405,6 +412,7 @@ impl Agent {
                         if trace {
                             eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
                         }
+                        reasoning_line.close_stdout()?;
                         if print_output {
                             print!("\n[{}] ", name);
                             io::stdout().flush()?;
@@ -631,6 +639,7 @@ impl Agent {
                             text_content.len(),
                             tool_calls.len(),
                         ));
+                        reasoning_line.close_stdout()?;
                         if print_output && !text_content.is_empty() {
                             // Already-printed text can't be unprinted on a plain
                             // stdout stream; mark the discontinuity instead.
@@ -652,6 +661,7 @@ impl Agent {
                         stop_reason = None;
                     }
                     StreamEvent::ProviderNative { provider, item } => {
+                        reasoning_line.close_stdout()?;
                         if print_output
                             && let Some(display) =
                                 jcode_message_types::provider_native::provider_native_display(
@@ -723,6 +733,7 @@ impl Agent {
                             openai_native_compaction
                                 .get_or_insert((encrypted_content, self.session.messages.len()));
                         }
+                        reasoning_line.close_stdout()?;
                         if print_output {
                             let tokens_str = pre_tokens
                                 .map(|t| format!(" ({} tokens)", t))
@@ -779,6 +790,7 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
+                        reasoning_line.close_stdout()?;
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
@@ -833,6 +845,8 @@ impl Agent {
             }
 
             usage_recorder.finish();
+            // Streams can end (or be cut) without ThinkingEnd.
+            reasoning_line.close_stdout()?;
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
