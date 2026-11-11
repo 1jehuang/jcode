@@ -245,8 +245,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     let had_failover_countdown = app.pending_provider_failover.is_some();
     needs_redraw |= app.maybe_progress_provider_failover_countdown();
-    if had_failover_countdown {
-        if let Some(selection) = app.pending_automatic_failover_route.take() {
+    if had_failover_countdown || app.pending_automatic_failover_route.is_some() {
+        if app.pending_automatic_failover_request_id.is_none()
+            && let Some(selection) = app.pending_automatic_failover_route.take()
+        {
             app.pending_model_switch = None;
             match remote
                 .set_route_selection_for_failover(selection.clone())
@@ -1422,6 +1424,8 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
     if app.pending_provider_failover.is_some()
+        || app.pending_automatic_failover_route.is_some()
+        || app.pending_automatic_failover_request_id.is_some()
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {
         return;

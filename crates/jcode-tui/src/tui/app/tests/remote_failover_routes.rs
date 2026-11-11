@@ -305,7 +305,48 @@ fn test_remote_definitive_exhaustion_immediately_stages_exact_route_not_resend()
             "openai-oauth@openai-fox:gpt-5.4"
         );
         assert!(app.pending_fallback_resend.is_some());
+        assert!(app.pending_fallback_offer.is_none());
         assert_eq!(app.remote_provider_name.as_deref(), Some("Anthropic"));
+        assert!(!app.pending_turn);
+    });
+}
+
+#[test]
+fn test_remote_immediate_failover_dispatches_once_and_suppresses_exhaustion_spam() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        let message_count = app.display_messages().len();
+        for _ in 0..10 {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Error {
+                    id: 21,
+                    message: "429 usage limit reached; quota exhausted".into(),
+                    retry_after_secs: None,
+                },
+                &mut connection,
+            );
+        }
+        assert_eq!(app.display_messages().len(), message_count);
+        assert!(app.pending_fallback_offer.is_none());
+        assert_eq!(app.pending_fallback_resend.as_ref().unwrap().content, "hi");
+        rt.block_on(remote::handle_tick(&mut app, &mut connection));
+        let request = app
+            .pending_automatic_failover_request_id
+            .expect("switch dispatched");
+        assert!(app.remote_model_switch_in_flight);
+        assert_eq!(
+            app.pending_automatic_failover_route
+                .as_ref()
+                .unwrap()
+                .routed_model_spec(),
+            "openai-oauth@openai-fox:gpt-5.4"
+        );
+        rt.block_on(remote::handle_tick(&mut app, &mut connection));
+        assert_eq!(app.pending_automatic_failover_request_id, Some(request));
+        assert!(app.pending_fallback_resend.is_some());
         assert!(!app.pending_turn);
     });
 }

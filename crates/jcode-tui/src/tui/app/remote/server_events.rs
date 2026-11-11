@@ -1260,6 +1260,18 @@ fn handle_server_event_inner(
                 app.set_status_notice("Agent model update failed");
                 return false;
             }
+            // Exhaustion can be reported again while the route switch is staged
+            // or awaiting acknowledgement. It belongs to the failed route, not
+            // a new turn: do not print it again or replace the held payload.
+            if (app.pending_provider_failover.is_some()
+                || app.pending_automatic_failover_route.is_some()
+                || app.pending_automatic_failover_request_id.is_some())
+                && (crate::provider::parse_failover_prompt_message(&message).is_some()
+                    || jcode_provider_core::classify_failover_error_message(&message)
+                        .should_mark_provider_unavailable())
+            {
+                return false;
+            }
             app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
@@ -1408,7 +1420,10 @@ fn handle_server_event_inner(
                 app.clear_pending_remote_retry();
                 crate::tui::app::commands::disable_auto_poke(app);
                 app.overnight_auto_poke = None;
-                if app.pending_provider_failover.is_none() {
+                if app.pending_provider_failover.is_none()
+                    && app.pending_automatic_failover_route.is_none()
+                    && app.pending_automatic_failover_request_id.is_none()
+                {
                     app.restore_failed_input_to_box();
                 }
                 return false;

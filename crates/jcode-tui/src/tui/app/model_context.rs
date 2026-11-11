@@ -606,6 +606,8 @@ impl App {
         // Never compete with the automatic countdown switcher. A migration
         // lease block is not a provider failure: switching model cannot help.
         if self.pending_provider_failover.is_some()
+            || self.pending_automatic_failover_route.is_some()
+            || self.pending_automatic_failover_request_id.is_some()
             || error.contains("Session is not runnable here")
         {
             return false;
