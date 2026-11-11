@@ -369,8 +369,22 @@ impl CsiTailGuard {
         }
         if self.expired(now) {
             // The deadline passed without a completion: everything held was
-            // human input, replay it in arrival order.
-            return GuardOutcome::Pass(self.replay_with(event));
+            // human input, replay it in arrival order. A fresh bare Escape
+            // is the head of a new report and re-arms instead of passing.
+            let replayed = self.replay();
+            if matches!(
+                &event,
+                Event::Key(KeyEvent { code: KeyCode::Esc, modifiers, kind: KeyEventKind::Press, .. })
+                    if modifiers.is_empty()
+            ) {
+                self.phase = CsiTailPhase::Armed;
+                self.started = Some(now);
+                self.hold(event, now);
+                return GuardOutcome::Pass(replayed);
+            }
+            let mut replayed = replayed;
+            replayed.push(event);
+            return GuardOutcome::Pass(replayed);
         }
         let Event::Key(key) = event else {
             return self.pass(event);
@@ -1263,6 +1277,38 @@ mod tests {
         let replayed = guard.tick_expire(now + CSI_TAIL_HOLD_TIMEOUT).unwrap();
         assert_eq!(replayed, vec![escape()]);
         assert_eq!(guard.phase, CsiTailPhase::Idle);
+    }
+
+    #[test]
+    fn expired_watch_rearms_on_a_fresh_split_head() {
+        // A watch expires (a lone Escape), then a new report's split head
+        // arrives: the fresh Escape must arm again, not pass through, or
+        // the tail that follows it leaks.
+        let _lock = guard_test_lock();
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(matches!(guard.push(escape(), now), GuardOutcome::Held));
+        let fresh = now + CSI_TAIL_HOLD_TIMEOUT + Duration::from_millis(1);
+        let outcome = guard.push(escape(), fresh);
+        assert!(matches!(outcome, GuardOutcome::Pass(_)));
+        let delivered = match outcome {
+            GuardOutcome::Pass(events) => events,
+            _ => unreachable!(),
+        };
+        // The first Escape replays; the fresh one re-arms and holds.
+        assert_eq!(delivered, vec![escape()]);
+        assert_eq!(guard.phase, CsiTailPhase::Armed);
+        // The new report's tail follows at burst pace and is swallowed.
+        let mut at = fresh + Duration::from_millis(1);
+        let mut outcome = guard.push(press('['), at);
+        for ch in "98;1:3u".chars() {
+            at += Duration::from_millis(1);
+            outcome = guard.push(press(ch), at);
+        }
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(matches!(outcome, GuardOutcome::Drop));
+        assert!(guard.held.is_empty());
     }
 
     #[test]
