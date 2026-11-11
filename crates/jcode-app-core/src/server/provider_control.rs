@@ -22,15 +22,6 @@ struct AuthRefreshTargets {
     session_providers: Vec<Arc<dyn Provider>>,
     deferred_agents: Vec<Arc<Mutex<Agent>>>,
 }
-fn begin_auth_refresh(session_id: &str) -> u64 {
-    let generation = NEXT_AUTH_REFRESH_GENERATION.fetch_add(1, Ordering::Relaxed);
-    let mut generations = AUTH_REFRESH_GENERATIONS
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    generations.insert(session_id.to_string(), generation);
-    generation
-}
 fn auth_refresh_is_current(session_id: &str, generation: u64) -> bool {
     let generations = AUTH_REFRESH_GENERATIONS
         .get_or_init(|| StdMutex::new(HashMap::new()))
@@ -96,7 +87,7 @@ use catalog_activity::format_auth_catalog_refresh_complete;
 mod deferred_operations;
 use deferred_operations::{
     apply_auth_route_to_agent, apply_auth_runtime_model_to_agent, auth_refresh_targets,
-    log_provider_control_completed, log_provider_control_deferred,
+    begin_auth_refresh, log_provider_control_completed, log_provider_control_deferred,
     log_provider_control_lock_acquired, spawn_deferred_agent_mutation,
     spawn_deferred_auth_refreshes, spawn_deferred_provider_operation,
 };
@@ -114,6 +105,7 @@ pub(super) async fn handle_notify_auth_changed_process_wide(
     let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
     crate::usage::invalidate_active_anthropic_usage();
     crate::provider::clear_all_provider_unavailability_for_account();
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
     crate::auth::AuthStatus::check_fast().log_snapshot("auth_changed_one_shot");
 
     provider_template.on_auth_changed();
@@ -997,6 +989,7 @@ pub(super) async fn handle_notify_auth_changed(
         // let the old login's usage snapshot or usage-limit marker gate it.
         crate::usage::invalidate_active_anthropic_usage();
         crate::provider::clear_all_provider_unavailability_for_account();
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
             // previous credential's cached runtime failure.

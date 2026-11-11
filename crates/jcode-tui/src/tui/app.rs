@@ -438,6 +438,8 @@ struct PendingFallbackOffer {
 /// one-keypress accept can resend it after the route switch completes.
 #[derive(Debug, Clone)]
 struct FallbackResendPayload {
+    /// Automatic retry budget already spent by this turn, across routes.
+    retry_attempts: u8,
     /// Expanded message content that was sent to the server.
     content: String,
     /// Inline image attachments that accompanied the message.
@@ -1632,11 +1634,9 @@ pub struct App {
     pending_route_selection: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,
-    // Reasoning level chosen for a model in the picker's level step (e.g.
-    // gpt-5.5 at high), staged for remote mode alongside the model
-    // switch. Without forwarding this to the server, it keeps its configured
-    // default effort (low by default) and silently runs the newly selected
-    // model at the wrong effort (issue #427).
+    pending_automatic_failover_started: Option<Instant>,
+    // Carry the picker's reasoning effort through remote model switches so
+    // the server does not fall back to its configured default (#427).
     pending_reasoning_effort: Option<String>,
     // Remote SetModel has been sent but ModelChanged has not arrived yet. User
     // prompts submitted in this window are held so the first request cannot race

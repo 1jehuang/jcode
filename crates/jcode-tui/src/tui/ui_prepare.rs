@@ -1,3 +1,8 @@
+#[path = "ui_prepare/active_tools.rs"]
+mod active_tools;
+pub(super) use active_tools::active_batch_progress_hash;
+use active_tools::{active_batch_progress, active_codemode, prepare_active_batch_progress};
+
 #[path = "ui_prepare/assistant_aux.rs"]
 mod assistant_aux;
 use assistant_aux::*;
@@ -290,42 +295,6 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
-fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
-    match app.status() {
-        ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
-        _ => None,
-    }
-}
-
-pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
-    let Some(progress) = active_batch_progress(app) else {
-        return 0;
-    };
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if progress.completed < progress.total {
-        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
-    }
-    progress.total.hash(&mut hasher);
-    progress.completed.hash(&mut hasher);
-    progress.last_completed.hash(&mut hasher);
-    for subcall in &progress.subcalls {
-        subcall.index.hash(&mut hasher);
-        subcall.tool_call.id.hash(&mut hasher);
-        subcall.tool_call.name.hash(&mut hasher);
-        match subcall.state {
-            crate::bus::BatchSubcallState::Running => 0u8,
-            crate::bus::BatchSubcallState::Succeeded => 1u8,
-            crate::bus::BatchSubcallState::Failed => 2u8,
-        }
-        .hash(&mut hasher);
-        if let Ok(input) = serde_json::to_string(&subcall.tool_call.input) {
-            input.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
 fn swarm_members_signature(members: &[crate::protocol::SwarmMemberStatus]) -> u64 {
     // Chat only renders a stable one-line identity/status summary. Excluding
     // elapsed time, age, output tails, todos, tool progress, and runtime details
@@ -382,88 +351,6 @@ fn spawned_member_for_tool<'a>(
         .filter(|member| member.task_label.as_deref() == Some(label));
     let member = matching.next()?;
     matching.next().is_none().then_some(member)
-}
-
-fn prepare_active_batch_progress(
-    app: &dyn TuiState,
-    width: u16,
-    prefix_blank: bool,
-) -> PreparedMessages {
-    let Some(progress) = active_batch_progress(app) else {
-        return empty_prepared_messages();
-    };
-
-    let centered = app.centered_mode();
-    let accent = rgb(255, 193, 94);
-    let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
-    let block_width = if centered {
-        super::centered_content_block_width(width, 96)
-    } else {
-        width as usize
-    };
-    let row_width = block_width.saturating_sub(1);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    if prefix_blank {
-        lines.push(Line::from(""));
-    }
-
-    let mut header = vec![
-        Span::styled(format!("  {} ", spinner), Style::default().fg(accent)),
-        Span::styled("batch", Style::default().fg(tool_color())),
-        Span::styled(
-            format!(" · {}/{} done", progress.completed, progress.total),
-            Style::default().fg(dim_color()),
-        ),
-    ];
-    if let Some(last) = progress
-        .last_completed
-        .as_ref()
-        .filter(|_| progress.completed < progress.total)
-    {
-        header.push(Span::styled(
-            format!(" · last done: {}", last),
-            Style::default().fg(dim_color()),
-        ));
-    }
-    lines.push(super::truncate_line_with_ellipsis_to_width(
-        &Line::from(header),
-        width.saturating_sub(1) as usize,
-    ));
-
-    let mut hidden_completed = 0usize;
-    for subcall in &progress.subcalls {
-        let (icon, icon_color) = match subcall.state {
-            crate::bus::BatchSubcallState::Running => (spinner, accent),
-            crate::bus::BatchSubcallState::Succeeded => {
-                hidden_completed += 1;
-                continue;
-            }
-            crate::bus::BatchSubcallState::Failed => ("✗", rgb(220, 100, 100)),
-        };
-
-        lines.push(tools_ui::render_batch_subcall_line(
-            &subcall.tool_call,
-            icon,
-            icon_color,
-            50,
-            Some(row_width),
-            None,
-        ));
-    }
-
-    if hidden_completed > 0 && progress.completed < progress.total {
-        lines.push(Line::from(Span::styled(
-            format!("    … {} completed", hidden_completed),
-            Style::default().fg(dim_color()),
-        )));
-    }
-
-    if centered {
-        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
-    }
-
-    wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[])
 }
 
 pub(super) fn prepare_messages(
@@ -634,7 +521,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(

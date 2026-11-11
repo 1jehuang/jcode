@@ -771,6 +771,7 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1299,6 +1300,7 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1858,9 +1860,7 @@ impl App {
     }
 }
 
-/// Credential family a provider id or display name belongs to. Claude login,
-/// Claude API keys, and the Anthropic provider share one account; the same
-/// holds for OpenAI OAuth (Codex) and API keys.
+/// Normalize provider labels to the credential family that can unblock a turn.
 fn credential_family(provider: &str) -> String {
     let normalized = provider.trim().to_ascii_lowercase();
     // Login labels vary ("claude", "claude-api", "Anthropic API").

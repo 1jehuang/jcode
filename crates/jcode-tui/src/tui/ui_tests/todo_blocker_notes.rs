@@ -16,7 +16,7 @@ fn blocker_footer_is_cell_bounded_and_clears_when_resolved() {
         assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
         if width > 0 {
             for line in &lines {
-                assert_eq!(line.style.fg, Some(Color::Rgb(225, 180, 80)));
+                assert_eq!(line.style.fg, Some(rgb(225, 180, 80)));
             }
         }
         if width >= 80 {
@@ -66,7 +66,7 @@ fn blocker_footer_renders_immediately_above_input() {
     );
     let blocker_row = &terminal.backend().buffer().content[(input_row - 1) * 120..input_row * 120];
     for cell in blocker_row.iter().take("Blocked".len()) {
-        assert_eq!(cell.fg, Color::Rgb(225, 180, 80));
+        assert_eq!(cell.fg, rgb(225, 180, 80));
     }
 }
 

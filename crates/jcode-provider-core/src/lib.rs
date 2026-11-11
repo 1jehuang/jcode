@@ -1,3 +1,6 @@
+mod model_catalog;
+pub use model_catalog::ModelCatalogSnapshot;
+
 pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
@@ -321,6 +324,17 @@ pub trait Provider: Send + Sync {
     /// Get all model routes for the unified picker.
     fn model_routes(&self) -> Vec<ModelRoute> {
         Vec::new()
+    }
+
+    /// Capture the owned catalog at a single provider boundary. Providers with
+    /// shared catalog storage can override this to reuse one memo lookup.
+    fn model_catalog_snapshot(&self) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            self.available_models_display(),
+            self.model_routes(),
+        )
     }
 
     /// Prefetch any dynamic model lists (default: no-op).
@@ -1449,56 +1463,6 @@ impl ModelRoute {
     }
 }
 
-/// Canonical snapshot of a provider's model catalog at a point in time.
-///
-/// This is the local contract shared by server-side providers, remote clients,
-/// and persisted remote catalog caches. The websocket wire format may still
-/// flatten these fields for backwards compatibility, but internal code should
-/// pass catalog state as this single value instead of loose parallel vectors.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ModelCatalogSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_routes: Vec<ModelRoute>,
-}
-
-impl ModelCatalogSnapshot {
-    pub fn new(
-        provider_name: Option<String>,
-        provider_model: Option<String>,
-        available_models: Vec<String>,
-        model_routes: Vec<ModelRoute>,
-    ) -> Self {
-        Self {
-            provider_name,
-            provider_model,
-            available_models,
-            model_routes,
-        }
-    }
-
-    pub fn from_provider(provider: &dyn Provider) -> Self {
-        // Note: on multi-providers both calls below build the same route
-        // catalog; MultiProvider memoizes it (short TTL) so this stays one
-        // build instead of two.
-        Self::new(
-            Some(provider.display_name()),
-            Some(provider.model()),
-            provider.available_models_display(),
-            provider.model_routes(),
-        )
-    }
-
-    pub fn has_routes(&self) -> bool {
-        !self.model_routes.is_empty()
-    }
-}
-
 pub const CHEAPNESS_REFERENCE_INPUT_TOKENS: u64 = 25_000;
 pub const CHEAPNESS_REFERENCE_OUTPUT_TOKENS: u64 = 5_000;
 
@@ -1679,3 +1643,6 @@ mod saved_account_route_tests;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod catalog_snapshot_tests;

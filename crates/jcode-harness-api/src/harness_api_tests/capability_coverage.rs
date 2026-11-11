@@ -66,7 +66,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
     ("PersistSession", ClientInternal),
-    ("Ping", ClientInternal),
+    // SDK ping/pong also supports the TUI's transport readiness probe.
+    ("Ping", Covered),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
@@ -78,6 +79,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RewindCheckpoint", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
+    // The same typed runtime-command gateway is exposed by ApiRequest.
     ("RuntimeCommand", Covered),
     // Per-window account pins, default account and failover toggle, like
     // the legacy Switch*Account requests, drive the TUI's /accounts flow.

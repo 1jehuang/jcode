@@ -1,5 +1,180 @@
+#[path = "mobile_sync_tests/bounded_wire_tests.rs"]
+mod bounded_wire;
+
 use super::*;
 use jcode_session_types::StoredMessage;
+
+// The pre-cache implementation remains the output oracle, including storage's
+// backup recovery behavior rather than a permissive top-level enabled parser.
+fn uncached_mobile_state() -> MobileSyncState {
+    let path = state_path().unwrap();
+    if !path.exists() {
+        return MobileSyncState::default();
+    }
+    storage::read_json(&path).unwrap_or_default()
+}
+
+#[test]
+fn parsed_state_reuse_matches_old_output_and_reads_current_bytes() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    let path = state_path().unwrap();
+    let valid = r#"{"enabled":true,"generation":7,"sessions":{"one":{"uploaded":3,"mtime_ms":9}}}"#;
+    std::fs::write(&path, valid).unwrap();
+    let first = load_state_snapshot();
+    assert!(Arc::ptr_eq(&first, &load_state_snapshot()));
+    assert_eq!(*first, uncached_mobile_state());
+    let mut owned = load_state();
+    owned.sessions.clear();
+    assert_eq!(load_state().sessions.len(), 1);
+
+    // Equal byte length and identical mtime still require fresh authorization.
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, valid.replace("\"generation\":7", "\"generation\":8")).unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(before)
+        .unwrap();
+    assert_eq!(load_state(), uncached_mobile_state());
+    assert!(!sync_still_enabled(7));
+    assert!(sync_still_enabled(8));
+    std::fs::write(&path, valid.replace("true", "null")).unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(before)
+        .unwrap();
+    assert_eq!(load_state(), uncached_mobile_state());
+    assert!(!is_enabled());
+    for contents in [
+        r#"{"enabled":true,"generation":7,"sessions":{"bad":{"uploaded":"oops","mtime_ms":9}}}"#,
+        r#"{"enabled":true,"sessions":{"bad":{"uploaded":3}}}"#,
+        r#"{"enabled":true,"sessions":[]}"#,
+        "{",
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        assert_eq!(load_state(), uncached_mobile_state());
+        assert!(!is_enabled());
+        assert!(!sync_still_enabled(7));
+    }
+    std::fs::write(&path, valid).unwrap();
+    assert!(sync_still_enabled(7));
+    save_state(&MobileSyncState::default()).unwrap();
+    assert!(!sync_still_enabled(7));
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(is_enabled());
+    assert!(!sync_still_enabled(7));
+    assert!(sync_still_enabled(9));
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(load_state(), uncached_mobile_state());
+    assert!(!is_enabled());
+}
+
+#[test]
+fn parsed_state_reuse_scopes_path_caps_retention_and_preserves_backup_recovery() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    let path = state_path().unwrap();
+    let valid = r#"{"enabled":true,"generation":4}"#;
+    std::fs::write(&path, valid).unwrap();
+    let first = load_state_snapshot();
+    {
+        let _other_env = TestEnv::set(&[("JCODE_HOME", other.path().as_os_str())]);
+        std::fs::write(state_path().unwrap(), valid).unwrap();
+        let second = load_state_snapshot();
+        assert_eq!(*first, *second);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            PARSED_STATE.lock().unwrap().as_ref().unwrap().path,
+            state_path().unwrap()
+        );
+    }
+    let oversized = format!("{}{}", valid, " ".repeat(MAX_CACHED_STATE_BYTES));
+    std::fs::write(&path, oversized).unwrap();
+    assert_eq!(load_state(), uncached_mobile_state());
+    assert!(PARSED_STATE.lock().unwrap().is_none());
+    std::fs::write(path.with_extension("bak"), valid).unwrap();
+    std::fs::write(&path, r#"{"enabled":true,"sessions":{"bad":null}}"#).unwrap();
+    assert_eq!(load_state().generation, 4);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), valid);
+    assert_eq!(load_state(), uncached_mobile_state());
+    std::fs::write(path.with_extension("bak"), "{").unwrap();
+    std::fs::write(&path, "{").unwrap();
+    assert_eq!(load_state(), uncached_mobile_state());
+    assert!(!is_enabled());
+}
+
+#[test]
+#[ignore = "paired warmed filesystem benchmark, run with --ignored --nocapture"]
+fn benchmark_exact_state_reuse() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    for count in [0, 32, 1300] {
+        let mut state = MobileSyncState {
+            enabled: true,
+            generation: 42,
+            ..Default::default()
+        };
+        for i in 0..count {
+            state.sessions.insert(
+                format!("session-{i:04}"),
+                SessionProgress {
+                    uploaded: 200,
+                    mtime_ms: 123456789,
+                    revision: Some([123456789, 10000, 123456790, 1000]),
+                    fingerprint: Some(123456789),
+                },
+            );
+        }
+        std::fs::write(
+            state_path().unwrap(),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_state(), uncached_mobile_state());
+        for _ in 0..20 {
+            std::hint::black_box(uncached_mobile_state());
+            std::hint::black_box(load_state_snapshot());
+        }
+        let mut old = Vec::new();
+        let mut cached = Vec::new();
+        for round in 0..12 {
+            for optimized in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = Instant::now();
+                for _ in 0..200 {
+                    if optimized {
+                        std::hint::black_box(sync_still_enabled(42));
+                    } else {
+                        let state = uncached_mobile_state();
+                        std::hint::black_box(state.enabled && state.generation == 42);
+                    }
+                }
+                if optimized {
+                    cached.push(started.elapsed().as_nanos());
+                } else {
+                    old.push(started.elapsed().as_nanos());
+                }
+            }
+        }
+        old.sort_unstable();
+        cached.sort_unstable();
+        eprintln!(
+            "exact state auth sessions={count} iterations=200 paired_rounds=12 old_median_ns={} cached_median_ns={} old_samples_ns={old:?} cached_samples_ns={cached:?}",
+            old[6], cached[6]
+        );
+    }
+}
 
 #[tokio::test]
 #[ignore = "manual local filesystem reconciliation benchmark"]
@@ -762,45 +937,4 @@ fn session_ids_are_validated() {
     assert!(valid_session_id("session_abc-123.x"));
     assert!(!valid_session_id("bad id"));
     assert!(!valid_session_id(""));
-}
-
-#[test]
-fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
-    let mut session = Session::create_with_id("rewrite".into(), None, None);
-    for text in ["first", "second"] {
-        session.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: text.into(),
-                cache_control: None,
-            }],
-        );
-    }
-    let (initial, fingerprint) = incremental_messages(&session, &SessionProgress::default());
-    assert_eq!(initial.len(), 2);
-    let progress = SessionProgress {
-        uploaded: 2,
-        fingerprint: Some(fingerprint),
-        ..Default::default()
-    };
-    assert!(incremental_messages(&session, &progress).0.is_empty());
-    session.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "appended".into(),
-            cache_control: None,
-        }],
-    );
-    let appended = incremental_messages(&session, &progress).0;
-    assert_eq!(appended.len(), 1);
-    assert_eq!(appended[0].seq, 2);
-    session.messages[0].content = vec![ContentBlock::Text {
-        text: "rewritten".into(),
-        cache_control: None,
-    }];
-    let rewritten = incremental_messages(&session, &progress).0;
-    assert_eq!(rewritten.len(), 3);
-    assert_eq!(rewritten[0].text, "rewritten");
-    session.truncate_messages(1);
-    assert_eq!(incremental_messages(&session, &progress).0.len(), 1);
 }

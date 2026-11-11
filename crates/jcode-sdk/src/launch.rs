@@ -569,14 +569,8 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     }
     progress("starting harness API bridge...");
     let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
-    let (bridge, bridge_args): (&Path, &[&str]) = if standalone_bridge.is_file() {
-        (&standalone_bridge, &[])
-    } else {
-        // Current Jcode distributions host the bridge as a CLI subcommand so a
-        // desktop bundle only needs to ship one companion executable. Keep the
-        // standalone lookup above for compatibility with older installations.
-        (&jcode, &["api-bridge"])
-    };
+    let (bridge, bridge_args) =
+        shared_bridge_launch(&jcode, &standalone_bridge, options.binary.is_some());
     spawn_detached(bridge, bridge_args).map_err(|error| {
         Error::new(
             ErrorKind::LaunchFailed,
@@ -584,6 +578,21 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         )
     })?;
     wait_for_socket(&api, "harness API bridge", options.start_timeout)
+}
+
+/// Keep the bridge aligned with the selected runtime. An old standalone left
+/// beside Desktop must not silently disable newer routing and identity support.
+/// Standalone-only bundles remain supported when no CLI companion was selected.
+fn shared_bridge_launch<'a>(
+    jcode: &'a Path,
+    standalone: &'a Path,
+    explicit_runtime: bool,
+) -> (&'a Path, &'static [&'static str]) {
+    if explicit_runtime || jcode.is_file() || !standalone.is_file() {
+        (jcode, &["api-bridge"])
+    } else {
+        (standalone, &[])
+    }
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
@@ -838,35 +847,8 @@ fn launch_io(error: std::io::Error) -> Error {
 }
 
 #[cfg(test)]
-mod executable_tests {
-    use super::*;
-
-    #[test]
-    fn sibling_executable_uses_platform_suffix_in_bundle_with_spaces() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = root.path().join("Jcode package with spaces 雪");
-        fs::create_dir(&bundle).unwrap();
-        let current = bundle.join(format!("jcode-desktop{}", std::env::consts::EXE_SUFFIX));
-        for name in ["jcode", "jcode-harness-api-bridge"] {
-            let companion = bundle.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-            fs::write(&companion, b"test executable").unwrap();
-            assert_eq!(sibling_exe_next_to(Some(&current), name), companion);
-        }
-    }
-
-    #[test]
-    fn sibling_executable_fallback_uses_platform_suffix() {
-        let root = tempfile::tempdir().unwrap();
-        let current = root.path().join("jcode-desktop");
-        for name in ["jcode", "jcode-harness-api-bridge"] {
-            let expected = PathBuf::from(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-            assert_eq!(sibling_exe_next_to(None, name), expected);
-            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
-            fs::create_dir(root.path().join(&expected)).unwrap();
-            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
-        }
-    }
-}
+#[path = "launch_tests.rs"]
+mod executable_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

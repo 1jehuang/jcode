@@ -61,7 +61,7 @@ fn partial_frame_retention_matches_presented_cells_across_buffer_swaps() {
     for area in [Rect::new(3, 5, 1, 1), Rect::new(0, 2, 20, 3)] {
         let bounds = Rect::new(0, 0, 20, 8);
         let mut previous = Buffer::empty(bounds);
-        previous.set_string(0, 0, "header unchanged", Style::default());
+        previous.set_string(0, 0, "界 header unchanged", Style::default());
         previous.set_string(0, 7, "composer unchanged", Style::default());
         let mut renderer = StatusSpinnerRenderer {
             last_frame: Some(previous),
@@ -70,7 +70,9 @@ fn partial_frame_retention_matches_presented_cells_across_buffer_swaps() {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let storage = renderer.last_frame.as_ref().unwrap().content.as_ptr();
-        for glyph in ["⠋", "⠙", "⠹", "⠸"] {
+        // Returning to the first glyph catches a stale previous-buffer baseline.
+        // More than two frames also exercises both alternating buffer slots.
+        for glyph in ["⠋", "⠙", "⠹", "⠸", "⠋", "⠋", "⠙"] {
             let working = terminal.current_buffer_mut();
             working
                 .content
@@ -95,73 +97,174 @@ fn partial_frame_retention_matches_presented_cells_across_buffer_swaps() {
 }
 
 #[test]
+fn spinner_retention_survives_resize_and_intervening_full_frame() {
+    let backend = ratatui::backend::TestBackend::new(20, 8);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let mut renderer = StatusSpinnerRenderer::default();
+    for (width, height) in [(20, 8), (12, 5), (24, 10)] {
+        terminal.backend_mut().resize(width, height);
+        terminal.resize(Rect::new(0, 0, width, height)).unwrap();
+        let area = Rect::new(1, height - 1, 1, 1);
+        let frame = terminal
+            .draw(|frame| {
+                let buffer = frame.buffer_mut();
+                buffer.set_string(0, 0, "界 header", Style::default());
+                render_status_spinner_into_buffer_mut(buffer, area, "⠋");
+            })
+            .unwrap();
+        renderer.last_frame = Some(frame.buffer.clone());
+        for glyph in ["⠙", "⠋", "⠋", "⠹", "⠋"] {
+            let previous = renderer.last_frame.as_mut().unwrap();
+            render_status_spinner_into_buffer_mut(previous, area, glyph);
+            assert!(
+                terminal
+                    .draw_retained_cell((area.x, area.y).into(), previous[(area.x, area.y)].clone())
+                    .unwrap()
+            );
+            assert_eq!(
+                terminal.backend().buffer(),
+                renderer.last_frame.as_ref().unwrap()
+            );
+            assert!(
+                terminal
+                    .current_buffer_mut()
+                    .content
+                    .iter()
+                    .all(|cell| *cell == ratatui::buffer::Cell::EMPTY)
+            );
+        }
+        // A normal frame must diff against the patched baseline, not the old
+        // glyph. This deliberately restores a glyph seen before the patch.
+        terminal
+            .draw(|frame| {
+                *frame.buffer_mut() = renderer.last_frame.as_ref().unwrap().clone();
+                render_status_spinner_into_buffer_mut(frame.buffer_mut(), area, "⠙");
+            })
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(area.x, area.y)].symbol(), "⠙");
+    }
+}
+
+#[test]
+fn retained_cell_rejects_wide_continuation_skipped_and_out_of_bounds() {
+    let backend = ratatui::backend::TestBackend::new(12, 3);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.buffer_mut().set_string(0, 0, "界⠋", Style::default());
+            frame.buffer_mut()[(3, 0)].set_symbol("s").set_skip(true);
+        })
+        .unwrap();
+    let original = terminal.backend().buffer().clone();
+    let mut narrow = ratatui::buffer::Cell::EMPTY;
+    narrow.set_symbol("⠙");
+    for position in [(0, 0), (1, 0), (3, 0), (12, 0), (0, 3)] {
+        assert!(
+            !terminal
+                .draw_retained_cell(position.into(), narrow.clone())
+                .unwrap()
+        );
+        assert_eq!(terminal.backend().buffer(), &original);
+    }
+    let mut wide = narrow.clone();
+    wide.set_symbol("界");
+    assert!(!terminal.draw_retained_cell((2, 0).into(), wide).unwrap());
+    narrow.set_skip(true);
+    assert!(!terminal.draw_retained_cell((2, 0).into(), narrow).unwrap());
+    assert_eq!(terminal.backend().buffer(), &original);
+}
+
+#[test]
 #[ignore = "comparative retained-frame benchmark, run with --ignored --nocapture"]
 fn benchmark_partial_frame_retention() {
     use std::hint::black_box;
-    let bounds = Rect::new(0, 0, 160, 48);
-    let animation_area = Rect::new(0, 3, 160, 14);
-    let spinner_area = Rect::new(2, 46, 1, 1);
-    let iterations = 200;
-    let initial = Buffer::empty(bounds);
-    // Exclude one-time animation/config initialization from the comparison.
-    let mut warmup = initial.clone();
-    crate::tui::ui::render_idle_animation_into(&mut warmup, animation_area, 0.0);
-    for animation in [false, true] {
-        let mut times = Vec::new();
-        let mut baseline_frame = None;
-        for optimized in [false, true] {
-            let mut renderer = StatusSpinnerRenderer {
-                last_frame: Some(initial.clone()),
-                ..Default::default()
-            };
-            let mut working = initial.clone();
-            let start = Instant::now();
-            for i in 0..iterations {
-                let previous = renderer.last_frame.as_ref().unwrap();
-                if optimized {
+    for (width, height) in [(160, 48), (240, 80)] {
+        let bounds = Rect::new(0, 0, width, height);
+        let animation_area = Rect::new(0, 3, width, 14);
+        let spinner_area = Rect::new(2, height - 2, 1, 1);
+        let iterations = 200;
+        let mut initial = Buffer::empty(bounds);
+        initial.set_string(0, 0, "界 unchanged header", Style::default());
+        render_status_spinner_into_buffer_mut(&mut initial, spinner_area, "⠋");
+        // Exclude one-time animation/config initialization from the comparison.
+        let mut warmup = initial.clone();
+        crate::tui::ui::render_idle_animation_into(&mut warmup, animation_area, 0.0);
+        for animation in [false, true] {
+            let mut times = Vec::new();
+            let mut baseline_frame = None;
+            for optimized in [false, true] {
+                let mut renderer = StatusSpinnerRenderer {
+                    last_frame: Some(initial.clone()),
+                    ..Default::default()
+                };
+                let backend = ratatui::backend::TestBackend::new(width, height);
+                let mut terminal = ratatui::Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| *frame.buffer_mut() = initial.clone())
+                    .unwrap();
+                let start = Instant::now();
+                for i in 0..iterations {
+                    if optimized && !animation {
+                        let position = (spinner_area.x, spinner_area.y);
+                        let previous = renderer.last_frame.as_mut().unwrap();
+                        let mut cell = previous[position].clone();
+                        cell.set_symbol(if i % 2 == 0 { "⠙" } else { "⠋" })
+                            .set_style(status_spinner_patch_style());
+                        assert!(
+                            terminal
+                                .draw_retained_cell(position.into(), cell.clone())
+                                .unwrap()
+                        );
+                        previous[position] = cell;
+                        black_box(previous);
+                        continue;
+                    }
+                    let previous = renderer.last_frame.as_ref().unwrap();
+                    let working = terminal.current_buffer_mut();
                     working.content.clone_from(&previous.content);
-                } else {
-                    working.clone_from(previous);
-                }
-                if animation {
-                    let elapsed = i as f32 / 30.0;
-                    crate::tui::ui::render_idle_animation_into(
-                        &mut working,
-                        animation_area,
-                        elapsed,
-                    );
-                    if optimized {
-                        renderer.remember_partial_frame(&working, animation_area);
-                    } else {
+                    if animation {
+                        let elapsed = i as f32 / 30.0;
                         crate::tui::ui::render_idle_animation_into(
-                            renderer.last_frame.as_mut().unwrap(),
+                            working,
                             animation_area,
                             elapsed,
                         );
-                    }
-                } else {
-                    render_status_spinner_into_buffer_mut(&mut working, spinner_area, "⠙");
-                    if optimized {
-                        renderer.remember_partial_frame(&working, spinner_area);
+                        if optimized {
+                            renderer.remember_partial_frame(working, animation_area);
+                        } else {
+                            crate::tui::ui::render_idle_animation_into(
+                                renderer.last_frame.as_mut().unwrap(),
+                                animation_area,
+                                elapsed,
+                            );
+                        }
                     } else {
-                        renderer.last_frame = Some(working.clone());
+                        let glyph = if i % 2 == 0 { "⠙" } else { "⠋" };
+                        render_status_spinner_into_buffer_mut(working, spinner_area, glyph);
+                        renderer.remember_partial_frame(working, spinner_area);
                     }
+                    terminal.flush().unwrap();
+                    terminal.swap_buffers();
+                    black_box(renderer.last_frame.as_ref().unwrap());
                 }
-                black_box(renderer.last_frame.as_ref().unwrap());
+                times.push(start.elapsed());
+                assert_eq!(
+                    terminal.backend().buffer(),
+                    renderer.last_frame.as_ref().unwrap()
+                );
+                if optimized {
+                    assert_eq!(renderer.last_frame, baseline_frame);
+                } else {
+                    baseline_frame = renderer.last_frame;
+                }
             }
-            times.push(start.elapsed());
-            if optimized {
-                assert_eq!(renderer.last_frame, baseline_frame);
-            } else {
-                baseline_frame = renderer.last_frame;
-            }
+            eprintln!(
+                "partial retention {width}x{height} animation={animation} iterations={iterations} baseline={:?} optimized={:?} speedup={:.2}x",
+                times[0],
+                times[1],
+                times[0].as_secs_f64() / times[1].as_secs_f64()
+            );
         }
-        eprintln!(
-            "partial retention animation={animation} iterations={iterations} baseline={:?} optimized={:?} speedup={:.2}x",
-            times[0],
-            times[1],
-            times[0].as_secs_f64() / times[1].as_secs_f64()
-        );
     }
 }
 

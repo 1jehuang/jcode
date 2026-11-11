@@ -56,8 +56,19 @@ async fn publish_startup_snapshot(snapshot: &Snapshot) {
 /// Queue an asynchronous response. The shared mutex covers the entire worker,
 /// so simultaneous clients coalesce into one fetch and errors get a retry floor.
 pub(super) fn request(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
+    request_with_refresh(id, tx, false);
+}
+
+/// Re-enumerate freshly saved credentials without clearing endpoint caches or
+/// provider Retry-After deadlines. Publish directly so the login's client does
+/// not have to wait for its next periodic usage poll.
+pub(super) fn request_after_auth_change(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
+    request_with_refresh(id, tx, true);
+}
+
+fn request_with_refresh(id: u64, tx: mpsc::UnboundedSender<ServerEvent>, force: bool) {
     tokio::spawn(async move {
-        let snapshot = snapshot_with(STATE.get_or_init(Mutex::default), fetch).await;
+        let snapshot = snapshot_with(STATE.get_or_init(Mutex::default), fetch, force).await;
         let _ = tx.send(ServerEvent::AccountUsage {
             id,
             anthropic: snapshot.anthropic,
@@ -66,13 +77,13 @@ pub(super) fn request(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
     });
 }
 
-async fn snapshot_with<F, Fut>(state: &Mutex<State>, fetch: F) -> Snapshot
+async fn snapshot_with<F, Fut>(state: &Mutex<State>, fetch: F, force: bool) -> Snapshot
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Snapshot>,
 {
     let mut state = state.lock().await;
-    if state.due(Instant::now()) {
+    if force || state.due(Instant::now()) {
         match tokio::time::timeout(Duration::from_secs(120), fetch()).await {
             Ok(snapshot) => {
                 state.snapshot = snapshot;
@@ -268,6 +279,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_change_replaces_fresh_login_error_without_waiting_for_poll_deadline() {
+        let state = Mutex::new(State {
+            snapshot: Snapshot {
+                anthropic: vec![wire_snapshot(account(Some("HTTP 401")), true)],
+                ..Default::default()
+            },
+            next_fetch: Some(Instant::now() + REFRESH),
+        });
+        let cached = snapshot_with(
+            &state,
+            || async { panic!("ordinary polls must reuse the fresh daemon snapshot") },
+            false,
+        )
+        .await;
+        assert!(cached.anthropic[0].error.is_some());
+        let refreshed = snapshot_with(
+            &state,
+            || async {
+                Snapshot {
+                    anthropic: vec![wire_snapshot(account(None), true)],
+                    ..Default::default()
+                }
+            },
+            true,
+        )
+        .await;
+        assert!(refreshed.anthropic[0].error.is_none());
+        assert!(state.lock().await.next_fetch.unwrap() > Instant::now());
+        let cached = snapshot_with(
+            &state,
+            || async { panic!("the auth refresh must restore ordinary polling coalescing") },
+            false,
+        )
+        .await;
+        assert_eq!(cached.anthropic, refreshed.anthropic);
+    }
+
+    #[tokio::test]
     async fn simultaneous_clients_coalesce_and_receive_same_snapshot() {
         let state = Mutex::new(State::default());
         let calls = AtomicUsize::new(0);
@@ -279,13 +328,15 @@ mod tests {
                 ..Default::default()
             }
         };
-        let (first, second) =
-            tokio::join!(snapshot_with(&state, worker), snapshot_with(&state, worker));
+        let (first, second) = tokio::join!(
+            snapshot_with(&state, worker, false),
+            snapshot_with(&state, worker, false)
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first.openai, second.openai);
         assert_eq!(first.openai[0].label, "test");
         state.lock().await.next_fetch = Some(Instant::now() - Duration::from_secs(1));
-        let refreshed = snapshot_with(&state, worker).await;
+        let refreshed = snapshot_with(&state, worker, false).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(refreshed.openai, first.openai);
     }

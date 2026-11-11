@@ -448,7 +448,7 @@ pub struct MultiProvider {
     /// explicitly so pickers never see stale routes after a switch.
     /// Unique configuration lineage, preserved only by equivalent forks.
     catalog_scope: u64,
-    routes_memo: Mutex<Option<RoutesMemoEntry>>,
+    routes_memo: Mutex<Option<Arc<RoutesMemoEntry>>>,
     /// Number of model-catalog prefetches launched by the latest auth refresh.
     /// Shared by forks so the server can wait for real work rather than sleeping
     /// through a fixed quiet period after login.
@@ -850,48 +850,6 @@ impl MultiProvider {
 
         let profile = crate::provider_catalog::openai_compatible_profile_by_id(prefix)?;
         Some((profile, rest))
-    }
-
-    /// Find the configured OpenAI-compatible profile that serves a bare model
-    /// id, using the live route catalog as the source of truth.
-    ///
-    /// Route specs from the picker carry a `<profile>:<model>` prefix, but
-    /// hand-typed `/model <id>` and saved sessions can carry the bare id. The
-    /// active profile wins when several profiles serve the same id, so a
-    /// re-select of the current model never silently hops endpoints.
-    fn openai_compatible_profile_owning_model(
-        &self,
-        model: &str,
-    ) -> Option<crate::provider_catalog::OpenAiCompatibleProfile> {
-        let model = model.trim();
-        if model.is_empty() {
-            return None;
-        }
-
-        let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
-        let mut fallback: Option<String> = None;
-        for route in self.fresh_routes_memo_entry().routes {
-            if !route.available || route.model != model {
-                continue;
-            }
-            let Some(profile_id) = route
-                .api_method
-                .strip_prefix("openai-compatible:")
-                .map(str::trim)
-                .filter(|profile_id| !profile_id.is_empty())
-            else {
-                continue;
-            };
-            if active_profile_id.as_deref() == Some(profile_id) {
-                fallback = Some(profile_id.to_string());
-                break;
-            }
-            if fallback.is_none() {
-                fallback = Some(profile_id.to_string());
-            }
-        }
-
-        crate::provider_catalog::openai_compatible_profile_by_id(&fallback?)
     }
 
     /// Return the active direct OpenAI-compatible runtime when its own catalog
@@ -2404,7 +2362,7 @@ impl Provider for MultiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        self.fresh_routes_memo_entry().listable_models
+        self.fresh_routes_memo_entry().listable_models.clone()
     }
 
     fn available_providers_for_model(&self, model: &str) -> Vec<String> {
@@ -2440,8 +2398,18 @@ impl Provider for MultiProvider {
         None
     }
 
+    fn model_catalog_snapshot(&self) -> jcode_provider_core::ModelCatalogSnapshot {
+        let entry = self.fresh_routes_memo_entry();
+        jcode_provider_core::ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            entry.listable_models.clone(),
+            entry.routes.clone(),
+        )
+    }
+
     fn model_routes(&self) -> Vec<ModelRoute> {
-        self.fresh_routes_memo_entry().routes
+        self.fresh_routes_memo_entry().routes.clone()
     }
 
     fn model_capabilities_need_refresh(&self) -> bool {
