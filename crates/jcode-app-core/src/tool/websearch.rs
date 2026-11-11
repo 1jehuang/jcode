@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 
 #[path = "websearch_kagi.rs"]
 mod kagi;
+#[path = "websearch_keenable.rs"]
+mod keenable;
 
 /// Web search using configured local HTTP backends.
 pub struct WebSearchTool {
@@ -88,7 +90,10 @@ impl Tool for WebSearchTool {
         if engines.contains(&WebSearchEngine::Custom) {
             profiles.push(Profile::Custom);
         }
-        if engines.contains(&WebSearchEngine::Kagi) {
+        // Keenable shares Kagi's API client profile: no redirects (an optional
+        // key header must never follow one), no automatic retries, bounded timeout.
+        if engines.contains(&WebSearchEngine::Kagi) || engines.contains(&WebSearchEngine::Keenable)
+        {
             profiles.push(Profile::Kagi);
         }
         let clients = session_http::clients(&ctx.session_id, &profiles)?;
@@ -189,6 +194,16 @@ impl WebSearchTool {
                     query,
                     num_results,
                     &config.websearch.kagi_api_key_env,
+                )
+                .await
+            }
+            WebSearchEngine::Keenable => {
+                let config = crate::config::config();
+                keenable::search(
+                    clients.kagi,
+                    query,
+                    num_results,
+                    &config.websearch.keenable_api_key_env,
                 )
                 .await
             }
