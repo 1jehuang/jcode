@@ -3,6 +3,9 @@ mod gmail_drafts;
 use gmail_drafts::*;
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
+#[cfg(test)]
+#[path = "ui_messages/todo_payload_cache_tests.rs"]
+mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -808,7 +811,47 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
+// Cache data only: time-sensitive blocker policy and width/style rendering
+// remain live on every draw. One bounded entry retains no transcript history.
+const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct TodoPayloadCache {
+    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
+}
+
+impl TodoPayloadCache {
+    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+        if let Some((source, parsed)) = &self.entry
+            && source == content
+        {
+            return parsed.clone();
+        }
+        let parsed = serde_json::from_str::<TodoCardPayload>(content)
+            .ok()
+            .map(std::sync::Arc::new);
+        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
+            .then(|| (content.to_owned(), parsed.clone()));
+        parsed
+    }
+}
+
+thread_local! {
+    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
+        std::cell::RefCell::new(TodoPayloadCache::default());
+}
+
+fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
+}
+
 impl TodoCardPayload {
+    fn todos(&self) -> &[crate::todo::TodoItem] {
+        match self {
+            Self::Current { todos, .. } | Self::Legacy(todos) => todos,
+        }
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -970,18 +1013,33 @@ pub(crate) fn render_todos_message(
 
 /// Dedicated composer chrome, one non-wrapping row per live blocker.
 pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line<'static>> {
-    let Some(payload) = payload.and_then(|p| serde_json::from_str::<TodoCardPayload>(p).ok())
-    else {
+    todo_blocker_footer_at(payload, width, chrono::Utc::now())
+}
+
+fn todo_blocker_footer_at(
+    payload: Option<&str>,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    let Some(payload) = payload.and_then(cached_todo_payload) else {
         return Vec::new();
     };
-    let (todos, ..) = payload.into_parts();
-    todos
+    render_todo_blocker_footer(&payload, width, now)
+}
+
+fn render_todo_blocker_footer(
+    payload: &TodoCardPayload,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    payload
+        .todos()
         .iter()
         .filter(|todo| crate::todo::is_incomplete_todo(todo))
         .filter_map(|todo| {
             let reason = if crate::todo::todo_completely_blocked(todo) {
                 todo.completely_blocked.as_ref().map(|b| b.reason.clone())
-            } else if crate::todo::todo_has_external_blocker(todo) {
+            } else if crate::todo::todo_has_external_blocker_at(todo, now) {
                 todo.external_blocker.as_ref().map(|b| b.reason.clone())
             } else if !todo.blocked_by.is_empty() {
                 Some(format!("waiting on {}", todo.blocked_by.join(", ")))
@@ -1004,10 +1062,10 @@ pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line
 pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(payload) = payload
-        && let Ok(payload) = serde_json::from_str::<TodoCardPayload>(payload)
+        && let Some(payload) = cached_todo_payload(payload)
     {
-        let (todos, ..) = payload.into_parts();
-        for todo in todos
+        for todo in payload
+            .todos()
             .iter()
             .filter(|todo| crate::todo::todo_completely_blocked(todo))
         {
