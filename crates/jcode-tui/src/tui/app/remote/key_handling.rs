@@ -670,6 +670,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             app.upstream_provider = None;
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
             remote.set_model(model_name).await?;
             app.remote_model_switch_in_flight = true;
             return Ok(());

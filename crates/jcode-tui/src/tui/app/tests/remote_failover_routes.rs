@@ -374,6 +374,181 @@ fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
 }
 
 #[test]
+fn test_remote_failover_ignores_confirmation_before_request_is_sent() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 0,
+                model: "claude-sonnet-4".into(),
+                provider_name: Some("Anthropic".into()),
+                error: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: Some("claude-otter".into()),
+                resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut connection,
+        );
+        assert!(app.pending_automatic_failover_route.is_some());
+        assert!(app.pending_fallback_resend.is_some());
+        connection.mark_history_loaded();
+        rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+        assert!(!app.is_processing);
+        assert!(app.pending_fallback_resend.is_some());
+    });
+}
+
+#[test]
+fn test_remote_failover_resends_only_after_exact_confirmation() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for mismatch in ["none", "model", "account", "credential", "provider"] {
+            let (mut app, mut connection) = remote_exact_failover_fixture();
+            connection.mark_history_loaded();
+            app.pending_automatic_failover_request_id = Some(22);
+            app.remote_model_switch_in_flight = true;
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ModelChanged {
+                    id: 22,
+                    model: if mismatch == "model" {
+                        "wrong-model"
+                    } else {
+                        "gpt-5.4"
+                    }
+                    .into(),
+                    provider_name: Some(
+                        if mismatch == "provider" {
+                            "Anthropic"
+                        } else {
+                            "OpenAI"
+                        }
+                        .into(),
+                    ),
+                    error: None,
+                    provider_oauth_email: None,
+                    provider_oauth_account_label: Some(
+                        if mismatch == "account" {
+                            "wrong-account"
+                        } else {
+                            "openai-fox"
+                        }
+                        .into(),
+                    ),
+                    resolved_credential: Some(if mismatch == "credential" {
+                        jcode_provider_core::ResolvedCredential::ApiKey
+                    } else {
+                        jcode_provider_core::ResolvedCredential::Oauth
+                    }),
+                    reasoning_effort: None,
+                    context_window: None,
+                },
+                &mut connection,
+            );
+            rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+            assert!(app.pending_automatic_failover_request_id.is_none());
+            assert!(app.pending_automatic_failover_route.is_none());
+            assert!(app.pending_fallback_resend.is_none());
+            assert!(!app.remote_model_switch_in_flight);
+            if mismatch == "none" {
+                assert!(app.is_processing);
+                assert_eq!(
+                    app.rate_limit_pending_message.as_ref().unwrap().content,
+                    "hi"
+                );
+                assert_eq!(
+                    app.remote_provider_oauth_account_label.as_deref(),
+                    Some("openai-fox")
+                );
+            } else {
+                assert!(!app.is_processing, "{mismatch}");
+                assert_eq!(app.input, "hi");
+                assert!(
+                    app.display_messages()
+                        .iter()
+                        .any(|m| m.content.contains("did not confirm"))
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn test_remote_failover_control_error_releases_switch_without_retry() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        app.pending_automatic_failover_request_id = Some(22);
+        app.remote_model_switch_in_flight = true;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 22,
+                message: "Target is no longer available".into(),
+                retry_after_secs: Some(60),
+            },
+            &mut connection,
+        );
+        assert!(app.pending_automatic_failover_request_id.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(!app.remote_model_switch_in_flight);
+        assert!(app.rate_limit_reset.is_none());
+        assert!(app.rate_limit_pending_message.is_none());
+        assert_eq!(app.input, "hi");
+    });
+}
+
+#[test]
+fn test_remote_failover_disconnect_does_not_wait_for_lost_confirmation() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _connection) = remote_exact_failover_fixture();
+        app.pending_automatic_failover_request_id = Some(22);
+        app.remote_model_switch_in_flight = true;
+        let mut state = remote::RemoteRunState::default();
+        remote::handle_disconnect(&mut app, &mut state, None);
+        assert!(app.pending_automatic_failover_request_id.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(!app.remote_model_switch_in_flight);
+        assert_eq!(app.input, "hi");
+    });
+}
+
+#[test]
+fn test_remote_failover_confirmation_timeout_restores_prompt_once() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        app.pending_automatic_failover_request_id = Some(22);
+        app.pending_automatic_failover_started = Some(Instant::now() - Duration::from_secs(31));
+        app.remote_model_switch_in_flight = true;
+        rt.block_on(remote::handle_tick(&mut app, &mut connection));
+        assert!(app.pending_automatic_failover_request_id.is_none());
+        assert!(app.pending_automatic_failover_started.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(!app.remote_model_switch_in_flight);
+        assert_eq!(app.input, "hi");
+        let messages = app.display_messages().len();
+        rt.block_on(remote::handle_tick(&mut app, &mut connection));
+        assert_eq!(app.display_messages().len(), messages);
+    });
+}
+
+#[test]
 fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() {
     with_temp_jcode_home(|| {
         write_test_config(
