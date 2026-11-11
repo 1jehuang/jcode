@@ -73,11 +73,7 @@ pub(crate) fn occasional_status_tip(max_width: usize, elapsed_secs: u64) -> Opti
     }
 
     let tip = current_tip(available);
-    Some(format!(
-        "{}{}",
-        prefix,
-        truncate_smart(&tip.text, available)
-    ))
+    Some(format!("{}{}", prefix, clip(&tip.text, available)))
 }
 
 fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {

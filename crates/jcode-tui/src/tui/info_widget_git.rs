@@ -5,7 +5,7 @@
 //! follow-up question instead: *which* files are dirty.
 
 use super::frame::{self, Framed};
-use super::text::truncate_smart;
+use super::text::clip;
 use super::{DirtyFile, GitInfo, InfoWidgetData};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
@@ -279,25 +279,7 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 }
 
 fn truncate_cells(text: &str, width: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if text.width() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut used = 0;
-    let mut out = String::new();
-    for ch in text.chars() {
-        let cells = ch.width().unwrap_or(0);
-        if used + cells > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += cells;
-    }
-    out.push('…');
-    out
+    clip(text, width)
 }
 
 fn repo_rows(state: &super::super::cloud_git::RepoState) -> u16 {
@@ -421,7 +403,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
         '?' => (rgb(120, 120, 135), rgb(130, 130, 145)),
         _ => (rgb(240, 200, 80), rgb(170, 170, 180)),
     };
-    // Layout: `M● name…   +84 −12`. Counts are dropped before the name gets
+    // Layout: `M● name   +84 −12`. Counts are dropped before the name gets
     // unreadably short.
     const PREFIX: usize = 3; // letter + agent marker + space
     const MIN_NAME: usize = 8;
@@ -431,7 +413,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
     } else {
         width.saturating_sub(PREFIX)
     };
-    let name = truncate_smart(&changes_display_path(&file.path), name_w);
+    let name = clip(&changes_display_path(&file.path), name_w);
     let name_len = unicode_width::UnicodeWidthStr::width(name.as_str());
 
     let mut spans = vec![
