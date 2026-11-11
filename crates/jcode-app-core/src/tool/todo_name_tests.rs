@@ -327,3 +327,37 @@ async fn named_tool_execution_persists_ids_but_returns_public_names() {
         "Implement"
     );
 }
+
+#[test]
+fn null_filled_strict_schema_edits_behave_like_omitted_fields() {
+    let stored = create(hierarchy(vec![named("Implement"), named("Test")]));
+    let before = stored["todos"].clone();
+    let updated = patch(
+        json!({
+            "accept_large_output": null, "add": null, "goals": null, "phases": null,
+            "plan": null, "remove": null,
+            "update": [{
+                "name": "Implement", "status": "in_progress", "phase": null, "lane": null,
+                "lane_owner": null, "priority": null, "description": null,
+                "confidence": null, "completion_confidence": null, "rename_to": null
+            }]
+        }),
+        &stored,
+    )["todos"]
+        .clone();
+    assert_eq!(updated[0]["status"], "in_progress");
+    for key in ["id", "content", "stage", "group", "priority"] {
+        assert_eq!(updated[0][key], before[0][key], "{key} changed");
+    }
+    let added = patch(
+        json!({"add": [{
+            "name": "Ship", "status": "pending", "priority": "high",
+            "confidence": "plausible", "after": "Test", "phase": null, "lane": null,
+            "lane_owner": null, "description": null
+        }]}),
+        &stored,
+    )["todos"]
+        .clone();
+    assert_eq!(added[2]["stage"], before[1]["stage"]);
+    assert_eq!(added[2]["group"], before[1]["group"]);
+}

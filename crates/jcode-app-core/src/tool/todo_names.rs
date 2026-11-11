@@ -2,6 +2,15 @@
 use super::*;
 
 /// Keep the existing leniency for providers that stringify tool arguments.
+/// Item fields where an explicit null is a documented "clear" instruction.
+const NULL_CLEARS: &[&str] = &[
+    "completely_blocked",
+    "external_blocker",
+    "lane_dependencies",
+    "lane_after",
+    "waiting_on",
+];
+
 pub(super) fn normalize_containers(input: &mut Value) {
     *input = normalize_todo_input(std::mem::take(input));
     for key in ["update", "add", "remove"] {
@@ -26,6 +35,13 @@ pub(super) fn normalize_containers(input: &mut Value) {
                     && let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw.trim())
                 {
                     *item = parsed;
+                }
+                // Strict-schema providers send every optional field as null.
+                // Null means "omitted" except where it documents a clear.
+                if let Some(fields) = item.as_object_mut() {
+                    fields.retain(|key, value| {
+                        !value.is_null() || NULL_CLEARS.contains(&key.as_str())
+                    });
                 }
             }
         }
