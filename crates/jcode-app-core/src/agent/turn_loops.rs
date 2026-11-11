@@ -303,6 +303,10 @@ impl Agent {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
+                        // This branch can return early, so finish any partial
+                        // reasoning line now. A stdout failure here must not
+                        // replace the stream error the caller needs to see.
+                        let _ = reasoning_line.close_stdout();
                         let err_str = e.to_string();
                         self.record_failed_account_route(&err_str);
                         usage_recorder.finish();
@@ -790,7 +794,7 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
-                        reasoning_line.close_stdout()?;
+                        let _ = reasoning_line.close_stdout();
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
