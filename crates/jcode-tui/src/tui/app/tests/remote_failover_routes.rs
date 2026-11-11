@@ -404,6 +404,75 @@ fn test_remote_failover_ignores_confirmation_before_request_is_sent() {
 }
 
 #[test]
+fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        let payload = app.pending_fallback_resend.take().unwrap();
+        app.pending_automatic_failover_route = None;
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: payload.content,
+            images: payload.images,
+            is_system: payload.is_system,
+            system_reminder: payload.system_reminder,
+            auto_retry: true,
+            retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+            retry_at: None,
+        });
+        let prompt = jcode_provider_core::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic".into(),
+            to_provider: "openai".into(),
+            to_label: "OpenAI fox".into(),
+            target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+            reason: "OAuth usage exhausted".into(),
+            estimated_input_chars: 0,
+            estimated_input_tokens: 0,
+        };
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 23,
+                message: prompt.to_error_message(),
+                retry_after_secs: None,
+            },
+            &mut connection,
+        );
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_automatic_failover_request_id.is_none());
+        assert!(app.rate_limit_pending_message.is_none());
+        assert_eq!(app.input, "hi");
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("Stopped automatic failover"))
+        );
+    });
+}
+
+#[test]
+fn test_remote_manual_fallback_waits_for_request_dispatch() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        connection.mark_history_loaded();
+        assert!(app.apply_pending_fallback_offer());
+        assert!(app.pending_route_selection.is_some());
+        assert_eq!(
+            app.session.route_api_method.as_deref(),
+            Some("claude-oauth@claude-otter")
+        );
+        rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+        assert!(!app.is_processing);
+        assert!(app.pending_fallback_resend.is_some());
+    });
+}
+
+#[test]
 fn test_remote_failover_resends_only_after_exact_confirmation() {
     with_temp_jcode_home(|| {
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
@@ -458,6 +527,13 @@ fn test_remote_failover_resends_only_after_exact_confirmation() {
             assert!(!app.remote_model_switch_in_flight);
             if mismatch == "none" {
                 assert!(app.is_processing);
+                assert_eq!(
+                    app.rate_limit_pending_message
+                        .as_ref()
+                        .unwrap()
+                        .retry_attempts,
+                    1
+                );
                 assert_eq!(
                     app.rate_limit_pending_message.as_ref().unwrap().content,
                     "hi"
@@ -1064,6 +1140,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.is_remote = true;
     app.pending_fallback_resend = Some(crate::tui::app::FallbackResendPayload {
+        retry_attempts: 0,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,

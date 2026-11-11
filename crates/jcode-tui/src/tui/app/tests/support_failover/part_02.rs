@@ -70,6 +70,7 @@ fn test_local_failover_revalidates_pool_after_countdown() {
 
 fn failover_test_payload(raw_input: Option<&str>) -> FallbackResendPayload {
     FallbackResendPayload {
+        retry_attempts: 0,
         content: "expanded failed request".into(),
         raw_input: raw_input.map(str::to_string),
         images: Vec::new(),
@@ -83,9 +84,13 @@ fn failover_test_payload(raw_input: Option<&str>) -> FallbackResendPayload {
 fn test_restore_failover_payload_keeps_existing_draft_and_raw_request() {
     let mut app = create_test_app();
     app.input = "next request".into();
+    app.cursor_pos = 3;
     app.restore_failover_payload(failover_test_payload(Some("original @file request")));
-    assert_eq!(app.input, "next request\n\noriginal @file request");
-    assert_eq!(app.cursor_pos, app.input.len());
+    assert_eq!(app.input, "next request");
+    assert_eq!(app.cursor_pos, 3);
+    let recovery = &app.display_messages.last().unwrap().content;
+    assert!(recovery.contains("Your draft is unchanged"));
+    assert!(recovery.contains("original @file request"));
 }
 
 #[test]
@@ -94,6 +99,22 @@ fn test_restore_failover_payload_does_not_duplicate_matching_input() {
     app.input = "original request".into();
     app.restore_failover_payload(failover_test_payload(Some("original request")));
     assert_eq!(app.input, "original request");
+}
+
+#[test]
+fn test_cancel_dispatched_failover_restores_payload_and_clears_inflight_state() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.pending_automatic_failover_request_id = Some(42);
+    app.pending_automatic_failover_started = Some(Instant::now());
+    app.remote_model_switch_in_flight = true;
+    app.pending_fallback_resend = Some(failover_test_payload(Some("held request")));
+    app.cancel_pending_provider_failover("Provider auto-switch canceled");
+    assert!(app.pending_automatic_failover_request_id.is_none());
+    assert!(app.pending_automatic_failover_started.is_none());
+    assert!(!app.remote_model_switch_in_flight);
+    assert!(app.pending_fallback_resend.is_none());
+    assert_eq!(app.input, "held request");
 }
 
 #[test]
@@ -157,6 +178,8 @@ fn assert_manual_failover_restores_remote_payload(mode: &str) {
         is_system: false,
         auto_retry: false,
         system_reminder: None,
+        retry_at: None,
+        retry_attempts: 0,
     });
     app.last_submitted_input = Some("original request".into());
     app.handle_turn_error(failover_error_message(&prompt));

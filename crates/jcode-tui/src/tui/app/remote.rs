@@ -286,7 +286,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return true;
     }
 
-    if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+    if app.pending_fallback_resend.is_some()
+        && (app.remote_model_switch_in_flight || app.pending_route_selection.is_some())
+    {
         return needs_redraw;
     }
 
@@ -617,14 +619,24 @@ async fn apply_terminal_event<B: Backend>(
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
-                    match remote.set_route_selection(selection).await {
-                        Ok(_) => {
+                    match remote.set_route_selection(selection.clone()).await {
+                        Ok(id) => {
+                            // Manual fallback offers use unrestricted SetRoute,
+                            // but need the same exact acknowledgement fence as
+                            // automatic failover before releasing their resend.
+                            if app.pending_fallback_resend.is_some() {
+                                app.pending_automatic_failover_route = Some(selection);
+                                app.pending_automatic_failover_request_id = Some(id);
+                                app.pending_automatic_failover_started = Some(Instant::now());
+                            }
                             app.remote_model_switch_in_flight = true;
                             forward_pending_reasoning_effort(app, remote).await;
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            app.pending_fallback_resend = None;
+                            if let Some(payload) = app.pending_fallback_resend.take() {
+                                app.restore_failover_payload(payload);
+                            }
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
                                 error
@@ -1138,10 +1150,10 @@ fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
         app.restore_failover_payload(payload);
     }
     app.push_display_message(DisplayMessage::error(format!(
-        "Auto-switch stopped: {}",
+        "Fallback switch stopped: {}",
         App::compact_provider_failure(reason)
     )));
-    app.set_status_notice("Auto-switch stopped; resend manually");
+    app.set_status_notice("Fallback switch stopped; resend manually");
 }
 
 pub(super) fn handle_disconnect(
@@ -1455,6 +1467,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     if app.pending_provider_failover.is_some()
         || app.pending_automatic_failover_route.is_some()
         || app.pending_automatic_failover_request_id.is_some()
+        || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some())
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {
         return;
@@ -1524,7 +1537,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             payload.is_system,
             payload.system_reminder,
             payload.auto_retry,
-            0,
+            payload.retry_attempts.saturating_add(1),
         )
         .await
         {

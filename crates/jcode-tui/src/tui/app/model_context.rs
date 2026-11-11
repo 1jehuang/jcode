@@ -164,12 +164,11 @@ impl App {
             self.input = restored;
             self.cursor_pos = self.input.len();
         } else if !restored.is_empty() && self.input != restored {
-            // The user may already be drafting their next request. Keep both
-            // texts visible for editing rather than silently losing the held
-            // request when its route switch is canceled or fails.
-            self.input.push_str("\n\n");
-            self.input.push_str(&restored);
-            self.cursor_pos = self.input.len();
+            // Do not turn a partially typed command or prompt into a different
+            // request. Keep the held request recoverable in the transcript.
+            self.push_display_message(DisplayMessage::system(format!(
+                "Failover request was not resent. Your draft is unchanged. Recover the previous request from here:\n\n{restored}"
+            )));
         }
         for image in payload.images {
             if !self.pending_images.contains(&image) {
@@ -179,10 +178,16 @@ impl App {
     }
 
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {
-        if self.pending_automatic_failover_route.take().is_some()
-            && let Some(payload) = self.pending_fallback_resend.take()
-        {
-            self.restore_failover_payload(payload);
+        let notice = notice.into();
+        let staged = self.pending_automatic_failover_route.take().is_some();
+        let awaiting_ack = self.pending_automatic_failover_request_id.take().is_some();
+        self.pending_automatic_failover_started = None;
+        if staged || awaiting_ack {
+            self.remote_model_switch_in_flight = false;
+            if let Some(payload) = self.pending_fallback_resend.take() {
+                self.restore_failover_payload(payload);
+            }
+            self.set_status_notice(notice.clone());
         }
         let Some(pending) = self.pending_provider_failover.take() else {
             return;
@@ -358,6 +363,7 @@ impl App {
             self.rate_limit_pending_message
                 .as_ref()
                 .map(|pending| super::FallbackResendPayload {
+                    retry_attempts: pending.retry_attempts,
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,
@@ -389,6 +395,21 @@ impl App {
         );
 
         let config = crate::config::Config::load().provider;
+        if remote_resend
+            .as_ref()
+            .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
+            && config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
+        {
+            if let Some(payload) = remote_resend {
+                self.restore_failover_payload(payload);
+            }
+            self.push_display_message(DisplayMessage::system(format!(
+                "Stopped automatic failover after {} retries. Use /model to choose a working account and resend manually.",
+                Self::AUTO_RETRY_MAX_ATTEMPTS
+            )));
+            self.set_status_notice("Paused: automatic failover retry limit reached");
+            return;
+        }
         match config.cross_provider_failover {
             crate::config::CrossProviderFailoverMode::Manual => {
                 if let Some(payload) = remote_resend {
@@ -576,6 +597,7 @@ impl App {
             self.rate_limit_pending_message
                 .as_ref()
                 .map(|pending| super::FallbackResendPayload {
+                    retry_attempts: pending.retry_attempts,
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,
@@ -837,6 +859,7 @@ impl App {
             self.rate_limit_pending_message
                 .as_ref()
                 .map(|pending| super::FallbackResendPayload {
+                    retry_attempts: pending.retry_attempts,
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,
@@ -893,12 +916,14 @@ impl App {
         if self.is_remote {
             self.upstream_provider = None;
             self.status_detail = None;
-            // Track the method we are switching to so subsequent fallback picks
-            // know the active credential path (remote sessions have no other
-            // client-side route bookkeeping).
-            self.session.route_api_method = Some(offer.selection.api_method.clone());
+            // Route metadata changes only after the server confirms the
+            // selection. A rejected switch must leave the active route intact.
             self.pending_route_selection = Some(offer.selection);
-            self.pending_fallback_resend = offer.remote_resend;
+            self.pending_fallback_resend = offer.remote_resend.map(|mut payload| {
+                // An explicit user action starts a fresh retry budget.
+                payload.retry_attempts = 0;
+                payload
+            });
             self.push_display_message(DisplayMessage::system(format!(
                 "↪ Switching to {} and resending (was {}).",
                 offer.target_label, offer.from_label,
