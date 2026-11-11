@@ -501,6 +501,10 @@ impl Agent {
             kind,
             pin,
         )?;
+        self.provider_runtime_state
+            .apply(crate::provider::ProviderStateEvent::UserSelectedModel {
+                model: self.provider.model(),
+            });
         self.record_observed_account_pins();
         self.sync_bound_account_route();
         self.log_env_snapshot("set_account_pin");
