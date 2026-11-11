@@ -22,14 +22,3 @@ receive pending forms followed by an explicit replay boundary. Drafts survive
 transport loss, and an unacknowledged submission can be reviewed and resent.
 Session changes and resolved forms clear stale input state.
 
-Focused automated coverage lives in:
-
-- `jcode-protocol`: `elicitation` schema and wire tests.
-- `jcode-app-core`: `elicitation` broker, tool, and registration tests.
-- `jcode-tui`: `tui::ask_form::tests` and
-  `tui::app::remote::server_events::ask_form_tests` for form input, rendering,
-  generated-form round trips, response routing and reconnects.
-
-For runtime acceptance, use a separately built binary and private daemon socket
-so the shared daemon does not silently run an older build. Automated tests do
-not replace checking terminal input encoding and a live provider session.
