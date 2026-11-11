@@ -256,6 +256,22 @@ impl App {
         format!("↪ Switching to {to_label} in 3s. Esc to cancel.")
     }
 
+    fn failover_switching_message(to_label: &str) -> String {
+        format!("↪ Switching to {to_label} and retrying.")
+    }
+
+    /// The in-flight switch line is superseded by the confirmed
+    /// "Switched to model" notice, which names the model and account.
+    pub(super) fn remove_failover_switching_message(&mut self) {
+        if let Some(idx) = self.display_messages.iter().rposition(|message| {
+            message.role == "system"
+                && message.content.starts_with("↪ Switching to ")
+                && message.content.ends_with(" and retrying.")
+        }) {
+            self.remove_display_message(idx);
+        }
+    }
+
     /// The countdown line is only meaningful while the countdown runs. Once the
     /// switch happens (or is canceled), drop it so the transcript keeps just the
     /// outcome rather than how long we waited.
@@ -389,10 +405,20 @@ impl App {
         self.pending_automatic_failover_route = None;
         self.clear_pending_fallback_offer();
         let reason = Self::compact_provider_failure(&prompt.reason);
-        let manual_message = format!(
-            "{} unavailable: {}\nUse /model to switch to {} and resend.",
-            prompt.from_label, reason, prompt.to_label,
-        );
+        // The caller often printed the provider error just above. Do not
+        // repeat the same cause on the next line.
+        let cause_already_shown = self
+            .display_messages
+            .last()
+            .is_some_and(|message| message.role == "error" && message.content.contains(&reason));
+        let manual_message = if cause_already_shown {
+            format!("Use /model to switch to {} and resend.", prompt.to_label)
+        } else {
+            format!(
+                "{} unavailable: {}\nUse /model to switch to {} and resend.",
+                prompt.from_label, reason, prompt.to_label,
+            )
+        };
 
         let config = crate::config::Config::load().provider;
         if remote_resend
@@ -451,10 +477,9 @@ impl App {
                     // and remote route acknowledgement before resending the payload.
                     self.maybe_progress_provider_failover_countdown();
                     if self.pending_automatic_failover_route.is_some() {
-                        self.push_display_message(DisplayMessage::system(format!(
-                            "↪ Switching to {}. Retrying after route confirmation.",
-                            prompt.to_label
-                        )));
+                        self.push_display_message(DisplayMessage::system(
+                            Self::failover_switching_message(&prompt.to_label),
+                        ));
                     }
                     return;
                 }

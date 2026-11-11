@@ -2746,6 +2746,7 @@ fn handle_server_event_inner(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                let automatic_failover = automatic_route.is_some();
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
@@ -2806,9 +2807,17 @@ fn handle_server_event_inner(
                             .filter(|_| is_oauth)
                             .map(|email| email.as_str()),
                     );
+                    // One line for an automatic failover: the confirmed route
+                    // replaces the in-flight "Switching to" line.
+                    let retrying = if automatic_failover {
+                        app.remove_failover_switching_message();
+                        ". Retrying."
+                    } else {
+                        ""
+                    };
                     app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}",
-                        model, suffix
+                        "✓ Switched to model: {}{}{}",
+                        model, suffix, retrying
                     )));
                 }
                 if model_actually_changed {
