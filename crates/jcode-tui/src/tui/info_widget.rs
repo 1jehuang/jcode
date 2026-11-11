@@ -2276,7 +2276,7 @@ fn render_sections(data: &InfoWidgetData, inner: Rect, now: i64) -> Vec<Line<'st
         let compaction_line = Line::from(vec![
             Span::styled("🗜  ", Style::default().fg(color)),
             Span::styled(
-                truncate_smart(&detail, inner.width.saturating_sub(2) as usize),
+                clip(&detail, inner.width.saturating_sub(2) as usize),
                 Style::default().fg(rgb(180, 180, 190)),
             ),
         ]);
@@ -2326,7 +2326,7 @@ fn render_todos_summary_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'stat
     vec![Line::from(vec![
         Span::styled("☑ ", Style::default().fg(rgb(120, 220, 160))),
         Span::styled(
-            truncate_smart(&text, width.saturating_sub(2) as usize),
+            clip(&text, width.saturating_sub(2) as usize),
             Style::default().fg(rgb(180, 180, 190)),
         ),
     ])]
@@ -2356,7 +2356,7 @@ fn render_swarm_summary_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'stat
     vec![Line::from(vec![
         Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
         Span::styled(
-            truncate_smart(&text, width.saturating_sub(2) as usize),
+            clip(&text, width.saturating_sub(2) as usize),
             Style::default().fg(rgb(180, 180, 190)),
         ),
     ])]
@@ -2388,7 +2388,7 @@ fn render_memory_counts_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'stat
     vec![Line::from(vec![
         Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
         Span::styled(
-            truncate_smart(&text, width.saturating_sub(2) as usize),
+            clip(&text, width.saturating_sub(2) as usize),
             Style::default().fg(rgb(180, 180, 190)),
         ),
     ])]
