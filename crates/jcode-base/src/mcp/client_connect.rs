@@ -1,5 +1,9 @@
 impl McpClient {
     #[cfg(all(windows, feature = "test-support"))]
+    pub fn test_set_drain_observer(observer: Option<fn(usize)>) {
+        super::windows_native_process::test_set_drain_observer(observer);
+    }
+    #[cfg(all(windows, feature = "test-support"))]
     pub fn test_set_native_observer(observer: Option<NativeObserver>) {
         *NATIVE_OBSERVER
             .lock()

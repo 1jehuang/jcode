@@ -24,13 +24,27 @@ include!("pool_state.rs");
 include!("pool_handle_lease.rs");
 
 impl SharedMcpPool {
+    #[cfg(all(windows, feature = "test-support"))]
+    pub fn test_wait_points(&self) -> [usize; 4] {
+        self.test_wait_points
+            .each_ref()
+            .map(|counter| counter.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[cfg(all(windows, feature = "test-support"))]
+    pub async fn test_with_owned_job(&self, name: &str, check: impl FnOnce(usize)) {
+        let owner = self.clients.lock().await.get(name).cloned().unwrap();
+        let client = owner.lock().await;
+        check(client.test_owned_job_handle().expect("native owned job"));
+    }
+
     #[cfg(test)]
     pub(super) fn test_pending_drop_releases(&self) -> usize {
         self.released_references.lock().unwrap().len()
     }
 
-    #[cfg(test)]
-    pub(super) async fn test_lock_ref_counts(
+    #[cfg(any(test, all(windows, feature = "test-support")))]
+    pub async fn test_lock_ref_counts(
         &self,
     ) -> tokio::sync::MutexGuard<'_, HashMap<String, usize>> {
         self.ref_counts.lock().await
@@ -64,6 +78,8 @@ impl SharedMcpPool {
 
     fn new_for_dir(config: McpConfig, config_dir: Option<std::path::PathBuf>) -> Self {
         Self {
+            #[cfg(all(windows, feature = "test-support"))]
+            test_wait_points: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)),
             admission: RwLock::new(()),
             cleanup_pending: std::sync::atomic::AtomicBool::new(false),
             clients: Mutex::new(HashMap::new()),

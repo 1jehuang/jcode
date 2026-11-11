@@ -27,6 +27,8 @@ enum DeferredReferenceRelease {
 /// Only one pool exists per jcode daemon. It owns the child processes
 /// and hands out cheap `McpHandle` clones to sessions.
 pub struct SharedMcpPool {
+    #[cfg(all(windows, feature = "test-support"))]
+    test_wait_points: [std::sync::atomic::AtomicUsize; 4],
     admission: RwLock<()>,
     cleanup_pending: std::sync::atomic::AtomicBool,
     clients: Mutex<HashMap<String, Arc<Mutex<McpClient>>>>,

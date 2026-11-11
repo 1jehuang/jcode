@@ -63,6 +63,8 @@ impl SharedMcpPool {
             .map(|(name, handle)| (name.clone(), handle.clone()))
             .collect();
 
+        #[cfg(all(windows, feature = "test-support"))]
+        self.test_wait_points[3].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut refs = self.ref_counts.lock().await;
         self.record_references(
             PoolReferenceOwner::Session(session_id.to_string()),
@@ -97,6 +99,8 @@ impl SharedMcpPool {
     }
 
     async fn release_reference_handles(&self, owner: PoolReferenceOwner, server_names: &[String]) {
+        #[cfg(all(windows, feature = "test-support"))]
+        self.test_wait_points[0].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut refs = self.ref_counts.lock().await;
         self.flush_released_references(&mut refs);
         let mut sessions = self.session_refs.lock().unwrap_or_else(|e| e.into_inner());

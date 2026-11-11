@@ -209,6 +209,8 @@ impl SharedMcpPool {
     ) -> Result<()> {
         let mut clients = self.clients.lock().await;
         let mut handles = self.handles.write().await;
+        #[cfg(all(windows, feature = "test-support"))]
+        self.test_wait_points[1].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut refs = self.ref_counts.lock().await;
         let mut errors = self.last_errors.write().await;
         self.flush_released_references(&mut refs);
@@ -258,6 +260,8 @@ impl SharedMcpPool {
     }
 
     async fn recent_failure(&self, name: &str) -> Option<FailedConnectRecord> {
+        #[cfg(all(windows, feature = "test-support"))]
+        self.test_wait_points[2].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self
             .handles
             .read()

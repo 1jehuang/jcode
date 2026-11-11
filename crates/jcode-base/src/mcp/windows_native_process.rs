@@ -8,6 +8,16 @@ use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessId, WaitForSingleObject,
 };
 
+#[cfg(feature = "test-support")]
+static DRAIN_OBSERVER: std::sync::Mutex<Option<fn(usize)>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "test-support")]
+pub(super) fn test_set_drain_observer(observer: Option<fn(usize)>) {
+    *DRAIN_OBSERVER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = observer;
+}
+
 #[repr(C)]
 #[derive(Default)]
 struct JobAccounting {
@@ -99,6 +109,15 @@ impl NativeProcess {
         tokio::time::timeout(bound, async {
             loop {
                 if Self::active_job_processes(job)? == 0 {
+                    #[cfg(feature = "test-support")]
+                    {
+                        let observer = *DRAIN_OBSERVER
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if let Some(observer) = observer {
+                            observer(job.as_raw_handle() as usize);
+                        }
+                    }
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
