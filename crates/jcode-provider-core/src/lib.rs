@@ -288,6 +288,17 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// Capture the owned catalog at a single provider boundary. Providers with
+    /// shared catalog storage can override this to reuse one memo lookup.
+    fn model_catalog_snapshot(&self) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            self.available_models_display(),
+            self.model_routes(),
+        )
+    }
+
     /// Prefetch any dynamic model lists (default: no-op).
     async fn prefetch_models(&self) -> Result<()> {
         Ok(())
@@ -1455,15 +1466,7 @@ impl ModelCatalogSnapshot {
     }
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
-        // Note: on multi-providers both calls below build the same route
-        // catalog; MultiProvider memoizes it (short TTL) so this stays one
-        // build instead of two.
-        Self::new(
-            Some(provider.display_name()),
-            Some(provider.model()),
-            provider.available_models_display(),
-            provider.model_routes(),
-        )
+        provider.model_catalog_snapshot()
     }
 
     pub fn has_routes(&self) -> bool {
@@ -1651,3 +1654,6 @@ mod saved_account_route_tests;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod catalog_snapshot_tests;

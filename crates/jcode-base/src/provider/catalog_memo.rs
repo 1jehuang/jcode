@@ -4,7 +4,8 @@ use super::*;
 /// time (short TTL), the auth generation at build time (bumped by
 /// `AuthStatus::invalidate_cache()` on login/logout/credential edits), and the
 /// catalog generation (bumped by prefetch/refresh completions).
-#[derive(Clone)]
+// Deep cloning is only retained for the benchmark's pre-Arc baseline.
+#[cfg_attr(test, derive(Clone))]
 pub(super) struct RoutesMemoEntry {
     pub(super) built_at: std::time::Instant,
     pub(super) scope_key: String,
@@ -27,7 +28,7 @@ pub(super) struct RoutesMemoEntry {
 /// build. Instance-specific inputs (active provider/model/profile) are folded
 /// into the memo key; anything not captured is bounded by the short TTL and
 /// the auth/catalog generations.
-static GLOBAL_ROUTES_MEMO: LazyLock<Mutex<HashMap<String, RoutesMemoEntry>>> =
+static GLOBAL_ROUTES_MEMO: LazyLock<Mutex<HashMap<String, Arc<RoutesMemoEntry>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Single-flight guard for catalog builds. During a client connect burst every
@@ -175,14 +176,14 @@ impl MultiProvider {
         )
     }
 
-    /// Return a fresh memoized catalog entry (routes + listable model names),
+    /// Return a fresh, immutable shared catalog entry (routes + model names),
     /// building it at most once per TTL window per catalog-relevant state.
     ///
     /// Freshness is keyed on a short TTL plus the auth and catalog
     /// generations. Lookup order: this instance's memo, the process-wide
     /// shared memo (so shared-server forks reuse one build), then a
     /// single-flight build that followers wait on instead of duplicating.
-    pub(super) fn fresh_routes_memo_entry(&self) -> RoutesMemoEntry {
+    pub(super) fn fresh_routes_memo_entry(&self) -> Arc<RoutesMemoEntry> {
         // Backstop only: invalidation is event-driven via auth/catalog
         // generations, so a completed refresh shows up on the next render.
         const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -211,7 +212,7 @@ impl MultiProvider {
 
             // Shared path: another instance with the same catalog-relevant state
             // (typically a fresh fork on the shared server) built one already.
-            let try_shared = || -> Option<RoutesMemoEntry> {
+            let try_shared = || -> Option<Arc<RoutesMemoEntry>> {
                 let shared = match GLOBAL_ROUTES_MEMO.lock() {
                     Ok(shared) => shared,
                     Err(error) => {
@@ -259,14 +260,14 @@ impl MultiProvider {
             {
                 continue;
             }
-            let entry = RoutesMemoEntry {
+            let entry = Arc::new(RoutesMemoEntry {
                 built_at: std::time::Instant::now(),
                 scope_key: shared_key.clone(),
                 auth_generation,
                 catalog_generation: catalog_gen,
                 listable_models: listable_model_names_from_routes(&routes),
                 routes,
-            };
+            });
             if let Ok(mut memo) = self.routes_memo.lock() {
                 *memo = Some(entry.clone());
             }
@@ -285,13 +286,13 @@ impl MultiProvider {
         // Continuous refresh churn must not starve clients or publish a stale
         // shared entry. Return a private best-effort catalog instead.
         let routes = catalog_routes::multiprovider_model_routes(self);
-        RoutesMemoEntry {
+        Arc::new(RoutesMemoEntry {
             built_at: std::time::Instant::now(),
             scope_key: self.routes_memo_key(),
             auth_generation: pricing::auth_pricing_generation(),
             catalog_generation: catalog_generation(),
             listable_models: listable_model_names_from_routes(&routes),
             routes,
-        }
+        })
     }
 }

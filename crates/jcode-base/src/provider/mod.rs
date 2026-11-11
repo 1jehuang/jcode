@@ -438,7 +438,7 @@ pub struct MultiProvider {
     /// explicitly so pickers never see stale routes after a switch.
     /// Unique configuration lineage, preserved only by equivalent forks.
     catalog_scope: u64,
-    routes_memo: Mutex<Option<RoutesMemoEntry>>,
+    routes_memo: Mutex<Option<Arc<RoutesMemoEntry>>>,
     /// Number of model-catalog prefetches launched by the latest auth refresh.
     /// Shared by forks so the server can wait for real work rather than sleeping
     /// through a fixed quiet period after login.
@@ -983,7 +983,7 @@ impl MultiProvider {
 
         let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
         let mut fallback: Option<String> = None;
-        for route in self.fresh_routes_memo_entry().routes {
+        for route in &self.fresh_routes_memo_entry().routes {
             if !route.available || route.model != model {
                 continue;
             }
@@ -2395,7 +2395,7 @@ impl Provider for MultiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        self.fresh_routes_memo_entry().listable_models
+        self.fresh_routes_memo_entry().listable_models.clone()
     }
 
     fn available_providers_for_model(&self, model: &str) -> Vec<String> {
@@ -2431,8 +2431,18 @@ impl Provider for MultiProvider {
         None
     }
 
+    fn model_catalog_snapshot(&self) -> jcode_provider_core::ModelCatalogSnapshot {
+        let entry = self.fresh_routes_memo_entry();
+        jcode_provider_core::ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            entry.listable_models.clone(),
+            entry.routes.clone(),
+        )
+    }
+
     fn model_routes(&self) -> Vec<ModelRoute> {
-        self.fresh_routes_memo_entry().routes
+        self.fresh_routes_memo_entry().routes.clone()
     }
 
     fn model_capabilities_need_refresh(&self) -> bool {
