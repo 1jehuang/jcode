@@ -956,8 +956,8 @@ impl EventStream {
                 Poll::Ready(Some(Ok(event))) => {
                     let now = Instant::now();
                     state.note_focus(&event);
-                    push_raw_event(&mut state, event, now);
-                    if let Some(event) = take_event(&mut state) {
+                    push_raw_event(state, event, now);
+                    if let Some(event) = take_event(state) {
                         return Poll::Ready(Some(Ok(event)));
                     }
                 }

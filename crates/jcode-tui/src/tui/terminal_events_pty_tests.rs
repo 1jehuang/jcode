@@ -59,6 +59,55 @@ fn pty_child() {
 }
 
 #[test]
+fn pty_csi_guard_child() {
+    if std::env::var_os("JCODE_TEST_CSI_GUARD_PTY").is_none() {
+        return;
+    }
+    crossterm::terminal::enable_raw_mode().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        crate::tui::KITTY_KEYBOARD_PUSH_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut events = EventStream::new();
+        let x = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // No theme queries here (JCODE_THEME=dark): no synthetic Resize,
+        // and a fresh PTY sends no SIGWINCH. The first event the child can
+        // see is the `x` written after each swallowed split report.
+        println!("JCODE_GUARD_STEP1");
+        // A split release report (`ESC` in one write, `[98;1:3u` in the
+        // next) must be swallowed whole: the next visible input is `x`.
+        assert_eq!(next_event(&mut events).await, x);
+        println!("JCODE_GUARD_STEP2");
+        // A split SGR click must reconstruct the click, not leak its bytes.
+        assert_eq!(
+            next_event(&mut events).await,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 34,
+                modifiers: KeyModifiers::NONE,
+            })
+        );
+        assert_eq!(next_event(&mut events).await, x);
+        println!("JCODE_GUARD_STEP3");
+        // A split focus report must arrive as a real focus event.
+        assert_eq!(next_event(&mut events).await, Event::FocusGained);
+        assert_eq!(next_event(&mut events).await, x);
+        println!("JCODE_GUARD_STEP4");
+        // A doubled escape in one write followed by a headless tail: only `x`.
+        assert_eq!(next_event(&mut events).await, x);
+        println!("JCODE_GUARD_STEP5");
+        // A genuine lone Escape replays after the hold expires.
+        assert_eq!(next_event(&mut events).await, escape);
+        assert_eq!(next_event(&mut events).await, x);
+        println!("JCODE_GUARD_ALL_OK");
+    });
+}
+
+#[test]
 fn live_queries_and_fragmented_color_replies_work_through_crossterm() {
     let mut master = -1;
     let mut slave = -1;
@@ -166,4 +215,130 @@ fn live_queries_and_fragmented_color_replies_work_through_crossterm() {
         String::from_utf8_lossy(&output)
     );
     assert!(query_count >= 2, "periodic query was not emitted");
+}
+
+/// Read from the PTY master until `marker` appears, or fail the test.
+fn await_marker(output: &mut Vec<u8>, master: &mut std::fs::File, marker: &str, deadline: Instant) {
+    let marker = marker.as_bytes();
+    while !output.windows(marker.len()).any(|window| window == marker) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}: {}",
+            String::from_utf8_lossy(marker),
+            String::from_utf8_lossy(output)
+        );
+        let mut fd = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: fd describes the live master, the array length is one.
+        if unsafe { libc::poll(&mut fd, 1, 50) } <= 0 || fd.revents & libc::POLLIN == 0 {
+            continue;
+        }
+        let mut bytes = [0; 4096];
+        match master.read(&mut bytes) {
+            Ok(0) => continue,
+            Ok(len) => output.extend_from_slice(&bytes[..len]),
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => continue,
+            Err(error) => panic!("PTY read failed: {error}"),
+        }
+    }
+}
+
+/// Write each chunk as its own write() with the #2140 split pacing.
+fn feed_chunks(master: &mut std::fs::File, chunks: &[&[u8]], gap: Duration) {
+    for chunk in chunks {
+        master.write_all(chunk).unwrap();
+        master.flush().unwrap();
+        std::thread::sleep(gap);
+    }
+}
+
+#[test]
+fn split_csi_reports_never_reach_the_composer_through_crossterm() {
+    let mut master = -1;
+    let mut slave = -1;
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty initializes both descriptors, with no name or termios.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        },
+        0
+    );
+    // SAFETY: these descriptors are newly allocated and exclusively owned.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "tui::terminal_events::pty_tests::pty_csi_guard_child",
+            "--nocapture",
+        ])
+        .env("JCODE_TEST_CSI_GUARD_PTY", "1")
+        .env("JCODE_THEME", "dark")
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    // SAFETY: child-only controlling-terminal setup immediately before exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::login_tty(libc::STDIN_FILENO) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+
+    await_marker(&mut output, &mut master, "JCODE_GUARD_STEP1", deadline);
+    feed_chunks(
+        &mut master,
+        &[b"\x1b", b"[98;1:3u", b"x"],
+        Duration::from_millis(25),
+    );
+    await_marker(&mut output, &mut master, "JCODE_GUARD_STEP2", deadline);
+    feed_chunks(
+        &mut master,
+        &[b"\x1b", b"[<0;13;35M", b"x"],
+        Duration::from_millis(25),
+    );
+    await_marker(&mut output, &mut master, "JCODE_GUARD_STEP3", deadline);
+    feed_chunks(
+        &mut master,
+        &[b"\x1b", b"[I", b"x"],
+        Duration::from_millis(25),
+    );
+    await_marker(&mut output, &mut master, "JCODE_GUARD_STEP4", deadline);
+    feed_chunks(
+        &mut master,
+        &[b"\x1b\x1b", b"[;23M", b"x"],
+        Duration::from_millis(25),
+    );
+    await_marker(&mut output, &mut master, "JCODE_GUARD_STEP5", deadline);
+    feed_chunks(&mut master, &[b"\x1b", b"x"], Duration::from_millis(120));
+    await_marker(&mut output, &mut master, "JCODE_GUARD_ALL_OK", deadline);
+
+    let status = child.wait().unwrap();
+    assert!(
+        status.success(),
+        "guard child failed: {}",
+        String::from_utf8_lossy(&output)
+    );
 }
