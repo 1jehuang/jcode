@@ -337,6 +337,7 @@ struct Inner {
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
+    disconnect_reason: Mutex<Option<Error>>,
     request_timeout: Option<Duration>,
     socket_path: std::path::PathBuf,
     client_name: String,
@@ -522,6 +523,7 @@ impl JcodeClient {
             next_id: AtomicU64::new(1),
             next_sub: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            disconnect_reason: Mutex::new(None),
             request_timeout: options.request_timeout,
             socket_path,
             client_name: options.client_name.clone(),
@@ -639,7 +641,20 @@ impl JcodeClient {
         })
     }
 
+    /// The terminal reader failure, once known. Malformed frames carry
+    /// `ErrorKind::Protocol` so callers can stop retrying corrupt history.
+    /// An ordinary EOF remains reconnectable (`ErrorKind::Disconnected`).
+    pub fn disconnect_reason(&self) -> Option<Error> {
+        self.inner.disconnect_reason.lock().ok()?.clone()
+    }
+
     fn disconnect_error(&self) -> Error {
+        if let Some(mut error) = self.disconnect_reason() {
+            if let Some(process) = &self.inner.ssh_process {
+                error.message = format!("{}; {}", error.message, process.diagnostic());
+            }
+            return error;
+        }
         match &self.inner.ssh_process {
             Some(process) => Error::new(ErrorKind::Disconnected, process.diagnostic()),
             None => closed_error(),
@@ -1706,7 +1721,18 @@ use global_session_workers::discover_global_sessions;
 /// The reader thread: correlates replies, fans stream events out.
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
-        while let Ok(frame) = read_frame::<_, ServerFrame>(&mut reader) {
+        loop {
+            let frame = match read_frame::<_, ServerFrame>(&mut reader) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    // Publish before closing pending requests/subscriptions, so
+                    // awakened callers observe the actual cause, not generic EOF.
+                    if let Ok(mut reason) = inner.disconnect_reason.lock() {
+                        *reason = Some(error.into());
+                    }
+                    break;
+                }
+            };
             // Unknown kinds are skipped silently, per the protocol's
             // forward-compatibility rule.
             if matches!(frame.event, ApiEvent::Unknown) {
