@@ -930,6 +930,7 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
             // previous credential's cached runtime failure.
@@ -1162,6 +1163,7 @@ pub(super) async fn handle_unbound_notify_auth_changed(
         provider_hint,
         auth,
     ));
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
     if let Some(provider_id) = activation.provider_id.as_deref() {
         crate::provider::clear_provider_unavailable_for_account(provider_id);
     }
