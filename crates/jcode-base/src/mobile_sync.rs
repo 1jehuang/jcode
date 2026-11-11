@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Only compile-time labels enter timing records. Never include session IDs,
@@ -224,18 +224,54 @@ fn state_path() -> Result<PathBuf> {
 }
 
 pub fn load_state() -> MobileSyncState {
-    let state = (|| -> Result<MobileSyncState> {
+    (*load_state_snapshot()).clone()
+}
+
+// One path and at most 1 MiB of source text are retained, never metadata-only
+// authorization. Every caller reads the current file before comparing bytes.
+const MAX_CACHED_STATE_BYTES: usize = 1024 * 1024;
+struct ParsedState {
+    path: PathBuf,
+    contents: String,
+    state: Arc<MobileSyncState>,
+}
+static PARSED_STATE: Mutex<Option<ParsedState>> = Mutex::new(None);
+
+fn load_state_snapshot() -> Arc<MobileSyncState> {
+    let state = (|| -> Result<Arc<MobileSyncState>> {
         let path = state_path()?;
         if !path.exists() {
-            return Ok(MobileSyncState::default());
+            return Ok(Arc::new(MobileSyncState::default()));
         }
-        storage::read_json(&path)
+        let contents = std::fs::read_to_string(&path)?;
+        {
+            let cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cached.as_ref()
+                && cached.path == path
+                && cached.contents == contents
+            {
+                return Ok(Arc::clone(&cached.state));
+            }
+        }
+        // Invalid schemas must take the original recovery/logging path. Do not
+        // cache failures or a recovered backup under the invalid primary bytes.
+        let parsed = match serde_json::from_str::<MobileSyncState>(&contents) {
+            Ok(parsed) => Arc::new(parsed),
+            Err(_) => return storage::read_json(&path).map(Arc::new),
+        };
+        let mut cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        *cached = (contents.len() <= MAX_CACHED_STATE_BYTES).then(|| ParsedState {
+            path,
+            contents,
+            state: Arc::clone(&parsed),
+        });
+        Ok(parsed)
     })();
     match state {
         Ok(state) => state,
         Err(error) => {
             crate::logging::warn(&format!("Could not load mobile sync state: {error:#}"));
-            MobileSyncState::default()
+            Arc::new(MobileSyncState::default())
         }
     }
 }
@@ -296,11 +332,11 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
 }
 
 pub fn is_enabled() -> bool {
-    load_state().enabled
+    load_state_snapshot().enabled
 }
 
 fn sync_still_enabled(generation: u64) -> bool {
-    let state = load_state();
+    let state = load_state_snapshot();
     state.enabled && state.generation == generation
 }
 
