@@ -631,46 +631,40 @@ impl StatusSpinnerRenderer {
             return Ok(false);
         }
 
-        {
-            let current_buffer = terminal.current_buffer_mut();
-            if current_buffer.area != previous_frame.area {
-                return Ok(false);
-            }
-            current_buffer.content.clone_from(&previous_frame.content);
-            if let Some((symbol, area)) = status_symbol.zip(status_area)
-                && status_patchable
-            {
-                render_status_spinner_into_buffer_mut(current_buffer, area, symbol);
-            }
+        if terminal.current_buffer_mut().area != previous_frame.area {
+            return Ok(false);
         }
+        let Some((symbol, area)) = status_symbol.zip(status_area) else {
+            return Ok(false);
+        };
+        let mut cell = previous_frame[(area.x, area.y)].clone();
+        cell.set_symbol(symbol)
+            .set_style(status_spinner_patch_style());
 
-        // Keep ratatui's virtual buffers authoritative while preserving the user's cursor position.
-        // The only terminal mutation outside ratatui here is cursor save/restore; cell contents still
-        // go through Terminal::flush so the next full-frame diff remains synchronized. Wrap the
-        // single-cell update in a synchronized update so it applies atomically (see issue #282).
+        // Keep retained buffers synchronized while saving/restoring the cursor.
+        // The synchronized update makes this single-cell patch atomic (#282).
         crossterm::queue!(
             terminal.backend_mut(),
             BeginSynchronizedUpdate,
             SavePosition
         )?;
-        terminal.flush()?;
-        crossterm::queue!(
+        let patch_result = terminal.draw_retained_cell((area.x, area.y).into(), cell.clone());
+        let cleanup_result = crossterm::queue!(
             terminal.backend_mut(),
             RestorePosition,
             EndSynchronizedUpdate
-        )?;
-        if let Some(area) = status_area {
-            self.remember_partial_frame(
-                terminal.current_buffer_mut(),
-                Rect::new(area.x, area.y, 1, 1),
-            );
+        );
+        let patched = patch_result?;
+        cleanup_result?;
+        if patched && let Some(previous) = self.last_frame.as_mut() {
+            previous[(area.x, area.y)] = cell;
         }
-        terminal.swap_buffers();
         terminal.backend_mut().flush()?;
-        // This path `clone_from`s the whole previous frame and patches one cell,
-        // so the animation-only repaint's "everything outside the animated rows
-        // is already seeded" assumption no longer holds. Make it re-seed once.
+        // The working buffer remains reset. A later animation repaint must seed it.
         self.seeded_animation_area = None;
+        if !patched {
+            return Ok(false);
+        }
         crate::tui::ui::note_idle_animation_partial_repaint();
         Ok(true)
     }
@@ -685,6 +679,7 @@ fn render_status_spinner_into_buffer(buffer: &Buffer, area: Rect, symbol: &str) 
         && !symbol.is_empty()
 }
 
+#[cfg(test)]
 fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol: &str) {
     buffer.set_stringn(
         area.x,
@@ -693,11 +688,15 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
-            jcode_tui_style::theme::ai_color(),
-            ratatui::style::Color::Reset,
-        )),
+        status_spinner_patch_style(),
     );
+}
+
+fn status_spinner_patch_style() -> Style {
+    Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
+        jcode_tui_style::theme::ai_color(),
+        ratatui::style::Color::Reset,
+    ))
 }
 
 impl App {

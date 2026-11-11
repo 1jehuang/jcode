@@ -1,3 +1,6 @@
+#[path = "translate_tests/api_routing_tests.rs"]
+mod api_routing;
+
 use super::*;
 
 #[test]
@@ -471,18 +474,6 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
             notification: "finished".into(),
         }
     );
-}
-
-#[test]
-fn create_session_maps_to_subscribe() {
-    let mut state = BridgeState::default();
-    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
-    let Outbound::Legacy(value) = &out[0] else {
-        panic!("expected legacy outbound");
-    };
-    assert_eq!(value["type"], "subscribe");
-    assert!(value["working_dir"].is_string());
-    assert!(value.get("system_prompt").is_none());
 }
 
 #[test]

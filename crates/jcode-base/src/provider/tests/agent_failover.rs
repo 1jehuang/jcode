@@ -5,14 +5,14 @@ fn agent_failover_set_default_model(model: &str) -> anyhow::Result<()> {
 fn agent_failover_catalog(provider: &MultiProvider, routes: Vec<ModelRoute>) {
     // Loading a changed default can advance the catalog's config generation.
     let _ = crate::config::config();
-    *provider.routes_memo.lock().unwrap() = Some(RoutesMemoEntry {
+    *provider.routes_memo.lock().unwrap() = Some(Arc::new(RoutesMemoEntry {
         built_at: std::time::Instant::now(),
         scope_key: provider.routes_memo_key(),
         auth_generation: pricing::auth_pricing_generation(),
         catalog_generation: catalog_generation(),
         listable_models: listable_model_names_from_routes(&routes),
         routes,
-    });
+    }));
 }
 
 fn agent_failover_fixture(models: &[&str]) -> MultiProvider {

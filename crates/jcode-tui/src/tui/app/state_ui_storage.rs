@@ -12,6 +12,17 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
     };
 
     match crate::tui::ui::tools_ui::canonical_tool_name(name) {
+        // Unlike an optional technical summary, the source is the codemode
+        // card's body. Keep it on insertion and subsequent snapshot compaction
+        // so completed calls and restored history render the same preview.
+        "codemode" => obj(vec![(
+            "code",
+            input
+                .get("code")
+                .filter(|value| value.is_string())
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )]),
         "bash" => obj(vec![(
             "command",
             input
@@ -503,6 +514,32 @@ pub(super) fn infer_spawned_session_startup_hints(
 mod tests {
     use super::*;
 
+    #[test]
+    fn codemode_preview_survives_transcript_compaction_and_restore() {
+        let _guard = crate::tui::ui::render_state_test_lock();
+        let code = "const value = 1\n  return value";
+        let mut message = tool_message(
+            "codemode",
+            serde_json::json!({
+                "code": code, "intent": "Inspect project", "accept_large_output": false,
+            }),
+        );
+        compact_display_message_tool_data(&mut message);
+        compact_display_messages_for_storage(std::slice::from_mut(&mut message));
+        let tool = message.tool_data.as_ref().unwrap();
+        assert_eq!(tool.input, serde_json::json!({"code": code}));
+        assert_eq!(tool.intent.as_deref(), Some("Inspect project"));
+        let lines =
+            crate::tui::ui::render_tool_message(&message, 100, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("const value = 1"), "{text}");
+        assert!(text.contains("  return value"), "{text}");
+    }
+
     fn tool_message(name: &str, input: serde_json::Value) -> DisplayMessage {
         DisplayMessage {
             role: "tool".to_string(),
@@ -737,5 +774,49 @@ mod tests {
             summary.contains("open") && summary.contains("example.com"),
             "summary should keep the browser action and url: {summary:?}"
         );
+    }
+}
+
+impl App {
+    pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
+        let restored = payload.raw_input.unwrap_or(payload.content);
+        if self.input.is_empty() {
+            self.input = restored;
+            self.cursor_pos = self.input.len();
+        } else if !restored.is_empty() && self.input != restored {
+            // Do not turn a partially typed command or prompt into a different
+            // request. Keep the held request recoverable in the transcript.
+            self.push_display_message(DisplayMessage::system(format!(
+                "Failover request was not resent. Your draft is unchanged. Recover the previous request from here:\n\n{restored}"
+            )));
+        }
+        for image in payload.images {
+            if !self.pending_images.contains(&image) {
+                self.pending_images.push(image);
+            }
+        }
+        self.ensure_input_image_markers();
+    }
+
+    /// Put the prompt that started the failed turn back into the input box so the
+    /// user does not lose what they typed when a turn errors out (for example a
+    /// "token refresh needed" / auth error). Only restores when the input box is
+    /// empty, so we never clobber text the user has already started typing.
+    pub(super) fn restore_failed_input_to_box(&mut self) {
+        let Some(prompt) = self.last_submitted_input.take() else {
+            return;
+        };
+        if prompt.trim().is_empty() {
+            return;
+        }
+        if !self.input.is_empty() {
+            // User already started a new prompt; do not overwrite it.
+            return;
+        }
+        self.input = prompt;
+        self.cursor_pos = self.input.len();
+        self.reset_tab_completion();
+        self.sync_model_picker_preview_from_input();
+        self.set_status_notice("Prompt restored to input after error");
     }
 }

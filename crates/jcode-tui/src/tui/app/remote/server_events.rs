@@ -1,3 +1,14 @@
+#[path = "server_events/runtime_identity.rs"]
+mod runtime_identity;
+use runtime_identity::{
+    client_release_version, server_release_is_older_than_client,
+    should_defer_history_for_runtime_identity,
+};
+#[cfg(test)]
+use runtime_identity::{
+    parse_release_semver, should_defer_history_for_runtime_identity_with_allow,
+};
+
 use super::super::remote_notifications::recent_swarm_card_matches;
 use super::*;
 
@@ -12,129 +23,6 @@ use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
-
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
-/// Parse a jcode version string into an orderable `(major, minor, patch)`, but
-/// only for *clean release* builds.
-///
-/// Dev/dirty builds share a base semver and cannot be ordered against each other
-/// or against releases (issue #277/#291: a self-dev / branched daemon must never
-/// be force-downgraded just because its version string differs). So we refuse to
-/// classify anything carrying a `-dev` or `dirty` marker as an orderable version
-/// and return `None`, leaving such daemons to the existing `server_has_update`
-/// (mtime-directional) path.
-fn parse_release_semver(version: &str) -> Option<(u32, u32, u32)> {
-    let lower = version.trim().to_ascii_lowercase();
-    if lower.contains("-dev") || lower.contains("dirty") {
-        return None;
-    }
-    // Take the leading token, e.g. "v0.17.0 (d741696f)" -> "0.17.0".
-    let token = lower
-        .split([' ', '(', ')', ','])
-        .next()
-        .unwrap_or(&lower)
-        .trim();
-    let token = token.strip_prefix('v').unwrap_or(token);
-    let mut parts = token.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
-}
-
-/// True when the connected server reports a clean release version strictly older
-/// than this client's own clean release version.
-///
-/// This is the missing client-side staleness signal behind issue #295: a server
-/// old enough to predate the self-reported staleness machinery reports
-/// `server_has_update: None`, so it can never tell us it is stale and the client
-/// happily attaches to it (then a `set_route`-shaped request explodes against the
-/// ancient protocol). We detect that case independently here.
-///
-/// Gated on clean release semvers on BOTH sides, so dev/dirty/self-dev daemons
-/// (which cannot be ordered) are never affected.
-fn server_release_is_older_than_client(server_version: Option<&str>, client_version: &str) -> bool {
-    let Some(server) = server_version.and_then(parse_release_semver) else {
-        return false;
-    };
-    let Some(client) = parse_release_semver(client_version) else {
-        return false;
-    };
-    server < client
-}
-
-/// Decide whether to defer applying remote session state because the server we
-/// attached to is not running the binary we expect.
-///
-/// Precedence:
-/// - The client independently measured the server's release version as strictly
-///   older than its own clean release version -> defer. This wins even over the
-///   server's own `server_has_update: Some(false)` self-report, because a stale
-///   long-lived daemon legitimately reports "no newer binary to reload into"
-///   (its `shared-server` channel still points at its own old build) while the
-///   client can plainly see it is an older release. Trusting the server here is
-///   exactly what left "current client, stale server" stuck (the daemon's reload
-///   decision runs old code that can never drag itself forward). The newer
-///   client is authoritative, so it defers and repairs the channel before
-///   reloading.
-/// - `Some(true)`: the server self-reported a newer binary on disk -> defer.
-/// - `Some(false)`: the server is new enough to self-assess and found nothing
-///   newer to reload into, AND the client could not prove it is older -> trust
-///   it, do not fight it with a forced reload.
-/// - `None`: the server is too old to self-report. Fall back to our own
-///   client-side release-version comparison, which is the only signal that can
-///   catch a pre-self-heal daemon.
-fn should_defer_history_for_runtime_identity_with_allow(
-    server_has_update: Option<bool>,
-    client_detected_stale: bool,
-    allow_mismatch: bool,
-) -> bool {
-    if allow_mismatch {
-        return false;
-    }
-    // A client-proven-older server always wins: never let an old daemon's
-    // (locally correct but globally wrong) "no update" self-report veto the
-    // client's own release-order comparison.
-    if client_detected_stale {
-        return true;
-    }
-    match server_has_update {
-        Some(true) => true,
-        Some(false) => false,
-        None => false,
-    }
-}
-
-/// The client's own version string, used for release-staleness comparison.
-///
-/// Production always reads the compiled-in build metadata. A test-only env
-/// override exists so the end-to-end `handle_server_event` path can be exercised
-/// from a dev/dirty test binary (whose real version would otherwise be
-/// unorderable and short-circuit the comparison).
-fn client_release_version() -> String {
-    if (cfg!(test) || cfg!(debug_assertions))
-        && let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE")
-    {
-        return v.to_string_lossy().into_owned();
-    }
-    jcode_build_meta::version().to_string()
-}
-
-fn should_defer_history_for_runtime_identity(
-    server_has_update: Option<bool>,
-    server_version: Option<&str>,
-) -> bool {
-    let client_detected_stale =
-        server_release_is_older_than_client(server_version, &client_release_version());
-    should_defer_history_for_runtime_identity_with_allow(
-        server_has_update,
-        client_detected_stale,
-        allow_runtime_identity_mismatch(),
-    )
-}
 
 #[cfg(test)]
 #[path = "kv_cache_miss_tests.rs"]
@@ -165,6 +53,14 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Route mutation errors are control responses, not failed conversation
+    // turns. Handle them before the scoped-turn terminal fence.
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.pending_automatic_failover_request_id == Some(*id)
+    {
+        super::fail_pending_automatic_failover(app, message);
+        return true;
+    }
     let (event, identity) = match event {
         ServerEvent::TurnState {
             session_id,
@@ -1368,6 +1264,19 @@ fn handle_server_event_inner(
                 app.set_status_notice("Agent model update failed");
                 return false;
             }
+            // Exhaustion can be reported again while the route switch is staged
+            // or awaiting acknowledgement. It belongs to the failed route, not
+            // a new turn: do not print it again or replace the held payload.
+            if (app.pending_provider_failover.is_some()
+                || app.pending_automatic_failover_route.is_some()
+                || app.pending_automatic_failover_request_id.is_some()
+                || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
+                && (crate::provider::parse_failover_prompt_message(&message).is_some()
+                    || jcode_provider_core::classify_failover_error_message(&message)
+                        .should_mark_provider_unavailable())
+            {
+                return false;
+            }
             app.refresh_openai_usage_after_quota_error(&message);
             let invalid_tool_calls_exhausted =
                 message.starts_with(crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX);
@@ -1513,6 +1422,7 @@ fn handle_server_event_inner(
                     images: pending.images.clone(),
                     is_system: pending.is_system,
                     auto_retry: pending.auto_retry,
+                    retry_attempts: pending.retry_attempts,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: app.last_submitted_input.clone(),
                 }
@@ -1559,7 +1469,10 @@ fn handle_server_event_inner(
                 app.clear_pending_remote_retry();
                 crate::tui::app::commands::disable_auto_poke(app);
                 app.overnight_auto_poke = None;
-                if app.pending_provider_failover.is_none() {
+                if app.pending_provider_failover.is_none()
+                    && app.pending_automatic_failover_route.is_none()
+                    && app.pending_automatic_failover_request_id.is_none()
+                {
                     app.restore_failed_input_to_box();
                 }
                 return false;
@@ -2839,6 +2752,15 @@ fn handle_server_event_inner(
             context_window,
             ..
         } => {
+            // A resume/catalog acknowledgement can arrive before the staged
+            // route request has even been sent. It cannot authorize a resend.
+            if app.pending_automatic_failover_request_id.is_none()
+                && (app.pending_automatic_failover_route.is_some()
+                    || (app.pending_route_selection.is_some()
+                        && app.pending_fallback_resend.is_some()))
+            {
+                return false;
+            }
             if app
                 .pending_automatic_failover_request_id
                 .is_some_and(|expected| expected != id)
@@ -2846,8 +2768,38 @@ fn handle_server_event_inner(
                 return false;
             }
             app.pending_automatic_failover_request_id = None;
+            app.pending_automatic_failover_started = None;
             app.remote_model_switch_in_flight = false;
             let automatic_route = app.pending_automatic_failover_route.take();
+            let error = error.or_else(|| {
+                let selection = automatic_route.as_ref()?;
+                use jcode_provider_core::{ResolvedCredential, RuntimeKey};
+                let expected_credential = match selection.runtime_key {
+                    RuntimeKey::ClaudeOAuth | RuntimeKey::OpenAIOAuth => {
+                        Some(ResolvedCredential::Oauth)
+                    }
+                    RuntimeKey::AnthropicApiKey | RuntimeKey::OpenAIApiKey => {
+                        Some(ResolvedCredential::ApiKey)
+                    }
+                    _ => None,
+                };
+                let expected_provider =
+                    jcode_provider_core::parse_provider_hint(&selection.provider_label);
+                let actual_provider = provider_name
+                    .as_deref()
+                    .and_then(jcode_provider_core::parse_provider_hint);
+                let matches = selection.model == model
+                    && selection.account_label().is_none_or(|label| {
+                        provider_oauth_account_label.as_deref() == Some(label)
+                    })
+                    && expected_credential.is_none_or(|credential| {
+                        resolved_credential == Some(credential)
+                    })
+                    && expected_provider.is_none_or(|provider| actual_provider == Some(provider));
+                (!matches).then(|| {
+                    "The server did not confirm the requested failover model/account. Automatic resend stopped. Use /model to choose a route and resend.".to_string()
+                })
+            });
             if let Some(err) = error {
                 let account_switch_failed = app.pending_account_switch_target.take().is_some();
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {

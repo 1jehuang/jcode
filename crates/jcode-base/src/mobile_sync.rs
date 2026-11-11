@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Only compile-time labels enter timing records. Never include session IDs,
@@ -224,18 +224,54 @@ fn state_path() -> Result<PathBuf> {
 }
 
 pub fn load_state() -> MobileSyncState {
-    let state = (|| -> Result<MobileSyncState> {
+    (*load_state_snapshot()).clone()
+}
+
+// One path and at most 1 MiB of source text are retained, never metadata-only
+// authorization. Every caller reads the current file before comparing bytes.
+const MAX_CACHED_STATE_BYTES: usize = 1024 * 1024;
+struct ParsedState {
+    path: PathBuf,
+    contents: String,
+    state: Arc<MobileSyncState>,
+}
+static PARSED_STATE: Mutex<Option<ParsedState>> = Mutex::new(None);
+
+fn load_state_snapshot() -> Arc<MobileSyncState> {
+    let state = (|| -> Result<Arc<MobileSyncState>> {
         let path = state_path()?;
         if !path.exists() {
-            return Ok(MobileSyncState::default());
+            return Ok(Arc::new(MobileSyncState::default()));
         }
-        storage::read_json(&path)
+        let contents = std::fs::read_to_string(&path)?;
+        {
+            let cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cached.as_ref()
+                && cached.path == path
+                && cached.contents == contents
+            {
+                return Ok(Arc::clone(&cached.state));
+            }
+        }
+        // Invalid schemas must take the original recovery/logging path. Do not
+        // cache failures or a recovered backup under the invalid primary bytes.
+        let parsed = match serde_json::from_str::<MobileSyncState>(&contents) {
+            Ok(parsed) => Arc::new(parsed),
+            Err(_) => return storage::read_json(&path).map(Arc::new),
+        };
+        let mut cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        *cached = (contents.len() <= MAX_CACHED_STATE_BYTES).then(|| ParsedState {
+            path,
+            contents,
+            state: Arc::clone(&parsed),
+        });
+        Ok(parsed)
     })();
     match state {
         Ok(state) => state,
         Err(error) => {
             crate::logging::warn(&format!("Could not load mobile sync state: {error:#}"));
-            MobileSyncState::default()
+            Arc::new(MobileSyncState::default())
         }
     }
 }
@@ -296,11 +332,11 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
 }
 
 pub fn is_enabled() -> bool {
-    load_state().enabled
+    load_state_snapshot().enabled
 }
 
 fn sync_still_enabled(generation: u64) -> bool {
-    let state = load_state();
+    let state = load_state_snapshot();
     state.enabled && state.generation == generation
 }
 
@@ -333,15 +369,60 @@ fn host_name() -> Option<String> {
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max).collect();
-    out.push_str("\n… (truncated)");
-    out
+    let mut out = BoundedText::new(max);
+    out.push(text);
+    out.text
 }
 
-fn tool_summary(name: &str, input: &serde_json::Value) -> String {
+/// Assemble the exact prefix of joined blocks without visiting or copying their
+/// discarded tails. Keep checking block kinds separately for role selection.
+struct BoundedText {
+    text: String,
+    remaining: usize,
+    truncated: bool,
+}
+
+impl BoundedText {
+    fn new(max: usize) -> Self {
+        Self {
+            text: String::new(),
+            remaining: max,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        // Byte length is an inexpensive upper bound on the scalar count. Most
+        // small blocks fit immediately, without a scalar-by-scalar walk.
+        if text.len() <= self.remaining {
+            self.remaining -= text.chars().count();
+            self.text.push_str(text);
+            return;
+        }
+        // Count a bounded byte prefix with str's optimized scalar counter,
+        // then inspect only the few additional scalars needed for Unicode.
+        let mut prefix_end = self.remaining;
+        while !text.is_char_boundary(prefix_end) {
+            prefix_end -= 1;
+        }
+        let prefix_chars = text[..prefix_end].chars().count();
+        let mut chars = text[prefix_end..].char_indices();
+        if let Some((end, _)) = chars.nth(self.remaining - prefix_chars) {
+            self.text.push_str(&text[..prefix_end + end]);
+            self.text.push_str("\n… (truncated)");
+            self.remaining = 0;
+            self.truncated = true;
+        } else {
+            self.remaining -= text.chars().count();
+            self.text.push_str(text);
+        }
+    }
+}
+
+fn append_tool_summary(out: &mut BoundedText, name: &str, input: &serde_json::Value) {
     let detail = input
         .get("intent")
         .or_else(|| input.get("command"))
@@ -349,10 +430,13 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
         .or_else(|| input.get("query"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if detail.is_empty() {
-        format!("🔧 {name}")
-    } else {
-        format!("🔧 {name}: {}", truncate(detail, 200))
+    out.push("🔧 ");
+    out.push(name);
+    if !detail.is_empty() {
+        out.push(": ");
+        if !out.truncated {
+            out.push(&truncate(detail, 200));
+        }
     }
 }
 
@@ -366,27 +450,44 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         .enumerate()
         .skip(start)
         .filter_map(|(seq, message)| {
-            let mut parts: Vec<String> = Vec::new();
+            let mut text = BoundedText::new(MAX_TEXT_CHARS);
+            let mut has_parts = false;
             let mut is_tool_result = false;
             for block in &message.content {
-                match block {
+                // Even after the text limit, later tool results change the role.
+                if matches!(block, ContentBlock::ToolResult { .. }) {
+                    is_tool_result = true;
+                }
+                if text.truncated {
+                    continue;
+                }
+                let part = match block {
                     ContentBlock::Text { text, .. }
-                        if !text.trim().is_empty()
+                        if !text.trim_start().is_empty()
                             && !text.trim_start().starts_with("<system-reminder>") =>
                     {
-                        parts.push(text.clone())
+                        std::borrow::Cow::Borrowed(text.as_str())
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
-                        parts.push(tool_summary(name, input))
+                        if has_parts {
+                            text.push("\n\n");
+                        }
+                        append_tool_summary(&mut text, name, input);
+                        has_parts = true;
+                        continue;
                     }
                     ContentBlock::ToolResult { content, .. } => {
-                        is_tool_result = true;
-                        parts.push(truncate(content, MAX_TOOL_RESULT_CHARS));
+                        std::borrow::Cow::Owned(truncate(content, MAX_TOOL_RESULT_CHARS))
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                if has_parts {
+                    text.push("\n\n");
                 }
+                text.push(&part);
+                has_parts = true;
             }
-            if parts.is_empty() {
+            if !has_parts {
                 return None;
             }
             let role = if is_tool_result {
@@ -402,7 +503,7 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             Some(WireMessage {
                 seq,
                 role,
-                text: truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
+                text: text.text,
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
         })

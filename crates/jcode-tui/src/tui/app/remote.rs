@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+pub(super) use server_event_handlers::handle_disconnect;
+
 use super::{
     App, DisplayMessage, MAX_TURN_HOLD_SECS, PendingReloadReconnectStatus, ProcessingStatus,
     RemoteResumeActivity, SendAction, auth::auth_muse_helpers, ctrl_bracket_fallback_to_esc, input,
@@ -282,10 +284,20 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     let _ = check_debug_command(app, remote).await;
 
+    if app.pending_automatic_failover_request_id.is_some()
+        && app
+            .pending_automatic_failover_started
+            .is_some_and(|started| started.elapsed() >= Duration::from_secs(30))
+    {
+        fail_pending_automatic_failover(app, "Timed out waiting for route confirmation");
+        return true;
+    }
     let had_failover_countdown = app.pending_provider_failover.is_some();
     needs_redraw |= app.maybe_progress_provider_failover_countdown();
-    if had_failover_countdown {
-        if let Some(selection) = app.pending_automatic_failover_route.take() {
+    if had_failover_countdown || app.pending_automatic_failover_route.is_some() {
+        if app.pending_automatic_failover_request_id.is_none()
+            && let Some(selection) = app.pending_automatic_failover_route.take()
+        {
             app.pending_model_switch = None;
             match remote
                 .set_route_selection_for_failover(selection.clone())
@@ -293,6 +305,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             {
                 Ok(id) => {
                     app.pending_automatic_failover_request_id = Some(id);
+                    app.pending_automatic_failover_started = Some(Instant::now());
                     app.pending_automatic_failover_route = Some(selection);
                     app.remote_model_switch_in_flight = true;
                     forward_pending_reasoning_effort(app, remote).await;
@@ -314,7 +327,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return true;
     }
 
-    if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+    if app.pending_fallback_resend.is_some()
+        && (app.remote_model_switch_in_flight || app.pending_route_selection.is_some())
+    {
         return needs_redraw;
     }
 
@@ -666,14 +681,24 @@ async fn apply_terminal_event<B: Backend>(
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
-                    match remote.set_route_selection(selection).await {
-                        Ok(_) => {
+                    match remote.set_route_selection(selection.clone()).await {
+                        Ok(id) => {
+                            // Manual fallback offers use unrestricted SetRoute,
+                            // but need the same exact acknowledgement fence as
+                            // automatic failover before releasing their resend.
+                            if app.pending_fallback_resend.is_some() {
+                                app.pending_automatic_failover_route = Some(selection);
+                                app.pending_automatic_failover_request_id = Some(id);
+                                app.pending_automatic_failover_started = Some(Instant::now());
+                            }
                             app.remote_model_switch_in_flight = true;
                             forward_pending_reasoning_effort(app, remote).await;
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            app.pending_fallback_resend = None;
+                            if let Some(payload) = app.pending_fallback_resend.take() {
+                                app.restore_failover_payload(payload);
+                            }
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
                                 error
@@ -1147,94 +1172,19 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
     )
 }
 
-pub(super) fn handle_disconnect(
-    app: &mut App,
-    state: &mut RemoteRunState,
-    reason: Option<RemoteDisconnectReason>,
-) {
-    app.invalidate_rewind_ui();
-    app.revoke_cloud_environment();
-    let detail = if state.server_reload_in_progress {
-        "server reload in progress".to_string()
-    } else if let Some(reason) = reason.as_ref() {
-        format_disconnect_reason(reason)
-    } else {
-        "connection to server dropped".to_string()
-    };
-    crate::logging::warn(&format!(
-        "handle_disconnect: session={:?}, remote_session_id={:?}, reason={:?}, detail={}",
-        app.resume_session_id, app.remote_session_id, reason, detail
-    ));
-    // A disconnect can drop the final auth catalog completion event. Keep any
-    // queued prompt for reconnect, but release the transient model-setup gate so
-    // it cannot remain blocked forever waiting for an event that was lost.
-    app.finish_auth_catalog_refresh();
-    // The cancel answer cannot arrive on a dead connection. Ask again later.
-    app.soft_interrupt_recovery = None;
-    state.last_disconnect_reason = Some(detail.clone());
-
-    let scheduled_retry =
-        app.schedule_pending_remote_retry(&format!("⚡ Connection lost ({detail})."));
-    if !scheduled_retry {
-        // A queued follow-up that was already dispatched (dequeued into an
-        // in-flight send) has no auto-retry path. Dropping it here would lose
-        // the user's queued message when a reload/disconnect races the
-        // turn-end dispatch (issue #391); put it back on the queue instead so
-        // it is re-sent once the turn is proven idle after reconnect.
-        if !recover_undelivered_queued_continuation(app, "disconnect") {
-            app.clear_pending_remote_retry();
-        }
+fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.pending_automatic_failover_request_id = None;
+    app.pending_automatic_failover_started = None;
+    app.pending_automatic_failover_route = None;
+    app.remote_model_switch_in_flight = false;
+    if let Some(payload) = app.pending_fallback_resend.take() {
+        app.restore_failover_payload(payload);
     }
-    let recovered_local = recover_local_interleave_to_queue(app, "disconnect");
-    app.current_message_id = None;
-    app.last_stream_activity = None;
-    app.remote_resume_activity = None;
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
-    if !app.streaming.streaming_text.is_empty() {
-        let content = app.take_streaming_text();
-        let content = app.collapse_reasoning_for_commit(content);
-        if !content.trim().is_empty() {
-            app.push_display_message(DisplayMessage {
-                role: "assistant".to_string(),
-                content,
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-        }
-    }
-    app.clear_streaming_render_state();
-    app.streaming_tool_calls.clear();
-    app.batch_progress = None;
-    app.thought_line_inserted = false;
-    app.thinking_prefix_emitted = false;
-    app.thinking_buffer.clear();
-    if recovered_local || !app.pending_soft_interrupts.is_empty() {
-        crate::logging::info(&format!(
-            "Preserving {} pending soft interrupt(s) across disconnect",
-            app.pending_soft_interrupts.len()
-        ));
-    }
-    app.reset_streaming_tps();
-    app.is_processing = false;
-    app.status = ProcessingStatus::Idle;
-    app.stream_message_ended = false;
-    app.clear_visible_turn_started();
-    state.disconnect_start = Some(Instant::now());
-    state.reconnect_attempts = state.reconnect_attempts.max(1);
-    state.reload_recovery_attempted = false;
-    app.push_display_message(DisplayMessage {
-        role: "system".to_string(),
-        content: reconnect_status_message(app, state, &detail),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some(CONNECTION_MESSAGE_TITLE.to_string()),
-        tool_data: None,
-    });
-    state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
-    state.reconnect_attempts = 1;
+    app.push_display_message(DisplayMessage::error(format!(
+        "Fallback switch stopped: {}",
+        App::compact_provider_failure(reason)
+    )));
+    app.set_status_notice("Fallback switch stopped; resend manually");
 }
 
 /// First wait before the watchdog re-requests history. Generous enough that a
@@ -1452,6 +1402,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
     if app.pending_provider_failover.is_some()
+        || app.pending_automatic_failover_route.is_some()
+        || app.pending_automatic_failover_request_id.is_some()
+        || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some())
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {
         return;
@@ -1512,6 +1465,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         app.last_submitted_input = payload.raw_input.clone();
         crate::logging::info("Resending failed turn after accepted fallback route switch");
+        let recovery_payload = payload.clone();
         if let Err(error) = begin_remote_send(
             app,
             remote,
@@ -1520,10 +1474,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             payload.is_system,
             payload.system_reminder,
             payload.auto_retry,
-            0,
+            payload.retry_attempts.saturating_add(1),
         )
         .await
         {
+            app.restore_failover_payload(recovery_payload);
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to resend after fallback switch: {}",
                 error

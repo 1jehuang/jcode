@@ -9,8 +9,7 @@ use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 use rewind::*;
 
-/// Canonical runtime commands never run the similarly named laptop handler.
-/// Keep argument validation and destructive-action confirmation on the daemon.
+/// Route runtime commands and their validation/confirmation to the SSH daemon.
 fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
     if let Some(command) = super::ssh_host::command(input) {
         return Some(command);
@@ -668,6 +667,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             app.upstream_provider = None;
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
             remote.set_model(model_name).await?;
             app.remote_model_switch_in_flight = true;
             return Ok(());

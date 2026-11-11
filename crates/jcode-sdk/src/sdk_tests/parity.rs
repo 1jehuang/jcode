@@ -200,6 +200,9 @@ const RUST_ONLY: &[&str] = &[
     "connect_with",
     // `Drop` closes the connection in Rust, so there is no `close()` to mirror.
     "is_closed",
+    // Rust event channels close without an error payload. TS transports expose
+    // failures via events; this accessor preserves the Rust reader cause.
+    "disconnect_reason",
     // TS reads `client.socketPath` as a field; Rust exposes it as an accessor.
     "socket_path",
 ];

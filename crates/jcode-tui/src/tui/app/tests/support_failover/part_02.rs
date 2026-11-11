@@ -1,3 +1,6 @@
+#[path = "out_of_credit_tests.rs"]
+mod out_of_credit;
+
 #[test]
 fn test_cancel_pending_provider_failover_clears_countdown() {
     with_temp_jcode_home(|| {
@@ -19,9 +22,11 @@ fn test_cancel_pending_provider_failover_clears_countdown() {
         app.handle_turn_error(failover_error_message(&prompt));
         assert!(app.pending_provider_failover.is_some());
 
+        app.pending_turn = true;
         app.cancel_pending_provider_failover("Provider auto-switch canceled");
 
         assert!(app.pending_provider_failover.is_none());
+        assert!(!app.pending_turn);
         let last = app.display_messages.last().expect("display message");
         assert_eq!(last.role, "system");
         assert!(last.content.contains("Auto-switch canceled"));
@@ -58,11 +63,132 @@ fn test_local_failover_revalidates_pool_after_countdown() {
         pool.save().unwrap();
         app.pending_provider_failover.as_mut().unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
+        app.pending_turn = true;
         app.maybe_progress_provider_failover_countdown();
         assert_eq!(active_provider.lock().unwrap().as_str(), "claude");
         assert!(!app.pending_turn);
         assert!(app.pending_provider_failover.is_none());
     });
+}
+
+fn failover_test_payload(raw_input: Option<&str>) -> FallbackResendPayload {
+    FallbackResendPayload {
+        retry_attempts: 0,
+        content: "expanded failed request".into(),
+        raw_input: raw_input.map(str::to_string),
+        images: Vec::new(),
+        is_system: false,
+        auto_retry: false,
+        system_reminder: None,
+    }
+}
+
+#[test]
+fn test_restore_failover_payload_keeps_existing_draft_and_raw_request() {
+    let mut app = create_test_app();
+    app.input = "next request".into();
+    app.cursor_pos = 3;
+    app.restore_failover_payload(failover_test_payload(Some("original @file request")));
+    assert_eq!(app.input, "next request");
+    assert_eq!(app.cursor_pos, 3);
+    let recovery = &app.display_messages.last().unwrap().content;
+    assert!(recovery.contains("Your draft is unchanged"));
+    assert!(recovery.contains("original @file request"));
+}
+
+#[test]
+fn test_restore_failover_payload_does_not_duplicate_matching_input() {
+    let mut app = create_test_app();
+    app.input = "original request".into();
+    app.restore_failover_payload(failover_test_payload(Some("original request")));
+    assert_eq!(app.input, "original request");
+}
+
+#[test]
+fn test_cancel_dispatched_failover_restores_payload_and_clears_inflight_state() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.pending_automatic_failover_request_id = Some(42);
+    app.pending_automatic_failover_started = Some(Instant::now());
+    app.remote_model_switch_in_flight = true;
+    app.pending_fallback_resend = Some(failover_test_payload(Some("held request")));
+    app.cancel_pending_provider_failover("Provider auto-switch canceled");
+    assert!(app.pending_automatic_failover_request_id.is_none());
+    assert!(app.pending_automatic_failover_started.is_none());
+    assert!(!app.remote_model_switch_in_flight);
+    assert!(app.pending_fallback_resend.is_none());
+    assert_eq!(app.input, "held request");
+}
+
+#[test]
+fn test_restore_failover_payload_preserves_images_without_duplicates() {
+    let mut app = create_test_app();
+    let existing = ("image/png".into(), "existing-image".into());
+    let failed = ("image/jpeg".into(), "failed-image".into());
+    app.pending_images.push(existing.clone());
+    let mut payload = failover_test_payload(None);
+    payload.images = vec![existing.clone(), failed.clone(), failed.clone()];
+    app.restore_failover_payload(payload);
+    assert_eq!(app.input, "expanded failed request [image 1] [image 2]");
+    assert_eq!(app.pending_images, vec![existing, failed]);
+}
+
+#[test]
+fn test_local_failed_fallback_switch_disarms_pending_turn() {
+    let mut app = create_failing_model_switch_test_app();
+    assert!(app.offer_fallback_after_error("credentials expired"));
+    app.pending_turn = true;
+    assert!(app.apply_pending_fallback_offer());
+    assert!(!app.pending_turn);
+    assert!(app.pending_fallback_offer.is_none());
+    assert!(
+        app.display_messages
+            .last()
+            .unwrap()
+            .content
+            .contains("credentials expired")
+    );
+}
+
+#[test]
+fn test_manual_failover_restores_remote_payload() {
+    with_temp_jcode_home(|| {
+        for mode in ["manual", "countdown"] {
+            assert_manual_failover_restores_remote_payload(mode);
+        }
+    });
+}
+
+fn assert_manual_failover_restores_remote_payload(mode: &str) {
+    write_test_config(&format!(
+        "[provider]\ncross_provider_failover = \"{mode}\"\n"
+    ));
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let prompt = crate::provider::ProviderFailoverPrompt {
+        from_provider: "claude".into(),
+        from_label: "Anthropic".into(),
+        to_provider: "openai".into(),
+        to_label: "OpenAI".into(),
+        target_route: None,
+        reason: "OAuth usage exhausted".into(),
+        estimated_input_chars: 0,
+        estimated_input_tokens: 0,
+    };
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "expanded failed request".into(),
+        images: Vec::new(),
+        is_system: false,
+        auto_retry: false,
+        system_reminder: None,
+        retry_at: None,
+        retry_attempts: 0,
+        overload_attempts: 0,
+    });
+    app.last_submitted_input = Some("original request".into());
+    app.handle_turn_error(failover_error_message(&prompt));
+    assert_eq!(app.input, "original request");
+    assert!(app.pending_provider_failover.is_none());
 }
 
 #[test]
@@ -1009,183 +1135,4 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
         app.session.route_api_method = None;
         assert_eq!(app.current_route_api_method(), None);
     });
-}
-
-fn remote_profile_failover_prompt() -> crate::provider::ProviderFailoverPrompt {
-    crate::provider::ProviderFailoverPrompt {
-        from_provider: "prof-a:glm-5.3".to_string(),
-        from_label: "prof-a".to_string(),
-        to_provider: "prof-b:glm-5.3".to_string(),
-        to_label: "prof-b (glm-5.3)".to_string(),
-        target_route: Some("prof-b:glm-5.3".to_string()),
-        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
-        estimated_input_chars: 400,
-        estimated_input_tokens: 100,
-    }
-}
-
-fn remote_app_with_failed_turn() -> App {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.last_submitted_input = Some("say hi".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "say hi".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
-    app
-}
-
-#[test]
-fn remote_out_of_credit_prompt_runs_countdown_then_switches_and_resends() {
-    with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
-
-        app.handle_server_event(
-            crate::protocol::ServerEvent::Error {
-                id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
-                retry_after_secs: None,
-                server_resumes: false,
-            },
-            &mut remote,
-        );
-        let pending = app
-            .pending_provider_failover
-            .as_ref()
-            .expect("remote session must arm the countdown");
-        assert_eq!(pending.prompt.to_provider, "prof-b:glm-5.3");
-        assert!(app.pending_model_switch.is_none(), "nothing sent before the deadline");
-        assert!(app.pending_fallback_resend.is_none());
-        assert!(
-            app.rate_limit_pending_message.is_none(),
-            "no blind retry to the out-of-credit profile"
-        );
-
-        if let Some(pending) = app.pending_provider_failover.as_mut() {
-            pending.deadline = Instant::now() - Duration::from_secs(1);
-        }
-        app.maybe_progress_provider_failover_countdown();
-        assert!(app.pending_provider_failover.is_none());
-        assert_eq!(app.pending_model_switch.as_deref(), Some("prof-b:glm-5.3"));
-        let resend = app
-            .pending_fallback_resend
-            .as_ref()
-            .expect("failed turn staged for resend after the switch");
-        assert_eq!(resend.content, "say hi");
-    });
-}
-
-#[test]
-fn remote_out_of_credit_countdown_esc_cancels_without_sending() {
-    with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
-
-        app.handle_server_event(
-            crate::protocol::ServerEvent::Error {
-                id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
-                retry_after_secs: None,
-                server_resumes: false,
-            },
-            &mut remote,
-        );
-        assert!(app.pending_provider_failover.is_some());
-        rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::NONE, &mut remote))
-            .expect("esc");
-        assert!(app.pending_provider_failover.is_none());
-        assert!(app.pending_model_switch.is_none());
-        assert!(app.pending_fallback_resend.is_none());
-        assert_eq!(app.input, "say hi", "the prompt goes back to the input box");
-        let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("Auto-switch canceled"), "{}", last.content);
-
-        // The deadline passing later must not switch anything.
-        app.maybe_progress_provider_failover_countdown();
-        assert!(app.pending_model_switch.is_none());
-    });
-}
-
-#[test]
-fn remote_out_of_credit_prompt_in_manual_mode_only_explains() {
-    with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
-        app.handle_server_event(
-            crate::protocol::ServerEvent::Error {
-                id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
-                retry_after_secs: None,
-                server_resumes: false,
-            },
-            &mut remote,
-        );
-        assert!(app.pending_provider_failover.is_none());
-        assert!(app.pending_model_switch.is_none());
-        assert!(app.pending_fallback_resend.is_none());
-        let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("Use /model to switch"), "{}", last.content);
-    });
-}
-
-#[test]
-fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
-    for (initial_provider, source_key, exclude) in [
-        ("claude", "anthropic-api", false),
-        ("openai", "openai:openai-otter", true),
-    ] {
-        with_temp_jcode_home(|| {
-            write_test_config(
-                "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
-            );
-            let (mut app, active_provider) = create_switchable_test_app(initial_provider);
-            // Deliberately stale metadata must not override runtime identity.
-            app.session.route_api_method = Some("claude-oauth@stale-account".into());
-            let prompt = crate::provider::ProviderFailoverPrompt {
-                from_provider: "stale-provider".into(),
-                from_label: "Previous account".into(),
-                to_provider: "openai".into(),
-                to_label: "OpenAI fox".into(),
-                target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
-                reason: "OAuth usage exhausted".into(),
-                estimated_input_chars: 400,
-                estimated_input_tokens: 100,
-            };
-            app.handle_turn_error(failover_error_message(&prompt));
-            assert!(app.pending_provider_failover.is_some());
-            let mut pool = crate::auth::account_pool::AccountPool::load();
-            pool.members.retain(|member| member != source_key);
-            if exclude {
-                pool.excluded.push(source_key.into());
-            }
-            pool.save().unwrap();
-            app.pending_provider_failover.as_mut().unwrap().deadline =
-                Instant::now() - Duration::from_secs(1);
-            app.maybe_progress_provider_failover_countdown();
-            assert_eq!(active_provider.lock().unwrap().as_str(), initial_provider);
-            assert!(!app.pending_turn);
-            assert!(app.pending_provider_failover.is_none());
-            assert!(app.display_messages.iter().any(|message| {
-                message
-                    .content
-                    .contains("Source is no longer in the auto-switch pool")
-            }));
-        });
-    }
 }
