@@ -159,8 +159,16 @@ impl App {
     }
 
     pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
+        let restored = payload.raw_input.unwrap_or(payload.content);
         if self.input.is_empty() {
-            self.input = payload.raw_input.unwrap_or(payload.content);
+            self.input = restored;
+            self.cursor_pos = self.input.len();
+        } else if !restored.is_empty() && self.input != restored {
+            // The user may already be drafting their next request. Keep both
+            // texts visible for editing rather than silently losing the held
+            // request when its route switch is canceled or fails.
+            self.input.push_str("\n\n");
+            self.input.push_str(&restored);
             self.cursor_pos = self.input.len();
         }
         for image in payload.images {
@@ -179,6 +187,9 @@ impl App {
         let Some(pending) = self.pending_provider_failover.take() else {
             return;
         };
+        if !self.is_remote {
+            self.pending_turn = false;
+        }
         if let Some(payload) = pending.remote_resend {
             self.restore_failover_payload(payload);
         }
@@ -326,6 +337,7 @@ impl App {
                 true
             }
             Err(error) => {
+                self.pending_turn = false;
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to switch provider to {}: {}",
                     pending.prompt.to_label, error
@@ -379,6 +391,9 @@ impl App {
         let config = crate::config::Config::load().provider;
         match config.cross_provider_failover {
             crate::config::CrossProviderFailoverMode::Manual => {
+                if let Some(payload) = remote_resend {
+                    self.restore_failover_payload(payload);
+                }
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
                     "{} unavailable; switch manually if desired",
@@ -431,6 +446,9 @@ impl App {
                 ));
             }
             _ => {
+                if let Some(payload) = remote_resend {
+                    self.restore_failover_payload(payload);
+                }
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
                     "{} unavailable; manual switch suggested",
@@ -921,6 +939,7 @@ impl App {
                 true
             }
             Err(error) => {
+                self.pending_turn = false;
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to switch to {}: {}",
                     offer.target_label, error
