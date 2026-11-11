@@ -211,6 +211,134 @@ fn event_mapper_maps_tool_lifecycle() {
     assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
 }
 
+/// An ACP client should see the tool's intent throughout the streamed call, including completion.
+#[test]
+fn event_mapper_preserves_tool_intent_through_lifecycle() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let start = mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    assert_eq!(start[0]["title"], "Running shell command");
+
+    assert!(
+        mapper
+            .map_event(ServerEvent::ToolInput {
+                id: Some("tool1".to_string()),
+                delta: "{\"intent\":\"Run ".to_string(),
+            })
+            .is_empty()
+    );
+    let input = mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: "the tests\",\"command\":\"cargo test\"}".to_string(),
+    });
+    assert_eq!(input[0]["title"], "Run the tests");
+    assert_eq!(input[0]["rawInput"]["command"], "cargo test");
+
+    let running = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    assert_eq!(running[0]["title"], "Run the tests");
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+        output: "ok".to_string(),
+        error: None,
+    });
+    assert_eq!(done[0]["title"], "Run the tests");
+}
+
+/// Missing, blank, or non-string intents keep the established descriptive fallback.
+#[test]
+fn event_mapper_falls_back_for_missing_or_invalid_tool_intent() {
+    for raw in [
+        r#"{"command":"true"}"#,
+        r#"{"intent":"  "}"#,
+        r#"{"intent":42}"#,
+    ] {
+        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        mapper.map_event(ServerEvent::ToolStart {
+            id: "tool1".into(),
+            name: "bash".into(),
+        });
+        let input = mapper.map_event(ServerEvent::ToolInput {
+            id: None,
+            delta: raw.into(),
+        });
+        assert!(input[0].get("title").is_none());
+        let running = mapper.map_event(ServerEvent::ToolExec {
+            id: "tool1".into(),
+            name: "bash".into(),
+        });
+        assert_eq!(running[0]["title"], "Running shell command");
+        let done = mapper.map_event(ServerEvent::ToolDone {
+            id: "tool1".into(),
+            name: "bash".into(),
+            output: String::new(),
+            error: None,
+        });
+        assert_eq!(done[0]["title"], "Running shell command");
+    }
+}
+
+/// Simultaneous tool calls must keep their own intent when events arrive out of order.
+#[test]
+fn event_mapper_keeps_intents_with_overlapping_tool_calls() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    for id in ["first", "second"] {
+        mapper.map_event(ServerEvent::ToolStart {
+            id: id.into(),
+            name: "bash".into(),
+        });
+    }
+    for (id, intent) in [("first", "Run tests"), ("second", "Check formatting")] {
+        let updates = mapper.map_event(ServerEvent::ToolInput {
+            id: Some(id.into()),
+            delta: json!({"intent": intent}).to_string(),
+        });
+        assert_eq!(updates[0]["title"], intent);
+    }
+    for (id, intent) in [("second", "Check formatting"), ("first", "Run tests")] {
+        let running = mapper.map_event(ServerEvent::ToolExec {
+            id: id.into(),
+            name: "bash".into(),
+        });
+        assert_eq!(running[0]["title"], intent);
+        let done = mapper.map_event(ServerEvent::ToolDone {
+            id: id.into(),
+            name: "bash".into(),
+            output: String::new(),
+            error: None,
+        });
+        assert_eq!(done[0]["title"], intent);
+    }
+}
+
+/// Older daemons without input event IDs still attach an intent to the active call.
+#[test]
+fn event_mapper_preserves_legacy_tool_intent_on_failure() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "legacy".into(),
+        name: "read".into(),
+    });
+    let input = mapper.map_event(ServerEvent::ToolInput {
+        id: None,
+        delta: r#"{"intent":"Read the configuration"}"#.into(),
+    });
+    assert_eq!(input[0]["title"], "Read the configuration");
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "legacy".into(),
+        name: "read".into(),
+        output: String::new(),
+        error: Some("File not found".into()),
+    });
+    assert_eq!(done[0]["title"], "Read the configuration");
+    assert_eq!(done[0]["status"], "failed");
+}
+
 #[test]
 fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
     let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
