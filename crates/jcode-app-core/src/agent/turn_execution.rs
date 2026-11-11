@@ -504,6 +504,7 @@ impl Agent {
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        self.register_ask_user().await;
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }

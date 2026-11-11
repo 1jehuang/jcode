@@ -3193,3 +3193,6 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         "workers inheriting the healed session must target the live credential"
     );
 }
+
+#[path = "agent_tests/elicitation.rs"]
+mod elicitation;
