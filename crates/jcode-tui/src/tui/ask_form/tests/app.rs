@@ -185,3 +185,84 @@ fn public_send_failure_restores_editing() {
     send_failed(&mut app, "offline");
     active(|form| assert!(matches!(form.submit, SubmitState::Rejected(_))));
 }
+
+/// Exercise the real tool -> broker -> TUI -> broker -> model-result contract.
+#[tokio::test]
+async fn generated_form_round_trips_unicode_choices_other_and_notes() {
+    use crate::elicitation::ask_user::AskUserTool;
+    use crate::tool::{Tool, ToolContext, ToolExecutionMode};
+    const SESSION: &str = "ask-form-contract";
+    const CONNECTION: &str = "ask-form-contract-client";
+    reset();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let broker = crate::elicitation::global();
+    broker.attach(CONNECTION, SESSION, true, false, false, tx);
+    rx.recv().await.expect("replay complete");
+    let task = tokio::spawn(async {
+        AskUserTool.execute(json!({"questions": [
+            {"question": "Which, \"界\"?", "header": "Pick", "multiSelect": false,
+             "options": [{"label": "A", "description": "First"}, {"label": "B", "description": "Second"}]},
+            {"question": "Which many?", "header": "Many", "multiSelect": true,
+             "options": [{"label": "界, 🎉", "description": "First"}, {"label": "B\nC", "description": "Second"}]}
+        ], "answers": {}, "annotations": {}, "metadata": {}}), ToolContext {
+            session_id: SESSION.into(), message_id: "message".into(), tool_call_id: "call".into(),
+            working_dir: None, stdin_request_tx: None, graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::AgentTurn,
+        }).await.unwrap().output
+    });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerEvent::ElicitationRequest(request) = event else {
+        panic!("expected form");
+    };
+    let context = install(SESSION, request.clone());
+    key(&context, KeyCode::Char('3'));
+    assert!(paste_text(&context, "custom 界🎉\nanswer"));
+    key(&context, KeyCode::Esc);
+    key(&context, KeyCode::Right);
+    key(&context, KeyCode::Char('1'));
+    key(&context, KeyCode::Char('2'));
+    key(&context, KeyCode::Char('n'));
+    assert!(paste_text(&context, "because \"both\"\nplease"));
+    key(&context, KeyCode::Esc);
+    key(&context, KeyCode::Enter);
+    let KeyOutcome::Send { response, .. } = key(&context, KeyCode::Enter) else {
+        panic!("expected submit");
+    };
+    broker
+        .respond(CONNECTION, SESSION, &request.elicitation_id, response)
+        .unwrap();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let lines: Vec<_> = output.lines().collect();
+    // Decode serialized values rather than comparing renderer or formatter internals.
+    let mut first = serde_json::Deserializer::from_str(lines[1]).into_iter::<Value>();
+    assert_eq!(first.next().unwrap().unwrap(), json!("Which, \"界\"?"));
+    let decode = |line: &str| {
+        serde_json::Deserializer::from_str(line.split_once('=').unwrap().1)
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(decode(lines[1]), json!("custom 界🎉\nanswer"));
+    let selected = decode(lines[2]);
+    let selected = selected.as_array().expect("multi-select stays an array");
+    assert_eq!(selected.len(), 2);
+    assert!(selected.contains(&json!("界, 🎉")));
+    assert!(selected.contains(&json!("B\nC")));
+    let notes = lines[2].split_once("user notes: ").unwrap().1;
+    assert_eq!(
+        serde_json::Deserializer::from_str(notes)
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap(),
+        json!("because \"both\"\nplease")
+    );
+    broker.detach(CONNECTION);
+}

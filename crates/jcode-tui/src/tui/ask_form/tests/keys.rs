@@ -177,3 +177,149 @@ fn hidden_editor_cannot_take_paste() {
     assert!(!paste_text(&blocked, "hidden"));
     active(|form| assert_eq!(form.questions[0].notes, "visible"));
 }
+
+// ASK_USER_FORM.md: typing on Other opens its editor; composed text wins.
+#[test]
+fn typing_on_other_keeps_the_first_composed_character_in_the_answer() {
+    reset();
+    let context = install(SESSION, form("e1", SESSION, single_schema()));
+    key(&context, KeyCode::Down);
+    key(&context, KeyCode::Down);
+    key_with(
+        &context,
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+        Some("界🎉"),
+    );
+    key(&context, KeyCode::Esc); // Save the editor, without declining.
+    key(&context, KeyCode::Right);
+    let KeyOutcome::Send { response, .. } = key(&context, KeyCode::Enter) else {
+        panic!("typed Other answer must be submittable");
+    };
+    let crate::protocol::elicitation::ElicitationResponse::Accept {
+        content: Some(content),
+    } = response
+    else {
+        panic!("expected accepted answer");
+    };
+    assert_eq!(content.get("q1"), Some(&json!("__other__")));
+    assert_eq!(content.get("q1_other"), Some(&json!("界🎉")));
+}
+
+#[test]
+fn shift_tab_key_encoding_moves_back_without_changing_answers() {
+    reset();
+    let context = install_default();
+    key(&context, KeyCode::Char('1'));
+    key(&context, KeyCode::Right);
+    key_with(&context, KeyCode::Tab, KeyModifiers::SHIFT, None);
+    let screen = render_buffer(&context, 80, 24);
+    assert!(
+        (0..24).any(|row| row_text(&screen, row).contains("Which option do you want?")),
+        "Shift+Tab must show the previous question, rather than Submit"
+    );
+    // Enter on q1 advances to q2; Enter on q2 advances to summary.
+    key(&context, KeyCode::Enter);
+    key(&context, KeyCode::Char('2'));
+    key(&context, KeyCode::Enter);
+    let KeyOutcome::Send { response, .. } = key(&context, KeyCode::Enter) else {
+        panic!("back navigation must preserve q1 and let q2 be answered");
+    };
+    let crate::protocol::elicitation::ElicitationResponse::Accept {
+        content: Some(content),
+    } = response
+    else {
+        panic!("expected accepted answer");
+    };
+    assert_eq!(content.get("q1"), Some(&json!("a")));
+    assert_eq!(content.get("q2"), Some(&json!(["y"])));
+}
+
+#[test]
+fn unicode_editor_limit_accepts_code_points_and_rejects_without_losing_text() {
+    for shortcut in ['n', '3'] {
+        reset();
+        let context = install_default();
+        key(&context, KeyCode::Char(shortcut));
+        let draft = "界".repeat(MAX_TEXT_CODE_POINTS);
+        assert!(paste_text(&context, &draft));
+        assert!(paste_text(&context, "🎉")); // Consumed, rejected, never sent to composer.
+        active(|form| assert!(form.notice.as_deref().unwrap().contains("Text limit")));
+        key(&context, KeyCode::Esc);
+        if shortcut == 'n' {
+            key(&context, KeyCode::Char('1'));
+        }
+        key(&context, KeyCode::Right);
+        key(&context, KeyCode::Char('1'));
+        key(&context, KeyCode::Enter);
+        let KeyOutcome::Send { response, .. } = key(&context, KeyCode::Enter) else {
+            panic!("exactly 8192 code points must be submittable");
+        };
+        let crate::protocol::elicitation::ElicitationResponse::Accept {
+            content: Some(content),
+        } = response
+        else {
+            panic!("expected accepted answer");
+        };
+        let field = if shortcut == 'n' {
+            "q1_notes"
+        } else {
+            "q1_other"
+        };
+        assert_eq!(content.get(field), Some(&json!(draft)));
+    }
+}
+
+#[test]
+fn replay_with_changed_choices_never_submits_the_old_answer_or_notes() {
+    reset();
+    let context = install(SESSION, form("e1", SESSION, single_schema()));
+    key(&context, KeyCode::Char('3'));
+    paste_text(&context, "stale private draft");
+    key(&context, KeyCode::Esc);
+    state::with(|state| reconcile::connection_replaced(state, Some(SESSION)));
+    let mut changed = single_schema();
+    changed["properties"]["q1"]["oneOf"][0]["const"] = json!("new");
+    send_event(
+        &context,
+        &ServerEvent::ElicitationRequest(form("e1", SESSION, changed)),
+    );
+    send_event(
+        &context,
+        &ServerEvent::ElicitationReplayComplete {
+            session_id: SESSION.into(),
+        },
+    );
+    key(&context, KeyCode::Right);
+    assert!(!matches!(
+        key(&context, KeyCode::Enter),
+        KeyOutcome::Send { .. }
+    ));
+    key(&context, KeyCode::Left);
+    key(&context, KeyCode::Char('1'));
+    key(&context, KeyCode::Right);
+    let KeyOutcome::Send { response, .. } = key(&context, KeyCode::Enter) else {
+        panic!("new answer should submit");
+    };
+    let crate::protocol::elicitation::ElicitationResponse::Accept {
+        content: Some(content),
+    } = response
+    else {
+        panic!("expected accepted answer");
+    };
+    assert_eq!(content, json!({"q1": "new"}).as_object().unwrap().clone());
+}
+
+#[test]
+fn opening_notes_from_preview_shows_the_text_being_edited() {
+    reset();
+    let context = install_default();
+    key(&context, KeyCode::Char('p'));
+    key(&context, KeyCode::Char('n'));
+    paste_text(&context, "visible draft 界");
+    let screen = render_buffer(&context, 80, 24);
+    assert!(
+        (0..24).any(|row| row_text(&screen, row).contains("visible draft 界")),
+        "narrow preview must yield to the active text editor"
+    );
+}

@@ -118,22 +118,13 @@ fn chrome_rows_never_exceed_width_with_cjk_and_emoji_headers() {
 }
 
 #[test]
-fn panel_height_caps_at_sixty_percent_and_uses_all_rows_below_12() {
-    assert_eq!(form_render::panel_height(0), 0);
-    assert_eq!(form_render::panel_height(10), 10);
-    assert_eq!(form_render::panel_height(11), 11);
-    assert_eq!(form_render::panel_height(12), 7);
-    assert_eq!(form_render::panel_height(15), 9);
-    assert_eq!(form_render::panel_height(24), 14);
-}
-
-#[test]
 fn render_at_80x24_40x15_and_80x10_is_bottom_anchored_and_height_capped() {
     reset();
     let context = install_default();
-    for (width, height) in [(80u16, 24u16), (40, 15), (80, 10)] {
+    for (width, height) in [(80u16, 24u16), (40, 15), (80, 10), (80, 11), (80, 12)] {
         let buffer = render_buffer(&context, width, height);
-        let top = height - form_render::panel_height(height);
+        let expected_height = if height < 12 { height } else { height * 3 / 5 };
+        let top = height - expected_height;
         let first = first_nonblank_row(&buffer).expect("panel content");
         assert!(
             first >= top,
@@ -144,10 +135,7 @@ fn render_at_80x24_40x15_and_80x10_is_bottom_anchored_and_height_capped() {
             "{width}x{height}: status row should not be blank"
         );
         active(|form| {
-            assert_eq!(
-                form.last_body_height as u16,
-                form_render::panel_height(height) - 2
-            );
+            assert_eq!(form.last_body_height as u16, expected_height - 2);
         });
     }
 }

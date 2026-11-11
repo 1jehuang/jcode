@@ -82,7 +82,7 @@ pub(super) fn handle_paste(state: &mut State, context: &ViewContext, text: &str)
     }
 }
 
-fn select_other(form: &mut Form, question_index: usize) -> Option<EditorFocus> {
+pub(super) fn select_other(form: &mut Form, question_index: usize) -> Option<EditorFocus> {
     let question = form.questions.get_mut(question_index)?;
     let other = question.other.clone()?;
     if question.multi {
@@ -95,6 +95,7 @@ fn select_other(form: &mut Form, question_index: usize) -> Option<EditorFocus> {
         question: question_index,
         kind: EditorKind::Other,
     };
+    form.preview_focus = false;
     form.editor = Some(editor);
     Some(editor)
 }

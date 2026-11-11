@@ -79,7 +79,7 @@ pub(super) fn handle_key(
     let result = if form.editor.is_some() {
         handle_editor(form, code, modifiers, text_input)
     } else {
-        handle_normal(form, code, modifiers)
+        handle_normal(form, code, modifiers, text_input)
     };
 
     if let KeyOutcome::Send {
@@ -181,7 +181,12 @@ fn handle_editor(
     KeyResult::consumed()
 }
 
-fn handle_normal(form: &mut Form, code: KeyCode, modifiers: KeyModifiers) -> KeyResult {
+fn handle_normal(
+    form: &mut Form,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    text_input: Option<&str>,
+) -> KeyResult {
     if form.is_submit_tab() {
         return handle_summary(form, code, modifiers);
     }
@@ -196,7 +201,7 @@ fn handle_normal(form: &mut Form, code: KeyCode, modifiers: KeyModifiers) -> Key
             KeyResult::consumed()
         }
         KeyCode::Tab => {
-            form.move_tab(true);
+            form.move_tab(!modifiers.contains(KeyModifiers::SHIFT));
             KeyResult::consumed()
         }
         KeyCode::BackTab => {
@@ -252,6 +257,7 @@ fn handle_normal(form: &mut Form, code: KeyCode, modifiers: KeyModifiers) -> Key
                 if let Some(question) = form.questions.get_mut(question) {
                     question.notes_cursor = question.notes.len();
                 }
+                form.preview_focus = false;
                 form.editor = Some(EditorFocus {
                     question,
                     kind: EditorKind::Notes,
@@ -300,6 +306,16 @@ fn handle_normal(form: &mut Form, code: KeyCode, modifiers: KeyModifiers) -> Key
             KeyResult::consumed()
         }
         KeyCode::Esc => decline(form),
+        KeyCode::Char(_)
+            if form
+                .current_question()
+                .is_some_and(super::state::Question::highlight_is_other) =>
+        {
+            // Match paste routing: typing on Other selects it and keeps the
+            // first character, including composed input from the terminal.
+            super::paste::select_other(form, form.tab);
+            handle_editor(form, code, modifiers, text_input)
+        }
         KeyCode::Char(_) => {
             // Printable keys outside an editor are shortcuts only. Swallow
             // them so they cannot type into the composer hidden behind the
@@ -449,6 +465,7 @@ fn choose_row(form: &mut Form, question_index: usize, row: usize) {
 
     let cursor = form.questions[question_index].other_text.len();
     form.questions[question_index].other_cursor = cursor;
+    form.preview_focus = false;
     form.editor = Some(EditorFocus {
         question: question_index,
         kind: EditorKind::Other,
