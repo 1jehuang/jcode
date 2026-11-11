@@ -7,18 +7,37 @@
 //!
 //! ```text
 //! ╭ Commits ────────────────────────────────╮
-//! │● e4b4d3a swarm dock lists each ag… 2m  │
-//! │● e205d0f info widgets put headers… 14m │
-//! │  4f6bf8e replay reasoning before t… 1h │
+//! │● e4b4d3a swarm dock lists each agen 2m  │
+//! │● e205d0f info widgets put headers o 14m │
+//! │  4f6bf8e replay reasoning before th 1h  │
 //! ╰ +5 more ─────────────────── ↑2 unpushed ╯
 //! ```
+//!
+//! Subjects are cut hard at the row edge, with no ellipsis, so every cell
+//! carries commit text.
 
 use super::frame::{self, Framed};
-use super::text::truncate_smart;
 use super::{GitInfo, InfoWidgetData, RecentCommit};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Hash cells kept once the subject no longer fits: still unambiguous enough
+/// to paste, and every cell saved goes to the subject.
+const SHORT_HASH: usize = 7;
+
+/// Longest prefix of `s` that fits `max` display cells. No ellipsis: in a
+/// narrow margin three cells of `...` cost more than they tell.
+fn clip(s: &str, max: usize) -> &str {
+    let mut used = 0;
+    for (idx, ch) in s.char_indices() {
+        used += ch.width().unwrap_or(0);
+        if used > max {
+            return s[..idx].trim_end();
+        }
+    }
+    s
+}
 
 /// Most commits listed before the rest collapse into the footer.
 pub(super) const COMMITS_MAX_ROWS: usize = 5;
@@ -102,7 +121,13 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
     } else {
         Span::styled("  ", Style::default())
     };
-    let hash = format!("{} ", commit.hash);
+    let subject_cells = UnicodeWidthStr::width(commit.subject.as_str());
+    let full_hash = UnicodeWidthStr::width(commit.hash.as_str());
+    let hash = if width < 2 + full_hash + 1 + subject_cells {
+        format!("{} ", clip(&commit.hash, SHORT_HASH))
+    } else {
+        format!("{} ", commit.hash)
+    };
     let age = short_age(now - commit.timestamp);
     let stat = match (commit.added, commit.removed) {
         (Some(a), Some(r)) => Some((format!("+{a}"), format!(" −{r}"))),
@@ -128,7 +153,7 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
     };
     let right_w = if show_stat { stat_w } else { 0 } + if show_age { age_w } else { 0 };
     let subject_w = width.saturating_sub(fixed + right_w);
-    let subject = truncate_smart(&commit.subject, subject_w.max(1));
+    let subject = clip(&commit.subject, subject_w).to_string();
     let pad = subject_w.saturating_sub(UnicodeWidthStr::width(subject.as_str()));
 
     let mut spans = vec![
@@ -263,8 +288,13 @@ mod tests {
                 assert!(line.width() <= usize::from(w), "w={w}: {}", text(line));
             }
         }
+        // Narrow margin: no ellipsis, short hash, subject fills the row.
+        let f = render_commits_at(&d, Rect::new(0, 0, 20, 3), NOW);
+        let row = text(&f.lines[0]);
+        assert_eq!(row, "● e4b4d3a a long sub");
         let f = render_commits_at(&d, Rect::new(0, 0, 30, 3), NOW);
         let row = text(&f.lines[0]);
+        assert!(!row.contains("...") && !row.contains('…'), "{row}");
         assert!(!row.contains('+'), "stats dropped first: {row}");
         assert!(row.ends_with(" 2m"), "age kept: {row}");
     }
