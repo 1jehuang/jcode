@@ -4,6 +4,63 @@ use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width
 use ratatui::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Source is a dedicated body, independent of the optional technical summary.
+/// Bound visual rows, not source lines: agents frequently submit one long line.
+pub(super) fn codemode_preview(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
+    if canonical_tool_name(&tool.name) != "codemode" {
+        return Vec::new();
+    }
+    let Some(code) = tool.input.get("code").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    if code.trim().is_empty() || width == 0 {
+        return Vec::new();
+    }
+    const MAX_ROWS: usize = 6;
+    let indent = width.saturating_sub(1).min(4);
+    let inner_width = width.saturating_sub(indent).max(1);
+    let mut rows = Vec::new();
+    let mut source = code.lines().peekable();
+    while let Some(line) = source.next() {
+        let source_line = Line::from(super::markdown::highlight_line(
+            &line.replace('\t', "    "),
+            Some("js"),
+        ));
+        let wrapped = super::markdown::wrap_lines(vec![source_line], inner_width);
+        let available = MAX_ROWS.saturating_sub(rows.len());
+        let continued = wrapped.len() > available;
+        for mut row in wrapped.into_iter().take(available) {
+            row = super::truncate_line_with_ellipsis_to_width(&row, inner_width);
+            row.spans.insert(0, Span::raw(" ".repeat(indent)));
+            rows.push(row);
+        }
+        if rows.len() == MAX_ROWS {
+            let remaining = source.count();
+            let label = if continued {
+                Some("… code continues".to_string())
+            } else if remaining > 0 {
+                Some(format!(
+                    "… {remaining} more line{}",
+                    if remaining == 1 { "" } else { "s" }
+                ))
+            } else {
+                None
+            };
+            if let Some(label) = label {
+                rows.push(super::truncate_line_with_ellipsis_to_width(
+                    &Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(label, Style::default().fg(dim_color())),
+                    ]),
+                    width,
+                ));
+            }
+            break;
+        }
+    }
+    rows
+}
+
 pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,

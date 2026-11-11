@@ -4237,6 +4237,7 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    lines.extend(tools_ui::codemode_preview(tc, row_width));
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
         lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
         if centered {

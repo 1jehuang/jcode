@@ -1,6 +1,7 @@
 use super::*;
 
 mod cloud_directories;
+mod codemode_preview;
 mod preview_redraw_schedule;
 mod resume_parity;
 use crate::tui::session_picker;
@@ -129,6 +130,7 @@ struct TestState {
     display_messages: Vec<DisplayMessage>,
     messages_version: u64,
     streaming_text: String,
+    streaming_tools: Vec<ToolCall>,
     batch_progress: Option<crate::bus::BatchProgress>,
     queued_messages: Vec<String>,
     pending_soft_interrupts: Vec<String>,
@@ -271,7 +273,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
-        Vec::new()
+        self.streaming_tools.clone()
     }
     fn elapsed(&self) -> Option<Duration> {
         None

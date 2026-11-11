@@ -290,6 +290,18 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
+fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
+    if !app.is_processing()
+        || !matches!(app.status(), ProcessingStatus::RunningTool(name) if name == "codemode")
+    {
+        return None;
+    }
+    app.streaming_tool_calls()
+        .into_iter()
+        .rev()
+        .find(|tool| tools_ui::canonical_tool_name(&tool.name) == "codemode")
+}
+
 fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
     match app.status() {
         ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
@@ -298,6 +310,14 @@ fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress
 }
 
 pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    if let Some(tool) = active_codemode(app) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.id.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
+        tool.intent.hash(&mut hasher);
+        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+        return hasher.finish();
+    }
     let Some(progress) = active_batch_progress(app) else {
         return 0;
     };
@@ -389,6 +409,46 @@ fn prepare_active_batch_progress(
     width: u16,
     prefix_blank: bool,
 ) -> PreparedMessages {
+    if let Some(tool) = active_codemode(app) {
+        let block_width = if app.centered_mode() {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
+        let mut lines = Vec::new();
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        let mut header = vec![
+            Span::styled(
+                format!("  {spinner} "),
+                Style::default().fg(rgb(255, 193, 94)),
+            ),
+            Span::styled("codemode", Style::default().fg(tool_color())),
+        ];
+        if let Some(intent) = tool
+            .intent
+            .as_deref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            header.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            header.push(Span::styled(
+                intent.to_owned(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(header),
+            row_width,
+        ));
+        lines.extend(tools_ui::codemode_preview(&tool, row_width));
+        if app.centered_mode() {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[]);
+    }
     let Some(progress) = active_batch_progress(app) else {
         return empty_prepared_messages();
     };
@@ -634,7 +694,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
