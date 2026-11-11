@@ -22,6 +22,48 @@ impl Agent {
         id
     }
 
+    /// Narrow this worker's tool surface to an agent definition's policy. The
+    /// result never widens what the global policy allows: the current effective
+    /// set is intersected with `allow` (when given) and `deny` is removed. The
+    /// tool list is unlocked so the next request picks the change up.
+    pub(crate) async fn narrow_tools(&mut self, allow: Option<&[String]>, deny: &[String]) {
+        let mut names: HashSet<String> = self.tool_names().await.into_iter().collect();
+        if let Some(allow) = allow {
+            names.retain(|name| allow.iter().any(|allowed| allowed == name));
+        }
+        for denied in deny {
+            names.remove(denied);
+        }
+        // Persist the restriction so a revived or resumed worker keeps it.
+        let mut persisted: Vec<String> = names.iter().cloned().collect();
+        persisted.sort();
+        self.session.tool_allowlist = Some(persisted);
+        self.allowed_tools = Some(names);
+        self.locked_tools = None;
+        // Nested calls (batch and friends) are checked against the registered
+        // session policy, so it must narrow with the agent's own filter.
+        self._tool_policy_registration = crate::tool::register_session_tool_policy(
+            &self.session.id,
+            self.allowed_tools.clone(),
+            self.disabled_tools.clone(),
+        );
+        self.persist_session_best_effort("agent tool restriction");
+    }
+
+    /// Add a hidden persona message (an agent definition body) to the
+    /// transcript of a freshly spawned worker. The system prompt is unchanged.
+    pub(crate) fn add_persona_message(&mut self, text: &str) {
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("agent persona");
+    }
+
     pub(crate) fn add_message_with_display_role(
         &mut self,
         role: Role,

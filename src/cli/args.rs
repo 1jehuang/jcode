@@ -8,11 +8,13 @@ mod cloud_ephemeral;
 mod cloud_runtime;
 mod google;
 mod mcp;
+mod trust;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
+pub(crate) use trust::{TrustCommand, TrustScopeArg};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -316,6 +318,12 @@ pub(crate) enum Command {
     /// Inspect or change usage telemetry settings
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
+
+    /// Review and approve what a project wants to run (hooks, MCP servers, agent policy)
+    Trust {
+        #[command(subcommand)]
+        action: TrustCommand,
+    },
 
     /// Self-development mode: run as a canary session on the shared server
     #[command(alias = "selfdev")]
@@ -1323,3 +1331,5 @@ pub(crate) enum MemoryCommand {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trust_tests;

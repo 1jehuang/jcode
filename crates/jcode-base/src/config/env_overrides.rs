@@ -455,6 +455,13 @@ impl Config {
                 _ => {}
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SWARM_FORCE_DEFAULTS") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.agents.force_swarm_defaults = true,
+                "0" | "false" | "no" | "off" => self.agents.force_swarm_defaults = false,
+                _ => {}
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
@@ -558,6 +565,14 @@ impl Config {
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
         hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(
+            &mut self.hooks.swarm_member_start,
+            "JCODE_HOOK_SWARM_MEMBER_START",
+        );
+        hook_env_override(
+            &mut self.hooks.swarm_member_end,
+            "JCODE_HOOK_SWARM_MEMBER_END",
+        );
         hook_env_override(
             &mut self.hooks.pre_tool_transform,
             "JCODE_HOOK_PRE_TOOL_TRANSFORM",

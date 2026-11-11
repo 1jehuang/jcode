@@ -650,6 +650,12 @@ swarm_max_concurrent_agents = 32
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
 #
+# Agent definitions (.jcode/agents, .claude/agents) may set model, effort and
+# tools for a worker. By default a definition beats swarm_model and swarm_effort
+# above, because a person wrote the file. Set this to make swarm_model,
+# swarm_effort and your tool policy always win. Env: JCODE_SWARM_FORCE_DEFAULTS.
+# force_swarm_defaults = false
+#
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
 # Unset = built-in default (40%). Lower values keep more transcript visible; set
 # near the minimum to collapse the gallery to a thin strip.
@@ -817,6 +823,13 @@ swarm_stall_after_secs = 600
 # the tool result the model sees, so linters can report findings inline.
 # post_tool_feedback = "~/bin/jcode-vale"
 # post_tool_feedback_timeout_ms = 10000
+#
+# Observers in the coordinator's context when a swarm worker starts or ends.
+# They receive a Claude-shaped SubagentStart/SubagentStop JSON document on
+# stdin. Inside a worker every hook also gets JCODE_HOOK_SWARM_ID,
+# JCODE_HOOK_COORDINATOR_SESSION_ID, JCODE_HOOK_AGENT_ID and friends.
+# swarm_member_start = "~/bin/on-worker-start"
+# swarm_member_end = "~/bin/on-worker-end"
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
