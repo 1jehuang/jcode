@@ -1,5 +1,5 @@
 use super::frame::{self, Framed};
-use super::{BackgroundInfo, InfoWidgetData, SwarmInfo, truncate_smart};
+use super::{BackgroundInfo, InfoWidgetData, SwarmInfo, clip};
 use crate::protocol::SwarmMemberStatus;
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
@@ -27,7 +27,7 @@ pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         lines.push(Line::from(vec![
             Span::styled("▶ ", Style::default().fg(rgb(255, 200, 100))),
             Span::styled(
-                truncate_smart(status, inner.width.saturating_sub(4) as usize),
+                clip(status, inner.width.saturating_sub(4) as usize),
                 Style::default().fg(rgb(200, 200, 210)),
             ),
         ]));
@@ -157,7 +157,7 @@ fn swarm_member_line(member: &SwarmMemberStatus, max_width: usize) -> Line<'stat
         detail = format!(" - {}", detail);
     }
     let role_prefix = swarm_role_prefix(member);
-    let line_text = truncate_smart(&format!("{} {}{}", name, member.status, detail), max_width);
+    let line_text = clip(&format!("{} {}{}", name, member.status, detail), max_width);
     let (color, icon) = swarm_status_style(&member.status);
     Line::from(vec![
         Span::styled(
@@ -186,7 +186,7 @@ fn render_swarm_name_line(name: &str, max_name_len: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled("  · ", Style::default().fg(rgb(100, 100, 110))),
         Span::styled(
-            truncate_smart(name, max_name_len),
+            clip(name, max_name_len),
             Style::default().fg(rgb(140, 140, 150)),
         ),
     ])
@@ -259,12 +259,12 @@ fn background_task_rows(
             None
         };
         let row_text = if let Some(detail) = detail {
-            truncate_smart(
+            clip(
                 &format!("{} · {}", task, detail),
                 row_width.saturating_sub(2),
             )
         } else {
-            truncate_smart(task, row_width.saturating_sub(2))
+            clip(task, row_width.saturating_sub(2))
         };
         lines.push(Line::from(vec![
             Span::raw(indent),
@@ -338,24 +338,7 @@ pub(crate) fn background_task_row_line(
 
 fn truncate_task_label(label: &str, max_width: usize) -> String {
     let label = label.replace(['\r', '\n'], " ");
-    if UnicodeWidthStr::width(label.as_str()) <= max_width {
-        return label;
-    }
-    if max_width <= 1 {
-        return "…".to_string();
-    }
-    let mut truncated = String::new();
-    let mut used = 0usize;
-    for ch in label.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w + 1 > max_width {
-            break;
-        }
-        used += w;
-        truncated.push(ch);
-    }
-    truncated.push('…');
-    truncated
+    clip(&label, max_width)
 }
 
 fn background_summary(info: &BackgroundInfo) -> Option<String> {

@@ -17,27 +17,15 @@
 //! carries commit text.
 
 use super::frame::{self, Framed};
+use super::text::clip;
 use super::{GitInfo, InfoWidgetData, RecentCommit};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Hash cells kept once the subject no longer fits: still unambiguous enough
 /// to paste, and every cell saved goes to the subject.
 const SHORT_HASH: usize = 7;
-
-/// Longest prefix of `s` that fits `max` display cells. No ellipsis: in a
-/// narrow margin three cells of `...` cost more than they tell.
-fn clip(s: &str, max: usize) -> &str {
-    let mut used = 0;
-    for (idx, ch) in s.char_indices() {
-        used += ch.width().unwrap_or(0);
-        if used > max {
-            return s[..idx].trim_end();
-        }
-    }
-    s
-}
 
 /// Most commits listed before the rest collapse into the footer.
 pub(super) const COMMITS_MAX_ROWS: usize = 5;
@@ -153,7 +141,7 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
     };
     let right_w = if show_stat { stat_w } else { 0 } + if show_age { age_w } else { 0 };
     let subject_w = width.saturating_sub(fixed + right_w);
-    let subject = clip(&commit.subject, subject_w).to_string();
+    let subject = clip(&commit.subject, subject_w);
     let pad = subject_w.saturating_sub(UnicodeWidthStr::width(subject.as_str()));
 
     let mut spans = vec![

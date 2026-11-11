@@ -3213,18 +3213,18 @@ fn suspend_terminal_for_editor() {
 }
 
 fn resume_terminal_after_editor() {
-    // Defense in depth for the run_interactive_editor_with early return: a
-    // termination signal already recorded that the process is exiting, so
-    // enabling modes here would leave them active on the shell after death
-    // (greptile #4232838288).
+    // Keep modes off if the editor still owns the handoff during shutdown
+    // (#4232838288); re-enabling them would leave the shell in TUI mode.
     if crate::tui::editor_owns_terminal() {
         return;
     }
-    // The caller reclaimed the handoff before entering here, so a termination
-    // signal arriving while these modes are re-armed runs the full cleanup.
-    // Re-enter the TUI before returning to the event loop. The existing
-    // ratatui Terminal remains usable and the next loop iteration redraws it.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    // Handoff was reclaimed, so termination signals now run full cleanup.
+    // Re-enter the TUI; the existing Terminal redraws on the next iteration.
+    if let Err(error) = jcode_tui_style::init_terminal() {
+        crate::logging::warn(&format!(
+            "failed to re-enter the TUI after the editor: {error}"
+        ));
+    }
     let policy = crate::perf::tui_policy();
     let _ = crate::tui::reapply_terminal_modes_to(
         &mut std::io::stdout(),

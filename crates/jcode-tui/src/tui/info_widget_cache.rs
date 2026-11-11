@@ -48,7 +48,7 @@ pub(super) fn render_kv_cache_widget(data: &InfoWidgetData, inner: Rect) -> Fram
                 Style::default().fg(rgb(255, 200, 100)),
             ),
             Span::styled(
-                format!("({})", truncate_smart(&sample.reason, reason_w.max(4))),
+                format!("({})", clip(&sample.reason, reason_w.max(4))),
                 Style::default().fg(rgb(140, 140, 150)),
             ),
         ]));

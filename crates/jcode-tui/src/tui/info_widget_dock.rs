@@ -215,7 +215,7 @@ fn branch_line(info: &GitInfo, max: usize) -> Line<'static> {
     let mut spans = vec![
         Span::styled(" ", Style::default().fg(rgb(240, 160, 60))),
         Span::styled(
-            truncate_smart(&info.branch, max.saturating_sub(24).max(6)),
+            clip(&info.branch, max.saturating_sub(24).max(6)),
             Style::default().fg(rgb(160, 160, 170)),
         ),
     ];
