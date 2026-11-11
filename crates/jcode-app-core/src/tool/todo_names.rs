@@ -13,6 +13,20 @@ const NULL_CLEARS: &[&str] = &[
 
 pub(super) fn normalize_containers(input: &mut Value) {
     *input = normalize_todo_input(std::mem::take(input));
+    // A stringified `phases` (including the literal "null") is the same
+    // provider quirk `normalize_todo_input` already absorbs for `todos`.
+    if let Some(phases) = input.get_mut("phases")
+        && let Value::String(raw) = phases
+    {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            *phases = Value::Null;
+        } else if let Ok(parsed @ (Value::Array(_) | Value::Null)) =
+            serde_json::from_str::<Value>(trimmed)
+        {
+            *phases = parsed;
+        }
+    }
     for key in ["update", "add", "remove"] {
         let Some(value) = input.get_mut(key) else {
             continue;
