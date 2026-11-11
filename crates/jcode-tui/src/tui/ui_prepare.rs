@@ -174,6 +174,7 @@ fn push_user_prompt_lines(
     line_raw_overrides: &mut Vec<Option<WrappedLineMap>>,
     line_copy_offsets: &mut Vec<usize>,
     user_line_indices: &mut Vec<usize>,
+    literal_raw_lines: &mut Vec<usize>,
     prompt_num: usize,
     num_color: Color,
     content: &str,
@@ -193,6 +194,7 @@ fn push_user_prompt_lines(
     for (line_idx, content_line) in normalized.split('\n').enumerate() {
         let raw_line = raw_plain_lines.len();
         raw_plain_lines.push(content_line.to_string());
+        literal_raw_lines.push(raw_line);
         let prompt_width = unicode_width::UnicodeWidthStr::width(content_line);
         let rendered_line_idx = lines.len();
         let is_first_line = line_idx == 0;
@@ -236,6 +238,7 @@ fn empty_prepared_messages() -> PreparedMessages {
         wrapped_copy_offsets: Arc::new(Vec::new()),
         raw_plain_lines: Arc::new(Vec::new()),
         wrapped_line_map: Arc::new(Vec::new()),
+        literal_raw_lines: Vec::new(),
         wrapped_user_indices: Vec::new(),
         wrapped_user_prompt_starts: Vec::new(),
         wrapped_user_prompt_ends: Vec::new(),
@@ -524,7 +527,7 @@ fn prepare_active_batch_progress(
         super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
 
-    wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[])
+    wrap_lines_with_map(lines, &[], &[], &[], &[], &[], &[], width, &[], &[], &[])
 }
 
 pub(super) fn prepare_messages(
@@ -806,6 +809,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
             wrapped_copy_offsets: Arc::new(vec![0; wrapped_line_count]),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
+            literal_raw_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
             wrapped_user_prompt_ends: Vec::new(),
@@ -844,6 +848,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
             wrapped_copy_offsets: Arc::new(vec![0; count]),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
+            literal_raw_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
             wrapped_user_prompt_ends: Vec::new(),
@@ -1357,6 +1362,7 @@ struct BodyAcc {
     line_raw_overrides: Vec<Option<WrappedLineMap>>,
     line_copy_offsets: Vec<usize>,
     user_line_indices: Vec<usize>,
+    literal_raw_lines: Vec<usize>,
     user_prompt_texts: Vec<String>,
     edit_tool_line_ranges: Vec<(usize, String, usize, usize, bool)>,
     copy_targets: Vec<RawCopyTarget>,
@@ -1379,6 +1385,13 @@ struct BodyAcc {
 }
 
 impl BodyAcc {
+    /// Mark a raw line as literal markdown text, never frame art.
+    fn mark_literal(&mut self, raw_line: usize) {
+        if self.literal_raw_lines.last() != Some(&raw_line) {
+            self.literal_raw_lines.push(raw_line);
+        }
+    }
+
     /// Push a fully-rendered display line whose raw selection text is the line
     /// itself (no logical-line mapping). Seeds a contiguous raw entry and an
     /// explicit full-width override so the body's `raw_plain_lines` stays
@@ -1463,6 +1476,7 @@ fn render_message_into(
                 &mut acc.line_raw_overrides,
                 &mut acc.line_copy_offsets,
                 &mut acc.user_line_indices,
+                &mut acc.literal_raw_lines,
                 displayed_prompt_num,
                 num_color,
                 &msg.content,
@@ -1514,6 +1528,9 @@ fn render_message_into(
                 for (idx, line) in cached.into_iter().enumerate() {
                     let line = align_if_unset(line, align);
                     if let Some(map) = maps.get(idx).copied() {
+                        if map.start_col == 0 && markdown::line_is_literal_text(&line) {
+                            acc.mark_literal(map.raw_line);
+                        }
                         acc.lines.push(line);
                         acc.line_raw_overrides.push(Some(map));
                         acc.line_copy_offsets.push(0);
@@ -1526,6 +1543,9 @@ fn render_message_into(
                 // text as the raw, matching the previous wrap-time fallback but
                 // recorded contiguously and in message order.
                 for line in cached {
+                    if markdown::line_is_literal_text(&line) {
+                        acc.mark_literal(acc.raw_plain_lines.len());
+                    }
                     acc.push_auto(align_if_unset(line, align));
                 }
             }
@@ -1863,6 +1883,7 @@ pub(super) fn prepare_body_incremental(
         &acc.line_raw_overrides,
         &acc.line_copy_offsets,
         &acc.user_line_indices,
+        &acc.literal_raw_lines,
         &acc.user_prompt_texts,
         width,
         &acc.edit_tool_line_ranges,
@@ -1902,6 +1923,10 @@ pub(super) fn prepare_body_incremental(
             });
         }
     }
+    let new_literal = new_wrapped.literal_raw_lines.iter();
+    prepared
+        .literal_raw_lines
+        .extend(new_literal.map(|i| i + prev_raw_len));
 
     prepared.wrapped_user_indices.extend(
         new_wrapped
@@ -2005,6 +2030,7 @@ pub(super) fn truncate_prepared_to_boundary(prepared: &mut PreparedMessages, kee
     Arc::make_mut(&mut prepared.wrapped_copy_offsets).truncate(wrapped_len);
     Arc::make_mut(&mut prepared.wrapped_line_map).truncate(wrapped_len);
     Arc::make_mut(&mut prepared.raw_plain_lines).truncate(raw_len);
+    prepared.literal_raw_lines.retain(|&i| i < raw_len);
     prepared.user_prompt_texts.truncate(user_prompt_len);
     prepared.message_boundaries.truncate(keep_msgs);
 
@@ -2186,6 +2212,7 @@ pub(super) fn prepare_body_prepended(
         &acc.line_raw_overrides,
         &acc.line_copy_offsets,
         &acc.user_line_indices,
+        &acc.literal_raw_lines,
         &acc.user_prompt_texts,
         width,
         &acc.edit_tool_line_ranges,
@@ -2236,6 +2263,10 @@ pub(super) fn prepare_body_prepended(
             Arc::try_unwrap(head.wrapped_line_map).unwrap_or_else(|arc| (*arc).clone()),
         );
     }
+
+    let tail = prepared.literal_raw_lines.iter().filter(|&&i| i >= cut_raw);
+    let tail: Vec<usize> = tail.map(|&i| i - cut_raw + head_raw_len).collect();
+    prepared.literal_raw_lines = [head.literal_raw_lines, tail].concat();
 
     {
         let keep_from = prepared
@@ -2487,6 +2518,7 @@ pub(super) fn prepare_body(
         &acc.line_raw_overrides,
         &acc.line_copy_offsets,
         &acc.user_line_indices,
+        &acc.literal_raw_lines,
         &acc.user_prompt_texts,
         width,
         &acc.edit_tool_line_ranges,
@@ -2613,6 +2645,7 @@ fn wrap_lines(
         wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
+        literal_raw_lines: Vec::new(),
         wrapped_user_indices,
         wrapped_user_prompt_starts,
         wrapped_user_prompt_ends,
@@ -2645,6 +2678,7 @@ fn wrap_lines_with_map(
     line_raw_overrides: &[Option<WrappedLineMap>],
     line_copy_offsets: &[usize],
     user_line_indices: &[usize],
+    literal_raw_lines: &[usize],
     user_prompt_texts: &[String],
     width: u16,
     edit_ranges: &[(usize, String, usize, usize, bool)],
@@ -2805,6 +2839,7 @@ fn wrap_lines_with_map(
         wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
+        literal_raw_lines: literal_raw_lines.to_vec(),
         wrapped_user_indices,
         wrapped_user_prompt_starts,
         wrapped_user_prompt_ends,
