@@ -82,6 +82,10 @@ impl ViewContext {
 /// The UI modes that outrank the question form. Ordered by precedence, matching
 /// the TUI's key handlers and `draw_inner`'s overlays.
 fn focus_block(probe: &(impl FocusProbe + ?Sized)) -> Option<&'static str> {
+    // The failover prompt owns keys before every other route.
+    if probe.probe_provider_failover() {
+        return Some("provider failover");
+    }
     if probe.probe_prompt_history() {
         return Some("history search");
     }
@@ -154,6 +158,7 @@ pub(super) trait FocusProbe {
     fn probe_pending_login(&self) -> bool;
     fn probe_swarm_page(&self) -> bool;
     fn probe_side_panel_fullscreen(&self) -> bool;
+    fn probe_provider_failover(&self) -> bool;
 }
 
 impl<T: TuiState + ?Sized> FocusProbe for T {
@@ -210,6 +215,9 @@ impl<T: TuiState + ?Sized> FocusProbe for T {
     }
     fn probe_side_panel_fullscreen(&self) -> bool {
         self.side_panel_fullscreen()
+    }
+    fn probe_provider_failover(&self) -> bool {
+        self.pending_provider_failover_active()
     }
 }
 
@@ -317,11 +325,22 @@ pub(crate) fn on_remote_loop_exit() {
     state::with(State::reset);
 }
 
+/// The transport dropped. Hide the panel and release keys and paste until the
+/// reconnect succeeds, but keep drafts for replay.
+pub(crate) fn on_connection_lost() {
+    state::with(|state| state.attached = false);
+}
+
 /// A new attachment replaces the connection: hide the panel, freeze drafts and
 /// drop response ownership from the old generation.
 pub(crate) fn on_connection_replaced(app: &mut App) {
     let session = ViewContext::from_probe(app).session;
-    state::with(|state| reconcile::connection_replaced(state, session.as_deref()));
+    let reopened = state::with(|state| reconcile::connection_replaced(state, session.as_deref()));
+    if reopened > 0 {
+        app.set_status_notice(format!(
+            "{reopened} answer(s) were not acknowledged before the connection changed; review and submit again."
+        ));
+    }
 }
 
 #[cfg(test)]

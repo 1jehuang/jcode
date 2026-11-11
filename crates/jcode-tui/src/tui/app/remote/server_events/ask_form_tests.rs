@@ -465,3 +465,56 @@ fn untagged_forms_are_ignored_without_a_response() {
     assert!(fixture.feed(event));
     expect_ignored(fixture.key(KeyCode::Char('1')));
 }
+
+#[test]
+fn connection_loss_hides_the_form_and_restores_its_draft() {
+    let mut fixture = Fixture::new(SESSION);
+    assert!(fixture.feed(request(SESSION, "e1")));
+    select_first_question_answer(&mut fixture.app, '1');
+
+    // No transport means no answers: keys and paste are released, not queued.
+    ask_form::on_connection_lost();
+    expect_ignored(fixture.key(KeyCode::Char('2')));
+    assert!(!ask_form::handle_paste(
+        &mut fixture.app,
+        "typed while away"
+    ));
+
+    // The reconnect replays the same form and the confirmed answer survives.
+    ask_form::on_connection_replaced(&mut fixture.app);
+    assert!(fixture.feed(request(SESSION, "e1")));
+    assert!(fixture.feed(ServerEvent::ElicitationReplayComplete {
+        session_id: SESSION.into(),
+    }));
+    go_to_submit(&mut fixture.app);
+    let response = expect_send(fixture.key(KeyCode::Enter));
+    assert_eq!(accept_content(&response).get("q1"), Some(&json!("a")));
+}
+
+#[test]
+fn submitted_form_reopens_after_the_connection_changes() {
+    let mut fixture = Fixture::new(SESSION);
+    assert!(fixture.feed(request(SESSION, "e1")));
+    let first = answer_and_submit(&mut fixture.app, 7);
+    assert_eq!(accept_content(&first).get("q1"), Some(&json!("a")));
+
+    // Submitting swallows input until the server resolves or rejects it.
+    expect_consumed(fixture.key(KeyCode::Enter));
+
+    // The acknowledgement never arrived; the next connection must reopen the
+    // form instead of leaving it stuck on `Submitting` forever.
+    ask_form::on_connection_lost();
+    ask_form::on_connection_replaced(&mut fixture.app);
+    assert!(fixture.feed(request(SESSION, "e1")));
+    assert!(fixture.feed(ServerEvent::ElicitationReplayComplete {
+        session_id: SESSION.into(),
+    }));
+    assert!(
+        fixture
+            .notice()
+            .is_some_and(|notice| notice.contains("not acknowledged")),
+        "reopening should explain why the answer needs review"
+    );
+    let second = expect_send(fixture.key(KeyCode::Enter));
+    assert_eq!(accept_content(&second).get("q1"), Some(&json!("a")));
+}

@@ -90,6 +90,30 @@ pub(super) fn single_schema() -> Value {
     })
 }
 
+pub(super) fn multi_other_schema() -> Value {
+    json!({
+        "_meta": {"jcode.dev/askUser": {"version": 1}},
+        "type": "object",
+        "required": ["q1"],
+        "properties": {
+            "q1": {
+                "type": "array",
+                "title": "Many",
+                "description": "Pick as many as you like.",
+                "_meta": {"jcode.dev/askUser": {
+                    "header": "Many",
+                    "otherField": "q1_other"
+                }},
+                "items": {"anyOf": [
+                    {"const": "a", "title": "Alpha"},
+                    {"const": "b", "title": "Beta"}
+                ]}
+            },
+            "q1_other": {"type": "string"}
+        }
+    })
+}
+
 pub(super) fn form(id: &str, session: &str, schema: Value) -> FormElicitation {
     FormElicitation {
         elicitation_id: id.to_string(),
@@ -276,6 +300,44 @@ fn multi_select_enter_advances_without_changing_selection() {
         assert!(form.is_submit_tab());
         assert!(!form.questions[1].selected.contains("x"));
         assert!(form.questions[1].selected.contains("y"));
+    });
+}
+
+#[test]
+fn multi_select_enter_on_the_other_row_only_advances() {
+    reset();
+    let context = install(SESSION, form("e1", SESSION, multi_other_schema()));
+
+    // The Other row is the third row in a two-option multi-select.
+    key(&context, KeyCode::Down);
+    key(&context, KeyCode::Down);
+    active(|form| assert_eq!(form.questions[0].highlight, 2));
+
+    key(&context, KeyCode::Enter);
+    active(|form| {
+        assert!(form.is_submit_tab());
+        assert!(form.questions[0].selected.is_empty());
+        assert!(form.editor.is_none());
+    });
+}
+
+#[test]
+fn multi_select_other_without_text_is_not_sent_as_an_answer() {
+    reset();
+    let context = install(SESSION, form("e1", SESSION, multi_other_schema()));
+
+    key(&context, KeyCode::Char('1'));
+    key(&context, KeyCode::Char('3'));
+    key(&context, KeyCode::Esc);
+    active(|form| {
+        let question = &form.questions[0];
+        assert!(question.other_selected());
+        assert!(question.other_text.trim().is_empty());
+        assert!(question.answered());
+        assert_eq!(question.answer_text(), "Alpha");
+        let content = form.content().expect("Alpha answers the question");
+        assert_eq!(content.get("q1"), Some(&json!(["a"])));
+        assert!(!content.contains_key("q1_other"));
     });
 }
 
@@ -814,6 +876,7 @@ struct FakeProbe {
     pending_login: bool,
     swarm_page: bool,
     side_panel: bool,
+    provider_failover: bool,
 }
 
 impl FocusProbe for FakeProbe {
@@ -871,6 +934,9 @@ impl FocusProbe for FakeProbe {
     fn probe_side_panel_fullscreen(&self) -> bool {
         self.side_panel
     }
+    fn probe_provider_failover(&self) -> bool {
+        self.provider_failover
+    }
 }
 
 fn blocked_probe(reason: &str) -> FakeProbe {
@@ -895,6 +961,7 @@ fn blocked_probe(reason: &str) -> FakeProbe {
         "login" => probe.pending_login = true,
         "swarm" => probe.swarm_page = true,
         "side" => probe.side_panel = true,
+        "failover" => probe.provider_failover = true,
         other => panic!("unknown probe {other}"),
     }
     probe
@@ -921,6 +988,7 @@ fn every_higher_priority_ui_blocks_render_keys_and_paste() {
         "login",
         "swarm",
         "side",
+        "failover",
     ] {
         let probe = blocked_probe(reason);
         let context = ViewContext::from_probe(&probe);

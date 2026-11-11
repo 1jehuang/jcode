@@ -185,7 +185,7 @@ pub(super) fn send_failed(state: &mut State, _context: &ViewContext, message: &s
     true
 }
 
-pub(super) fn connection_replaced(state: &mut State, app_session: Option<&str>) {
+pub(super) fn connection_replaced(state: &mut State, app_session: Option<&str>) -> usize {
     state.generation = state.generation.wrapping_add(1).max(1);
     state.attached = false;
     state.responses.clear();
@@ -197,13 +197,23 @@ pub(super) fn connection_replaced(state: &mut State, app_session: Option<&str>) 
         // A session change clears the old session's drafts immediately.
         state.clear_forms();
         state.session = Some(session.to_string());
-        return;
+        return 0;
     }
 
     // Same session: freeze drafts and wait for replay.
+    let mut reopened = 0;
     for form in &mut state.forms {
         form.seen_generation = None;
+        // The old transport died before acknowledging this answer. The server
+        // may or may not have received it; reopen the form so a rejection or
+        // replay can resolve it, and so a delivered-but-unacknowledged answer
+        // can be submitted again.
+        if matches!(form.submit, SubmitState::Submitting) {
+            form.submit = SubmitState::Idle;
+            reopened += 1;
+        }
     }
+    reopened
 }
 
 pub(super) fn on_replay_complete(

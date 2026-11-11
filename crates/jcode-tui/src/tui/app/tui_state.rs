@@ -2157,6 +2157,9 @@ impl crate::tui::TuiState for App {
     fn side_panel_fullscreen(&self) -> bool {
         self.side_panel_fullscreen
     }
+    fn pending_provider_failover_active(&self) -> bool {
+        self.pending_provider_failover.is_some()
+    }
     fn pin_images(&self) -> bool {
         self.pin_images && !self.side_panel_user_hidden
     }

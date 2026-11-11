@@ -278,18 +278,21 @@ fn handle_normal(form: &mut Form, code: KeyCode, modifiers: KeyModifiers) -> Key
         }
         KeyCode::Enter => {
             let question = form.tab;
-            let highlighted_other = form
-                .questions
-                .get(question)
-                .is_some_and(super::state::Question::highlight_is_other);
-            if highlighted_other {
-                choose_row(form, question, current_highlight(form));
-                return KeyResult::consumed();
-            }
             let multi = form
                 .questions
                 .get(question)
                 .is_some_and(|question| question.multi);
+            let highlighted_other = form
+                .questions
+                .get(question)
+                .is_some_and(super::state::Question::highlight_is_other);
+            // Single-select Other opens its editor instead of advancing. In a
+            // multi-select question Enter only advances; Space is what toggles
+            // a row, Other included.
+            if highlighted_other && !multi {
+                choose_row(form, question, current_highlight(form));
+                return KeyResult::consumed();
+            }
             if !multi {
                 choose_row(form, question, current_highlight(form));
             }

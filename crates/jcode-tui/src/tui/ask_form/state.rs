@@ -163,7 +163,14 @@ impl Question {
     }
 
     pub(super) fn selected_values(&self) -> Vec<String> {
-        self.selected.iter().cloned().collect()
+        // A selected Other row with no text is not an answer; never emit it as
+        // one, or the tool has to render its "Other (no text given)" row.
+        let other_empty = self.other_text.trim().is_empty();
+        self.selected
+            .iter()
+            .filter(|value| !(other_empty && self.value_is_other(value)))
+            .cloned()
+            .collect()
     }
 
     pub(super) fn label_for(&self, value: &str) -> String {
@@ -183,7 +190,7 @@ impl Question {
                 .filter(|value| !self.value_is_other(value))
                 .map(|value| self.label_for(value))
                 .collect();
-            if self.other_selected() {
+            if self.other_selected() && !self.other_text.trim().is_empty() {
                 labels.push(other_answer_text(self));
             }
             labels.join(", ")
@@ -378,6 +385,7 @@ impl Form {
             };
             content.insert(question.field.clone(), value);
             if question.other_selected()
+                && !question.other_text.trim().is_empty()
                 && let Some(other) = &question.other
             {
                 content.insert(

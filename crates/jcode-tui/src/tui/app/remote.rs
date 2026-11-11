@@ -1178,6 +1178,9 @@ pub(super) fn handle_disconnect(
         "handle_disconnect: session={:?}, remote_session_id={:?}, reason={:?}, detail={}",
         app.resume_session_id, app.remote_session_id, reason, detail
     ));
+    // The form must not capture keys or paste while there is no transport to
+    // answer on; drafts are kept for replay after reconnect.
+    crate::tui::ask_form::on_connection_lost();
     // A disconnect can drop the final auth catalog completion event. Keep any
     // queued prompt for reconnect, but release the transient model-setup gate so
     // it cannot remain blocked forever waiting for an event that was lost.
