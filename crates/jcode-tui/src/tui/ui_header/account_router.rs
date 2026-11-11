@@ -385,7 +385,7 @@ fn inventory_lines(
     lines
 }
 
-const QUOTA_SEPARATOR: &str = " │ ";
+const QUOTA_SEPARATOR: &str = "  ";
 
 fn inline_account_row(mut identity: Line<'static>, quotas: Vec<Line<'static>>) -> Line<'static> {
     if quotas.is_empty() {
