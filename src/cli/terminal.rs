@@ -350,12 +350,8 @@ fn init_tui_terminal(inherited_terminal: bool) -> Result<ratatui::DefaultTermina
     if inherited_terminal {
         init_tui_terminal_resume()
     } else {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
-            anyhow::anyhow!(
-                "failed to initialize terminal: {}",
-                panic_payload_to_string(payload.as_ref())
-            )
-        })
+        jcode_tui_style::init_terminal()
+            .map_err(|error| anyhow::anyhow!("failed to initialize terminal: {error}"))
     }
 }
 

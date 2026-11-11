@@ -511,17 +511,8 @@ impl PermissionsApp {
             anyhow::bail!("permissions viewer requires an interactive terminal");
         }
 
-        let mut terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init))
-            .map_err(|payload| {
-                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                anyhow::anyhow!("failed to initialize terminal: {}", msg)
-            })?;
+        let mut terminal = jcode_tui_style::init_terminal()
+            .map_err(|error| anyhow::anyhow!("failed to initialize terminal: {error}"))?;
 
         let result = loop {
             terminal.draw(|frame| self.render(frame))?;

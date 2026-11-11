@@ -2985,9 +2985,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // epoch here so the memo is scoped to exactly this frame.
     app.advance_command_suggestions_epoch();
     crate::tui::mermaid::begin_terminal_image_frame();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    match jcode_tui_style::catch_recoverable_panic(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
-    })) {
+    }) {
         Ok(()) => layout_support::draw_side_panel_restore(frame, app),
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
