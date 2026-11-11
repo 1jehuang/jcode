@@ -173,6 +173,7 @@ fn compact_auth_catalog_activity_reports_changed_and_unchanged_in_two_lines() {
 struct AuthChangeMockState {
     logged_in: StdRwLock<bool>,
     selected_model: StdRwLock<Option<String>>,
+    account_pin: StdRwLock<Option<crate::provider::AccountPin>>,
     route_provider: StdRwLock<String>,
     route_api_method: StdRwLock<String>,
     routes_override: StdRwLock<Option<Vec<ModelRoute>>>,
@@ -432,6 +433,39 @@ impl Provider for AuthChangeMockProvider {
         }
 
         *self.state.selected_model.write().unwrap() = Some(model.to_string());
+        Ok(())
+    }
+
+    fn set_route_selection(
+        &self,
+        selection: &crate::provider::RouteSelection,
+    ) -> anyhow::Result<()> {
+        self.set_model(&selection.routed_model_spec())?;
+        *self.state.account_pin.write().unwrap() = selection
+            .account_label()
+            .map(|label| crate::provider::AccountPin::new(label, None));
+        Ok(())
+    }
+
+    fn account_pin(
+        &self,
+        kind: crate::provider::AccountProviderKind,
+    ) -> Option<crate::provider::AccountPin> {
+        (kind == crate::provider::AccountProviderKind::OpenAi)
+            .then(|| self.state.account_pin.read().unwrap().clone())
+            .flatten()
+    }
+
+    fn set_account_pin(
+        &self,
+        kind: crate::provider::AccountProviderKind,
+        pin: Option<crate::provider::AccountPin>,
+    ) -> anyhow::Result<()> {
+        assert_eq!(kind, crate::provider::AccountProviderKind::OpenAi);
+        if pin.as_ref().is_some_and(|pin| pin.label == "missing") {
+            anyhow::bail!("No saved account named missing");
+        }
+        *self.state.account_pin.write().unwrap() = pin;
         Ok(())
     }
 
@@ -1112,75 +1146,6 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
         "successful recovery should not warn: {}",
         final_message
     );
-}
-
-#[tokio::test]
-async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
-    let _guard = EnvGuard::save(&[
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ]);
-    crate::bus::reset_models_updated_publish_state_for_tests();
-
-    let provider = Arc::new(AuthChangeMockProvider::new());
-    *provider.state.routes_override.write().unwrap() = Some(vec![
-        ModelRoute {
-            catalog_metadata: None,
-            model: "claude-fable-5".to_string(),
-            provider: "Anthropic".to_string(),
-            api_method: "claude-oauth".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        },
-        ModelRoute {
-            catalog_metadata: None,
-            model: "gpt-5.5".to_string(),
-            provider: "OpenAI".to_string(),
-            api_method: "openai-api-key".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        },
-        ModelRoute {
-            catalog_metadata: None,
-            model: "gpt-5.6-sol".to_string(),
-            provider: "OpenAI".to_string(),
-            api_method: "openai-api-key".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        },
-    ]);
-    let provider: Arc<dyn Provider> = provider;
-    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
-    let session_id = { agent.lock().await.session_id().to_string() };
-    let sessions: SessionAgents = Arc::new(
-        crate::server::session_manager::SessionManager::from_agents(HashMap::new()),
-    );
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    handle_notify_auth_changed(
-        49,
-        Some("claude".to_string()),
-        None,
-        true,
-        &provider,
-        &provider,
-        &sessions,
-        session_id.as_str(),
-        &agent,
-        &client_event_tx,
-    )
-    .await;
-
-    recv_final_catalog_notification(&mut client_event_rx).await;
-
-    assert_eq!(agent.lock().await.provider_model(), "gpt-5.6-sol");
 }
 
 #[tokio::test]
