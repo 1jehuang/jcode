@@ -21,6 +21,7 @@ mod client_state;
 mod model_refresh;
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
+mod client_error_context;
 mod client_writer;
 mod comm_await;
 mod comm_control;

@@ -439,6 +439,10 @@ impl ServerRuntime {
 }
 
 #[cfg(test)]
+#[path = "runtime_error_tests.rs"]
+mod error_tests;
+
+#[cfg(test)]
 mod tests {
     use super::RuntimeTaskScope;
     use std::sync::Arc;

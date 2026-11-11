@@ -295,6 +295,8 @@ pub(super) async fn handle_client(
                     ));
                 }
                 if request.is_lightweight_control_request() {
+                    let request_kind = request_type_from_line(&line);
+                    let request_id = request.id();
                     let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
                         request,
@@ -321,7 +323,16 @@ pub(super) async fn handle_client(
                             swarm_mutation_runtime: &swarm_mutation_runtime,
                         },
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        let context =
+                            super::client_error_context::initial_lightweight_error_context(
+                                &error,
+                                &request_kind,
+                                request_id,
+                            );
+                        error.context(context)
+                    })?;
                     // Native SSH probes daemon capability before sending its
                     // Subscribe on this same stream. Ping must not consume the
                     // connection, unlike the other one-shot control requests.
