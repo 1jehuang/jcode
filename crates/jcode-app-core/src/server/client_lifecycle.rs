@@ -1367,6 +1367,14 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await;
+                crate::elicitation::global().attach(
+                    &client_connection_id,
+                    &client_session_id,
+                    supports_elicitation_form,
+                    applet_elicitation,
+                    supports_user_response,
+                    client_event_tx.clone(),
+                );
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
