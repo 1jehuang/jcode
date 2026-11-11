@@ -544,9 +544,10 @@ exhausted_usage_immediate_failover = true
 anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
-# Opt in to spending earned OpenAI banked resets at an exhausted weekly limit.
-# Retries the waiting request automatically. Never buys credits. Default: false.
-# openai_auto_banked_reset = true
+# Automatically spend earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: true.
+# Set false to disable automatic redemption.
+# openai_auto_banked_reset = false
 # Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
 # anthropic_auto_fable_reset = true
 # Preserve earned resets while another approved pool route is ready (default: true).

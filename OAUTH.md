@@ -163,15 +163,16 @@ a malformed value is logged and ignored rather than breaking requests.
 
 ### Banked Codex usage resets
 
-To let agents spend an earned reset and continue automatically when the OpenAI
-weekly limit is exhausted, opt in under `[provider]` in `~/.jcode/config.toml`:
+Agents automatically spend an earned reset and continue when the OpenAI weekly
+limit is exhausted and no approved pool route is ready. To opt out, set the
+following under `[provider]` in `~/.jcode/config.toml`:
 
 ```toml
 [provider]
-openai_auto_banked_reset = true
+openai_auto_banked_reset = false
 ```
 
-This is disabled by default. Automatic recovery checks fresh, account-scoped
+This is enabled by default. Automatic recovery checks fresh, account-scoped
 usage and requires an enforced limit plus exhausted weekly usage, not just a
 rounded percentage or a transient 429. It redeems the soonest-expiring reset for
 that OAuth login and retries the request once when no approved pool route is ready.

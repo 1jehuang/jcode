@@ -1261,7 +1261,7 @@ pub struct ProviderConfig {
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
     /// Automatically redeem an earned OpenAI banked reset when weekly OAuth
-    /// usage is exhausted. Never purchases credits. Disabled by default.
+    /// usage is exhausted. Never purchases credits. Enabled by default.
     pub openai_auto_banked_reset: bool,
     /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
     /// OAuth usage. Never purchases credits. Disabled by default.
@@ -1324,7 +1324,7 @@ impl Default for ProviderConfig {
             exhausted_usage_immediate_failover: true,
             anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
-            openai_auto_banked_reset: false,
+            openai_auto_banked_reset: true,
             anthropic_auto_fable_reset: false,
             auto_reset_only_when_no_routes: true,
             copilot_premium: None,

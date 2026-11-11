@@ -1056,20 +1056,21 @@ fn test_provider_failover_defaults_match_new_behavior() {
         super::CrossProviderFailoverMode::Countdown
     );
     assert!(provider.same_provider_account_failover);
-    assert!(!provider.openai_auto_banked_reset);
+    assert!(provider.openai_auto_banked_reset);
     assert!(!provider.anthropic_auto_fable_reset);
 }
 
 #[test]
-fn automatic_banked_reset_requires_explicit_opt_in() {
-    let cfg: Config = toml::from_str("[provider]\nopenai_auto_banked_reset = true\n").unwrap();
-    assert!(cfg.provider.openai_auto_banked_reset);
-    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+fn automatic_banked_reset_defaults_on_and_supports_explicit_opt_out() {
+    let cfg: Config = toml::from_str("[provider]\nopenai_auto_banked_reset = false\n").unwrap();
     assert!(!cfg.provider.openai_auto_banked_reset);
+    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+    assert!(cfg.provider.openai_auto_banked_reset);
+    assert!(cfg.provider.auto_reset_only_when_no_routes);
     assert!(!cfg.provider.anthropic_auto_fable_reset);
     let cfg: Config = toml::from_str("[provider]\nanthropic_auto_fable_reset = true\n").unwrap();
     assert!(cfg.provider.anthropic_auto_fable_reset);
-    assert!(!cfg.provider.openai_auto_banked_reset);
+    assert!(cfg.provider.openai_auto_banked_reset);
 }
 
 #[test]
