@@ -329,6 +329,23 @@ async fn named_tool_execution_persists_ids_but_returns_public_names() {
 }
 
 #[test]
+fn stringified_null_containers_do_not_conflict_with_edits() {
+    let stored = create(hierarchy(vec![named("Implement")]));
+    let updated = patch(
+        json!({
+            "phases": "null", "add": "null", "remove": "null", "goals": "null", "plan": "null",
+            "update": [{"name": "Implement", "status": "in_progress"}]
+        }),
+        &stored,
+    );
+    assert_eq!(parsed(updated)[0].status, "in_progress");
+    let replaced = create(json!({
+        "phases": hierarchy(vec![named("Ship")])["phases"].to_string()
+    }));
+    assert_eq!(parsed(replaced)[0].content, "Ship");
+}
+
+#[test]
 fn null_filled_strict_schema_edits_behave_like_omitted_fields() {
     let stored = create(hierarchy(vec![named("Implement"), named("Test")]));
     let before = stored["todos"].clone();
