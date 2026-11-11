@@ -900,10 +900,7 @@ impl OpenRouterProvider {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
-        } else if Self::profile_supports_unified_reasoning(
-            self.profile_id.as_deref(),
-            self.send_openrouter_headers,
-        ) {
+        } else if self.supports_unified_reasoning_effort() {
             let effort = if effort == "max" { "xhigh" } else { effort };
             request["reasoning"] = serde_json::json!({"effort": effort});
         } else {
@@ -1024,10 +1021,7 @@ impl OpenRouterProvider {
     pub(crate) fn supports_any_reasoning_effort(&self) -> bool {
         self.supports_deepseek_reasoning_effort()
             || self.supports_openai_reasoning_effort()
-            || Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            )
+            || self.supports_unified_reasoning_effort()
     }
 
     pub(crate) fn normalize_reasoning_effort_for_self(&self, effort: &str) -> Option<String> {
@@ -1082,6 +1076,30 @@ impl OpenRouterProvider {
         (send_openrouter_headers
             && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter")))
             || profile_id.is_some_and(|id| id.eq_ignore_ascii_case("conifer"))
+    }
+
+    /// Model-aware unified reasoning support. In addition to real OpenRouter,
+    /// Responses-routed Muse models (Command Code `meta/muse-*` and native
+    /// Muse) accept `reasoning.effort` on the wire and must expose `/effort`
+    /// even though Muse is neither DeepSeek nor GPT family.
+    pub(crate) fn supports_unified_reasoning_effort(&self) -> bool {
+        if Self::profile_supports_unified_reasoning(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
+            return true;
+        }
+        if self.reasoning_effort_support == Some(false)
+            || self.model_reasoning_support() == Some(false)
+            || self.disable_reasoning_heuristics
+        {
+            return false;
+        }
+        crate::opencode_go_responses::model_uses_responses_api(
+            &self.api_base,
+            self.profile_id.as_deref(),
+            &self.model_snapshot(),
+        )
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {

@@ -63,13 +63,10 @@ impl OpenRouterProvider {
             .clone()
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-        Ok(Self {
+        let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                None,
-                Some(&resolved.id),
-            ))),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             session_account: Self::initial_session_account(Some(&resolved.id)),
@@ -93,6 +90,18 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
+        };
+        // Honor `[provider].openai_reasoning_effort` for built-in profiles
+        // (including Responses-routed Muse) instead of only dedicated
+        // deepseek/zai profiles. Mirrors the named-profile construction.
+        let initial_effort = if provider.supports_any_reasoning_effort() {
+            provider.configured_effort_for_model()
+        } else {
+            None
+        };
+        if let Ok(mut effort) = provider.reasoning_effort.try_write() {
+            *effort = initial_effort;
+        }
+        Ok(provider)
     }
 }

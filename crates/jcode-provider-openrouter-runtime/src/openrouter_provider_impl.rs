@@ -548,7 +548,7 @@ impl Provider for OpenRouterProvider {
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(
-                "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family and GPT-family reasoning models, and profiles with supports_reasoning_effort = true."
+                "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family, GPT-family and Responses-based Muse reasoning models, and profiles with supports_reasoning_effort = true."
             );
         }
         let requested = effort.trim().to_ascii_lowercase();
@@ -579,10 +579,7 @@ impl Provider for OpenRouterProvider {
             jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
         } else if self.supports_openai_reasoning_effort() {
             jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
-        } else if Self::profile_supports_unified_reasoning(
-            self.profile_id.as_deref(),
-            self.send_openrouter_headers,
-        ) {
+        } else if self.supports_unified_reasoning_effort() {
             jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
         } else {
             vec![]
