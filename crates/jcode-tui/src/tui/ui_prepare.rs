@@ -291,9 +291,10 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
 }
 
 fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
-    if !app.is_processing()
-        || !matches!(app.status(), ProcessingStatus::RunningTool(name) if name == "codemode")
-    {
+    // Connection-phase and nested-tool events can replace RunningTool while
+    // the parent call is still live. ToolDone removes it from this list, so
+    // pending tool calls, not the transient status label, own its lifetime.
+    if !app.is_processing() {
         return None;
     }
     app.streaming_tool_calls()

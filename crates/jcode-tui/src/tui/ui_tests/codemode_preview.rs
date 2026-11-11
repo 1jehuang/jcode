@@ -89,6 +89,8 @@ fn codemode_preview_live_updates_and_disappears_when_idle() {
                 .join("\n")
         };
         assert!(render(&state).contains("return 1"));
+        state.status = ProcessingStatus::Streaming;
+        assert!(render(&state).contains("return 1"));
         state.streaming_tools[0] = tool("return 2");
         let updated = render(&state);
         assert!(updated.contains("return 2"), "{updated}");
