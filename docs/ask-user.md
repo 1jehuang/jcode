@@ -21,4 +21,3 @@ validated before settlement; the first valid response wins. Reconnecting clients
 receive pending forms followed by an explicit replay boundary. Drafts survive
 transport loss, and an unacknowledged submission can be reviewed and resent.
 Session changes and resolved forms clear stale input state.
-
