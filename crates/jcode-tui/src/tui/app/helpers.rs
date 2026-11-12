@@ -1111,6 +1111,65 @@ fn remote_resume_invocation_args(
     args
 }
 
+/// Arguments that attach a second client to a session on the SSH host this
+/// client is already displaying. Everything is passed explicitly because the
+/// window may be opened by the companion, which does not share our env.
+pub(super) fn ssh_child_invocation_args(session_id: &str) -> Vec<String> {
+    let host = crate::tui::ssh_remote_host().unwrap_or_default();
+    let mut args = vec!["--fresh-spawn".to_string(), "--ssh".to_string(), host];
+    for (flag, variable) in [
+        ("--ssh-binary", "JCODE_SSH_BINARY"),
+        ("--ssh-server-socket", "JCODE_SSH_SERVER_SOCKET"),
+        ("--remote-working-dir", "JCODE_SSH_WORKING_DIR"),
+    ] {
+        if let Ok(value) = std::env::var(variable)
+            && !value.trim().is_empty()
+        {
+            args.extend([flag.to_string(), value]);
+        }
+    }
+    args.extend(["--resume".to_string(), session_id.to_string()]);
+    if jcode_selfdev_types::client_selfdev_requested() {
+        args.push("self-dev".to_string());
+    }
+    args
+}
+
+pub(super) fn ssh_child_manual_command(session_id: &str) -> String {
+    command_display(
+        Path::new("jcode"),
+        &ssh_child_invocation_args(session_id)[1..],
+    )
+}
+
+/// Open another SSH client on `session_id` in a new terminal window.
+pub(super) fn spawn_ssh_child_in_new_terminal(session_id: &str) -> anyhow::Result<bool> {
+    if cfg!(test) {
+        // Never launch real terminal windows from unit tests.
+        return Ok(false);
+    }
+    let cwd = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let host = crate::tui::ssh_remote_host().unwrap_or_default();
+    let mut command = crate::terminal_launch::TerminalCommand::new(
+        launch_client_executable(),
+        ssh_child_invocation_args(session_id),
+    )
+    .title(format!("jcode SSH {host}"))
+    // Attaching must not replay a cloud handoff from this client's env.
+    .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+    .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    if std::env::var("JCODE_SSH_LOCAL_IS_SOURCE").as_deref() != Ok("1") {
+        // Our cached client cwd is inherited by the child. It was never
+        // authorized as a migration source, so it must not become one there.
+        command = command.spawn_env("JCODE_SSH_LOCAL_INHERITED", "1");
+    }
+    crate::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
+}
+
 fn command_display(program: &Path, args: &[String]) -> String {
     std::iter::once(program.to_string_lossy().to_string())
         .chain(args.iter().cloned())
