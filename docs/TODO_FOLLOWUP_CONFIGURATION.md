@@ -13,7 +13,7 @@ Set `todo_gate_digest = false` to disable it again. Auto-poke must also be enabl
 
 With auto-poke enabled, an unchanged incomplete todo list receives at most three automatic continuation attempts. A change to the incomplete list or a new todo cycle resets that budget. The TUI preserves its remaining budget across self-development reloads. Explicitly turning auto-poke off still stops these retries.
 
-Todos marked `completely_blocked` are an exception to automatic continuation: **✋ Completely blocked**. No way forward. Its object contains only a nonempty `reason` string. It pauses retries for that item until its condition is cleared, without creating a timed review. Independent actionable todos still continue normally. This condition does not mark work completed and is distinct from waiting for a running background task or an external blocker with a review deadline.
+Three conditions exempt unfinished work from automatic continuation: a todo `waiting_on` background tasks that are still running, a todo marked `requires_user_auth` (**✋ Needs your authorization**) until the user authorizes it, and every todo of a goal whose `cannot_complete` reason is set. None of them marks work completed or spends the retry budget, and independent actionable todos still continue normally. There is no item-level "blocked" state and no timed blocker review. See "Pausing a todo" in `docs/HARNESS.md`.
 
 When enabled, recorded todo gate observations produce the existing aggregate reminder once per completion cycle, after open work finishes and before the completion gates. Repeated observations during that cycle do not trigger another aggregate reminder. New open work starts another cycle. The TUI and headless `jcode run` both respect this setting.
 

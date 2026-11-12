@@ -836,6 +836,7 @@ fn create_transfer_child_session(
     // reassess those results, not inherit foreign task IDs or their wakes.
     for todo in &mut todos {
         todo.waiting_on.clear();
+        todo.waiting_reason = None;
     }
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();

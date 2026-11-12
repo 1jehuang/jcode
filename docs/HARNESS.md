@@ -188,30 +188,37 @@ progress and does not dim a prerequisite-ready lane merely because its phase is
 later. This note describes the prerequisite gate, not the lane's lifecycle or
 other blockers.
 
-## Completely blocked
+## Pausing a todo
 
-No way forward.
+A todo has no "blocked" state. An unfinished todo keeps receiving automatic continuation unless one of these applies:
 
-`completely_blocked` is a condition on an unfinished todo, not another lifecycle status. Its object contains only a nonempty `reason` string explaining the blocker.
+| Field | Level | Pauses until | Use for |
+| --- | --- | --- | --- |
+| `waiting_on: {ids, reason}` | todo | the listed background tasks or `await_members` waits finish | work that is already running somewhere else |
+| `requires_user_auth: {reason}` | todo | the user authorizes it and the field is cleared with `null` | an action only the user may approve |
+| `cannot_complete: "<reason>"` | goal | the reason is cleared with `""` | a goal that is genuinely impossible |
 
 ```json
 {
   "update": [
-    {
-      "name": "Recover source data",
-      "completely_blocked": {
-        "reason": "Required source data no longer exists"
-      }
-    }
+    {"name": "Compare benchmark", "waiting_on": {"ids": ["bench-task"], "reason": "Rerun in progress"}},
+    {"name": "Deploy to production", "requires_user_auth": {"reason": "Approve the production deploy"}}
+  ],
+  "goals": [
+    {"group": "migration", "cannot_complete": "Source data was deleted upstream", "closed_feedback_loop": "absent", "feedback_loop": "None possible", "feedback_loop_relevance": "indirect", "feedback_loop_coverage": "narrow", "feedback_loop_traceability": "unmapped"}
   ]
 }
 ```
 
-The TUI labels this condition **✋ Completely blocked** and shows the reason. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"completely_blocked": null` when a way forward exists, then reassess rather than assuming the task is complete.
+These are conditions on unfinished work, not lifecycle statuses: keep the todo pending or in progress. A failed command, a retry, or a decision the agent can make itself is not a reason to pause. `waiting_on` also accepts a bare list of IDs. Both todo pauses clear automatically when the todo is completed or cancelled.
+
+The TUI shows the waiting reason on the todo row, marks user authorization with **✋ Needs your authorization**, and lists a goal that cannot complete in the footer above the composer. Independent work stays actionable in every case.
+
+The former `external_blocker` and `completely_blocked` item fields were removed. Saved todos that still carry them load as ordinary actionable todos, and a tool call that sends them is rejected with a pointer to the fields above.
 
 ## Live worker status in todo lanes
 
-An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A completely blocked condition pauses its item without hiding independent work in the same lane.
+An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A todo that needs user authorization pauses only itself, without hiding independent work in the same lane.
 
 Passive worker status is displayed with the todo lanes rather than in a second list beside the pinned todo band. Focused worker navigation and transcript controls remain available.
 

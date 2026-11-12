@@ -15,8 +15,8 @@ pub mod store;
 pub use followup::{
     ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
     INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
-    TodoSnapshot, is_incomplete_todo, todo_completely_blocked, todo_has_external_blocker,
-    todo_has_external_blocker_at, todo_waits_on_running_task,
+    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, todo_cannot_complete_reason,
+    todo_goal_cannot_complete, todo_requires_user_auth, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -34,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, LANE_OWNER_WORKER, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal,
-    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    IterationMaturity, LANE_OWNER_WORKER, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
+    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.

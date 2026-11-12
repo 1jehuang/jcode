@@ -17,8 +17,8 @@ fn uncapped_and_preserves_every_todo_field() {
             confidence_history: vec![ConfidenceState::Speculative, ConfidenceState::Verified],
             assigned_to: Some("worker".into()),
             blocked_by: vec!["dependency".into()],
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["background-task".into()],
             stage: Some(2),
         })
@@ -54,6 +54,7 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
     };
     let goal = TodoGoal {
         group: Some("lane".into()),
+        cannot_complete: None,
         feedback_loop: Some("Run acceptance workflow".into()),
         closed_feedback_loop: Some(FeedbackLoopState::Closed),
         closed_feedback_loop_history: vec![FeedbackLoopState::Absent, FeedbackLoopState::Closed],

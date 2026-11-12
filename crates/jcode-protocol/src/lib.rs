@@ -708,7 +708,7 @@ pub struct SwarmMemberRuntime {
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_status: Option<SwarmLiveStatus>,
-    /// Foreground blocking operation or completely blocked todo pause. A display reason,
+    /// Foreground blocking operation or user-authorization todo pause. A display reason,
     /// not an automatically waking durable dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,

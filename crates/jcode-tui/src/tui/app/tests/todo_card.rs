@@ -1182,7 +1182,7 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
-    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "completely_blocked":{"reason":"Only the owner can approve"}}]});
+    let payload = serde_json::json!({"todos":[{"id":"debug", "content":"Authorize", "status":"pending", "priority":"high", "requires_user_auth":{"reason":"Only the owner can approve"}}]});
     let response = app.handle_debug_command(&format!("inject:todos:{payload}"));
     assert!(
         response.starts_with("OK: injected todos message"),
@@ -1199,7 +1199,7 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     let text = render_and_snap(&app, &mut terminal);
     assert!(
-        text.contains("✋") && text.contains("Completely blocked"),
+        text.contains("✋") && text.contains("Needs your authorization"),
         "{text}"
     );
 }

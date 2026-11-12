@@ -24,8 +24,8 @@ mod names;
 mod name_tests;
 
 #[cfg(test)]
-#[path = "todo_external_blocker_tests.rs"]
-mod external_blocker_tests;
+#[path = "todo_pause_tests.rs"]
+mod pause_tests;
 
 #[cfg(test)]
 #[path = "todo_lane_dependency_tests.rs"]
@@ -52,32 +52,59 @@ fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
     patch_lane_field(todos, id, "lane_after", value)
 }
 
-fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
-    let now = chrono::Utc::now();
-    for todo in todos {
-        if let Some(required) = &todo.completely_blocked
-            && required.reason.trim().is_empty()
-        {
-            bail!(
-                "completely_blocked.reason must be nonempty for todo {}",
-                todo.id
-            );
-        }
-        if let Some(blocker) = &todo.external_blocker {
-            if blocker.reason.trim().is_empty() {
-                bail!(
-                    "external_blocker.reason must explain the external condition for todo {}",
-                    todo.id
-                );
+/// Resolve the item pause fields at the tool boundary. `waiting_on` arrives as
+/// `{ids, reason}` (a bare ID list is still accepted) and is stored as the ID
+/// list plus `waiting_reason`. Items have no block of their own, so the removed
+/// blocker fields are rejected with the replacement spelled out.
+fn normalize_item_pauses(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    for key in ["update", "add", "todos"] {
+        let Some(items) = obj.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(fields) = item.as_object_mut() else {
+                continue;
+            };
+            for removed in ["external_blocker", "completely_blocked"] {
+                if fields.get(removed).is_some_and(|value| !value.is_null()) {
+                    bail!(
+                        "{removed} was removed: todos cannot be blocked. Use waiting_on for \
+                         running tasks or other agents, requires_user_auth when only the user \
+                         can authorize the step, or the goal's cannot_complete when the goal \
+                         is impossible. Otherwise keep working."
+                    );
+                }
+                fields.remove(removed);
             }
-            let unchanged = previous
-                .iter()
-                .any(|old| old.id == todo.id && old.external_blocker == todo.external_blocker);
-            if !unchanged && blocker.review_at <= now {
-                bail!(
-                    "external_blocker.review_at must be a future RFC3339 deadline for todo {}",
-                    todo.id
-                );
+            let Some(waiting) = fields.get_mut("waiting_on") else {
+                continue;
+            };
+            if let Value::String(raw) = waiting
+                && let Ok(parsed @ (Value::Object(_) | Value::Array(_) | Value::Null)) =
+                    serde_json::from_str::<Value>(raw.trim())
+            {
+                *waiting = parsed;
+            }
+            // Writing `{ids, reason}` replaces the reason. A bare list is
+            // either a model write without a reason (clears it) or an already
+            // normalized item, whose resolved reason must survive a second pass.
+            match waiting {
+                Value::Object(wait) => {
+                    let reason = wait
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(|reason| json!(reason));
+                    *waiting = wait.remove("ids").unwrap_or(Value::Null);
+                    fields.insert("waiting_reason".into(), reason.unwrap_or(Value::Null));
+                }
+                _ => {
+                    fields.entry("waiting_reason").or_insert(Value::Null);
+                }
             }
         }
     }
@@ -97,7 +124,7 @@ async fn prepare_background_dependencies(
         let prior = previous.iter().find(|old| old.id == todo.id);
         let active = !crate::todo::todo_status_is_completed(&todo.status)
             && !crate::todo::todo_status_is_cancelled(&todo.status)
-            && !crate::todo::todo_completely_blocked(todo);
+            && !crate::todo::todo_requires_user_auth(todo);
         for id in &todo.waiting_on {
             // Check before the manager constructs any filesystem path.
             if id.is_empty()
@@ -284,6 +311,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
     )?;
     flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
@@ -454,6 +482,7 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
     let mut input = input;
     names::normalize_public_input(&mut input, &[])?;
     flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
     if let Some(todos) = &params.todos {
         let mut ids = std::collections::HashSet::new();
@@ -818,7 +847,16 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
             if goal.stopping_evidence.is_none() {
                 goal.stopping_evidence = prev.stopping_evidence.clone();
             }
+            if goal.cannot_complete.is_none() {
+                goal.cannot_complete = prev.cannot_complete.clone();
+            }
         }
+        // An empty reason is the documented way to resume a goal.
+        goal.cannot_complete = goal
+            .cannot_complete
+            .take()
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty());
         record_score_observation(
             &mut goal.closed_feedback_loop_history,
             goal.closed_feedback_loop,
@@ -918,6 +956,11 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
         != after.and_then(|goal| goal.stopping_evidence.as_ref())
     {
         fields.push(TodoGoalField::StoppingEvidence);
+    }
+    if before.and_then(|goal| goal.cannot_complete.as_ref())
+        != after.and_then(|goal| goal.cannot_complete.as_ref())
+    {
+        fields.push(TodoGoalField::CannotComplete);
     }
     fields
 }
@@ -1315,27 +1358,22 @@ impl Tool for TodoTool {
                                 "type": "string"
                             },
                             "waiting_on": {
-                                "type": ["array", "null"],
-                                "items": {"type": "string"},
-                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
-                            },
-                            "completely_blocked": {
                                 "type": ["object", "null"],
-                                "description": "No way forward. Block only for an indispensable action by someone else with no safe workaround: name who must do what and why you cannot proceed. Uncertainty, task size, and agent coordination are not blockers. Continue independent work.",
+                                "description": "Pause while this session's background/await_members tasks run, including work by other agents; wakes on completion. null clears.",
+                                "required": ["ids", "reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "ids": {"type": "array", "items": {"type": "string"}},
+                                    "reason": {"type": "string"}
+                                }
+                            },
+                            "requires_user_auth": {
+                                "type": ["object", "null"],
+                                "description": "Pause until the user authorizes a step only they can approve. Retries, decisions you can make yourself, and waits on other agents (use waiting_on) do not qualify; a todo with neither pause stays yours to continue. null clears.",
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
                                     "reason": {"type": "string", "minLength": 1}
-                                }
-                            },
-                            "external_blocker": {
-                                "type": ["object", "null"],
-                                "description": "Same bar as completely_blocked. Keeps work pending/in_progress and schedules reassessment at review_at instead of a separate schedule call; null clears it.",
-                                "required": ["reason", "review_at"],
-                                "additionalProperties": false,
-                                "properties": {
-                                    "reason": {"type": "string", "minLength": 1},
-                                    "review_at": {"type": "string", "format": "date-time", "description": "Future RFC3339 reassessment time, not assumed resolution."}
                                 }
                             },
                             "status": {
@@ -1436,6 +1474,10 @@ impl Tool for TodoTool {
                             "stopping_evidence": {
                                 "type": "string",
                                 "description": "Observed evidence supporting iteration_maturity."
+                            },
+                            "cannot_complete": {
+                                "type": "string",
+                                "description": "Why this goal is genuinely impossible; stops work on its todos. Not for failures you can retry or work around. Empty string clears."
                             }
                         }
                     }
@@ -1470,10 +1512,8 @@ impl Tool for TodoTool {
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
             schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
-        schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
-            schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
-        schema["properties"]["update"]["items"]["properties"]["completely_blocked"] =
-            schema["properties"]["todos"]["items"]["properties"]["completely_blocked"].clone();
+        schema["properties"]["update"]["items"]["properties"]["requires_user_auth"] =
+            schema["properties"]["todos"]["items"]["properties"]["requires_user_auth"].clone();
         // The item schema is built locally above. Remove flat aliases from the
         // hierarchical representation without assuming the JSON object shape.
         let mut item = schema["properties"]["todos"]["items"].clone();
@@ -1530,16 +1570,15 @@ impl Tool for TodoTool {
             )
             .map_err(anyhow::Error::msg)?;
             for todo in &mut todos {
+                // Finished work needs no authorization, and a reason only
+                // describes the dependencies it was written for.
                 if !crate::todo::is_incomplete_todo(todo) {
-                    todo.external_blocker = None;
-                    todo.completely_blocked = None;
-                } else if todo.completely_blocked.is_some() {
-                    // Complete blockers have no timed review. Existing task
-                    // and todo dependencies remain useful once unblocked.
-                    todo.external_blocker = None;
+                    todo.requires_user_auth = None;
+                }
+                if todo.waiting_on.is_empty() {
+                    todo.waiting_reason = None;
                 }
             }
-            validate_external_blockers(&previous, &todos)?;
             prepare_background_dependencies(
                 crate::background::global(),
                 &ctx.session_id,
@@ -1594,35 +1633,6 @@ impl Tool for TodoTool {
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
                 save_todos(&ctx.session_id, &todos)?;
-                if previous
-                    .iter()
-                    .chain(&todos)
-                    .any(|todo| todo.external_blocker.is_some())
-                {
-                    if let Err(error) =
-                        crate::ambient::reconcile_stored_todo_reviews(&ctx.session_id)
-                    {
-                        // A failed durable wake must not leave silent suppression.
-                        // Keep unrelated/newer todo fields, clearing only the exact
-                        // blocker generations this write attempted to schedule.
-                        let mut current = load_todos(&ctx.session_id)?;
-                        for todo in &mut current {
-                            if todo.external_blocker.is_some()
-                                && todos.iter().any(|attempted| {
-                                    attempted.id == todo.id
-                                        && attempted.external_blocker == todo.external_blocker
-                                })
-                            {
-                                todo.external_blocker = None;
-                            }
-                        }
-                        save_todos(&ctx.session_id, &current)?;
-                        bail!(
-                            "Could not persist durable todo reviews; matching external blockers were cleared so work remains actionable: {error:#}"
-                        );
-                    }
-                    super::ambient::nudge_schedule_runner();
-                }
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
                 if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {

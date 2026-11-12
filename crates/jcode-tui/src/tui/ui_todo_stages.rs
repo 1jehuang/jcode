@@ -295,11 +295,9 @@ fn current_stage(
 }
 
 fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {
-    if crate::todo::todo_completely_blocked(todo) {
-        "completely_blocked"
-    } else if crate::todo::is_incomplete_todo(todo)
-        && (crate::todo::todo_has_external_blocker(todo) || !todo.blocked_by.is_empty())
-    {
+    if crate::todo::todo_requires_user_auth(todo) {
+        "requires_user_auth"
+    } else if crate::todo::is_incomplete_todo(todo) && !todo.blocked_by.is_empty() {
         "blocked"
     } else if todo.status == "in_progress" && todo.assigned_to.as_deref() == Some("@self") {
         "self_in_progress"
@@ -314,7 +312,7 @@ fn pip_span(todo: &crate::todo::TodoItem) -> Span<'static> {
 
 fn status_pip_span(status: &str) -> Span<'static> {
     let (glyph, color) = match status {
-        "completely_blocked" => ("✋", rgb(225, 165, 90)),
+        "requires_user_auth" => ("✋", rgb(225, 165, 90)),
         "blocked" => ("⊘", rgb(225, 165, 90)),
         "completed" => ("●", rgb(100, 180, 100)),
         "in_progress" => ("●", asap_color()),
@@ -388,9 +386,9 @@ pub(crate) fn push_stage_pips(
             if counts {
                 if stage
                     .item_indices()
-                    .any(|i| crate::todo::todo_completely_blocked(todos[i]))
+                    .any(|i| crate::todo::todo_requires_user_auth(todos[i]))
                 {
-                    out.push(status_pip_span("completely_blocked"));
+                    out.push(status_pip_span("requires_user_auth"));
                     continue;
                 }
                 let total = stage.len();
@@ -556,7 +554,7 @@ fn lane_item_statuses<'a>(
     let mut seen = std::collections::HashSet::new();
     let mut statuses = Vec::new();
     for todo in lane_todos {
-        if matches!(todo_pip_status(todo), "blocked" | "completely_blocked") {
+        if matches!(todo_pip_status(todo), "blocked" | "requires_user_auth") {
             statuses.push((todo_pip_status(todo), false));
             continue;
         }
@@ -627,10 +625,10 @@ fn lane_note_spans(
 ) -> Vec<Span<'static>> {
     if lane_todos
         .iter()
-        .any(|todo| crate::todo::todo_completely_blocked(todo))
+        .any(|todo| crate::todo::todo_requires_user_auth(todo))
     {
         return vec![Span::styled(
-            "Completely blocked",
+            "Needs your authorization",
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }
@@ -950,7 +948,7 @@ pub(crate) fn push_stage_lines(
         // Expand a waiting lane so its dependency progress belongs to the
         // corresponding todo rather than an ambiguous lane-wide status dot.
         if items.iter().any(|todo| {
-            crate::todo::todo_completely_blocked(todo)
+            crate::todo::todo_requires_user_auth(todo)
                 || !todo_running_dependencies(todo, background_tasks).is_empty()
         }) {
             for todo in &items {
@@ -1095,7 +1093,7 @@ pub(crate) fn todo_wait_note(
     todo: &crate::todo::TodoItem,
     agents: &[TodoCardAgent],
 ) -> Option<String> {
-    if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
+    if crate::todo::todo_requires_user_auth(todo) || is_done(todo) {
         return None;
     }
     let agent = todo
@@ -1127,7 +1125,7 @@ fn push_lane_status_lines_inner(
 ) {
     let mut seen = std::collections::HashSet::new();
     for todo in todos {
-        if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
+        if crate::todo::todo_requires_user_auth(todo) || is_done(todo) {
             continue; // Pause this item, not independent workers sharing its lane.
         }
         let Some(agent) = todo

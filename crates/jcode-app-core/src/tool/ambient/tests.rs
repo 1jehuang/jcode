@@ -1,11 +1,11 @@
 use super::*;
 
 #[test]
-fn schedule_description_preserves_blocker_routing_within_budget() {
+fn schedule_description_stays_one_short_sentence() {
     let tool = ScheduleTool::new();
     let description = tool.description();
     assert!(description.contains("independent future tasks"));
-    assert!(description.contains("todo external_blocker"));
+    assert!(!description.contains("blocker"));
     assert!(crate::util::estimate_tokens(description) <= 20);
     let schema = tool.parameters_schema();
     for action in ["create", "list", "cancel"] {

@@ -401,7 +401,8 @@ fn schema_advertises_intent_and_todos() {
     assert!(!goal_props.contains_key("user_intention"));
     assert!(!goal_props.contains_key("alignment_score"));
     assert!(!goal_props.contains_key("objective"));
-    assert_eq!(goal_props.len(), 11);
+    assert!(goal_props.contains_key("cannot_complete"));
+    assert_eq!(goal_props.len(), 12);
     assert_eq!(
         goal_props["feedback_loop_relevance"]["enum"],
         json!([

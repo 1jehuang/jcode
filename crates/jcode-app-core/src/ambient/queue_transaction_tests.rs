@@ -139,3 +139,32 @@ fn scheduled_queue_failed_transaction_preserves_disk_and_memory() {
     assert_eq!(queue.len(), 1);
     assert!(queue.take_ready_direct_items().is_empty());
 }
+
+#[test]
+fn legacy_todo_review_entries_are_dropped_without_losing_other_schedules() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone());
+    queue
+        .try_push(AmbientManager::scheduled_item(request("kept", false)))
+        .unwrap();
+    let mut entries: Vec<serde_json::Value> = crate::storage::read_json(&path).unwrap();
+    let mut legacy = entries[0].clone();
+    legacy["id"] = "legacy-review".into();
+    legacy["target"] = serde_json::json!({
+        "type": "todo_review", "session_id": "old", "todo_id": "acceptance",
+        "blocker": {"reason": "Coordinator acceptance", "review_at": "2026-10-26T00:00:00Z"}
+    });
+    entries.insert(0, legacy);
+    crate::storage::write_json(&path, &entries).unwrap();
+    let mut reloaded = ScheduledQueue::load(path.clone());
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded.items()[0].context, "kept");
+    // The next write persists the cleaned queue.
+    reloaded
+        .try_push(AmbientManager::scheduled_item(request("later", false)))
+        .unwrap();
+    let saved: Vec<serde_json::Value> = crate::storage::read_json(&path).unwrap();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.iter().all(|entry| entry["id"] != "legacy-review"));
+}

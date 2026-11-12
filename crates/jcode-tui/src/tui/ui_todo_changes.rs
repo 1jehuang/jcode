@@ -135,8 +135,7 @@ impl TodoDiff {
 }
 
 fn blocked_of(todo: &TodoItem) -> bool {
-    crate::todo::is_incomplete_todo(todo)
-        && (!todo.blocked_by.is_empty() || crate::todo::todo_has_external_blocker(todo))
+    crate::todo::is_incomplete_todo(todo) && !todo.blocked_by.is_empty()
 }
 
 fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
@@ -154,16 +153,16 @@ fn compute_diff(prev: Option<&[TodoItem]>, next: &[TodoItem]) -> TodoDiff {
         let previous = find_prev(&item.id);
         let blocker_changed = previous
             .map(|old| {
-                old.completely_blocked
+                old.requires_user_auth
                     .as_ref()
                     .map(|blocker| &blocker.reason)
                     != item
-                        .completely_blocked
+                        .requires_user_auth
                         .as_ref()
                         .map(|blocker| &blocker.reason)
             })
             .unwrap_or(true);
-        if crate::todo::todo_completely_blocked(item)
+        if crate::todo::todo_requires_user_auth(item)
             && (blocker_changed
                 || previous
                     .is_some_and(|old| old.status != item.status || old.content != item.content))
@@ -382,7 +381,7 @@ mod tests {
     fn complete_blocker_changes_are_visible_and_width_safe() {
         let before = todo("1", "Connect", "pending");
         let mut after = before.clone();
-        after.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        after.requires_user_auth = Some(crate::todo::TodoUserAuth {
             reason: "Only the owner can approve".into(),
         });
         let lines =
@@ -392,7 +391,7 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("✋ Completely blocked: Only the owner can approve"));
+        assert!(text.contains("✋ Needs your authorization: Only the owner can approve"));
         assert!(text.contains("Only the owner can approve"));
         for width in 0..100 {
             assert!(
@@ -509,8 +508,8 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
-            external_blocker: None,
-            completely_blocked: None,
+            waiting_reason: None,
+            requires_user_auth: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
