@@ -457,6 +457,16 @@ const API_VERSION: &str = "2023-06-01";
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
 
+/// Attempt budget for pure transport faults (connection reset, DNS failure,
+/// HTTP/2 stream error). A Wi-Fi roam or DHCP renewal takes several seconds to
+/// settle, so the ~3s that [`MAX_RETRIES`] covers can fall entirely inside one
+/// blip. Six attempts back off ~1s, 2s, 4s, 8s, 16s (~31s of waiting).
+const TRANSPORT_MAX_RETRIES: u32 = 6;
+
+/// Extended transport retries stop once this much time has passed since the
+/// first failure, so slow per-attempt timeouts cannot stall a turn for minutes.
+const TRANSPORT_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
@@ -1847,8 +1857,12 @@ async fn run_stream_with_retries(
     // Track every model id we have already attempted so a retired/renamed
     // model only falls back to genuinely new candidates.
     let mut tried_models: Vec<String> = vec![original_model.clone()];
+    // Transport faults get a longer budget than other transient errors; the
+    // displayed maximum grows only once one has actually been seen.
+    let mut retry_max = MAX_RETRIES;
+    let mut first_failure_at: Option<std::time::Instant> = None;
 
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..TRANSPORT_MAX_RETRIES {
         if attempt > 0 {
             // Exponential backoff with jitter: ~1s, ~2s, ~4s
             let delay = jcode_provider_core::retry_after::retry_delay(
@@ -1860,7 +1874,7 @@ async fn run_stream_with_retries(
                 .send(Ok(StreamEvent::ConnectionPhase {
                     phase: jcode_message_types::ConnectionPhase::Retrying {
                         attempt: attempt + 1,
-                        max: MAX_RETRIES,
+                        max: retry_max,
                     },
                 }))
                 .await;
@@ -1868,7 +1882,7 @@ async fn run_stream_with_retries(
             jcode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
                 attempt + 1,
-                MAX_RETRIES
+                retry_max
             ));
         }
 
@@ -2124,7 +2138,15 @@ async fn run_stream_with_retries(
                 }
 
                 // Check if this is a transient/retryable error
-                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                let since_first_failure = first_failure_at
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed();
+                let is_transport_fault =
+                    jcode_provider_core::is_transient_transport_error(&error_str);
+                if should_retry_transient(&error_str, attempt, since_first_failure) {
+                    if is_transport_fault {
+                        retry_max = TRANSPORT_MAX_RETRIES;
+                    }
                     if saw_output {
                         // The fault hit mid-stream after partial output reached
                         // the consumer. Tell it to discard the partial attempt
@@ -2137,7 +2159,7 @@ async fn run_stream_with_retries(
                         let _ = tx
                             .send(Ok(StreamEvent::RetryRollback {
                                 attempt: attempt + 2,
-                                max: MAX_RETRIES,
+                                max: retry_max,
                             }))
                             .await;
                     } else {
@@ -2156,6 +2178,17 @@ async fn run_stream_with_retries(
                             e
                         )))
                         .await;
+                } else if is_transport_fault && attempt > 0 {
+                    // Say that retries already happened and why they failed,
+                    // so the raw transport error is not mistaken for a
+                    // provider or model problem.
+                    let _ = tx
+                        .send(Err(e.context(format!(
+                            "Network unstable: {} attempts over {}s all failed at the transport level",
+                            attempt + 1,
+                            since_first_failure.as_secs().max(1)
+                        ))))
+                        .await;
                 } else {
                     let _ = tx.send(Err(e)).await;
                 }
@@ -2169,7 +2202,7 @@ async fn run_stream_with_retries(
         let _ = tx
             .send(Err(anyhow::anyhow!(
                 "Failed after {} retries: {}",
-                MAX_RETRIES,
+                TRANSPORT_MAX_RETRIES,
                 e
             )))
             .await;
