@@ -1270,7 +1270,7 @@ impl Tool for CommunicateTool {
                 let prompt = params.spawn_initial_message();
                 let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
-                    let title = jcode_swarm_core::derive_swarm_task_label(&label)
+                    let title = derive_swarm_task_label(&label)
                         .unwrap_or_else(|| label.clone());
                     let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
                         &todos,
