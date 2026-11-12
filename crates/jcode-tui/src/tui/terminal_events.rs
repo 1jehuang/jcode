@@ -257,7 +257,13 @@ impl RuntimeTheme {
 
 fn runtime() -> &'static Mutex<RuntimeTheme> {
     static RUNTIME: OnceLock<Mutex<RuntimeTheme>> = OnceLock::new();
-    RUNTIME.get_or_init(|| Mutex::new(RuntimeTheme::default()))
+    RUNTIME.get_or_init(|| {
+        Mutex::new(RuntimeTheme {
+            // A re-executed background client stays on the slow query cadence.
+            unfocused: !crate::tui::focus_carryover::initial_focus(),
+            ..RuntimeTheme::default()
+        })
+    })
 }
 
 fn background_query(passthrough: bool) -> &'static [u8] {

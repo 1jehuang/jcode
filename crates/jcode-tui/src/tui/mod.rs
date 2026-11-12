@@ -41,6 +41,7 @@ mod info_widget_cloud_directories;
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
+mod focus_carryover;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
