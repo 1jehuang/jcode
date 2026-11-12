@@ -2808,17 +2808,14 @@ fn handle_server_event_inner(
                             .map(|email| email.as_str()),
                     );
                     // One line for an automatic failover: the confirmed route
-                    // replaces the in-flight "Switching to" line.
-                    let retrying = if automatic_failover {
-                        app.remove_failover_switching_message();
-                        ". Retrying."
+                    // replaces the in-flight "Switching to" line and absorbs
+                    // a usage-limit error as its cause.
+                    let message = if automatic_failover {
+                        app.confirmed_failover_message(&model, &suffix)
                     } else {
-                        ""
+                        format!("✓ Switched to model: {}{}", model, suffix)
                     };
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}{}",
-                        model, suffix, retrying
-                    )));
+                    app.push_display_message(DisplayMessage::system(message));
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));
