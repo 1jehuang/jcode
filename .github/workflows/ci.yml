@@ -318,8 +318,8 @@ jobs:
           model_dir="$HOME/.jcode/models/all-MiniLM-L6-v2"
           mkdir -p "$model_dir"
           base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
-          curl -sSfL --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
-          curl -sSfL --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
+          curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
+          curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
           # Fail loudly if the fetch produced something unusable, so this cannot
           # degrade back into a silent skip.
           test -s "$model_dir/model.onnx"
