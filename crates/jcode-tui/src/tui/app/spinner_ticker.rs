@@ -16,6 +16,12 @@
 //! thread (about 14 on the main thread, 14 on this one, and 5 to 13 left on a
 //! runtime worker from the loop's other timers).
 //!
+//! That gain is for a turn that is waiting. It did not show on a live window
+//! mirroring a busy session: 54.0 wakeups/s with this thread against 58.6 and
+//! 53.7 for two windows on the runtime timer over the same 30s. While text
+//! streams the spinner is drawn by full frames and this thread is parked, so
+//! the redraw timer's own wakeup chain is what remains to fix.
+//!
 //! The thread free-runs while its ticks are being collected, so the loop never
 //! has to wake it to ask for the next one. Once two ticks in a row find the
 //! previous one still uncollected it parks, and the next `tick` call restarts
