@@ -354,7 +354,7 @@ async fn register_visible_spawned_member(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
-/// Resolve the reasoning effort for a spawned swarm worker (#1165, #2020).
+/// Resolve the reasoning effort for a spawned swarm worker (#1165, #2153).
 ///
 /// The swarm tool no longer lets agents choose worker effort, so
 /// `requested_effort` only arrives from direct protocol clients (SDK). It wins

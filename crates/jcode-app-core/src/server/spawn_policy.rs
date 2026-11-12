@@ -1,6 +1,6 @@
 use super::*;
 
-/// Resolve the reasoning effort for a spawned swarm worker (#1165, #2020).
+/// Resolve the reasoning effort for a spawned swarm worker (#1165, #2153).
 ///
 /// Priority: explicit `requested_effort` (SDK) → `agents.swarm_effort` config
 /// pin → if the root is in swarm mode, the root's effective effort (e.g. `none`
@@ -51,7 +51,7 @@ pub(in crate::server) fn resolve_swarm_spawn_mode(
     }
 }
 
-pub(in crate::server) fn is_inherit_sentinel(model: &str) -> bool {
+pub(crate) fn is_inherit_sentinel(model: &str) -> bool {
     let trimmed = model.trim();
     trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
 }
