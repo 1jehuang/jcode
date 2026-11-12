@@ -1108,9 +1108,31 @@ async fn resolve_stop_target_session(
     matches.sort_by(|a, b| a.0.cmp(&b.0));
 
     match matches.len() {
-        0 => Err(format!(
-            "Unknown swarm session '{target}'. Use an exact session ID, unique friendly name, or unique session ID prefix/suffix."
-        )),
+        0 => {
+            // The target is not in the live swarm roster. If it is an exact
+            // session ID whose persisted state is terminal (already stopped,
+            // crashed, closed, or error), allow the stop to proceed so the
+            // caller can report "already stopped" idempotently (#2150).
+            // Ownership is still enforced: the requester must be a member of
+            // this swarm (checked before this function is called).
+            let is_terminal = crate::session::Session::load(target)
+                .map(|session| {
+                    matches!(
+                        session.status,
+                        jcode_base::session::SessionStatus::Closed
+                            | jcode_base::session::SessionStatus::Crashed { .. }
+                            | jcode_base::session::SessionStatus::Error { .. }
+                    )
+                })
+                .unwrap_or(false);
+            if is_terminal {
+                Ok(target.to_string())
+            } else {
+                Err(format!(
+                    "Unknown swarm session '{target}'. Use an exact session ID, unique friendly name, or unique session ID prefix/suffix."
+                ))
+            }
+        }
         1 => Ok(matches.remove(0).0),
         _ => Err(format!(
             "Ambiguous swarm session '{target}' matched: {}. Use an exact session ID.",
