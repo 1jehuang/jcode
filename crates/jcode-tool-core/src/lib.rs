@@ -6,44 +6,27 @@ use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub const TOOL_INTENT_DESCRIPTION: &str = "Why this call is made; short label shown in the UI.";
-
 /// Input key a caller sets to accept the token cost of an oversized result.
 ///
 /// The context guard withholds any tool result too large for the remaining
-/// context and states its token cost. Setting this repeats the call and spends
-/// that cost deliberately. Kept in sync with the registry constant of the same
-/// name, which reads the flag off raw tool input.
+/// context and states its token cost. Repeating the identical call, or setting
+/// this key, spends that cost deliberately.
+///
+/// The key is deliberately absent from every tool schema: one more property on
+/// every tool is paid on every request, while the refusal message that names
+/// it is only shown when it is relevant.
 pub const ACCEPT_LARGE_OUTPUT_KEY: &str = "accept_large_output";
 
-/// Deliberately terse: this rides on every tool schema on every request, so
-/// each word is paid forever. The full explanation lives in the refusal
-/// message, which is only ever shown when it is actually relevant.
-pub const ACCEPT_LARGE_OUTPUT_DESCRIPTION: &str =
-    "Accept the stated token cost of a withheld result.";
-
+/// Deliberately undescribed: the name says what it is, and a description here
+/// would be repeated in every tool schema on every request.
 pub fn intent_schema_property() -> Value {
-    serde_json::json!({
-        "type": "string",
-        "description": TOOL_INTENT_DESCRIPTION,
-    })
-}
-
-pub fn accept_large_output_schema_property() -> Value {
-    serde_json::json!({
-        "type": "boolean",
-        "description": ACCEPT_LARGE_OUTPUT_DESCRIPTION,
-    })
+    serde_json::json!({ "type": "string" })
 }
 
 /// Ensure a tool parameter schema declares the shared `intent` property and
 /// marks it required. Applied centrally when converting tools to provider
 /// definitions so every tool (including MCP proxies) asks the model for an
 /// intent without each tool wiring it manually.
-///
-/// The optional `accept_large_output` escape hatch is added the same way. Any
-/// tool can produce a result too large to return, so documenting it per tool
-/// would mean editing dozens of schemas and missing MCP proxies entirely.
 pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
     let Some(object) = schema.as_object_mut() else {
         return schema;
@@ -65,10 +48,6 @@ pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
         properties
             .entry("intent")
             .or_insert_with(intent_schema_property);
-        // Optional, so it is deliberately not added to `required`.
-        properties
-            .entry(ACCEPT_LARGE_OUTPUT_KEY)
-            .or_insert_with(accept_large_output_schema_property);
     } else {
         return schema;
     }
@@ -285,22 +264,20 @@ mod escape_hatch_tests {
     use super::*;
 
     #[test]
-    fn injects_the_escape_hatch_into_any_object_schema() {
-        // MCP tools are built from remote definitions and never edit their own
-        // schemas, so they can only advertise the flag if injection is central.
-        // A schema shaped like an MCP proxy's proves the mechanism.
+    fn never_adds_the_escape_hatch_to_a_schema() {
+        // The flag would ride on every tool on every request. The refusal
+        // message names it instead, and repeating the call also accepts.
         let mcp_shaped = serde_json::json!({
             "type": "object",
             "required": ["path"],
             "properties": { "path": { "type": "string" } }
         });
         let out = ensure_intent_in_schema(mcp_shaped);
+        assert!(out["properties"].get(ACCEPT_LARGE_OUTPUT_KEY).is_none());
         assert_eq!(
-            out["properties"][ACCEPT_LARGE_OUTPUT_KEY]["type"], "boolean",
-            "every object schema must advertise the escape hatch"
+            out["properties"]["intent"],
+            serde_json::json!({"type": "string"})
         );
-        // Optional by design: requiring it would make the model answer a token
-        // budget question on every call.
         let required: Vec<&str> = out["required"]
             .as_array()
             .expect("required array")
