@@ -605,9 +605,20 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             .and_then(|v| v.as_array())
             .map(|calls| !calls.is_empty())
             .unwrap_or(false);
+        // Since issue #2157 the provider replays `reasoning_content` for any
+        // model that produced reasoning (not just DeepSeek-named ids). A
+        // reasoning-only turn that is replayed therefore carries a non-empty
+        // `reasoning_content` (and an explicit empty `content` so strict
+        // validators accept it); that is a valid payload, not the bare
+        // `{"role":"assistant"}` that issue #321 guards against.
+        let has_reasoning_content = msg
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
         assert!(
-            has_content || has_tool_calls,
-            "assistant message must carry content or tool_calls (issue #321); got: {msg}"
+            has_content || has_tool_calls || has_reasoning_content,
+            "assistant message must carry content, tool_calls, or replayed \
+             reasoning_content (issue #321); got: {msg}"
         );
     }
 }

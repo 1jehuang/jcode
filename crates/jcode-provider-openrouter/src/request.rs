@@ -597,6 +597,65 @@ mod request_tests {
         ]
     }
 
+    /// An assistant tool-call turn that also carried reasoning, as a reasoning
+    /// model (DeepSeek, Qwen, GLM, ...) returns it. The follow-up request must
+    /// replay `reasoning_content` so the model keeps its reasoning context
+    /// (issue #2157). The decision is driven by `allow_reasoning`, which the
+    /// provider now sets independently of the model id; this helper isolates
+    /// the message-building side of that contract.
+    fn reasoning_tool_call(id: &str, output: &str, reasoning: &str) -> [Message; 2] {
+        [
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        text: reasoning.to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: id.to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": output}),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message::tool_result(id, output, false),
+        ]
+    }
+
+    #[test]
+    fn reasoning_content_is_replayed_when_allow_reasoning() {
+        let messages = reasoning_tool_call("read_0", "x", "I should check the file first.");
+        let api_messages = build_chat_messages(&messages, "", true, false, false);
+
+        let assistant = api_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant tool-call turn must be kept");
+        assert_eq!(
+            assistant["reasoning_content"].as_str(),
+            Some("I should check the file first."),
+            "reasoning_content must be replayed so the model keeps its context"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_is_omitted_when_allow_reasoning_disabled() {
+        let messages = reasoning_tool_call("read_0", "x", "thinking...");
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+
+        let assistant = api_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant tool-call turn must still be kept for its tool call");
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "must not synthesize or replay reasoning_content when disabled"
+        );
+    }
+
     #[test]
     fn repeated_tool_call_ids_get_their_own_outputs_in_order() {
         let messages = tool_call("read:0", "first output")
