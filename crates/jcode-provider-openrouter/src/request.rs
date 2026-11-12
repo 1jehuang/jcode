@@ -366,8 +366,19 @@ pub fn build_chat_messages(
         ));
     }
 
-    // Safety pass: ensure tool-call messages include reasoning_content (when allowed)
-    // and that every tool call has a matching tool output after it.
+    // Safety pass: ensure tool-call messages include reasoning_content for
+    // endpoints that *require* the field on tool-call turns (Kimi coding and
+    // other strict reasoning gateways, issue #322), and that every tool call has
+    // a matching tool output after it.
+    //
+    // The `" "` fill below *synthesizes* reasoning the model never produced, so
+    // it must be gated on `include_reasoning_content` (the endpoint contract that
+    // demands the field) rather than on `allow_reasoning` alone. `allow_reasoning`
+    // only permits *replaying* reasoning the model actually returned (handled in
+    // the first pass); a plain OpenAI-compatible model that never returned
+    // reasoning must not gain a fabricated `reasoning_content: " "` on ordinary
+    // tool follow-ups, since strict gateways reject the non-standard field
+    // (issue #2157).
     let mut outputs_after: HashSet<String> = HashSet::new();
     let mut missing_by_index: Vec<Vec<String>> = vec![Vec::new(); api_messages.len()];
 
@@ -401,7 +412,7 @@ pub fn build_chat_messages(
     for (idx, mut msg) in api_messages.into_iter().enumerate() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if role == "assistant"
-            && allow_reasoning
+            && include_reasoning_content
             && msg.get("tool_calls").and_then(|v| v.as_array()).is_some()
         {
             let needs_reasoning = match msg.get("reasoning_content") {
@@ -653,6 +664,63 @@ mod request_tests {
         assert!(
             assistant.get("reasoning_content").is_none(),
             "must not synthesize or replay reasoning_content when disabled"
+        );
+    }
+
+    /// A plain OpenAI-compatible model that never returned reasoning must NOT
+    /// gain a fabricated `reasoning_content: " "` on an ordinary tool follow-up,
+    /// even when `allow_reasoning` is on (issue #2157). `allow_reasoning` only
+    /// permits *replaying* reasoning the model actually produced; synthesizing a
+    /// blank field for a non-reasoning model can make strict gateways reject the
+    /// whole request. `include_reasoning_content` stays false for such a model.
+    #[test]
+    fn non_reasoning_tool_turn_does_not_gain_fabricated_reasoning_content() {
+        // Assistant tool-call turn with no Reasoning block (the model never
+        // reasoned) and no text — a normal tool follow-up.
+        let messages = tool_call("read_0", "x");
+        // allow_reasoning=true (a reasoning-capable endpoint), but
+        // include_reasoning_content=false (no Kimi/thinking-override contract).
+        let api_messages = build_chat_messages(&messages, "", true, false, false);
+
+        let assistant = api_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant tool-call turn must be kept");
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "a non-reasoning tool turn must not be given a fabricated \
+             reasoning_content: {assistant}"
+        );
+        // The tool call itself must still be present and valid.
+        assert!(
+            assistant.get("tool_calls").is_some(),
+            "the tool call must be preserved"
+        );
+    }
+
+    /// The Kimi coding / thinking-override contract still *requires*
+    /// `reasoning_content` on tool-call turns (issue #322), so when
+    /// `include_reasoning_content` is true the blank fill is still applied to a
+    /// non-reasoning tool turn. This guards the separation made by the previous
+    /// test: the fill is driven by `include_reasoning_content`, not by
+    /// `allow_reasoning` alone.
+    #[test]
+    fn required_reasoning_contract_still_fills_blank_on_tool_turn() {
+        let messages = tool_call("read_0", "x");
+        // allow_reasoning=true AND include_reasoning_content=true (the contract
+        // that demands the field on tool-call messages).
+        let api_messages = build_chat_messages(&messages, "", true, true, false);
+
+        let assistant = api_messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant tool-call turn must be kept");
+        assert!(
+            assistant
+                .get("reasoning_content")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "a reasoning-requiring contract must keep its blank reasoning_content: {assistant}"
         );
     }
 
