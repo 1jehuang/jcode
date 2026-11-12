@@ -2876,7 +2876,13 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
-        agent.run_once(&next_message).await?;
+        // Only the first message is the person's; poke follow-ups are generated.
+        let origin = if turns_completed == 0 {
+            crate::hooks::PromptOrigin::User
+        } else {
+            crate::hooks::PromptOrigin::Auto
+        };
+        agent.run_once_as(origin, &next_message).await?;
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2994,7 +3000,12 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
-        outputs.push(agent.run_once_capture(&next_message).await?);
+        let origin = if turns_completed == 0 {
+            crate::hooks::PromptOrigin::User
+        } else {
+            crate::hooks::PromptOrigin::Auto
+        };
+        outputs.push(agent.run_once_capture_as(origin, &next_message).await?);
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;

@@ -658,8 +658,7 @@ impl BridgeState {
                     self.pending_message_id = Some(id);
                 }
                 let mut message = json!({
-                    "type": "message",
-                    "id": id,
+                    "type": "message", "id": id, "origin": "sdk",
                     "content": request["content"].as_str().unwrap_or(""),
                 });
                 if no_reply {
