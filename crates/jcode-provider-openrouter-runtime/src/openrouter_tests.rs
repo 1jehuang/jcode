@@ -1762,6 +1762,54 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
     );
 }
 
+/// Issue #2157: a DeepSeek model served by an OpenAI-compatible gateway under a
+/// non-"deepseek" name (here `Qwen/Qwen3.8-27B-FP8`, a renamed deepseek) must
+/// still receive its configured `reasoning_effort`. The per-model config opts
+/// the model into reasoning control, so the effort field must be honored on any
+/// gateway that serves it — the model id must not gate it. Without this the
+/// model silently falls back to maximum-length thinking (3-11x slower per
+/// turn in swarm).
+#[test]
+fn renamed_deepseek_model_receives_configured_reasoning_effort() {
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new("Qwen/Qwen3.8-27B-FP8".to_string())),
+        profile_id: Some("litellm".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        send_openrouter_headers: false,
+        static_reasoning_config: [("qwen/qwen3.8-27b-fp8".to_string(), (Some(true), Some("none".to_string())))]
+            .into_iter()
+            .collect(),
+        ..make_custom_compatible_provider()
+    };
+    // The per-model config must enable effort for this model even though its id
+    // is not "deepseek". The user opted it into reasoning control.
+    provider
+        .set_reasoning_effort("none")
+        .expect("per-model reasoning_effort config must enable effort for a renamed model");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("none"));
+    // Effort must be routed (deepseek- or openai-style) so the field is sent.
+    assert!(
+        provider.supports_deepseek_reasoning_effort()
+            || provider.supports_openai_reasoning_effort(),
+        "renamed deepseek model must route its reasoning_effort to a request field"
+    );
+
+    // A model with the same per-model config but a fresh name must also work.
+    provider.set_model("renamed-reasoner-x").unwrap();
+    // Unknown model without per-model config must NOT gain effort from the id alone.
+    let blank = OpenRouterProvider {
+        model: Arc::new(RwLock::new("renamed-reasoner-x".to_string())),
+        profile_id: Some("litellm".to_string()),
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    assert!(
+        blank.reasoning_effort().is_none(),
+        "a model with no per-model config and a non-deepseek id must not get effort"
+    );
+}
+
 #[test]
 fn sol_compatible_request_sends_low_reasoning_effort() {
     let (api_base, request_rx) = spawn_single_response_chat_server();
