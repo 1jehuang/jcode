@@ -1034,9 +1034,27 @@ pub(super) async fn handle_comm_stop(
     let response = if removed_live_agent || removed_swarm_id.is_some() {
         PersistedSwarmMutationResponse::Done
     } else {
-        PersistedSwarmMutationResponse::Error {
-            message: format!("Unknown session '{target_session}'"),
-            retry_after_secs: None,
+        // The session is already gone from both the live agents and the swarm
+        // roster. This is the normal path for a second stop of the same target:
+        // report it as already-stopped rather than an error so callers can
+        // stop idempotently (#2150).
+        let is_terminal = crate::session::Session::load(&target_session)
+            .map(|session| {
+                matches!(
+                    session.status,
+                    jcode_base::session::SessionStatus::Closed
+                        | jcode_base::session::SessionStatus::Crashed { .. }
+                        | jcode_base::session::SessionStatus::Error { .. }
+                )
+            })
+            .unwrap_or(false);
+        if is_terminal {
+            PersistedSwarmMutationResponse::Done
+        } else {
+            PersistedSwarmMutationResponse::Error {
+                message: format!("Unknown session '{target_session}'"),
+                retry_after_secs: None,
+            }
         }
     };
     finish_request(swarm_mutation_runtime, &mutation_state, response).await;
