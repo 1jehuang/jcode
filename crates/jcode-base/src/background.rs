@@ -42,6 +42,9 @@ pub struct BackgroundTaskManager {
     /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
     /// output bytes and no progress events for the configured window.
     stall_watchdogs: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    /// Status files already seen in a terminal state by [`Self::sweep`]. A
+    /// finished task never runs again, so the periodic sweep skips them.
+    settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
     output_dir: PathBuf,
 }
 
@@ -60,6 +63,7 @@ impl BackgroundTaskManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
+            settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
             output_dir,
         }
     }
@@ -843,6 +847,65 @@ impl BackgroundTaskManager {
             output_file: output_path,
             status_file: status_path,
         }
+    }
+
+    /// Periodic maintenance pass: reconcile tasks that may still be running
+    /// and return the number of status files on disk.
+    ///
+    /// `list` opens, parses and reconciles every status file through tokio's
+    /// blocking pool, which costs several thread wakeups per file, and the
+    /// task directory keeps thousands of finished tasks. A once-a-minute
+    /// caller (the runtime memory heartbeat) made that the server's largest
+    /// source of idle wakeups. This lists the directory in one blocking call
+    /// and only reads files not yet seen in a terminal state, so a quiet
+    /// server reads nothing after the first pass.
+    ///
+    /// Reconciliation is kept because it is what finalizes a detached task,
+    /// and publishes its completion, when the task outlived the server that
+    /// started it and no one is waiting on it. The count is by file
+    /// extension, so an unparseable status file is included.
+    pub async fn sweep(&self) -> usize {
+        let dir = self.output_dir.clone();
+        let paths = tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+
+        let pending: Vec<PathBuf> = {
+            let mut settled = self.settled.lock().await;
+            // Drop entries for files that were cleaned up.
+            if settled.len() > paths.len() {
+                let present: std::collections::HashSet<&PathBuf> = paths.iter().collect();
+                settled.retain(|path| present.contains(path));
+            }
+            paths
+                .iter()
+                .filter(|path| !settled.contains(*path))
+                .cloned()
+                .collect()
+        };
+
+        for path in pending {
+            let Some(status) = self.read_status_file(&path).await else {
+                continue;
+            };
+            let status = self.finalize_detached_status_if_needed(status, &path).await;
+            let status = self.finalize_orphaned_status_if_needed(status, &path).await;
+            if status.status != BackgroundTaskStatus::Running {
+                self.settled.lock().await.insert(path);
+            }
+        }
+
+        paths.len()
     }
 
     /// List all tasks (both running and completed from disk)
