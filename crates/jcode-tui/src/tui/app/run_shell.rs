@@ -1,4 +1,5 @@
 use super::idle_animation_repaint::{copy_cells_in, idle_animation_partial_repaint_allowed};
+use super::spinner_ticker::SpinnerTicker;
 use super::*;
 
 fn report_reload_interaction_gap() {
@@ -69,25 +70,16 @@ pub(crate) fn refresh_preview_redraw_timer(
     }
 }
 
-pub(super) fn status_spinner_interval() -> tokio::time::Interval {
-    status_spinner_interval_after(STATUS_SPINNER_ONLY_INTERVAL)
+/// Spinner cadence. Not a runtime timer: see [`SpinnerTicker`] for why that
+/// cost four thread wakeups per frame.
+pub(super) fn status_spinner_interval() -> SpinnerTicker {
+    SpinnerTicker::new(STATUS_SPINNER_ONLY_INTERVAL, STATUS_SPINNER_ONLY_INTERVAL)
 }
 
-pub(super) fn reset_status_spinner_interval(interval: &mut tokio::time::Interval, app: &App) {
-    *interval = status_spinner_interval_after(status_spinner_delay_until_next_frame(
+pub(super) fn reset_status_spinner_interval(interval: &mut SpinnerTicker, app: &App) {
+    interval.reset_after(status_spinner_delay_until_next_frame(
         status_spinner_elapsed(app),
     ));
-}
-
-fn status_spinner_interval_after(delay: Duration) -> tokio::time::Interval {
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + delay,
-        STATUS_SPINNER_ONLY_INTERVAL,
-    );
-    // The spinner is visual liveness, not simulated time. If terminal/input work delays a tick,
-    // skip the missed frames instead of bursting them later.
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval
 }
 
 fn status_spinner_elapsed(app: &App) -> f32 {

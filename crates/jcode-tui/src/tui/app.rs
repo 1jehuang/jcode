@@ -109,6 +109,7 @@ pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
 mod slash_command_parser;
+mod spinner_ticker;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
