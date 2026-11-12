@@ -279,15 +279,31 @@ fn model_facing_descriptions_stay_compact() {
         "todo description bytes: {bytes}; schema bytes: {}",
         schema.to_string().len()
     );
-    // Blocker guidance lives on the item fields, which the schema repeats for
-    // phases, add, and update, so it is counted three times here.
-    assert!(bytes < 4_000, "todo descriptions grew to {bytes} bytes");
-    for route in ["add", "update"] {
-        let properties = &schema["properties"][route]["items"]["properties"];
-        for field in ["description", "status", "priority", "lane", "phase"] {
+    // Item-field guidance is written once, on add. update and phases repeat
+    // the fields without descriptions.
+    assert!(bytes < 2_600, "todo descriptions grew to {bytes} bytes");
+    assert!(
+        schema.to_string().len() < 8_100,
+        "todo schema grew to {} bytes",
+        schema.to_string().len()
+    );
+    let add = &schema["properties"]["add"]["items"]["properties"];
+    for field in ["description", "status", "priority", "lane", "phase"] {
+        assert!(add[field].get("description").is_none(), "add.{field}");
+    }
+    let phase_item = &schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]
+        ["items"]["items"]["properties"];
+    for (route, properties) in [
+        (
+            "update",
+            &schema["properties"]["update"]["items"]["properties"],
+        ),
+        ("phases", phase_item),
+    ] {
+        for (field, property) in properties.as_object().unwrap() {
             assert!(
-                properties[field].get("description").is_none(),
-                "{route}.{field}"
+                field == "rename_to" || property.get("description").is_none(),
+                "{route}.{field} repeats a description already given on add"
             );
         }
     }
@@ -302,7 +318,9 @@ fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
         .as_object()
         .unwrap()
     {
-        assert_eq!(&add["properties"][name], property, "{name}");
+        let mut described = add["properties"][name].clone();
+        described.as_object_mut().unwrap().remove("description");
+        assert_eq!(&described, property, "{name}");
     }
     assert_eq!(add["properties"]["after"]["type"], "string");
     let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
@@ -356,7 +374,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(item_props.contains_key("completion_confidence"));
     assert!(!item_props.contains_key("closed_feedback_loop"));
     assert_eq!(
-        item_props["confidence"]["description"],
+        props["add"]["items"]["properties"]["confidence"]["description"],
         "Evidence that the task can be completed correctly."
     );
 

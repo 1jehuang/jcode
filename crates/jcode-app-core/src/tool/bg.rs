@@ -527,31 +527,31 @@ impl Tool for BgTool {
                 "action": {
                     "type": "string",
                     "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
-                    "description": "Action. Prefer wait over polling; watch is an alias for delivery."
+                    "description": "watch and subscribe are aliases for delivery."
                 },
-                "task_id": { "type": "string", "description": "Task ID." },
-                "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Task IDs for multi-task wait/status." },
-                "latest": { "type": "boolean", "description": "Use latest matching task when task_id is omitted." },
-                "session_only": { "type": "boolean", "description": "Restrict list/implicit selection to current session." },
+                "task_id": { "type": "string", "description": "Omit with latest." },
+                "task_ids": { "type": "array", "items": {"type":"string"}, "description": "For multi-task wait/status." },
+                "latest": { "type": "boolean", "description": "Use the latest matching task." },
+                "session_only": { "type": "boolean", "description": "Only this session's tasks." },
                 "status_filter": {
                     "anyOf": [
                         { "type": "string" },
                         { "type": "array", "items": { "type": "string" } }
                     ],
-                    "description": "Status filter string or array: running, completed, failed, superseded, terminal, all."
+                    "description": "running, completed, failed, superseded, terminal, or all."
                 },
                 "max_age_hours": { "type": "integer", "description": "Cleanup age in hours." },
-                "dry_run": { "type": "boolean", "description": "For cleanup, report what would be removed without deleting." },
-                "notify": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to notify on completion. Defaults to true." },
-                "wake": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to wake on completion. Defaults to true." },
-                "stall_wake_seconds": { "type": "integer", "description": "For delivery/watch: also wake after N seconds without output/progress (min 30). For jobs that may hang." },
-                "max_wait_seconds": { "type": "integer", "description": "For wait: max seconds to block. Default 60, cap 3600, 0 = immediate check." },
-                "return_on_progress": { "type": "boolean", "description": "For wait: return on the first progress/checkpoint event too. Defaults to true." },
-                "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "For multi-task wait, return on any completion, all completions, or first failure. Defaults to any." },
-                "tail_lines": { "type": "integer", "description": "Return only the last N output lines for output/tail/wait preview." },
+                "dry_run": { "type": "boolean", "description": "cleanup: report without deleting." },
+                "notify": { "type": "boolean", "description": "delivery: notify on completion. Default true." },
+                "wake": { "type": "boolean", "description": "delivery: wake on completion. Default true." },
+                "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30), for jobs that may hang." },
+                "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 3600, 0 checks without blocking." },
+                "return_on_progress": { "type": "boolean", "description": "wait: also return on the first progress event. Default true." },
+                "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "Multi-task wait. Default any." },
+                "tail_lines": { "type": "integer", "description": "Last N lines for output/tail/wait preview." },
                 "lines": { "type": "integer", "description": "Alias for tail_lines." },
-                "include_output_preview": { "type": "boolean", "description": "When wait returns, include a recent output preview. Failed tasks include a preview by default." },
-                "graceful_timeout_ms": { "type": "integer", "description": "For cancel, grace period for detached process termination before force kill." }
+                "include_output_preview": { "type": "boolean", "description": "wait: include recent output. Failed tasks always do." },
+                "graceful_timeout_ms": { "type": "integer", "description": "cancel: grace period before force kill." }
             }
         })
     }

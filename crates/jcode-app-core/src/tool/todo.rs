@@ -1300,6 +1300,20 @@ fn coerce_empty_string_to_null(value: &mut Value) {
     }
 }
 
+/// Drop the `description` of every property of an item schema except `keep`.
+fn strip_property_descriptions(item: &mut Value, keep: &[&str]) {
+    let Some(properties) = item["properties"].as_object_mut() else {
+        return;
+    };
+    for (name, property) in properties {
+        if !keep.contains(&name.as_str())
+            && let Some(property) = property.as_object_mut()
+        {
+            property.remove("description");
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for TodoTool {
     fn name(&self) -> &str {
@@ -1359,7 +1373,7 @@ impl Tool for TodoTool {
                             },
                             "waiting_on": {
                                 "type": ["object", "null"],
-                                "description": "Pause while this session's background/await_members tasks run, including work by other agents; wakes on completion. null clears.",
+                                "description": "Pause while this session's background/await_members tasks run; wakes on completion. null clears.",
                                 "required": ["ids", "reason"],
                                 "additionalProperties": false,
                                 "properties": {
@@ -1539,13 +1553,21 @@ impl Tool for TodoTool {
                             "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
                         }, "owner": {
                             "type": "string", "enum": ["self", "worker"],
-                            "description": "Who runs the lane. Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                            "description": "Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
         schema["properties"]["add"]["description"] =
             json!("Specify phase/lane or inherit from after.");
+        // Item fields repeat across phases, add, and update, and every word is
+        // paid on every request. Describe them once, on add (the superset),
+        // and point the other two routes at it.
+        let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
+            ["properties"]["items"];
+        strip_property_descriptions(&mut phase_items["items"], &[]);
+        phase_items["description"] = json!("Item fields as in add.");
+        strip_property_descriptions(&mut schema["properties"]["update"]["items"], &["rename_to"]);
         schema
     }
 

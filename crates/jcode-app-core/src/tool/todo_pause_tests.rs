@@ -224,13 +224,17 @@ async fn goal_cannot_complete_is_recorded_reported_and_cleared_by_empty_string()
 fn pause_schema_is_shared_strict_and_carries_the_guidance() {
     let schema = TodoTool::new().parameters_schema();
     let properties = &schema["properties"];
-    let update = &properties["update"]["items"]["properties"];
+    // Guidance is written once, on add. update and phases repeat the shape
+    // without the description.
+    let update = &properties["add"]["items"]["properties"];
     for field in ["waiting_on", "requires_user_auth"] {
         let canonical = &update[field];
-        assert_eq!(canonical, &properties["add"]["items"]["properties"][field]);
+        let mut bare = canonical.clone();
+        bare.as_object_mut().unwrap().remove("description");
+        assert_eq!(bare, properties["update"]["items"]["properties"][field]);
         assert_eq!(
-            canonical,
-            &properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]
+            bare,
+            properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]
                 ["properties"][field]
         );
         assert_eq!(canonical["type"], json!(["object", "null"]));

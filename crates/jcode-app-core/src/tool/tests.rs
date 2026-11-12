@@ -790,11 +790,23 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // The todo pause fields carry the rules for when an agent may stop
+    // working, which live on the fields because the tool description is one
+    // sentence. Each is stated once (on add), not per route.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
             "$.properties.goals.items.properties.feedback_loop_relevance",
         ),
+        (
+            "todo",
+            "$.properties.add.items.properties.requires_user_auth",
+        ),
+        (
+            "todo",
+            "$.properties.goals.items.properties.cannot_complete",
+        ),
+        ("todo", "$.properties.phases"),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
     ];
@@ -1973,4 +1985,28 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         "{output}"
     );
     assert!(output.contains("stdin-ok"), "{output}");
+}
+
+/// Dump every model-visible tool definition as JSON so a real tokenizer can
+/// measure the always-on prompt cost. Run with
+/// `cargo test -p jcode-app-core --lib dump_tool_definitions -- --ignored --nocapture`
+/// and read the line after `TOOL_DEFS_JSON`.
+#[tokio::test]
+#[ignore = "manual measurement helper"]
+async fn dump_tool_definitions() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs: Vec<Value> = registry
+        .definitions(None)
+        .await
+        .into_iter()
+        .map(|def| {
+            serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "input_schema": def.input_schema,
+            })
+        })
+        .collect();
+    println!("TOOL_DEFS_JSON\n{}", serde_json::to_string(&defs).unwrap());
 }
