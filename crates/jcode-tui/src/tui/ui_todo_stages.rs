@@ -885,6 +885,13 @@ pub(crate) fn push_stage_lines(
     let items_of = |lane: &crate::todo::stages::TodoLane| -> Vec<&crate::todo::TodoItem> {
         lane.items.iter().map(|&i| todos[i]).collect()
     };
+    // A name shared by every lane (typically a placeholder such as "main" on
+    // a plan with no parallel work) distinguishes nothing, so it is not drawn.
+    let uniform_name =
+        lanes.len() > 1 && lanes.iter().all(|(_, lane)| lane.group == lanes[0].1.group);
+    let shown_group = |lane: &crate::todo::stages::TodoLane| -> Option<String> {
+        (!uniform_name).then(|| lane.group.clone()).flatten()
+    };
     let strip_width = lanes
         .iter()
         .map(|(_, lane)| {
@@ -900,7 +907,7 @@ pub(crate) fn push_stage_lines(
         .iter()
         .map(|(_, lane)| {
             width_of(&lane_name_spans(
-                lane.group.as_deref(),
+                shown_group(lane).as_deref(),
                 Style::default(),
                 &items_of(lane),
                 agents,
@@ -986,7 +993,7 @@ pub(crate) fn push_stage_lines(
                 let pad = padding.content.width().saturating_sub(1);
                 padding.content = " ".repeat(pad).into();
             }
-            let name = lane_name_spans(lane.group.as_deref(), lane_style, &items, agents);
+            let name = lane_name_spans(shown_group(lane).as_deref(), lane_style, &items, agents);
             let name = super::truncate_line_with_ellipsis_to_width(&Line::from(name), worker_width);
             let name_padding = worker_width.saturating_sub(name.width());
             row.extend(name.spans);
@@ -1022,7 +1029,7 @@ pub(crate) fn push_stage_lines(
         }
         let mut row = lane_strip_spans(&statuses, strip_width);
         if name_width > 0 {
-            let name = lane_name_spans(lane.group.as_deref(), lane_style, &items, agents);
+            let name = lane_name_spans(shown_group(lane).as_deref(), lane_style, &items, agents);
             let name =
                 super::truncate_line_with_ellipsis_to_width(&Line::from(name), name_width).spans;
             let pad = name_width.saturating_sub(width_of(&name)) + 2;

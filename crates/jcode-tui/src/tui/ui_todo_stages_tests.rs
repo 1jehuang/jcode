@@ -1222,3 +1222,19 @@ fn waiting_worker_reason_shares_its_todo_row() {
         assert_fits(&render_at(width), width);
     }
 }
+
+#[test]
+fn lane_name_shared_by_every_lane_is_not_drawn() {
+    let same = [
+        laned("a", "completed", 1, "main"),
+        laned("b", "pending", 2, "main"),
+    ];
+    let rows = render(&same, &[], 120);
+    assert!(rows.iter().all(|row| !row.contains("main")), "{rows:?}");
+    let distinct = [
+        laned("a", "completed", 1, "parser"),
+        laned("b", "pending", 2, "ship"),
+    ];
+    let rows = render(&distinct, &[], 120).join("\n");
+    assert!(rows.contains("parser") && rows.contains("ship"), "{rows}");
+}

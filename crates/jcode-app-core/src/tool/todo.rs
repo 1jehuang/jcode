@@ -1497,7 +1497,7 @@ impl Tool for TodoTool {
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
+                        "properties": {"lane": {"type": "string", "minLength": 1, "description": "Short name for this workstream's work, e.g. parser. Not a placeholder like main."}, "dependencies": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
                             "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
