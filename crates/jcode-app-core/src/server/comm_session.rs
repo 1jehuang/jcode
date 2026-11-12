@@ -366,8 +366,9 @@ async fn register_visible_spawned_member(
 #[path = "spawn_policy.rs"]
 mod spawn_policy;
 use spawn_policy::inherit_coordinator_selection;
+pub(crate) use spawn_policy::is_inherit_sentinel;
 pub(super) use spawn_policy::{
-    is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
+    resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
 };
 #[expect(
     clippy::too_many_arguments,

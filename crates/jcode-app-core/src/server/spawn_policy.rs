@@ -55,7 +55,7 @@ pub(in crate::server) fn resolve_swarm_spawn_mode(
     }
 }
 
-pub(super) fn is_inherit_sentinel(model: &str) -> bool {
+pub(crate) fn is_inherit_sentinel(model: &str) -> bool {
     let trimmed = model.trim();
     trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
 }
