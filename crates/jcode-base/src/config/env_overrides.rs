@@ -329,6 +329,11 @@ impl Config {
                 self.display.compact_notifications = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_TYPING_SCROLL_LOCK") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.typing_scroll_lock = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_SHOW_AGENTGREP_OUTPUT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.show_agentgrep_output = parsed;
