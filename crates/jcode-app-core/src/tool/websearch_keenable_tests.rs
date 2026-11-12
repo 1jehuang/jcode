@@ -109,3 +109,88 @@ fn keenable_maps_results_and_skips_unusable_rows() {
     );
     assert!(parse_results(&json!({"data": []}), 5).is_err());
 }
+
+#[tokio::test]
+async fn keenable_local_http_success_errors_and_redirect_safety() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (status, body) in [
+        (
+            200,
+            r#"{"results":[{"url":"https://rust.test","title":"Rust","snippet":"JSON"}]}"#,
+        ),
+        (200, "credential-sentinel"),
+        (200, r#"{"error":"credential-sentinel"}"#),
+        (401, "credential-sentinel"),
+        (429, "credential-sentinel"),
+        (500, "credential-sentinel"),
+        (302, "credential-sentinel"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                let n = stream.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                received.extend_from_slice(&buffer[..n]);
+                if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&received[..end]).to_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if received.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8(received).unwrap();
+            assert!(request.starts_with("POST /keyed HTTP/1.1"));
+            assert!(request.to_lowercase().contains("x-api-key: test-secret"));
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nLocation: http://{address}/leak\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            drop(stream);
+            // Neither redirects nor failures should trigger a second request.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let client = client();
+        let public = format!("http://{address}/public");
+        let keyed = format!("http://{address}/keyed");
+        let req = request(
+            &client,
+            (&public, &keyed),
+            "private-query",
+            2,
+            "TEST_KEY",
+            |_| Some("test-secret".into()),
+        )
+        .unwrap();
+        let result = execute(&client, req, 2).await;
+        if status == 200 && body.starts_with("{\"results\"") {
+            let results = result.unwrap();
+            assert_eq!(results[0].title, "Rust");
+            assert_eq!(results[0].url, "https://rust.test");
+            assert_eq!(results[0].snippet, "JSON");
+        } else {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(!error.contains("credential-sentinel"));
+            assert!(!error.contains("test-secret"));
+            assert!(!error.contains("private-query"));
+            if status != 200 {
+                assert!(error.contains(&status.to_string()));
+            }
+        }
+        server.await.unwrap();
+    }
+}

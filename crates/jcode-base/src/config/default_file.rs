@@ -405,7 +405,8 @@ bing_market = "en-US"
 # kagi_api_key_env = "KAGI_API_KEY"
 # Set fallback_engines = [] above to keep queries from reaching other backends.
 # Setup and API behavior: docs/kagi-web-search.md
-# Keenable search API: set engine = "keenable" (or add it to fallback_engines).
+# Keenable search API: set engine = "keenable" (or add it to fallback_engines)
+# and prefer_native = false above so local search runs on every provider.
 # It works without a key on the public tier (rate limited per IP) and returns
 # JSON, so it is not affected by the anti-bot pages DuckDuckGo/Bing scraping can hit.
 # An optional key in this variable switches to the keyed endpoint for higher limits.
