@@ -374,6 +374,14 @@ impl Agent {
         self.session.provider_key.clone()
     }
 
+    /// Reasoning effort the coordinator session currently carries. Spawned
+    /// swarm workers inherit it so a coordinator in `swarm` effort mode (or
+    /// any explicitly chosen level) propagates to its workers instead of
+    /// falling back to the configured `low` worker default.
+    pub fn session_reasoning_effort(&self) -> Option<String> {
+        self.session.reasoning_effort.clone()
+    }
+
     /// API method/runtime route used to select the active model (e.g.
     /// "openai-api", "claude-oauth", "openai-compatible:nvidia-nim"). Spawned
     /// swarm agents inherit this so they reconstruct the coordinator's exact
