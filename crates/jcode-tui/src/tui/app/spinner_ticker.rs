@@ -117,9 +117,16 @@ impl SpinnerTicker {
             // Nobody is waiting for ticks. Remember the phase without waking
             // the thread: an idle client repaints full frames too.
             self.restart_delay = delay;
-        } else {
-            self.schedule(self.fallback_next);
+            return;
         }
+        // Full frames arrive several times a second while a turn streams, and
+        // nearly all of them ask for the frame boundary the thread is already
+        // sleeping towards. Waking it to hear that costs a wakeup per frame.
+        let current = lock(&self.shared.state).next;
+        if current.is_some_and(|next| same_phase(next, self.fallback_next, self.period)) {
+            return;
+        }
+        self.schedule(self.fallback_next);
     }
 
     fn schedule(&self, next: Instant) {
@@ -142,6 +149,15 @@ fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether two deadlines sit on the same frame grid, give or take an eighth of
+/// a frame. Scheduling jitter and the `f32` elapsed clock both move a deadline
+/// by a millisecond or so, which is not worth a wakeup to correct.
+fn same_phase(a: Instant, b: Instant, period: Duration) -> bool {
+    let period = period.as_nanos().max(1);
+    let apart = if a > b { a - b } else { b - a }.as_nanos() % period;
+    apart.min(period - apart) <= period / 8
 }
 
 /// First point after `now` on the grid `previous + n * period`. Missed frames
@@ -276,8 +292,8 @@ mod tests {
             start.elapsed()
         );
 
-        // While running, it reschedules the thread.
-        ticker.reset_after(Duration::from_millis(10));
+        // While running, a reset to a different phase reschedules the thread.
+        ticker.reset_after(Duration::from_millis(100));
         let start = Instant::now();
         ticker.tick().await;
         assert!(
@@ -285,6 +301,40 @@ mod tests {
             "reset should pull a running tick in: {:?}",
             start.elapsed()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reset_to_the_same_phase_leaves_the_thread_asleep() {
+        let period = Duration::from_millis(400);
+        let mut ticker = SpinnerTicker::new(period, period);
+        ticker.tick().await;
+        let scheduled = lock(&ticker.shared.state).next.expect("running");
+
+        // A full frame asking for the boundary already scheduled, a little off.
+        let delay = scheduled.saturating_duration_since(Instant::now()) + Duration::from_millis(3);
+        ticker.reset_after(delay);
+        assert_eq!(lock(&ticker.shared.state).next, Some(scheduled));
+        // One whole frame later is still the same grid.
+        ticker.reset_after(delay + period);
+        assert_eq!(lock(&ticker.shared.state).next, Some(scheduled));
+
+        // Half a frame off is a real phase change.
+        ticker.reset_after(delay + period / 2);
+        assert_ne!(lock(&ticker.shared.state).next, Some(scheduled));
+    }
+
+    #[test]
+    fn same_phase_tolerates_jitter_and_whole_frames() {
+        let period = Duration::from_millis(80);
+        let base = Instant::now();
+        let ms = Duration::from_millis;
+        assert!(same_phase(base, base, period));
+        assert!(same_phase(base, base + ms(9), period));
+        assert!(same_phase(base + ms(9), base, period));
+        assert!(same_phase(base, base + ms(160), period));
+        assert!(same_phase(base, base + ms(75), period));
+        assert!(!same_phase(base, base + ms(20), period));
+        assert!(!same_phase(base, base + ms(120), period));
     }
 
     #[test]
