@@ -114,7 +114,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
-        && let Err(error) = remote.poll_account_usage().await
+        && let Err(error) = remote
+            .poll_account_usage_for_focus(app.client_focused())
+            .await
     {
         crate::logging::warn(&format!("Failed to request daemon account usage: {error}"));
     }

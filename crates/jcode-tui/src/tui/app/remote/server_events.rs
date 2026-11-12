@@ -2515,9 +2515,7 @@ fn handle_server_event_inner(
         ServerEvent::Todos {
             session_id,
             payload,
-        } => {
-            app.receive_remote_todos(session_id, payload)
-        }
+        } => app.receive_remote_todos(session_id, payload),
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 // Surface member lifecycle transitions (done/failed/blocked/
