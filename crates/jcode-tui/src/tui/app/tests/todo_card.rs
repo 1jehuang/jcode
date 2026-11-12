@@ -107,6 +107,41 @@ fn resumed_local_snapshot_keeps_polling_so_card_does_not_go_stale() {
 }
 
 #[test]
+fn background_turn_polls_todos_slowly_and_catches_up_on_focus() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("background-turn".into());
+    let payload = serde_json::json!({
+        "todos": [{"id":"lane", "content":"Lane", "priority":"high", "status":"pending"}],
+        "plan": {}, "goals": []
+    })
+    .to_string();
+    app.receive_remote_todos("background-turn".into(), payload);
+    app.toggle_todo_card();
+    app.is_processing = true;
+    let five_seconds_ago = std::time::Instant::now() - std::time::Duration::from_secs(5);
+
+    app.remote_todos_requested_at = Some(five_seconds_ago);
+    assert!(
+        app.remote_todos_refresh_due(),
+        "a focused turn keeps the 2s poll"
+    );
+
+    app.set_client_focused(false);
+    app.remote_todos_requested_at = Some(five_seconds_ago);
+    assert!(
+        !app.remote_todos_refresh_due(),
+        "an unfocused turn must not poll every 2s"
+    );
+
+    app.set_client_focused(true);
+    assert!(
+        app.remote_todos_refresh_due(),
+        "gaining focus refreshes at once"
+    );
+}
+
+#[test]
 fn ssh_todos_command_renders_remote_card() {
     if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
         return;

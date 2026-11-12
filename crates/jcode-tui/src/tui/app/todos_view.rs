@@ -88,8 +88,13 @@ impl App {
     /// immediate refresh. An idle session therefore needs only a slow safety
     /// poll: a 2s poll from every open window kept the shared server and each
     /// client waking for nothing.
+    ///
+    /// The fast poll during a turn exists to show changes made by something
+    /// other than this session's own todo tool, such as a swarm worker. Nobody
+    /// sees that in an unfocused window, and gaining focus refreshes at once,
+    /// so a background turn polls slowly too.
     fn remote_todos_poll_interval(&self) -> std::time::Duration {
-        if self.is_processing() {
+        if self.is_processing() && self.client_focused {
             std::time::Duration::from_secs(2)
         } else {
             std::time::Duration::from_secs(30)

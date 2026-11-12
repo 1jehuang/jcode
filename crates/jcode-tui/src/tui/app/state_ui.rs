@@ -227,6 +227,8 @@ impl App {
             // Schedule an immediate differential frame so a newly-focused window
             // catches up and resumes animation timing from "now".
             self.note_client_focus(true);
+            // The todo poll runs slowly while unfocused, so catch up now.
+            self.request_remote_todos_refresh_soon();
             true
         } else {
             false
