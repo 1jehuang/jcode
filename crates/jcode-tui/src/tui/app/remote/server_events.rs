@@ -3372,7 +3372,42 @@ fn handle_server_event_inner(
                 return false;
             }
             if crate::tui::is_ssh_remote() {
+                finish_remote_split_launch(app);
                 app.pending_split_request = false;
+                app.pending_split_model_override = None;
+                app.pending_split_provider_key_override = None;
+                app.pending_split_label = None;
+                // The armed-prompt hotkey forks on the VM. Stage the prompt for
+                // a second SSH client, which submits it once attached.
+                if let Some(prompt) = app.pending_split_prompt.take() {
+                    App::save_startup_submission_for_session(
+                        &new_session_id,
+                        prompt.content,
+                        prompt.images,
+                    );
+                    let manual = app_mod::ssh_child_manual_command(&new_session_id);
+                    match app_mod::spawn_ssh_child_in_new_terminal(&new_session_id) {
+                        Ok(true) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Prompt launched in {new_session_name} on the remote host (opened in new window)",
+                            )));
+                            app.set_status_notice(format!("Prompt → {new_session_name}"));
+                        }
+                        Ok(false) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Remote session {new_session_name} created with your prompt staged.\n\nNo terminal found. Open it manually:\n  {manual}",
+                            )));
+                            app.set_status_notice("Prompt session created");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Remote session {new_session_name} was created but failed to open a window: {error}\n\nOpen it manually:\n  {manual}",
+                            )));
+                            app.set_status_notice("Prompt window failed");
+                        }
+                    }
+                    return true;
+                }
                 app.set_status_notice(format!(
                     "Remote session created: {new_session_id}. Resume using --ssh and --resume."
                 ));

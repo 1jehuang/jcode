@@ -187,9 +187,6 @@ pub(super) async fn handle_remote_key_internal(
     }
 
     if input::is_next_prompt_new_session_hotkey(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "New-session routing") {
-            return Ok(());
-        }
         app.toggle_next_prompt_new_session_routing();
         return Ok(());
     }
