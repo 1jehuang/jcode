@@ -12,7 +12,7 @@ mod picker_chrome_parity;
 
 /// Delegates to the single shared render-state lock so viewport-snapshot tests
 /// serialize against every other rendering test, not just each other (#593).
-fn viewport_snapshot_test_lock() -> crate::tui::ui::RenderStateTestGuard {
+fn viewport_snapshot_test_lock() -> std::sync::MutexGuard<'static, ()> {
     crate::tui::ui::render_state_test_lock()
 }
 
