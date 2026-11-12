@@ -62,6 +62,46 @@ example `JCODE_HOOK_TURN_END='["notify-one", "notify-two"]'`.
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
 | `JCODE_HOOKS_DISABLED` | Always `1`; suppresses hooks in nested jcode calls (recursion guard) |
 
+## Project hooks and trust
+
+A project can register hooks of its own in `<project>/.jcode/config.toml`. Only
+the `[hooks]` table is read; every other table is ignored with one log warning.
+
+```toml
+# <project>/.jcode/config.toml
+[hooks]
+pre_tool = ["bash .jcode/hooks/guard.sh"]
+post_tool_feedback = "bash .jcode/hooks/lint.sh"
+post_tool_feedback_timeout_ms = 30000
+```
+
+- **Additive only.** For each event, global commands run first, then the
+  project's. A project can never remove or replace a global hook.
+- **Trusted only.** Project hooks run only when the `hooks` scope of the
+  [project trust](PROJECT_TRUST.md) store holds the exact digest of the
+  project's `[hooks]` table, timeouts included. Any edit needs approval again.
+  Review with `jcode trust show`, approve with `jcode trust grant --scope hooks`.
+  Untrusted project hooks are skipped with one log line, and `jcode run` and
+  swarm workers never prompt.
+- **Timeouts.** A project may set `<event>_timeout_ms` for its own commands. It
+  is part of the trusted digest and clamped by the global
+  `[hooks] project_timeout_cap_ms` (default 120000). Global `*_timeout_ms`
+  values apply to global commands.
+- **Switches.** `[hooks] project_hooks = false` in the global config, or
+  `JCODE_PROJECT_HOOKS=0`, disables all project hooks.
+- **Environment.** Every hook (global ones too) gets `JCODE_PROJECT_DIR` and a
+  `CLAUDE_PROJECT_DIR` alias, naming the project the session works in, and
+  `JCODE_HOOK_SCOPE` (`global` or `project`). A relative program path such as
+  `.jcode/hooks/guard.sh` in a project command resolves against the project
+  root.
+- **Worktrees.** A linked worktree is trusted through its main checkout's
+  approval, but its own `[hooks]` digest must match. A worktree with an edited
+  table does not run.
+- **Malformed TOML** turns project hooks off for that session with one warning.
+  Global hooks are unaffected.
+
+`JCODE_HOOK_*` env overrides keep their meaning and apply to the global layer.
+
 ## Observer hooks
 
 `turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
