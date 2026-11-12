@@ -5,17 +5,15 @@ use std::collections::HashMap;
 
 /// Tracks streamed tool calls while converting daemon events to ACP updates.
 pub(super) struct EventMapper {
-    session_id: String,
     profile: AcpProfile,
     current_tool_id: Option<String>,
     tool_inputs: HashMap<String, String>,
 }
 
 impl EventMapper {
-    /// Creates mapper state for one ACP session and profile.
-    pub(super) fn new(session_id: String, profile: AcpProfile) -> Self {
+    /// Creates mapper state for one ACP profile.
+    pub(super) fn new(profile: AcpProfile) -> Self {
         Self {
-            session_id,
             profile,
             current_tool_id: None,
             tool_inputs: HashMap::new(),
@@ -118,7 +116,12 @@ impl EventMapper {
                 output_format,
                 revised_prompt,
                 ..
-            } => vec![json!({
+            } => {
+                let mut text = format!("Generated image: {path} ({output_format})");
+                if let Some(prompt) = revised_prompt {
+                    text.push_str(&format!("\nRevised prompt: {prompt}"));
+                }
+                vec![json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": id,
                 "status": "completed",
@@ -126,10 +129,11 @@ impl EventMapper {
                     "type": "content",
                     "content": {
                         "type": "text",
-                        "text": format!("Generated image: {path} ({output_format}){}", revised_prompt.map(|prompt| format!("\nRevised prompt: {prompt}")).unwrap_or_default()),
+                        "text": text,
                     }
                 }]
-            })],
+                })]
+            }
             ServerEvent::Compaction { trigger, .. } if self.profile.is_extended() => vec![json!({
                 "sessionUpdate": "agent_message_chunk",
                 "content": {
@@ -148,10 +152,7 @@ impl EventMapper {
                     "text": format!("\n[Jcode MCP status: {}]\n", servers.join(", ")),
                 }
             })],
-            _ => {
-                let _ = &self.session_id;
-                Vec::new()
-            }
+            _ => Vec::new(),
         }
     }
 }

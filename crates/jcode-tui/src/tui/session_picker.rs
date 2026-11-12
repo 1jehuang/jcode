@@ -2425,17 +2425,9 @@ impl SessionPicker {
         }
         // Detect light/dark terminal background before raw mode (OSC 11 query).
         super::theme_detect::init_theme_mode();
-        let mut terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init))
-            .map_err(|payload| {
-                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic payload".to_string()
-                };
-                anyhow::anyhow!("failed to initialize session picker terminal: {}", msg)
-            })?;
+        let mut terminal = jcode_tui_style::init_terminal().map_err(|error| {
+            anyhow::anyhow!("failed to initialize session picker terminal: {error}")
+        })?;
         // Initialize mermaid image picker (fast default, optional probe via env)
         super::mermaid::init_picker();
         let perf_policy = crate::perf::tui_policy();

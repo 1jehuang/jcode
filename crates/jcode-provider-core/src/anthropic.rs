@@ -151,7 +151,8 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
 
 /// Models whose adaptive thinking is mandatory. Match normalized versions, not
 /// prefixes, so Opus 5 and Fable 5 keep their existing optional-thinking behavior.
-/// Verified against the Opus 5.5 migration guide (2026-09-22).
+/// Verified against the Opus 5.5 migration guide (2026-09-22). Fable 5.2 was
+/// probed live on 2026-11-11: `thinking: {type: disabled}` is a 400.
 pub fn anthropic_thinking_always_on(model: &str) -> bool {
     let base = normalized_claude_caps_key(model);
     if !base.starts_with("claude-") {
@@ -159,7 +160,7 @@ pub fn anthropic_thinking_always_on(model: &str) -> bool {
     }
     matches!(
         parse_claude_family_version(&base),
-        (Some("opus"), Some((5, 5))) | (Some("fable"), Some((5, 1)))
+        (Some("opus"), Some((5, 5))) | (Some("fable"), Some((5, 1) | (5, 2)))
     )
 }
 
@@ -185,6 +186,7 @@ pub fn anthropic_max_output_tokens(model: &str) -> u32 {
         "claude-opus-4-6",
         "claude-opus-4.6",
         "claude-sonnet-5",
+        "claude-haiku-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4.6",
         "claude-fable-5-1",
@@ -446,6 +448,8 @@ mod tests {
         }
         assert!(anthropic_thinking_always_on("claude-fable-5-1"));
         assert!(anthropic_thinking_always_on("claude-fable-5.1-20260828"));
+        assert!(anthropic_thinking_always_on("claude-fable-5-2"));
+        assert!(anthropic_thinking_always_on("claude-fable-5.2"));
         for model in [
             "claude-opus-5",
             "claude-fable-5",

@@ -4,7 +4,7 @@ use super::{
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
     render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_usage_compact, render_usage_widget, truncate_smart,
+    render_usage_compact, render_usage_widget,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -70,13 +70,6 @@ fn cache_hit_ratio_uses_effective_prompt_for_split_providers() {
     // 19499 / (2449 + 19499 + 684) = 0.8616...
     let ratio = cache.hit_ratio().expect("ratio");
     assert!((ratio - 0.8616).abs() < 0.01, "ratio was {ratio}");
-}
-
-#[test]
-fn truncate_smart_handles_unicode() {
-    let s = "eagle running - keep going";
-    let out = truncate_smart(s, 15);
-    assert_eq!(out, "eagle runnin...");
 }
 
 #[test]
@@ -977,7 +970,10 @@ fn swarm_dock_shows_health_without_repeating_todo_activity() {
         !row.contains("Build the per-step"),
         "todo must stay out: {row}"
     );
-    assert!(!row.contains("..."), "single-char ellipsis: {row}");
+    assert!(
+        !row.contains("...") && !row.contains('…'),
+        "no ellipsis: {row}"
+    );
     // The compact health row still respects the available display cells.
     assert!(
         unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width),

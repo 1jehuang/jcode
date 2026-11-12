@@ -1201,7 +1201,7 @@ impl AcpRuntime {
             return Err(err);
         }
 
-        let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
+        let mut mapper = EventMapper::new(self.profile);
         let mut outcome = TurnOutcome::default();
         let mut turn_usage = TurnUsage::default();
         loop {
@@ -1985,10 +1985,9 @@ mod turn_envelope_tests {
                 name: "read".into(),
             },
         ] {
-            let plain =
-                EventMapper::new("session".into(), AcpProfile::Standard).map_event(event.clone());
-            let wrapped = EventMapper::new("session".into(), AcpProfile::Standard)
-                .map_event(envelope(envelope(event)));
+            let plain = EventMapper::new(AcpProfile::Standard).map_event(event.clone());
+            let wrapped =
+                EventMapper::new(AcpProfile::Standard).map_event(envelope(envelope(event)));
             assert!(!plain.is_empty());
             assert_eq!(wrapped, plain);
         }

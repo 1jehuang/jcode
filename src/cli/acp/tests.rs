@@ -185,9 +185,31 @@ fn initialize_full_advertises_jcode_extension_meta() {
     );
 }
 
+/// Generated image updates retain the optional revised prompt in their displayed text.
+#[test]
+fn event_mapper_formats_generated_image_with_optional_revised_prompt() {
+    for (revised_prompt, expected) in [
+        (None, "Generated image: image.png (png)"),
+        (
+            Some("a cat"),
+            "Generated image: image.png (png)\nRevised prompt: a cat",
+        ),
+    ] {
+        let mut mapper = EventMapper::new(AcpProfile::Standard);
+        let updates = mapper.map_event(ServerEvent::GeneratedImage {
+            id: "image".into(),
+            path: "image.png".into(),
+            metadata_path: None,
+            output_format: "png".into(),
+            revised_prompt: revised_prompt.map(str::to_owned),
+        });
+        assert_eq!(updates[0]["content"][0]["content"]["text"], expected);
+    }
+}
+
 #[test]
 fn event_mapper_maps_tool_lifecycle() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     let start = mapper.map_event(ServerEvent::ToolStart {
         id: "tool1".to_string(),
         name: "bash".to_string(),
@@ -214,7 +236,7 @@ fn event_mapper_maps_tool_lifecycle() {
 /// An ACP client should see the tool's intent throughout the streamed call, including completion.
 #[test]
 fn event_mapper_preserves_tool_intent_through_lifecycle() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     let start = mapper.map_event(ServerEvent::ToolStart {
         id: "tool1".to_string(),
         name: "bash".to_string(),
@@ -258,7 +280,7 @@ fn event_mapper_falls_back_for_missing_or_invalid_tool_intent() {
         r#"{"intent":"  "}"#,
         r#"{"intent":42}"#,
     ] {
-        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        let mut mapper = EventMapper::new(AcpProfile::Standard);
         mapper.map_event(ServerEvent::ToolStart {
             id: "tool1".into(),
             name: "bash".into(),
@@ -286,7 +308,7 @@ fn event_mapper_falls_back_for_missing_or_invalid_tool_intent() {
 /// Simultaneous tool calls must keep their own intent when events arrive out of order.
 #[test]
 fn event_mapper_keeps_intents_with_overlapping_tool_calls() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     for id in ["first", "second"] {
         mapper.map_event(ServerEvent::ToolStart {
             id: id.into(),
@@ -319,7 +341,7 @@ fn event_mapper_keeps_intents_with_overlapping_tool_calls() {
 /// Older daemons without input event IDs still attach an intent to the active call.
 #[test]
 fn event_mapper_preserves_legacy_tool_intent_on_failure() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     mapper.map_event(ServerEvent::ToolStart {
         id: "legacy".into(),
         name: "read".into(),
@@ -341,7 +363,7 @@ fn event_mapper_preserves_legacy_tool_intent_on_failure() {
 
 #[test]
 fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     for id in ["a", "b"] {
         mapper.map_event(ServerEvent::ToolStart {
             id: id.to_string(),
@@ -384,7 +406,7 @@ fn event_mapper_keeps_overlapping_tool_inputs_on_their_call() {
 
 #[test]
 fn event_mapper_suppresses_incomplete_legacy_tool_input() {
-    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let mut mapper = EventMapper::new(AcpProfile::Standard);
     assert!(
         mapper
             .map_event(ServerEvent::ToolInput {

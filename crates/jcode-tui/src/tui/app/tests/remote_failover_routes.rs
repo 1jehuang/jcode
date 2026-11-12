@@ -1045,6 +1045,56 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
     assert!(!app.usage_reset.refresh_usage);
 }
 
+/// Once the server confirms an automatic failover, the usage-limit error and
+/// the in-flight switch line collapse into one notice that names the model
+/// and the masked account it switched to.
+#[test]
+fn test_remote_usage_limit_failover_collapses_into_one_line_with_account() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut remote) = remote_exact_failover_fixture();
+        let staged: Vec<_> = app
+            .display_messages()
+            .iter()
+            .rev()
+            .take(2)
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect();
+        assert!(staged[0].1.starts_with("↪ Switching to "), "{staged:?}");
+        assert_eq!(staged[1].0, "error", "{staged:?}");
+        let before = app.display_messages().len() - 2;
+
+        app.pending_automatic_failover_request_id = Some(22);
+        app.remote_model_switch_in_flight = true;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 22,
+                model: "gpt-5.4".into(),
+                provider_name: Some("OpenAI".into()),
+                error: None,
+                provider_oauth_email: Some(crate::protocol::ProviderOAuthEmail::new(
+                    "jeremy@gmail.com".to_string(),
+                )),
+                provider_oauth_account_label: Some("openai-fox".into()),
+                resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut remote,
+        );
+
+        let added: Vec<_> = app.display_messages()[before..].to_vec();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert_eq!(added[0].role, "system");
+        assert_eq!(
+            added[0].content,
+            "✓ Usage limit reached. Switched to model: gpt-5.4 (via OAuth · j***y@gmail.com). Retrying."
+        );
+    });
+}
+
 /// Accepting a remote fallback offer stages the route switch (SetRoute via the
 /// dispatcher) and the payload resend; the ModelChanged confirmation then
 /// dispatches the resend through process_remote_followups.

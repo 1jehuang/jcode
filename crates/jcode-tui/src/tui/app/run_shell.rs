@@ -622,19 +622,16 @@ impl StatusSpinnerRenderer {
             return Ok(false);
         };
         let status_area = crate::tui::ui::last_status_area();
-        let status_patchable = status_symbol
-            .zip(status_area)
-            .is_some_and(|(symbol, area)| {
-                render_status_spinner_into_buffer(previous_frame, area, symbol)
-            });
-        if !status_patchable {
+        let Some((symbol, area)) = status_symbol.zip(status_area) else {
+            return Ok(false);
+        };
+        if !render_status_spinner_into_buffer(previous_frame, area, symbol) {
             return Ok(false);
         }
 
         if terminal.current_buffer_mut().area != previous_frame.area {
             return Ok(false);
         }
-        let (symbol, area) = status_symbol.zip(status_area).expect("patchable spinner");
         let mut cell = previous_frame[(area.x, area.y)].clone();
         cell.set_symbol(symbol)
             .set_style(status_spinner_patch_style());

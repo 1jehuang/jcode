@@ -1437,7 +1437,6 @@ impl Provider for AnthropicProvider {
                 return None;
             }
         };
-        let cached = cached.as_ref()?;
         let accounts = match auth::claude::list_accounts() {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -1446,6 +1445,17 @@ impl Provider for AnthropicProvider {
                 ));
                 return None;
             }
+        };
+        let Some(cached) = cached.as_ref() else {
+            // Binding an account clears the token cache until the next request.
+            // The explicit binding still names the exact account that will
+            // serve, so a just-switched route can show its identity at once.
+            // An unbound runtime stays unknown: never guess the global account.
+            let label = self.oauth_account_label()?;
+            return accounts
+                .into_iter()
+                .find(|account| account.label == label)
+                .and_then(|account| account.email);
         };
         accounts.into_iter().find_map(|account| {
             let matches = (!cached.access_token.is_empty()
