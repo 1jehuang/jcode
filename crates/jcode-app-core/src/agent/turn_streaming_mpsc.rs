@@ -1364,6 +1364,13 @@ impl Agent {
                 )? {
                     NoToolCallOutcome::Break => {
                         if saw_message_end
+                            && self
+                                .stop_hook_continues_mpsc(&text_content, &stop_reason, &event_tx)
+                                .await?
+                        {
+                            continue;
+                        }
+                        if saw_message_end
                             && !self.is_graceful_shutdown()
                             && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())
                         {

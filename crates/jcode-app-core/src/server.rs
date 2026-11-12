@@ -187,6 +187,10 @@ async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmS
 /// lifecycle operation. Server-owned sessions all share the long-running
 /// server PID, so leaving the marker behind makes presence UIs count the
 /// removed session forever.
+///
+/// The worker's swarm hook identity is deliberately kept: the caller closes
+/// the agent next (`session_end`) and may still fire `swarm_member_end`, and
+/// both need it. Callers must call `hooks::forget_swarm_identity` afterwards.
 pub(super) async fn remove_session_entry(
     sessions: &SessionAgents,
     session_id: &str,
@@ -194,7 +198,7 @@ pub(super) async fn remove_session_entry(
     let removed = sessions.remove(session_id).await;
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
-        crate::session_env::remove_session_env(session_id);
+        crate::session_env::remove_session_env_keeping_hook_identity(session_id);
     }
     removed
 }
@@ -352,6 +356,7 @@ async fn reap_idle_spawned_workers(
                 agent.mark_closed();
             }
         }
+        crate::hooks::forget_swarm_identity(&session_id);
 
         let removed_swarm_id = {
             let mut members = swarm_state.members.write().await;
@@ -1028,7 +1033,7 @@ impl Server {
                     vec![],
                     Some(reminder),
                     events.sender(),
-                    true,
+                    (true, None),
                 )
                 .await;
 

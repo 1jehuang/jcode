@@ -52,6 +52,7 @@ impl Client {
             images: vec![],
             system_reminder: None,
             active_skill: None,
+            origin: None,
             no_reply: false,
         };
         let json = serde_json::to_string(&request)? + "\n";
