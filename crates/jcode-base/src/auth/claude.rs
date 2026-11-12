@@ -705,6 +705,9 @@ fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
 /// JSON blob `claude setup-token` produces. We also tolerate a bare access
 /// token string for forward compatibility.
 fn load_claude_code_env_credentials() -> Option<ClaudeCredentials> {
+    // Foreign credential: Claude Code's own env var, never written by jcode
+    // (the env file is our only store, issue #1389). User-exported env always
+    // wins by design.
     let raw = std::env::var(CLAUDE_CODE_OAUTH_TOKEN_ENV).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -816,6 +819,8 @@ fn read_claude_code_keychain_blob() -> Option<String> {
 /// reading the secret value. The secret is only read during an approved
 /// import or at runtime load.
 pub fn native_credentials_present() -> bool {
+    // ponytail: foreign credential (Claude Code env / macOS Keychain); jcode
+    // never writes it, so the process env is the only plausible source (#1389).
     if std::env::var(CLAUDE_CODE_OAUTH_TOKEN_ENV)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
@@ -870,6 +875,7 @@ pub fn native_source_allowed() -> bool {
 /// Human-facing name for the Claude Code native credential source, reflecting
 /// where the credentials actually live on this platform.
 pub fn native_source_display_name() -> &'static str {
+    // ponytail: foreign credential; env is the only source (#1389).
     if std::env::var(CLAUDE_CODE_OAUTH_TOKEN_ENV)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
@@ -887,6 +893,7 @@ pub fn native_source_display_name() -> &'static str {
 /// expect a location string. The Keychain/env credentials have no real file
 /// path, so this returns a descriptive pseudo-location.
 pub fn native_source_path_hint() -> PathBuf {
+    // ponytail: foreign credential; env is the only source (#1389).
     if std::env::var(CLAUDE_CODE_OAUTH_TOKEN_ENV)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)

@@ -457,6 +457,8 @@ impl AuthLifecycleDriver {
                 Ok(Some(path.display().to_string()))
             }
             AuthLifecycleAuthPath::ProcessEnvPreseeded => {
+                // ponytail: the doctor simulates user-exported credentials; the
+                // runtime reads env live, so env is the only workable channel (#1389).
                 jcode_base::env::set_var(&resolved.api_key_env, &spec.api_key);
                 jcode_base::auth::AuthStatus::invalidate_cache();
                 Ok(Some(format!("process env {}", resolved.api_key_env)))

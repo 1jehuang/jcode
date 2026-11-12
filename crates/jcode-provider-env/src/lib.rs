@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 use jcode_provider_metadata::{is_safe_env_file_name, is_safe_env_key_name};
@@ -110,7 +111,7 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
     let prefix = format!("{}=", env_key);
 
     for line in content.lines() {
-        if let Some(key) = line.strip_prefix(&prefix)
+        if let Some(key) = line.trim().strip_prefix(&prefix)
             && let Some(key) = clean_loaded_value(key, env_key)
         {
             return Some(key);
@@ -118,19 +119,10 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
     }
 
     if env_key == "ZHIPU_API_KEY" {
-        if let Ok(key) = std::env::var("ZAI_API_KEY")
-            && let Some(key) = clean_loaded_value(&key, "ZAI_API_KEY")
-        {
+        // Legacy ZAI alias: same env-then-file lookup, through the sanctioned
+        // loader so it stays file-aware and ratchet-clean (issue #1389).
+        if let Some(key) = load_env_value_from_env_or_config("ZAI_API_KEY", file_name) {
             return Some(key);
-        }
-
-        let legacy_prefix = "ZAI_API_KEY=";
-        for line in content.lines() {
-            if let Some(key) = line.strip_prefix(legacy_prefix)
-                && let Some(key) = clean_loaded_value(key, "ZAI_API_KEY")
-            {
-                return Some(key);
-            }
         }
     }
 
@@ -196,7 +188,7 @@ pub fn load_env_value_from_config_file(env_key: &str, file_name: &str) -> Option
     let prefix = format!("{}=", env_key);
 
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix(&prefix)
+        if let Some(value) = line.trim().strip_prefix(&prefix)
             && let Some(value) = clean_loaded_value(value, env_key)
         {
             return Some(value);
@@ -204,6 +196,43 @@ pub fn load_env_value_from_config_file(env_key: &str, file_name: &str) -> Option
     }
 
     None
+}
+
+static JCODE_MANAGED_PROCESS_ENV: LazyLock<RwLock<HashMap<String, Option<String>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Record that Jcode is syncing a credential into the process environment
+/// (e.g. during login activation). Captures the pre-existing environment value
+/// (if any) so that genuine shell overrides are preserved across logout.
+pub fn track_process_env_var_override(key: &str) {
+    if let Ok(mut map) = JCODE_MANAGED_PROCESS_ENV.write() {
+        map.entry(key.to_string())
+            .or_insert_with(|| std::env::var(key).ok());
+    }
+}
+
+/// Check if a process environment variable was modified/managed by Jcode.
+pub fn is_process_env_var_managed_by_jcode(key: &str) -> bool {
+    JCODE_MANAGED_PROCESS_ENV
+        .read()
+        .map(|map| map.contains_key(key))
+        .unwrap_or(false)
+}
+
+/// Clear a Jcode-installed process environment copy on logout.
+/// If there was an inherited shell override before Jcode modified it, that
+/// override is restored. If there was no inherited key, the variable is removed.
+pub fn clear_process_env_var_managed_by_jcode(key: &str) {
+    let baseline = JCODE_MANAGED_PROCESS_ENV
+        .write()
+        .ok()
+        .and_then(|mut map| map.remove(key));
+    if let Some(prev) = baseline {
+        match prev {
+            Some(original) => jcode_core::env::set_var(key, original),
+            None => jcode_core::env::remove_var(key),
+        }
+    }
 }
 
 pub fn save_env_value_to_env_file(
@@ -220,15 +249,61 @@ pub fn save_env_value_to_env_file(
 
     let config_dir = jcode_storage::app_config_dir()?;
     let file_path = config_dir.join(file_name);
+    let old_file_value = load_env_value_from_config_file(env_key, file_name);
+
+    // The env file is the credential store: never write the process env when
+    // saving credentials (issue #1389).
     jcode_storage::upsert_env_file_value(&file_path, env_key, value)?;
 
-    if let Some(value) = value {
-        jcode_core::env::set_var(env_key, value);
+    if let Some(new_val) = value {
+        // Reconcile Jcode-managed process copies on replacement so that readers
+        // which prefer the process env (load_env_value_from_env_or_config) see
+        // the new key immediately rather than continuing to use the stale copy.
+        if is_process_env_var_managed_by_jcode(env_key) {
+            jcode_core::env::set_var(env_key, new_val);
+        }
     } else {
-        jcode_core::env::remove_var(env_key);
+        // Reconcile login activation and logout so Jcode-created process copies
+        // are cleared without removing genuine shell overrides.
+        if is_process_env_var_managed_by_jcode(env_key) {
+            clear_process_env_var_managed_by_jcode(env_key);
+        } else if let Some(old) = old_file_value {
+            if std::env::var(env_key).ok().as_deref() == Some(old.as_str()) {
+                jcode_core::env::remove_var(env_key);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Credential store facade: process env is a read-only override, the env file
+/// is the truth, and lookups happen at call time. Holds no state.
+pub struct Creds;
+
+impl Creds {
+    /// Live env var, else the file parsed right now.
+    pub fn get(key: &str, file_name: &str) -> Option<String> {
+        load_env_value_from_env_or_config(key, file_name)
     }
 
-    Ok(())
+    /// Upsert a file line. Never touches the process env.
+    pub fn set(key: &str, file_name: &str, val: &str) -> anyhow::Result<()> {
+        save_env_value_to_env_file(key, file_name, Some(val))
+    }
+
+    /// Delete the file line (logout).
+    pub fn clear(key: &str, file_name: &str) -> anyhow::Result<()> {
+        save_env_value_to_env_file(key, file_name, None)
+    }
+
+    pub fn has(key: &str, file_name: &str) -> bool {
+        Self::get(key, file_name).is_some()
+    }
+
+    pub fn require(key: &str, file_name: &str) -> anyhow::Result<String> {
+        Self::get(key, file_name)
+            .ok_or_else(|| anyhow::anyhow!("{key} not configured, run `jcode login`"))
+    }
 }
 
 /// Persist a named API key to its provider env file, file-only.
@@ -470,5 +545,182 @@ mod tests {
                 .as_deref(),
             Some("sk-env-key")
         );
+    }
+
+    #[test]
+    fn creds_set_and_clear_are_file_only_and_read_live() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_CREDS_TEST_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        assert!(!Creds::has("JCODE_CREDS_TEST_API_KEY", "creds-test.env"));
+        assert!(Creds::require("JCODE_CREDS_TEST_API_KEY", "creds-test.env").is_err());
+
+        Creds::set("JCODE_CREDS_TEST_API_KEY", "creds-test.env", "first").expect("set");
+        assert!(std::env::var_os("JCODE_CREDS_TEST_API_KEY").is_none());
+        assert_eq!(
+            Creds::get("JCODE_CREDS_TEST_API_KEY", "creds-test.env").as_deref(),
+            Some("first")
+        );
+
+        // A later file edit is visible immediately: no captured/stale copy.
+        Creds::set("JCODE_CREDS_TEST_API_KEY", "creds-test.env", "second").expect("set");
+        assert_eq!(
+            Creds::require("JCODE_CREDS_TEST_API_KEY", "creds-test.env").expect("require"),
+            "second"
+        );
+
+        Creds::clear("JCODE_CREDS_TEST_API_KEY", "creds-test.env").expect("clear");
+        assert!(!Creds::has("JCODE_CREDS_TEST_API_KEY", "creds-test.env"));
+        assert!(std::env::var_os("JCODE_CREDS_TEST_API_KEY").is_none());
+    }
+
+    #[test]
+    fn login_sync_logout_clears_process_env_without_removing_genuine_shell_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_LOGIN_SYNC_TEST_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_LOGIN_SYNC_TEST_API_KEY";
+        let file = "login-sync-test.env";
+
+        // Case 1: No inherited key -> login save & sync -> logout -> credential reads are None
+        save_env_value_to_env_file(key, file, Some("saved-key")).expect("save");
+        track_process_env_var_override(key);
+        jcode_core::env::set_var(key, "saved-key");
+
+        assert_eq!(
+            load_api_key_from_env_or_config(key, file).as_deref(),
+            Some("saved-key")
+        );
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("saved-key")
+        );
+
+        // Logout
+        save_env_value_to_env_file(key, file, None).expect("logout");
+        assert_eq!(load_api_key_from_env_or_config(key, file), None);
+        assert_eq!(load_env_value_from_env_or_config(key, file), None);
+        assert!(std::env::var_os(key).is_none());
+
+        // Case 2: Genuine shell override that was never overwritten by Jcode
+        jcode_core::env::set_var(key, "genuine-shell-override");
+        save_env_value_to_env_file(key, file, None).expect("logout on unmanaged");
+        assert_eq!(std::env::var(key).as_deref(), Ok("genuine-shell-override"));
+        jcode_core::env::remove_var(key);
+    }
+
+    /// Regression: indented entries (e.g. `  KEY=value`) in an env file must
+    /// still be found after the shared reader replaced per-provider readers that
+    /// trimmed each line before matching.
+    #[test]
+    fn loads_api_key_from_indented_env_file_line() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_INDENTED_LINE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let config_dir = jcode_storage::app_config_dir().expect("config dir");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("indented-test.env"),
+            "  JCODE_INDENTED_LINE_TEST_KEY=indented-value\n",
+        )
+        .expect("write env file");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("JCODE_INDENTED_LINE_TEST_KEY", "indented-test.env")
+                .as_deref(),
+            Some("indented-value"),
+            "indented env-file entry must be found by the shared reader"
+        );
+        assert_eq!(
+            load_env_value_from_config_file("JCODE_INDENTED_LINE_TEST_KEY", "indented-test.env")
+                .as_deref(),
+            Some("indented-value"),
+            "load_env_value_from_config_file must also handle indented entries"
+        );
+    }
+
+    /// Regression: `Creds::set` (save_env_value_to_env_file with Some) must update
+    /// the Jcode-managed process copy so that `Creds::get` returns the new value
+    /// even when a stale copy is still present in the process env.
+    #[test]
+    fn replacement_key_reconciles_jcode_managed_process_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_REKEY_RECONCILE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_REKEY_RECONCILE_TEST_KEY";
+        let file = "rekey-reconcile-test.env";
+
+        // Simulate login activation: write the first key and install a process copy.
+        save_env_value_to_env_file(key, file, Some("first-key")).expect("save first key");
+        track_process_env_var_override(key);
+        jcode_core::env::set_var(key, "first-key");
+
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("first-key")
+        );
+
+        // Save a replacement key (e.g. from `/login` credential rotation).
+        save_env_value_to_env_file(key, file, Some("replacement-key")).expect("save replacement");
+
+        // The process env copy must be updated: subsequent requests must use the new key.
+        assert_eq!(
+            std::env::var(key).as_deref(),
+            Ok("replacement-key"),
+            "Jcode-managed process copy must be reconciled to the replacement key"
+        );
+        assert_eq!(
+            load_env_value_from_env_or_config(key, file).as_deref(),
+            Some("replacement-key"),
+            "Creds::get must return the replacement key after save"
+        );
+        assert_eq!(
+            load_api_key_from_env_or_config(key, file).as_deref(),
+            Some("replacement-key"),
+            "load_api_key_from_env_or_config must return the replacement key after save"
+        );
+    }
+
+    /// Regression: indented env-file entries (e.g. `  KEY=old`) must be replaced
+    /// and deleted by the writer just as readers accept them, so that clearing or
+    /// rotating an indented key does not leave the old key readable.
+    #[test]
+    fn indented_key_is_replaced_and_cleared_by_writers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_INDENTED_WRITE_TEST_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let key = "JCODE_INDENTED_WRITE_TEST_KEY";
+        let file = "indented-write-test.env";
+        let config_dir = jcode_storage::app_config_dir().expect("config dir");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let file_path = config_dir.join(file);
+
+        // 1. Initial indented key
+        std::fs::write(&file_path, format!("  {key}=old-key\n")).expect("write indented");
+        assert_eq!(Creds::get(key, file).as_deref(), Some("old-key"));
+        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("old-key"));
+        assert_eq!(load_env_value_from_config_file(key, file).as_deref(), Some("old-key"));
+
+        // 2. Replacement must replace the indented key, not append below it
+        Creds::set(key, file, "new-key").expect("set replacement");
+        assert_eq!(Creds::get(key, file).as_deref(), Some("new-key"));
+        assert_eq!(load_api_key_from_env_or_config(key, file).as_deref(), Some("new-key"));
+        assert_eq!(load_env_value_from_config_file(key, file).as_deref(), Some("new-key"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read file"),
+            format!("{key}=new-key\n")
+        );
+
+        // 3. Reset to indented key and test clear (logout)
+        std::fs::write(&file_path, format!("  {key}=old-key\n")).expect("reset indented");
+        Creds::clear(key, file).expect("clear indented");
+        assert_eq!(Creds::get(key, file), None);
+        assert_eq!(load_api_key_from_env_or_config(key, file), None);
+        assert_eq!(load_env_value_from_config_file(key, file), None);
     }
 }

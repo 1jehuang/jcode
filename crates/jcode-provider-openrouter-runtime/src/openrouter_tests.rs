@@ -1,4 +1,84 @@
 use super::*;
+
+#[tokio::test]
+async fn catalog_request_headers_follow_provider_auth_rules() {
+    for base in [
+        "https://api.anthropic.com/v1",
+        "https://API.ANTHROPIC.COM/v1",
+    ] {
+        for auth in [
+            ProviderAuth::InlineBearer {
+                token: "test-key".into(),
+                label: "test".into(),
+            },
+            ProviderAuth::InlineHeader {
+                header_name: HeaderName::from_static("x-api-key"),
+                token: "test-key".into(),
+                label: "test".into(),
+            },
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/v1/models");
+            assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+            assert_eq!(request.headers()["x-api-key"], "test-key");
+            assert!(request.headers().get("authorization").is_none());
+            assert_eq!(request.headers().get_all("x-api-key").iter().count(), 1);
+        }
+    }
+
+    for base in [
+        "https://openrouter.ai/api/v1",
+        "https://api.openai.com/v1",
+        "http://localhost:11434/v1",
+    ] {
+        for (auth, expected_header, expected_value) in [
+            (
+                ProviderAuth::InlineBearer {
+                    token: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("authorization"),
+                "Bearer test-key",
+            ),
+            (
+                ProviderAuth::InlineHeader {
+                    header_name: HeaderName::from_static("api-key"),
+                    token: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("api-key"),
+                "test-key",
+            ),
+            (
+                ProviderAuth::None {
+                    label: "test".into(),
+                },
+                None,
+                "",
+            ),
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(request.headers().get("anthropic-version").is_none());
+            assert!(request.headers().get("x-api-key").is_none());
+            if let Some(header) = expected_header {
+                assert_eq!(request.headers()[header], expected_value);
+            } else {
+                assert!(request.headers().is_empty());
+            }
+        }
+    }
+}
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
@@ -1300,12 +1380,10 @@ fn make_provider() -> OpenRouterProvider {
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: DEFAULT_API_BASE.to_string(),
-        auth: Arc::new(|| {
-            Ok(ProviderAuth::AuthorizationBearer {
-                token: "test".to_string(),
-                label: DEFAULT_API_KEY_NAME.to_string(),
-            })
-        }),
+        auth: ProviderAuth::InlineBearer {
+            token: "test".to_string(),
+            label: DEFAULT_API_KEY_NAME.to_string(),
+        },
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
@@ -1335,12 +1413,10 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: "https://compat.example.test/v1".to_string(),
-        auth: Arc::new(|| {
-            Ok(ProviderAuth::AuthorizationBearer {
-                token: "test".to_string(),
-                label: "OPENAI_COMPAT_API_KEY".to_string(),
-            })
-        }),
+        auth: ProviderAuth::InlineBearer {
+            token: "test".to_string(),
+            label: "OPENAI_COMPAT_API_KEY".to_string(),
+        },
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
@@ -1645,12 +1721,10 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
     for model in models {
         let token = token.clone();
         let provider = OpenRouterProvider {
-            auth: Arc::new(move || {
-                Ok(ProviderAuth::AuthorizationBearer {
-                    token: token.clone(),
-                    label: configured_api_key_name(),
-                })
-            }),
+            auth: ProviderAuth::InlineBearer {
+                token: token.clone(),
+                label: configured_api_key_name(),
+            },
             model: Arc::new(RwLock::new(model.clone())),
             max_tokens: Some(max_tokens),
             ..make_provider()
@@ -1871,12 +1945,10 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("live-login-flow-model".to_string())),
-        auth: Arc::new(|| {
-            Ok(ProviderAuth::AuthorizationBearer {
-                token: "sk-live-catalog".to_string(),
-                label: "OPENAI_COMPAT_API_KEY".to_string(),
-            })
-        }),
+        auth: ProviderAuth::InlineBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "OPENAI_COMPAT_API_KEY".to_string(),
+        },
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
@@ -1961,12 +2033,10 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
     );
     let provider = OpenRouterProvider {
         api_base,
-        auth: Arc::new(|| {
-            Ok(ProviderAuth::AuthorizationBearer {
-                token: "sk-live-catalog".to_string(),
-                label: "CEREBRAS_API_KEY".to_string(),
-            })
-        }),
+        auth: ProviderAuth::InlineBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "CEREBRAS_API_KEY".to_string(),
+        },
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("cerebras".to_string()),

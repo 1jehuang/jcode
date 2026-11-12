@@ -103,10 +103,7 @@ fn direct_auth_mode() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
-            if std::env::var("ANTHROPIC_AUTH_TOKEN")
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
+            if jcode_base::provider_catalog::Creds::has("ANTHROPIC_AUTH_TOKEN", "anthropic.env") {
                 "bearer".to_string()
             } else {
                 "header".to_string()

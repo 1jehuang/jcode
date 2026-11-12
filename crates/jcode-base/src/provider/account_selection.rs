@@ -6,6 +6,8 @@ impl MultiProvider {
     /// sending anything so only the pool/countdown router may change billing.
     pub(super) fn bind_auto_account_for_request(&self, target: ActiveProvider) -> Result<()> {
         if target == ActiveProvider::Claude
+            // ponytail: foreign credential (Claude Code's own env var); jcode
+            // never writes it, so raw env is the only source (#1389).
             && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|token| !token.trim().is_empty())
         {
             // External OAuth tokens retain their existing precedence and identity.

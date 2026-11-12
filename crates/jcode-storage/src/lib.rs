@@ -223,6 +223,11 @@ pub fn app_config_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(path).join("config").join("jcode"));
     }
 
+    #[cfg(windows)]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Ok(PathBuf::from(appdata).join("jcode"));
+    }
+
     let config_dir =
         dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
     Ok(config_dir.join("jcode"))
@@ -494,10 +499,12 @@ pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) ->
     let mut lines = Vec::new();
     let mut replaced = false;
     for line in existing.lines() {
-        if line.starts_with(&prefix) {
-            replaced = true;
-            if let Some(value) = value {
-                lines.push(format!("{}={}", env_key, value));
+        if line.trim().starts_with(&prefix) {
+            if !replaced {
+                replaced = true;
+                if let Some(value) = value {
+                    lines.push(format!("{}={}", env_key, value));
+                }
             }
         } else {
             lines.push(line.to_string());
@@ -797,6 +804,30 @@ mod env_file_tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
+        );
+    }
+
+    #[test]
+    fn env_upsert_replaces_and_deletes_indented_entries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.env");
+
+        // Write an indented entry manually
+        std::fs::write(&path, "  ANTHROPIC_API_KEY=old-key\nOTHER=val\n").expect("write initial");
+
+        // Replace the indented entry
+        assert!(upsert_env_file_value(&path, "ANTHROPIC_API_KEY", Some("new-key")).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read env"),
+            "ANTHROPIC_API_KEY=new-key\nOTHER=val\n"
+        );
+
+        // Reset with indented entry and delete it
+        std::fs::write(&path, "  ANTHROPIC_API_KEY=old-key\nOTHER=val\n").expect("write indented");
+        assert!(upsert_env_file_value(&path, "ANTHROPIC_API_KEY", None).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read env after clear"),
+            "OTHER=val\n"
         );
     }
 }
