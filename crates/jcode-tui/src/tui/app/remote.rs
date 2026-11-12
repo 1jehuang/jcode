@@ -99,6 +99,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             "Could not clear expired cloud resource tools: {error}"
         ));
     }
+    app.expire_presumed_focus();
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {

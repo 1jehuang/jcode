@@ -11,6 +11,9 @@
 //! child processes that merely inherit the variable ignore it.
 
 const UNFOCUSED_ENV: &str = "JCODE_CLIENT_UNFOCUSED_PID";
+/// Set once a focus report or an input event has told this process what its
+/// focus state really is. Without it the state is only a presumption.
+const CONFIRMED_ENV: &str = "JCODE_CLIENT_FOCUS_KNOWN_PID";
 
 fn marker_matches(value: Option<&str>, pid: u32) -> bool {
     value.and_then(|v| v.trim().parse::<u32>().ok()) == Some(pid)
@@ -18,6 +21,12 @@ fn marker_matches(value: Option<&str>, pid: u32) -> bool {
 
 /// Record a focus change so a later re-exec of this process can restore it.
 pub(crate) fn record(focused: bool) {
+    // Tests share one process: a marker left by one test would change the
+    // starting focus of every client created after it.
+    if cfg!(test) {
+        return;
+    }
+    confirm();
     if focused {
         if std::env::var_os(UNFOCUSED_ENV).is_some() {
             crate::env::remove_var(UNFOCUSED_ENV);
@@ -25,6 +34,24 @@ pub(crate) fn record(focused: bool) {
     } else {
         crate::env::set_var(UNFOCUSED_ENV, std::process::id().to_string());
     }
+}
+
+/// Record that the focus state is known rather than presumed.
+pub(crate) fn confirm() {
+    if cfg!(test) {
+        return;
+    }
+    let pid = std::process::id();
+    if !marker_matches(std::env::var(CONFIRMED_ENV).ok().as_deref(), pid) {
+        crate::env::set_var(CONFIRMED_ENV, pid.to_string());
+    }
+}
+
+/// Whether this process learned its real focus state before it re-executed.
+pub(crate) fn initial_confirmed() -> bool {
+    let pid = std::process::id();
+    marker_matches(std::env::var(CONFIRMED_ENV).ok().as_deref(), pid)
+        || marker_matches(std::env::var(UNFOCUSED_ENV).ok().as_deref(), pid)
 }
 
 /// Focus state a freshly started client should assume: unfocused only when
